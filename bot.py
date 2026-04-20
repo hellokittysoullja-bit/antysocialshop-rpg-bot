@@ -1,4 +1,3 @@
-# bot.py
 import os
 import logging
 import random
@@ -9,7 +8,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 
 # === НАСТРОЙКИ ===
 TOKEN = os.getenv("TOKEN")
-ADMIN_ID = 7457247409  # ← ЗАМЕНИТЕ НА ВАШ TELEGRAM ID
+ADMIN_ID = 7457247409  # ← ЗАМЕНИ НА СВОЙ ID (число от @userinfobot)
 FARM_COOLDOWN_HOURS = 1
 FARM_MIN = 1
 FARM_MAX = 10
@@ -85,7 +84,7 @@ async def farm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     update_balance(user_id, username, earned)
     update_last_farm(user_id)
     new_balance = get_player(user_id)[0]
-    await update.message.reply_text(f"🧵 Вы собрали *{earned}* ОАС (Тканевых Душ).\nБаланс: *{new_balance}* ОАС", parse_mode='Markdown')
+    await update.message.reply_text(f"🧵 Вы собрали *{earned}* ОАС.\nБаланс: *{new_balance}* ОАС", parse_mode='Markdown')
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
