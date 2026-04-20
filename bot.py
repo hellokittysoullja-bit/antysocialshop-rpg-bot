@@ -8,7 +8,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 # === НАСТРОЙКИ ===
-TOKEN = os.getenv("8439988809:AAG8Jl_VcrQSBi1b_sJuPMc6eF9eElR2MRg")  # Будет взят из переменной окружения Render
+TOKEN = os.getenv("TOKEN")
 ADMIN_ID = 7457247409  # ← ЗАМЕНИТЕ НА ВАШ TELEGRAM ID
 FARM_COOLDOWN_HOURS = 1
 FARM_MIN = 1
