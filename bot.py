@@ -3,12 +3,25 @@ import logging
 import random
 import sqlite3
 from datetime import datetime, timedelta
+from threading import Thread
+from flask import Flask
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-# === НАСТРОЙКИ ===
+# === Фальшивый веб-сервер для Render (чтобы порт был открыт) ===
+web_app = Flask(__name__)
+
+@web_app.route('/')
+def home():
+    return "Antysocialshop RPG Bot is alive!"
+
+def run_web_server():
+    port = int(os.getenv("PORT", 10000))
+    web_app.run(host='0.0.0.0', port=port)
+
+# === НАСТРОЙКИ БОТА ===
 TOKEN = os.getenv("TOKEN")
-ADMIN_ID = 7457247409  # ← ЗАМЕНИ НА СВОЙ ID (число от @userinfobot)
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))  # Бери из переменной окружения или 0
 FARM_COOLDOWN_HOURS = 1
 FARM_MIN = 1
 FARM_MAX = 10
@@ -148,6 +161,12 @@ async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # === ЗАПУСК ===
 def main():
     init_db()
+    # Запускаем веб-сервер в отдельном потоке
+    web_thread = Thread(target=run_web_server)
+    web_thread.daemon = True
+    web_thread.start()
+
+    # Запускаем Telegram-бота
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("farm", farm))
