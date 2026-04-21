@@ -137,7 +137,9 @@ def get_main_menu_keyboard():
         [InlineKeyboardButton("📊 Статус", callback_data='status'),
          InlineKeyboardButton("🏆 Топ", callback_data='top')],
         [InlineKeyboardButton("🕋 Гильдии", callback_data='guild_info'),
-         InlineKeyboardButton("📜 Правила", callback_data='rules')]
+         InlineKeyboardButton("📜 Законы", callback_data='rules')],
+        [InlineKeyboardButton("🪪 Привилегия", callback_data='privilege'),
+         InlineKeyboardButton("🔒 Забрать", callback_data='claim_help')]
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -165,6 +167,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await guild_info(update, context)
     elif data == 'rules':
         await rules(update, context)
+    elif data == 'privilege':
+        await privilege(update, context)
+    elif data == 'claim_help':
+        await query.message.reply_text("Используй команду `/claim #КОД`, чтобы застолбить экземпляр на 24 часа.")
 
 # === АДАПТАЦИЯ ФУНКЦИЙ ДЛЯ РАБОТЫ С CALLBACK_QUERY ===
 async def farm(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -416,16 +422,19 @@ async def rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = update.message
 
     await msg.reply_text(
-        "📜 *ПРАВИЛА НАЧИСЛЕНИЯ ОАС*\n\n"
+        "📜 *ЗАКОНЫ ГИЛЬДИИ*\n\n"
         f"• /farm — раз в час: {FARM_MIN}-{FARM_MAX} ОАС\n"
         "• Репост поста/сторис с отметкой: +20 ОАС (вручную админом)\n"
-        "• Покупка: +5% от суммы заказа в ОАС\n"
+        "• Покупка экземпляра: +5% от суммы заказа в ОАС\n"
         "• Фото распаковки/образа с отметкой: +50 ОАС\n"
         "• Приглашение друга, совершившего покупку: +100 ОАС\n\n"
         "🌿 *БЛАНТЫ*\n"
         "/craft или /крафт — обменять 5 ОАС на 1 Блант\n"
         "/balance или /баланс — проверить запасы\n"
         "/smoke или /дунуть — активировать Блант (эффекты Смотрителя)\n\n"
+        "🪪 *ПРИВИЛЕГИИ*\n"
+        "/privilege или /привилегия — твоя персональная скидка на экземпляры\n"
+        "/claim или /забрать #КОД — застолбить экземпляр на 24 часа\n\n"
         "🕯️⚜️ *ГИЛЬДИИ*\n"
         "/guild join BLACK или /вступить BLACK — Чёрная Гильдия (Ритуал)\n"
         "/guild join WHITE или /вступить WHITE — Белая Гильдия (Сохранение Бланта)\n"
@@ -496,6 +505,109 @@ async def guild_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await msg.reply_text(text, parse_mode='Markdown')
 
+# === НОВЫЕ КОМАНДЫ: ПРИВИЛЕГИЯ РАНГА И РЕЗЕРВ ЭКЗЕМПЛЯРА ===
+# Словарь резервов (в памяти, при перезапуске бота сбрасывается)
+reservations = {}
+
+async def privilege(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    player = get_player(user_id)
+    if not player:
+        await update.message.reply_text("❌ Сначала зарегистрируйся: /start")
+        return
+    balance = player[0]
+    
+    if balance >= 2000:
+        rank = "👻 Призрак"
+        divisor = 10
+        max_percent = 0.15
+    elif balance >= 500:
+        rank = "⚔️ Ветеран"
+        divisor = 15
+        max_percent = 0.10
+    else:
+        rank = "💉 Рекрут"
+        divisor = 20
+        max_percent = 0.05
+    
+    await update.message.reply_text(
+        f"🪪 **ПРИВИЛЕГИЯ РАНГА**\n\n"
+        f"🎖️ Твой ранг: **{rank}**\n"
+        f"💰 Баланс: **{balance}** ОАС\n\n"
+        f"📐 _Формула скидки:_ 1₽ за каждые **{divisor}** ОАС\n"
+        f"🔒 _Максимальная скидка:_ **{int(max_percent*100)}%** от цены экземпляра\n\n"
+        f"🔍 Чтобы узнать точную скидку на конкретный экземпляр, отправь Смотрителю в ЛС его стоимость.\n\n"
+        f"▸ _Чем выше ранг, тем выгоднее обмен._",
+        parse_mode='Markdown'
+    )
+
+async def privilege_ru(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await privilege(update, context)
+
+async def claim(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    username = update.effective_user.username or update.effective_user.first_name
+    player = get_player(user_id)
+    if not player:
+        await update.message.reply_text("❌ Сначала зарегистрируйся: /start")
+        return
+    
+    balance = player[0]
+    if balance >= 2000:
+        cost = 100
+        rank_name = "Призрак"
+    elif balance >= 500:
+        cost = 150
+        rank_name = "Ветеран"
+    else:
+        cost = 200
+        rank_name = "Рекрут"
+    
+    if balance < cost:
+        await update.message.reply_text(f"❌ Недостаточно ОАС. Для {rank_name} нужно **{cost}** ОАС.", parse_mode='Markdown')
+        return
+    
+    try:
+        art = context.args[0]
+        if not art.startswith('#'):
+            art = '#' + art
+    except IndexError:
+        await update.message.reply_text("❌ Укажи код экземпляра: `/claim #BAL001`")
+        return
+    
+    if art in reservations:
+        await update.message.reply_text(f"❌ Экземпляр `{art}` уже зарезервирован.", parse_mode='Markdown')
+        return
+    
+    update_balance(user_id, username, -cost)
+    reservations[art] = {
+        "user_id": user_id,
+        "username": username,
+        "expires": datetime.now() + timedelta(hours=24)
+    }
+    
+    await update.message.reply_text(
+        f"🔒 **ПРАВО ПРИОРИТЕТА АКТИВИРОВАНО**\n\n"
+        f"📦 Экземпляр `{art}` закреплён за тобой на **24 часа**.\n"
+        f"⏳ Активируй его в ЛС Смотрителя в течение суток.\n\n"
+        f"💸 Стоимость резерва: **{cost}** ОАС списано.\n"
+        f"🎁 _При активации резерва ты получишь обратно **{cost}** ОАС + **бонус 10%**._\n\n"
+        f"▸ _Не дай удаче ускользнуть._",
+        parse_mode='Markdown'
+    )
+    
+    await context.bot.send_message(
+        chat_id="@n3r0ck",
+        text=(
+            f"🔒 **[РЕЗЕРВ]** @{username} застолбил экземпляр `{art}` на 24 часа.\n"
+            f"_Смотритель наблюдает. Кто следующий?_"
+        ),
+        parse_mode='Markdown'
+    )
+
+async def claim_ru(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await claim(update, context)
+
 # === ОБРАБОТЧИКИ КОМАНД ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -522,7 +634,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         welcome_text += "`/guild join BLACK` — 🕯️ Чёрная (Ритуал)\n"
         welcome_text += "`/guild join WHITE` — ⚜️ Белая (Сохранение Бланта)\n\n"
 
-    welcome_text += "🎮 *Используй кнопки ниже, чтобы играть:*"
+    welcome_text += (
+        "🎮 *Основные действия:*\n"
+        "/farm — собирать ОАС (раз в час)\n"
+        "/balance или /баланс — твои ОАС и Бланты\n"
+        "/craft или /крафт — обмен 5 ОАС на 1 Блант\n"
+        "/smoke или /дунуть — активировать Блант\n"
+        "/ritual или /ритуал — ритуал Чёрной Гильдии\n"
+        "/privilege или /привилегия — твоя персональная скидка\n"
+        "/claim или /забрать — застолбить экземпляр\n"
+        "/status — твой ранг и Гильдия\n"
+        "/top — топ-10 игроков\n"
+        "/rules — полные законы\n\n"
+        "🎮 *Используй кнопки ниже, чтобы играть:*"
+    )
 
     await update.message.reply_text(welcome_text, reply_markup=get_main_menu_keyboard(), parse_mode='Markdown')
 
@@ -543,7 +668,6 @@ async def ritual_ru(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await ritual(update, context)
 
 async def guild_join_ru(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Для MessageHandler с regex
     text = update.message.text
     parts = text.split()
     if len(parts) > 1:
@@ -592,18 +716,21 @@ def main():
     app.add_handler(CommandHandler("rules", rules))
     app.add_handler(CommandHandler("guild", guild_join))
     app.add_handler(CommandHandler("add", add))
-
-    # Русские команды через MessageHandler (кириллица разрешена)
+    # Новые команды
+    app.add_handler(CommandHandler("privilege", privilege))
+    app.add_handler(CommandHandler("привилегия", privilege_ru))
+    app.add_handler(CommandHandler("claim", claim))
+    app.add_handler(CommandHandler("забрать", claim_ru))
+    # Русские команды через MessageHandler
     app.add_handler(MessageHandler(filters.Regex(r'^/баланс$'), balance_ru))
     app.add_handler(MessageHandler(filters.Regex(r'^/крафт$'), craft_ru))
     app.add_handler(MessageHandler(filters.Regex(r'^/дунуть$'), smoke_ru))
     app.add_handler(MessageHandler(filters.Regex(r'^/ритуал$'), ritual_ru))
     app.add_handler(MessageHandler(filters.Regex(r'^/вступить(?:\s+(.+))?$'), guild_join_ru))
-
     # Обработчик кнопок
     app.add_handler(CallbackQueryHandler(button_handler))
 
-    print("Бот с кнопками и русскими командами запущен...")
+    print("Бот с кнопками, привилегиями и резервом запущен...")
     app.run_polling()
 
 if __name__ == '__main__':
