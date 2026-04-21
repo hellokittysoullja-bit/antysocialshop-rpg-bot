@@ -1059,8 +1059,7 @@ def main():
     app.add_handler(MessageHandler(filters.Regex(r'^/ускорение$'), rush_ru))
 
     # Бесслешные команды в чате
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(r'^(?i)(фарм|farm|дунуть|smoke|крафт|craft|баланс|balance|колесо|daily|ускорение|rush)$'), handle_chat_shortcut))
-
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(r'^(фарм|farm|дунуть|smoke|крафт|craft|баланс|balance|колесо|daily|ускорение|rush)$'), handle_chat_shortcut))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_member))
     app.add_handler(CallbackQueryHandler(button_handler))
 
