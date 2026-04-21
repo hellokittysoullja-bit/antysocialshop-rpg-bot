@@ -146,7 +146,7 @@ def get_guild_bonus(user_id):
     else:
         return {'smoke_save_chance': 0, 'ritual_available': False, 'stable_discount': True}
 
-# === ГЕНЕРАЦИЯ ГЛАВНОГО МЕНЮ ===
+# === ГЛАВНОЕ МЕНЮ ===
 def get_main_menu_keyboard():
     keyboard = [
         [InlineKeyboardButton("🍬 Фармить ОАС", callback_data='farm')],
@@ -230,6 +230,7 @@ async def farm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     new_balance = get_player(user_id)[0]
     await msg.reply_text(f"🍬 Вы собрали *{earned}* ОАС.\n💰 Баланс: *{new_balance}* ОАС", parse_mode='Markdown', reply_markup=get_back_to_menu_keyboard())
     await check_rank_up(context, user_id, username, old_balance, new_balance)
+    await check_secret_titles(user_id, username, context)
 
 async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query:
@@ -349,6 +350,7 @@ async def smoke(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     message += spend_msg
     await msg.reply_text(message, parse_mode='Markdown', reply_markup=get_back_to_menu_keyboard())
+    await check_secret_titles(user_id, username, context)
 
 async def ritual(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query:
@@ -389,6 +391,7 @@ async def ritual(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='Markdown', reply_markup=get_back_to_menu_keyboard()
     )
     await check_rank_up(context, user_id, username, old_balance, new_balance)
+    await check_secret_titles(user_id, username, context)
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query:
@@ -542,7 +545,7 @@ async def guild_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await msg.reply_text(text, parse_mode='Markdown', reply_markup=get_back_to_menu_keyboard())
 
-# === ПРИВИЛЕГИЯ РАНГА (С ПРОГРЕССОМ И ФРАЗАМИ) ===
+# === ПРИВИЛЕГИЯ РАНГА ===
 async def privilege(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     player = get_player(user_id)
@@ -569,7 +572,6 @@ async def privilege(update: Update, context: ContextTypes.DEFAULT_TYPE):
         max_percent = 0.10
         target = 500
 
-    # Особенность гильдии
     if guild == 'WHITE':
         max_percent = 0.15
         guild_note = "🎲 Шанс 20% не потратить ОАС при скидке"
@@ -602,31 +604,24 @@ async def privilege(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(text, parse_mode='Markdown', reply_markup=get_back_to_menu_keyboard())
 
-# === СЕКРЕТНЫЕ ЗВАНИЯ (ПРОВЕРКА И НАЧИСЛЕНИЕ) ===
+# === СЕКРЕТНЫЕ ЗВАНИЯ ===
 async def check_secret_titles(user_id, username, context):
     player = get_player(user_id)
     if not player:
         return
     balance, blunts, guild, last_farm, last_ritual, last_daily, titles = player
 
-    # Первый Шаг (уже есть после регистрации и первого фарма)
     if last_farm and '🐾' not in (titles or ''):
         add_title(user_id, '🐾')
         await context.bot.send_message(chat_id=user_id,
             text="👁‍🗨 [СМОТРИТЕЛЬ]\n«Ты сделал первый шаг. Отныне ты известен как **Первый Шаг** 🐾.»\n\nНоси это звание с честью. Или не носи. Мне всё равно.")
 
-    # Искра (50 ОАС)
     if balance >= 50 and '✨' not in (titles or ''):
         add_title(user_id, '✨')
         await context.bot.send_message(chat_id=user_id,
             text="👁‍🗨 [СМОТРИТЕЛЬ]\n«В тебе зажглась Искра ✨. Гильдия чувствует твоё присутствие.»")
 
-    # Молчун (не писал в чат 3 дня, но фармил каждый день) — упрощённо: если зарегистрирован >3 дней и нет сообщений
-    # Здесь нужна более сложная логика с отслеживанием сообщений, пока пропустим или реализуем позже
-
-    # Призрачный Гончий (Призрак без покупок)
     if balance >= 2000 and '👻' not in (titles or ''):
-        # Проверяем, были ли покупки (пока заглушка, можно добавить флаг в БД)
         add_title(user_id, '👻')
         await context.bot.send_message(chat_id=user_id,
             text="👁‍🗨 [СМОТРИТЕЛЬ]\n«Ты достиг ранга Призрака, не совершив ни одной покупки. Ты — **Призрачный Гончий** 👻. Редкая порода.»")
@@ -655,9 +650,8 @@ async def check_rank_up(context: ContextTypes.DEFAULT_TYPE, user_id: int, userna
             text=f"👻 @{username} стал **Призраком**! Ткань реальности дрожит.",
             parse_mode='Markdown'
         )
-    await check_secret_titles(user_id, username, context)
 
-# === КОЛЕСО СМОТРИТЕЛЯ (/daily) ===
+# === КОЛЕСО СМОТРИТЕЛЯ ===
 async def daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query:
         user = update.callback_query.from_user
@@ -704,6 +698,7 @@ async def daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     update_last_daily(user_id)
     await msg.reply_text(f"🎡 Колесо Смотрителя: {prize_text}", reply_markup=get_back_to_menu_keyboard())
+    await check_secret_titles(user_id, username, context)
 
 # === ПИН ЗА ОАС ===
 async def pin_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -783,6 +778,81 @@ async def warden_whisper(context: ContextTypes.DEFAULT_TYPE):
     ]
     await context.bot.send_message(chat_id="@guild_antysocial", text=random.choice(whispers))
 
+# === ОБРАБОТЧИКИ START, MENU, ADD ===
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    username = update.effective_user.username or update.effective_user.first_name
+
+    player = get_player(user_id)
+    if not player:
+        update_balance(user_id, username, 0)
+        update_blunts(user_id, username, 0)
+        guild = None
+    else:
+        guild = player[2]
+
+    welcome_text = "⚔️ *Добро пожаловать в Гильдию antysocialshop!*\n\n"
+    if guild == 'BLACK':
+        welcome_text += "🕯️ Ты состоишь в **Чёрной Гильдии**.\n"
+        welcome_text += "Раз в 24 часа тебе доступен `/ritual` (гарантированные +15 ОАС).\n\n"
+    elif guild == 'WHITE':
+        welcome_text += "⚜️ Ты состоишь в **Белой Гильдии**.\n"
+        welcome_text += "При использовании `/smoke` есть 20% шанс сохранить Блант.\n\n"
+    else:
+        welcome_text += "Ты пока не в Гильдии.\n"
+        welcome_text += "Вступи, чтобы получить уникальные бонусы:\n"
+        welcome_text += "`/guild join BLACK` — 🕯️ Чёрная (Ритуал)\n"
+        welcome_text += "`/guild join WHITE` — ⚜️ Белая (Сохранение Бланта)\n\n"
+
+    welcome_text += "🎮 *Используй кнопки ниже, чтобы играть:*"
+
+    await update.message.reply_text(welcome_text, reply_markup=get_main_menu_keyboard(), parse_mode='Markdown')
+
+async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.callback_query:
+        msg = update.callback_query.message
+        await update.callback_query.answer()
+    else:
+        msg = update.message
+    await msg.reply_text("🎮 *Главное меню*", reply_markup=get_main_menu_keyboard(), parse_mode='Markdown')
+
+async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("⛔ Недостаточно прав.", reply_markup=get_back_to_menu_keyboard())
+        return
+    try:
+        if update.message.reply_to_message:
+            target_user = update.message.reply_to_message.from_user
+            target_id = target_user.id
+            target_name = target_user.username or target_user.first_name
+            amount = int(context.args[0])
+            update_balance(target_id, target_name, amount)
+            await update.message.reply_text(f"✅ Игроку {target_name} начислено {amount} ОАС.", reply_markup=get_back_to_menu_keyboard())
+        else:
+            await update.message.reply_text("Ответьте на сообщение пользователя и напишите `/add <сумма>`", reply_markup=get_back_to_menu_keyboard())
+    except (IndexError, ValueError):
+        await update.message.reply_text("Использование: ответьте на сообщение игрока и напишите `/add <сумма>`", reply_markup=get_back_to_menu_keyboard())
+
+# === РУССКИЕ КОМАНДЫ (ЗАГОТОВКИ) ===
+async def balance_ru(update: Update, context: ContextTypes.DEFAULT_TYPE): await balance(update, context)
+async def craft_ru(update: Update, context: ContextTypes.DEFAULT_TYPE): await craft(update, context)
+async def smoke_ru(update: Update, context: ContextTypes.DEFAULT_TYPE): await smoke(update, context)
+async def ritual_ru(update: Update, context: ContextTypes.DEFAULT_TYPE): await ritual(update, context)
+async def privilege_ru(update: Update, context: ContextTypes.DEFAULT_TYPE): await privilege(update, context)
+async def claim_ru(update: Update, context: ContextTypes.DEFAULT_TYPE): await claim(update, context)
+async def daily_ru(update: Update, context: ContextTypes.DEFAULT_TYPE): await daily(update, context)
+async def catalog_ru(update: Update, context: ContextTypes.DEFAULT_TYPE): await catalog(update, context)
+
+async def guild_join_ru(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    parts = text.split()
+    if len(parts) > 1:
+        context.args = parts[1:]
+    else:
+        context.args = []
+    await guild_join(update, context)
+
 # === ЗАПУСК ===
 def main():
     init_db()
@@ -791,6 +861,8 @@ def main():
     web_thread.start()
 
     app = Application.builder().token(TOKEN).build()
+
+    # Английские команды
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("menu", menu))
     app.add_handler(CommandHandler("farm", farm))
@@ -803,20 +875,29 @@ def main():
     app.add_handler(CommandHandler("rules", rules))
     app.add_handler(CommandHandler("guild", guild_join))
     app.add_handler(CommandHandler("privilege", privilege))
-    app.add_handler(CommandHandler("привилегия", privilege))
     app.add_handler(CommandHandler("claim", claim))
-    app.add_handler(CommandHandler("забрать", claim))
     app.add_handler(CommandHandler("daily", daily))
-    app.add_handler(CommandHandler("дейли", daily))
     app.add_handler(CommandHandler("proof", proof))
     app.add_handler(CommandHandler("pin", pin_message))
     app.add_handler(CommandHandler("catalog", catalog))
-    app.add_handler(CommandHandler("каталог", catalog))
     app.add_handler(CommandHandler("add", add))
 
+    # Русские команды (через MessageHandler для кириллицы)
+    app.add_handler(MessageHandler(filters.Regex(r'^/баланс$'), balance_ru))
+    app.add_handler(MessageHandler(filters.Regex(r'^/крафт$'), craft_ru))
+    app.add_handler(MessageHandler(filters.Regex(r'^/дунуть$'), smoke_ru))
+    app.add_handler(MessageHandler(filters.Regex(r'^/ритуал$'), ritual_ru))
+    app.add_handler(MessageHandler(filters.Regex(r'^/привилегия$'), privilege_ru))
+    app.add_handler(MessageHandler(filters.Regex(r'^/забрать(?:\s+(.+))?$'), claim_ru))
+    app.add_handler(MessageHandler(filters.Regex(r'^/дейли$'), daily_ru))
+    app.add_handler(MessageHandler(filters.Regex(r'^/каталог$'), catalog_ru))
+    app.add_handler(MessageHandler(filters.Regex(r'^/вступить(?:\s+(.+))?$'), guild_join_ru))
+
+    # Автоприветствие и кнопки
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_member))
     app.add_handler(CallbackQueryHandler(button_handler))
 
+    # Шёпот Смотрителя каждые 4 часа
     job_queue = app.job_queue
     job_queue.run_repeating(warden_whisper, interval=14400, first=10)
 
