@@ -834,7 +834,7 @@ async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except (IndexError, ValueError):
         await update.message.reply_text("Использование: ответьте на сообщение игрока и напишите `/add <сумма>`", reply_markup=get_back_to_menu_keyboard())
 
-# === РУССКИЕ КОМАНДЫ (ЗАГОТОВКИ) ===
+# === РУССКИЕ КОМАНДЫ ===
 async def balance_ru(update: Update, context: ContextTypes.DEFAULT_TYPE): await balance(update, context)
 async def craft_ru(update: Update, context: ContextTypes.DEFAULT_TYPE): await craft(update, context)
 async def smoke_ru(update: Update, context: ContextTypes.DEFAULT_TYPE): await smoke(update, context)
@@ -882,7 +882,7 @@ def main():
     app.add_handler(CommandHandler("catalog", catalog))
     app.add_handler(CommandHandler("add", add))
 
-    # Русские команды (через MessageHandler для кириллицы)
+    # Русские команды
     app.add_handler(MessageHandler(filters.Regex(r'^/баланс$'), balance_ru))
     app.add_handler(MessageHandler(filters.Regex(r'^/крафт$'), craft_ru))
     app.add_handler(MessageHandler(filters.Regex(r'^/дунуть$'), smoke_ru))
