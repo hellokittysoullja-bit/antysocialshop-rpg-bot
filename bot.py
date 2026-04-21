@@ -4,17 +4,30 @@ import logging
 import random
 import sqlite3
 from datetime import datetime, timedelta
+from threading import Thread
+from flask import Flask
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-# === НАСТРОЙКИ ===
+# === ФАЛЬШИВЫЙ ВЕБ-СЕРВЕР (ЧТОБЫ RENDER НЕ ЗАСЫПАЛ) ===
+web_app = Flask(__name__)
+
+@web_app.route('/')
+def home():
+    return "Antysocialshop RPG Bot is alive!"
+
+def run_web_server():
+    port = int(os.getenv("PORT", 10000))
+    web_app.run(host='0.0.0.0', port=port)
+
+# === НАСТРОЙКИ БОТА ===
 TOKEN = os.getenv("TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))  # Убедись, что в Render есть переменная ADMIN_ID с твоим ID
 FARM_COOLDOWN_HOURS = 1
 FARM_MIN = 1
 FARM_MAX = 10
 
-# === ИНИЦИАЛИЗАЦИЯ БД (ДОБАВЛЕНО ПОЛЕ blunts) ===
+# === БАЗА ДАННЫХ (balance = ОАС, blunts = Бланты) ===
 def init_db():
     conn = sqlite3.connect('players.db')
     c = conn.cursor()
@@ -242,6 +255,13 @@ async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # === ЗАПУСК ===
 def main():
     init_db()
+    
+    # Запускаем веб-сервер в фоне
+    web_thread = Thread(target=run_web_server)
+    web_thread.daemon = True
+    web_thread.start()
+    
+    # Запускаем Telegram-бота
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("farm", farm))
@@ -252,7 +272,7 @@ def main():
     app.add_handler(CommandHandler("craft", craft))
     app.add_handler(CommandHandler("smoke", smoke))
     app.add_handler(CommandHandler("add", add))
-    print("Бот запущен...")
+    print("Бот и веб-сервер запущены...")
     app.run_polling()
 
 if __name__ == '__main__':
