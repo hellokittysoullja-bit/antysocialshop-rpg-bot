@@ -146,7 +146,7 @@ def get_guild_bonus(user_id):
     else:
         return {'smoke_save_chance': 0, 'ritual_available': False, 'stable_discount': True}
 
-# === ГЛАВНОЕ МЕНЮ ===
+# === ГЛАВНОЕ МЕНЮ (КНОПКИ) ===
 def get_main_menu_keyboard():
     keyboard = [
         [InlineKeyboardButton("🍬 Фармить ОАС", callback_data='farm')],
@@ -626,7 +626,7 @@ async def check_secret_titles(user_id, username, context):
         await context.bot.send_message(chat_id=user_id,
             text="👁‍🗨 [СМОТРИТЕЛЬ]\n«Ты достиг ранга Призрака, не совершив ни одной покупки. Ты — **Призрачный Гончий** 👻. Редкая порода.»")
 
-# === КОМАНДА /catalog ===
+# === КАТАЛОГ ===
 async def catalog(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔗 Перейти", url="https://t.me/antysocialshop")]
@@ -791,22 +791,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         guild = player[2]
 
-    welcome_text = "⚔️ *Добро пожаловать в Гильдию antysocialshop!*\n\n"
-    if guild == 'BLACK':
-        welcome_text += "🕯️ Ты состоишь в **Чёрной Гильдии**.\n"
-        welcome_text += "Раз в 24 часа тебе доступен `/ritual` (гарантированные +15 ОАС).\n\n"
-    elif guild == 'WHITE':
-        welcome_text += "⚜️ Ты состоишь в **Белой Гильдии**.\n"
-        welcome_text += "При использовании `/smoke` есть 20% шанс сохранить Блант.\n\n"
-    else:
-        welcome_text += "Ты пока не в Гильдии.\n"
-        welcome_text += "Вступи, чтобы получить уникальные бонусы:\n"
-        welcome_text += "`/guild join BLACK` — 🕯️ Чёрная (Ритуал)\n"
-        welcome_text += "`/guild join WHITE` — ⚜️ Белая (Сохранение Бланта)\n\n"
+    welcome_text = (
+        "🎉 *Добро пожаловать в Гильдию antysocialshop!*\n\n"
+        "▸ _Смотритель приветствует тебя._\n"
+        "▸ _Здесь добываются редкие экземпляры, зарабатывают Очки Антисошл (ОАС), курят бланты и вступают в гильдии._\n\n"
+        "🕯️ *ЧЁРНАЯ ГИЛЬДИЯ* — стабильность, ритуалы, власть.\n"
+        "⚜️ *БЕЛАЯ ГИЛЬДИЯ* — азарт, удача, танец на лезвии.\n\n"
+        "▸ _Выбери свой путь:_"
+    )
 
-    welcome_text += "🎮 *Используй кнопки ниже, чтобы играть:*"
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎮 ОТКРЫТЬ ТЕРМИНАЛ", callback_data='menu')]
+    ])
 
-    await update.message.reply_text(welcome_text, reply_markup=get_main_menu_keyboard(), parse_mode='Markdown')
+    await update.message.reply_text(welcome_text, reply_markup=keyboard, parse_mode='Markdown')
 
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query:
