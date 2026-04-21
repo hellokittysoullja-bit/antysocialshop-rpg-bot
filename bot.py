@@ -129,7 +129,7 @@ def get_guild_bonus(user_id):
 # === ГЕНЕРАЦИЯ ГЛАВНОГО МЕНЮ (КНОПКИ) ===
 def get_main_menu_keyboard():
     keyboard = [
-        [InlineKeyboardButton("🧵 Фармить ОАС", callback_data='farm')],
+        [InlineKeyboardButton("🍬 Фармить ОАС", callback_data='farm')],
         [InlineKeyboardButton("💰 Баланс", callback_data='balance'),
          InlineKeyboardButton("🌿 Крафт Бланта", callback_data='craft')],
         [InlineKeyboardButton("💨 Дунуть", callback_data='smoke'),
@@ -170,7 +170,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == 'privilege':
         await privilege(update, context)
     elif data == 'claim_help':
-        await query.message.reply_text("Используй команду `/claim #КОД`, чтобы застолбить экземпляр на 24 часа.")
+        await query.message.reply_text("Используй команду `/claim #КОД` или `/забрать #КОД`, чтобы застолбить экземпляр на 24 часа.", parse_mode='Markdown')
 
 # === АДАПТАЦИЯ ФУНКЦИЙ ДЛЯ РАБОТЫ С CALLBACK_QUERY ===
 async def farm(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -506,7 +506,6 @@ async def guild_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.reply_text(text, parse_mode='Markdown')
 
 # === НОВЫЕ КОМАНДЫ: ПРИВИЛЕГИЯ РАНГА И РЕЗЕРВ ЭКЗЕМПЛЯРА ===
-# Словарь резервов (в памяти, при перезапуске бота сбрасывается)
 reservations = {}
 
 async def privilege(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -703,7 +702,7 @@ def main():
     web_thread.start()
 
     app = Application.builder().token(TOKEN).build()
-    # Английские команды
+    # Английские команды (CommandHandler)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("menu", menu))
     app.add_handler(CommandHandler("farm", farm))
@@ -716,17 +715,20 @@ def main():
     app.add_handler(CommandHandler("rules", rules))
     app.add_handler(CommandHandler("guild", guild_join))
     app.add_handler(CommandHandler("add", add))
-    # Новые команды
+    # Английские новые команды
     app.add_handler(CommandHandler("privilege", privilege))
-    app.add_handler(CommandHandler("привилегия", privilege_ru))
     app.add_handler(CommandHandler("claim", claim))
-    app.add_handler(CommandHandler("забрать", claim_ru))
-    # Русские команды через MessageHandler
+
+    # Русские команды через MessageHandler (кириллица)
     app.add_handler(MessageHandler(filters.Regex(r'^/баланс$'), balance_ru))
     app.add_handler(MessageHandler(filters.Regex(r'^/крафт$'), craft_ru))
     app.add_handler(MessageHandler(filters.Regex(r'^/дунуть$'), smoke_ru))
     app.add_handler(MessageHandler(filters.Regex(r'^/ритуал$'), ritual_ru))
     app.add_handler(MessageHandler(filters.Regex(r'^/вступить(?:\s+(.+))?$'), guild_join_ru))
+    # Новые русские команды
+    app.add_handler(MessageHandler(filters.Regex(r'^/привилегия$'), privilege_ru))
+    app.add_handler(MessageHandler(filters.Regex(r'^/забрать(?:\s+(.+))?$'), claim_ru))
+
     # Обработчик кнопок
     app.add_handler(CallbackQueryHandler(button_handler))
 
