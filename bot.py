@@ -817,6 +817,7 @@ async def rush(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # === ЗАПУСК ===
 def main():
+    return
     init_db()
     web_thread = Thread(target=run_web_server)
     web_thread.daemon = True
