@@ -6,8 +6,8 @@ import sqlite3
 from datetime import datetime, timedelta
 from threading import Thread
 from flask import Flask
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 # === ВЕБ-СЕРВЕР ДЛЯ RENDER (ЧТОБЫ НЕ ЗАСЫПАЛ) ===
 web_app = Flask(__name__)
@@ -27,7 +27,7 @@ FARM_COOLDOWN_HOURS = 1
 FARM_MIN = 1
 FARM_MAX = 10
 
-# === ИНИЦИАЛИЗАЦИЯ БД (ДОБАВЛЕНЫ ГИЛЬДИИ И РИТУАЛ) ===
+# === ИНИЦИАЛИЗАЦИЯ БД ===
 def init_db():
     conn = sqlite3.connect('players.db')
     c = conn.cursor()
@@ -120,133 +120,156 @@ def count_guilds():
 def get_guild_bonus(user_id):
     guild = get_guild(user_id)
     if guild == 'BLACK':
-        return {'farm_bonus': 0, 'smoke_save_chance': 0, 'ritual_available': True}
+        return {'smoke_save_chance': 0, 'ritual_available': True}
     elif guild == 'WHITE':
-        return {'farm_bonus': 0, 'smoke_save_chance': 20, 'ritual_available': False}
+        return {'smoke_save_chance': 20, 'ritual_available': False}
     else:
-        return {'farm_bonus': 0, 'smoke_save_chance': 0, 'ritual_available': False}
+        return {'smoke_save_chance': 0, 'ritual_available': False}
+
+# === ГЕНЕРАЦИЯ ГЛАВНОГО МЕНЮ (КНОПКИ) ===
+def get_main_menu_keyboard():
+    keyboard = [
+        [InlineKeyboardButton("🧵 Фармить ОАС", callback_data='farm')],
+        [InlineKeyboardButton("💰 Баланс", callback_data='balance'),
+         InlineKeyboardButton("🌿 Крафт Бланта", callback_data='craft')],
+        [InlineKeyboardButton("💨 Дунуть", callback_data='smoke'),
+         InlineKeyboardButton("🕯️ Ритуал", callback_data='ritual')],
+        [InlineKeyboardButton("📊 Статус", callback_data='status'),
+         InlineKeyboardButton("🏆 Топ", callback_data='top')],
+        [InlineKeyboardButton("🕋 Гильдии", callback_data='guild_info'),
+         InlineKeyboardButton("📜 Правила", callback_data='rules')]
+    ]
+    return InlineKeyboardMarkup(keyboard)
 
 # === ОБРАБОТЧИКИ КОМАНД ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "⚔️ *Добро пожаловать в Гильдию antysocialshop!*\n\n"
-        "Доступные протоколы:\n"
-        "/farm — сбор ОАС (раз в час)\n"
-        "/balance — твои ОАС и Бланты 🌿\n"
-        "/craft — обмен 5 ОАС на 1 Блант\n"
-        "/smoke — активировать Блант\n"
-        "/status — твой ранг и Гильдия\n"
-        "/top — топ-10 игроков\n"
-        "/rules — правила\n"
-        "/guild join BLACK/WHITE — вступить в Гильдию\n"
-        "/guild info — информация о Гильдиях",
-        parse_mode='Markdown'
-    )
-
-async def farm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     username = update.effective_user.username or update.effective_user.first_name
+
     player = get_player(user_id)
+    if not player:
+        update_balance(user_id, username, 0)
+        update_blunts(user_id, username, 0)
+        guild = None
+    else:
+        guild = player[2]
+
+    welcome_text = "⚔️ *Добро пожаловать в Гильдию antysocialshop!*\n\n"
+    if guild == 'BLACK':
+        welcome_text += "🕯️ Ты состоишь в **Чёрной Гильдии**.\n"
+        welcome_text += "Раз в 24 часа тебе доступен `/ritual` (гарантированные +15 ОАС).\n\n"
+    elif guild == 'WHITE':
+        welcome_text += "⚜️ Ты состоишь в **Белой Гильдии**.\n"
+        welcome_text += "При использовании `/smoke` есть 20% шанс сохранить Блант.\n\n"
+    else:
+        welcome_text += "Ты пока не в Гильдии.\n"
+        welcome_text += "Вступи, чтобы получить уникальные бонусы:\n"
+        welcome_text += "`/guild join BLACK` — 🕯️ Чёрная (Ритуал)\n"
+        welcome_text += "`/guild join WHITE` — ⚜️ Белая (Сохранение Бланта)\n\n"
+
+    welcome_text += "🎮 *Используй кнопки ниже, чтобы играть:*"
+
+    await update.message.reply_text(welcome_text, reply_markup=get_main_menu_keyboard(), parse_mode='Markdown')
+
+async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🎮 *Главное меню*", reply_markup=get_main_menu_keyboard(), parse_mode='Markdown')
+
+# === ОБРАБОТЧИК НАЖАТИЙ НА КНОПКИ ===
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    # Перенаправляем на соответствующую команду
+    if data == 'farm':
+        await farm(query, context)
+    elif data == 'balance':
+        await balance(query, context)
+    elif data == 'craft':
+        await craft(query, context)
+    elif data == 'smoke':
+        await smoke(query, context)
+    elif data == 'ritual':
+        await ritual(query, context)
+    elif data == 'status':
+        await status(query, context)
+    elif data == 'top':
+        await top(query, context)
+    elif data == 'guild_info':
+        await guild_info(query, context)
+    elif data == 'rules':
+        await rules(query, context)
+
+# === АДАПТАЦИЯ ФУНКЦИЙ ДЛЯ РАБОТЫ С CALLBACK_QUERY ===
+async def farm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.callback_query:
+        user = update.callback_query.from_user
+        msg = update.callback_query.message
+        await update.callback_query.answer()
+    else:
+        user = update.effective_user
+        msg = update.message
+
+    user_id = user.id
+    username = user.username or user.first_name
+    player = get_player(user_id)
+
     if player:
         balance, blunts, guild, last_farm_str, _ = player
         if last_farm_str:
             last_farm = datetime.fromisoformat(last_farm_str)
             if datetime.now() - last_farm < timedelta(hours=FARM_COOLDOWN_HOURS):
                 remaining = timedelta(hours=FARM_COOLDOWN_HOURS) - (datetime.now() - last_farm)
-                await update.message.reply_text(f"⏳ Энергия восстанавливается. Попробуйте через {remaining.seconds//60} мин.")
+                await msg.reply_text(f"⏳ Энергия восстанавливается. Попробуйте через {remaining.seconds//60} мин.")
                 return
+
     earned = random.randint(FARM_MIN, FARM_MAX)
     update_balance(user_id, username, earned)
     update_last_farm(user_id)
     new_balance = get_player(user_id)[0]
-    await update.message.reply_text(f"🧵 Вы собрали *{earned}* ОАС.\nБаланс: *{new_balance}* ОАС", parse_mode='Markdown')
-
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    username = update.effective_user.username or update.effective_user.first_name
-    player = get_player(user_id)
-    if not player:
-        update_balance(user_id, username, 0)
-        balance = 0
-        guild = None
-    else:
-        balance, _, guild, _, _ = player
-    if balance >= 2000:
-        rank = "👻 Призрак"
-    elif balance >= 500:
-        rank = "⚔️ Ветеран"
-    else:
-        rank = "💉 Рекрут"
-
-    guild_emoji = ""
-    if guild == 'BLACK':
-        guild_emoji = " 🕯️"
-        guild_name = "**Чёрная**"
-    elif guild == 'WHITE':
-        guild_emoji = " ⚜️"
-        guild_name = "**Белая**"
-    else:
-        guild_name = "Нет"
-
-    text = f"*{username}*{guild_emoji}\nРанг: {rank}\nБаланс: *{balance}* ОАС\nГильдия: {guild_name}"
-    await update.message.reply_text(text, parse_mode='Markdown')
-
-async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    top_players = get_top(10)
-    if not top_players:
-        await update.message.reply_text("Топ пока пуст.")
-        return
-    text = "🏆 *ТОП-10 ИГРОКОВ* 🏆\n\n"
-    for i, (name, bal) in enumerate(top_players, 1):
-        medal = "🥇" if i==1 else "🥈" if i==2 else "🥉" if i==3 else f"{i}."
-        text += f"{medal} {name}: {bal} ОАС\n"
-    await update.message.reply_text(text, parse_mode='Markdown')
-
-async def rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "📜 *ПРАВИЛА НАЧИСЛЕНИЯ ОАС*\n\n"
-        f"• /farm — раз в час: {FARM_MIN}-{FARM_MAX} ОАС\n"
-        "• Репост поста/сторис с отметкой: +20 ОАС (вручную админом)\n"
-        "• Покупка: +5% от суммы заказа в ОАС\n"
-        "• Фото распаковки/образа с отметкой: +50 ОАС\n"
-        "• Приглашение друга, совершившего покупку: +100 ОАС\n\n"
-        "🌿 *БЛАНТЫ*\n"
-        "/craft — обменять 5 ОАС на 1 Блант\n"
-        "/balance — проверить запасы\n"
-        "/smoke — активировать Блант (эффекты Смотрителя)\n\n"
-        "🕯️⚜️ *ГИЛЬДИИ*\n"
-        "/guild join BLACK — Чёрная Гильдия (Ритуал)\n"
-        "/guild join WHITE — Белая Гильдия (Сохранение Бланта)\n"
-        "/guild info — статистика Гильдий\n\n"
-        "Ранги:\n💉 Рекрут: 0-499 ОАС\n⚔️ Ветеран: 500-1999 ОАС\n👻 Призрак: 2000+ ОАС",
-        parse_mode='Markdown'
-    )
+    await msg.reply_text(f"🍬 Вы собрали *{earned}* ОАС.\n💰 Баланс: *{new_balance}* ОАС", parse_mode='Markdown')
 
 async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    username = update.effective_user.username or update.effective_user.first_name
+    if update.callback_query:
+        user = update.callback_query.from_user
+        msg = update.callback_query.message
+        await update.callback_query.answer()
+    else:
+        user = update.effective_user
+        msg = update.message
+
+    user_id = user.id
+    username = user.username or user.first_name
     player = get_player(user_id)
     if not player:
         update_balance(user_id, username, 0)
-        balance = 0
+        balance_val = 0
         blunts = 0
     else:
-        balance, blunts, _, _, _ = player
-    await update.message.reply_text(f"💰 ОАС: *{balance}*\n🌿 Бланты: *{blunts}*", parse_mode='Markdown')
+        balance_val, blunts, _, _, _ = player
+    await msg.reply_text(f"💰 ОАС: *{balance_val}*\n🌿 Бланты: *{blunts}*", parse_mode='Markdown')
 
 async def craft(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    username = update.effective_user.username or update.effective_user.first_name
+    if update.callback_query:
+        user = update.callback_query.from_user
+        msg = update.callback_query.message
+        await update.callback_query.answer()
+    else:
+        user = update.effective_user
+        msg = update.message
+
+    user_id = user.id
+    username = user.username or user.first_name
     player = get_player(user_id)
     if not player:
         update_balance(user_id, username, 0)
-        balance = 0
+        balance_val = 0
         guild = None
     else:
-        balance, _, guild, _, _ = player
+        balance_val, _, guild, _, _ = player
 
-    if balance < 5:
-        await update.message.reply_text("❌ Недостаточно ОАС. Нужно 5 ОАС для крафта 1 Бланта.")
+    if balance_val < 5:
+        await msg.reply_text("❌ Недостаточно ОАС. Нужно 5 ОАС для крафта 1 Бланта.")
         return
 
     update_balance(user_id, username, -5)
@@ -260,11 +283,19 @@ async def craft(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         craft_msg = "🌿 Ты закрафтил 1 Блант!"
 
-    await update.message.reply_text(f"{craft_msg}\n💰 ОАС: {new_balance}\n🌿 Бланты: {new_blunts}")
+    await msg.reply_text(f"{craft_msg}\n💰 ОАС: {new_balance}\n🌿 Бланты: {new_blunts}")
 
 async def smoke(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    username = update.effective_user.username or update.effective_user.first_name
+    if update.callback_query:
+        user = update.callback_query.from_user
+        msg = update.callback_query.message
+        await update.callback_query.answer()
+    else:
+        user = update.effective_user
+        msg = update.message
+
+    user_id = user.id
+    username = user.username or user.first_name
     player = get_player(user_id)
     if not player:
         update_blunts(user_id, username, 0)
@@ -274,7 +305,7 @@ async def smoke(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _, blunts, guild, _, _ = player
 
     if blunts < 1:
-        await update.message.reply_text("❌ У тебя нет Блантов. Используй /craft чтобы создать их.")
+        await msg.reply_text("❌ У тебя нет Блантов. Используй /craft чтобы создать их.")
         return
 
     bonus_info = get_guild_bonus(user_id)
@@ -310,46 +341,144 @@ async def smoke(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message += f"👁‍🗨 **Эффект: {effect_name}**\n"
     if oas_gain > 0:
         new_balance, new_blunts, _, _, _ = get_player(user_id)
-        message += f"✨ +{oas_gain} ОАС\n💰 Баланс: {new_balance} ОАС"
+        message += f"🍬 +{oas_gain} ОАС\n💰 Баланс: {new_balance} ОАС"
     else:
         message += "✨ Никакого видимого эффекта."
 
     message += spend_msg
-    await update.message.reply_text(message, parse_mode='Markdown')
+    await msg.reply_text(message, parse_mode='Markdown')
 
 async def ritual(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    username = update.effective_user.username or update.effective_user.first_name
+    if update.callback_query:
+        user = update.callback_query.from_user
+        msg = update.callback_query.message
+        await update.callback_query.answer()
+    else:
+        user = update.effective_user
+        msg = update.message
+
+    user_id = user.id
+    username = user.username or user.first_name
     player = get_player(user_id)
     if not player:
-        await update.message.reply_text("❌ Сначала зарегистрируйся через /start.")
+        await msg.reply_text("❌ Сначала зарегистрируйся через /start.")
         return
 
     balance, blunts, guild, _, last_ritual_str = player
     if guild != 'BLACK':
-        await update.message.reply_text("❌ Только члены 🕯️ **Чёрной Гильдии** могут проводить Ритуал.", parse_mode='Markdown')
+        await msg.reply_text("❌ Только члены 🕯️ **Чёрной Гильдии** могут проводить Ритуал.", parse_mode='Markdown')
         return
 
     if last_ritual_str:
         last_ritual = datetime.fromisoformat(last_ritual_str)
         if datetime.now() - last_ritual < timedelta(hours=24):
             remaining = timedelta(hours=24) - (datetime.now() - last_ritual)
-            await update.message.reply_text(f"⏳ Ритуал можно проводить раз в 24 часа. Попробуйте через {remaining.seconds//3600} ч.")
+            await msg.reply_text(f"⏳ Ритуал можно проводить раз в 24 часа. Попробуйте через {remaining.seconds//3600} ч.")
             return
 
     update_balance(user_id, username, 15)
     update_last_ritual(user_id)
     new_balance = get_player(user_id)[0]
-    await update.message.reply_text(
+    await msg.reply_text(
         f"🕯️ *Ритуал Чёрной Гильдии завершён.*\n"
         f"«Тьма одарила тебя стабильностью.»\n"
-        f"✨ +15 ОАС\n💰 Баланс: *{new_balance}* ОАС",
+        f"🍬 +15 ОАС\n💰 Баланс: *{new_balance}* ОАС",
+        parse_mode='Markdown'
+    )
+
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.callback_query:
+        user = update.callback_query.from_user
+        msg = update.callback_query.message
+        await update.callback_query.answer()
+    else:
+        user = update.effective_user
+        msg = update.message
+
+    user_id = user.id
+    username = user.username or user.first_name
+    player = get_player(user_id)
+    if not player:
+        update_balance(user_id, username, 0)
+        balance_val = 0
+        guild = None
+    else:
+        balance_val, _, guild, _, _ = player
+
+    if balance_val >= 2000:
+        rank = "👻 Призрак"
+    elif balance_val >= 500:
+        rank = "⚔️ Ветеран"
+    else:
+        rank = "💉 Рекрут"
+
+    guild_emoji = ""
+    if guild == 'BLACK':
+        guild_emoji = " 🕯️"
+        guild_name = "**Чёрная**"
+    elif guild == 'WHITE':
+        guild_emoji = " ⚜️"
+        guild_name = "**Белая**"
+    else:
+        guild_name = "Нет"
+
+    text = f"*{username}*{guild_emoji}\nРанг: {rank}\n💰 Баланс: *{balance_val}* ОАС\nГильдия: {guild_name}"
+    await msg.reply_text(text, parse_mode='Markdown')
+
+async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.callback_query:
+        msg = update.callback_query.message
+        await update.callback_query.answer()
+    else:
+        msg = update.message
+
+    top_players = get_top(10)
+    if not top_players:
+        await msg.reply_text("Топ пока пуст.")
+        return
+    text = "🏆 *ТОП-10 ИГРОКОВ* 🏆\n\n"
+    for i, (name, bal) in enumerate(top_players, 1):
+        medal = "🥇" if i==1 else "🥈" if i==2 else "🥉" if i==3 else f"{i}."
+        text += f"{medal} {name}: {bal} ОАС\n"
+    await msg.reply_text(text, parse_mode='Markdown')
+
+async def rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.callback_query:
+        msg = update.callback_query.message
+        await update.callback_query.answer()
+    else:
+        msg = update.message
+
+    await msg.reply_text(
+        "📜 *ПРАВИЛА НАЧИСЛЕНИЯ ОАС*\n\n"
+        f"• /farm — раз в час: {FARM_MIN}-{FARM_MAX} ОАС\n"
+        "• Репост поста/сторис с отметкой: +20 ОАС (вручную админом)\n"
+        "• Покупка: +5% от суммы заказа в ОАС\n"
+        "• Фото распаковки/образа с отметкой: +50 ОАС\n"
+        "• Приглашение друга, совершившего покупку: +100 ОАС\n\n"
+        "🌿 *БЛАНТЫ*\n"
+        "/craft или /крафт — обменять 5 ОАС на 1 Блант\n"
+        "/balance или /баланс — проверить запасы\n"
+        "/smoke или /дунуть — активировать Блант (эффекты Смотрителя)\n\n"
+        "🕯️⚜️ *ГИЛЬДИИ*\n"
+        "/guild join BLACK или /вступить BLACK — Чёрная Гильдия (Ритуал)\n"
+        "/guild join WHITE или /вступить WHITE — Белая Гильдия (Сохранение Бланта)\n"
+        "/guild info — статистика Гильдий\n\n"
+        "Ранги:\n💉 Рекрут: 0-499 ОАС\n⚔️ Ветеран: 500-1999 ОАС\n👻 Призрак: 2000+ ОАС",
         parse_mode='Markdown'
     )
 
 async def guild_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    username = update.effective_user.username or update.effective_user.first_name
+    if update.callback_query:
+        user = update.callback_query.from_user
+        msg = update.callback_query.message
+        await update.callback_query.answer()
+    else:
+        user = update.effective_user
+        msg = update.message
+
+    user_id = user.id
+    username = user.username or user.first_name
 
     player = get_player(user_id)
     if not player:
@@ -359,30 +488,37 @@ async def guild_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
     current_guild = get_guild(user_id)
     if current_guild:
         emoji = "🕯️" if current_guild == 'BLACK' else "⚜️"
-        await update.message.reply_text(f"❌ Ты уже состоишь в Гильдии {emoji} **{current_guild}**.", parse_mode='Markdown')
+        await msg.reply_text(f"❌ Ты уже состоишь в Гильдии {emoji} **{current_guild}**.", parse_mode='Markdown')
         return
 
     try:
         guild_name = context.args[0].upper()
         if guild_name not in ['BLACK', 'WHITE']:
-            await update.message.reply_text("❌ Неверное название. Доступные Гильдии: **BLACK**, **WHITE**.\nПример: `/guild join BLACK`", parse_mode='Markdown')
+            await msg.reply_text("❌ Неверное название. Доступные Гильдии: **BLACK**, **WHITE**.\nПример: `/guild join BLACK`", parse_mode='Markdown')
             return
 
         set_guild(user_id, guild_name)
         emoji = "🕯️" if guild_name == 'BLACK' else "⚜️"
-        await update.message.reply_text(f"✅ Ты вступил в Гильдию {emoji} **{guild_name}**.", parse_mode='Markdown')
+        await msg.reply_text(f"✅ Ты вступил в Гильдию {emoji} **{guild_name}**.", parse_mode='Markdown')
     except IndexError:
-        await update.message.reply_text("❌ Укажи название Гильдии: `/guild join BLACK` или `/guild join WHITE`.")
+        await msg.reply_text("❌ Укажи название Гильдии: `/guild join BLACK` или `/guild join WHITE`.")
 
 async def guild_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+    if update.callback_query:
+        user = update.callback_query.from_user
+        msg = update.callback_query.message
+        await update.callback_query.answer()
+    else:
+        user = update.effective_user
+        msg = update.message
+
+    user_id = user.id
     current_guild = get_guild(user_id)
     counts = count_guilds()
 
     text = "🕋 **ГИЛЬДИИ ANTYSOCIALSHOP**\n\n"
     text += f"🕯️ **Чёрная**: {counts['BLACK']} чел.\n"
     text += f"⚜️ **Белая**: {counts['WHITE']} чел.\n\n"
-
     text += "🕯️ **Чёрная**: Ритуал — раз в 24 часа гарантированные +15 ОАС.\n"
     text += "⚜️ **Белая**: 20% шанс сохранить Блант при /smoke.\n\n"
 
@@ -392,7 +528,23 @@ async def guild_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         text += "Ты пока не в Гильдии. Вступи: `/guild join BLACK` или `/guild join WHITE`"
 
-    await update.message.reply_text(text, parse_mode='Markdown')
+    await msg.reply_text(text, parse_mode='Markdown')
+
+# === АЛЬТЕРНАТИВНЫЕ КОМАНДЫ (РУССКИЕ) ===
+async def balance_ru(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await balance(update, context)
+
+async def craft_ru(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await craft(update, context)
+
+async def smoke_ru(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await smoke(update, context)
+
+async def ritual_ru(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await ritual(update, context)
+
+async def guild_join_ru(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await guild_join(update, context)
 
 # === АДМИН-КОМАНДЫ ===
 async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -422,18 +574,27 @@ def main():
 
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("menu", menu))
     app.add_handler(CommandHandler("farm", farm))
-    app.add_handler(CommandHandler("status", status))
-    app.add_handler(CommandHandler("top", top))
-    app.add_handler(CommandHandler("rules", rules))
     app.add_handler(CommandHandler("balance", balance))
     app.add_handler(CommandHandler("craft", craft))
     app.add_handler(CommandHandler("smoke", smoke))
     app.add_handler(CommandHandler("ritual", ritual))
+    app.add_handler(CommandHandler("status", status))
+    app.add_handler(CommandHandler("top", top))
+    app.add_handler(CommandHandler("rules", rules))
     app.add_handler(CommandHandler("guild", guild_join))
-    app.add_handler(CommandHandler("guild", guild_info))
     app.add_handler(CommandHandler("add", add))
-    print("Бот и веб-сервер запущены...")
+    # Альтернативные команды
+    app.add_handler(CommandHandler("баланс", balance_ru))
+    app.add_handler(CommandHandler("крафт", craft_ru))
+    app.add_handler(CommandHandler("дунуть", smoke_ru))
+    app.add_handler(CommandHandler("ритуал", ritual_ru))
+    app.add_handler(CommandHandler("вступить", guild_join_ru))
+    # Обработчик кнопок
+    app.add_handler(CallbackQueryHandler(button_handler))
+
+    print("Бот с кнопками запущен...")
     app.run_polling()
 
 if __name__ == '__main__':
