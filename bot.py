@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from threading import Thread
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 
 # === ВЕБ-СЕРВЕР ДЛЯ RENDER (ЧТОБЫ НЕ ЗАСЫПАЛ) ===
 web_app = Flask(__name__)
@@ -141,7 +141,7 @@ def get_main_menu_keyboard():
     ]
     return InlineKeyboardMarkup(keyboard)
 
-# === ОБРАБОТЧИК НАЖАТИЙ НА КНОПКИ (ИСПРАВЛЕНО) ===
+# === ОБРАБОТЧИК НАЖАТИЙ НА КНОПКИ ===
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -543,6 +543,13 @@ async def ritual_ru(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await ritual(update, context)
 
 async def guild_join_ru(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Для MessageHandler с regex
+    text = update.message.text
+    parts = text.split()
+    if len(parts) > 1:
+        context.args = parts[1:]
+    else:
+        context.args = []
     await guild_join(update, context)
 
 # === АДМИН-КОМАНДЫ ===
@@ -572,6 +579,7 @@ def main():
     web_thread.start()
 
     app = Application.builder().token(TOKEN).build()
+    # Английские команды
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("menu", menu))
     app.add_handler(CommandHandler("farm", farm))
@@ -584,16 +592,18 @@ def main():
     app.add_handler(CommandHandler("rules", rules))
     app.add_handler(CommandHandler("guild", guild_join))
     app.add_handler(CommandHandler("add", add))
-    # Альтернативные команды
-    app.add_handler(CommandHandler("баланс", balance_ru))
-    app.add_handler(CommandHandler("крафт", craft_ru))
-    app.add_handler(CommandHandler("дунуть", smoke_ru))
-    app.add_handler(CommandHandler("ритуал", ritual_ru))
-    app.add_handler(CommandHandler("вступить", guild_join_ru))
+
+    # Русские команды через MessageHandler (кириллица разрешена)
+    app.add_handler(MessageHandler(filters.Regex(r'^/баланс$'), balance_ru))
+    app.add_handler(MessageHandler(filters.Regex(r'^/крафт$'), craft_ru))
+    app.add_handler(MessageHandler(filters.Regex(r'^/дунуть$'), smoke_ru))
+    app.add_handler(MessageHandler(filters.Regex(r'^/ритуал$'), ritual_ru))
+    app.add_handler(MessageHandler(filters.Regex(r'^/вступить(?:\s+(.+))?$'), guild_join_ru))
+
     # Обработчик кнопок
     app.add_handler(CallbackQueryHandler(button_handler))
 
-    print("Бот с кнопками запущен...")
+    print("Бот с кнопками и русскими командами запущен...")
     app.run_polling()
 
 if __name__ == '__main__':
