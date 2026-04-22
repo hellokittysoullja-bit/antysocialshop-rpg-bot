@@ -1020,8 +1020,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             update_balance(user_id, username, 0)
             update_blunts(user_id, username, 0)
             update_balance(userbalance(user_id,_id, username, username, 100 100)
-           )
-            bonus_msg bonus_msg = " = "🎁 Смотри🎁 Смотритель датель дарует терует тебе бе 100100 🍬.\n 🍬\n"
+           )  
+            bonus_msg = "🎁 Смотритель дарует тебе 100 🍬.\n\n"
 .\n\n"
         else        else:
            :
