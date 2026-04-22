@@ -1019,381 +1019,193 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not player:
             update_balance(user_id, username, 0)
             update_blunts(user_id, username, 0)
-            update_balance(userbalance(user_id,_id, username, username, 100 100)
-           )  
+            update_balance(user_id, username, 100)
             bonus_msg = "🎁 Смотритель дарует тебе 100 🍬.\n\n"
-.\n\n"
-        else        else:
-           :
-            bonus_msg bonus_msg = " = ""
+        else:
+            bonus_msg = ""
 
-       "
-
-        welcome_text welcome_text = (
- = (
-            "🎉            "🎉 *Добро *Добро пожал пожаловать вовать в Гиль Гильдиюдию antys antysocialshopocialshop!*\!*\n\nn\n"
-           "
-            " "▸ _▸ _СмотриСмотритель притель приветствуетветствует тебя тебя._\._\n"
-n"
-            "            "▸▸ _З _Здесь ддесь добываютсяобываются редкие редкие экзем экземпляпляры,ры, зарабаты зарабатывают Овают Очки Ачки Антисонтисошлшл ( (🍬),🍬), куря курят бт блантыланты и в и вступаютступают в ги в гильдиильдии._\._\n\n"
-           n\n"
-            " "🕯🕯️ *️ *ЧЁЧЁРНАРНАЯ ГЯ ГИЛЬИЛЬДИДИЯ* — стаЯ* — стабильбильность,ность, риту ритуалы,алы, власть власть.\n.\n"
-           "
-            "⚜️ "⚜️ *Б *БЕЛАЕЛАЯ ГЯ ГИЛЬИЛЬДИДИЯ*Я* — а — азарзарт,т, удача удача, та, танецнец на ле на лезвизвии.\и.\n\nn\n"
-           "
-            " "▸ _▸ _ВыбеВыбери свойри свой путь:_ путь:_"
-       "
+        welcome_text = (
+            "🎉 *Добро пожаловать в Гильдию antysocialshop!*\n\n"
+            "▸ _Смотритель приветствует тебя._\n"
+            "▸ _Здесь добываются редкие экземпляры, зарабатывают Очки Антисошл (🍬), курят бланты и вступают в гильдии._\n\n"
+            "🕯️ *ЧЁРНАЯ ГИЛЬДИЯ* — стабильность, ритуалы, власть.\n"
+            "⚜️ *БЕЛАЯ ГИЛЬДИЯ* — азарт, удача, танец на лезвии.\n\n"
+            "▸ _Выбери свой путь:_"
         )
-        )
- full       _text full_text = bonus_msg + welcome_text = bonus_msg + welcome_text
-       
-        await update await update.message.re.message.reply_textply_text(
-            full_text(
+        full_text = bonus_msg + welcome_text
+        await update.message.reply_text(
             full_text,
-            reply_m,
-            reply_markuparkup=get_main=get_main_menu_key_menu_keyboard(userboard(user_id),
-_id),
-            parse            parse_mode='_mode='MarkdownMarkdown'
-       '
-        )
+            reply_markup=get_main_menu_keyboard(user_id),
+            parse_mode='Markdown'
         )
         return
 
- return
-
-    if not player    if not player:
-       :
-        update_ update_balance(userbalance(user_id,_id, username, username, 0 0)
-       )
-        update_bl update_blunts(userunts(user_id,_id, username, username, 0 0)
-       )
-        activation_text activation_text = (
-            " = (
-            "👁👁‍‍🗨 *🗨 *СмотриСмотритель заметтель заметил теил тебя.*бя.*\n\n"
-           "
-            " "🎁🎁 На Нажмижми,, чтобы чтобы получить  получить 100100 🍬 🍬 и вой и войти вти в 🔒 🔒 закрытый закрытый сектор сектор."
-       ."
+    if not player:
+        update_balance(user_id, username, 0)
+        update_blunts(user_id, username, 0)
+        activation_text = (
+            "👁‍🗨 *Смотритель заметил тебя.*\n"
+            "🎁 Нажми, чтобы получить 100 🍬 и войти в 🔒 закрытый сектор."
         )
-        )
-        keyboard = keyboard = InlineKeyboardMark InlineKeyboardMarkup([
-up([
-                       [InlineKeyboardButton(" [InlineKeyboardButton("▶️▶️ АКТ АКТИВИВИРИРОВАТОВАТЬ ТЬ ТЕРМИЕРМИНАЛНАЛ", callback", callback_data='_data='activate_menuactivate_menu')]
-')]
-        ]        ])
-       )
-        await update await update.message.re.message.reply_textply_text(
-           (
-            activation_text activation_text,
-           ,
-            reply_m reply_markuparkup=key=keyboard,
-board,
-            parse            parse_mode='_mode='MarkdownMarkdown'
-       '
-        )
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("▶️ АКТИВИРОВАТЬ ТЕРМИНАЛ", callback_data='activate_menu')]
+        ])
+        await update.message.reply_text(
+            activation_text,
+            reply_markup=keyboard,
+            parse_mode='Markdown'
         )
         return
 
- return
-
-    guild    guild = player = player[2]
-   [2]
-    welcome_back welcome_back = " = "⚔⚔️ *️ *С возвраС возвращениемщением в Ги в Гильдильдию!ю!*\n*\n\n"
-    if guild ==\n"
-    if guild == 'BL 'BLACK':
-ACK':
-        welcome        welcome_back +=_back += " "🕯🕯️ Ты состо️ Ты состоишьишь в Ч в Чёрнойёрной Гиль Гильдии.\дии.\nn"
-"
-    elif    elif guild == guild == 'WH 'WHITE':
-ITE':
-        welcome        welcome_back +=_back += " "⚜️⚜️ Ты Ты состои состоишь вшь в Белой Белой Гиль Гильдии.\n"
-дии.\n"
-    else    else:
-       :
-        welcome_back welcome_back += " += "ТыТы пока не пока не в Ги в Гильдиильдии. В. Вступи,ступи, чтобы получить чтобы получить бон бонусыусы.\.\n"
-    welcome_backn"
-    welcome_back += "\ += "\nn🎮 *🎮 *ТвойТвой терминал терминал:*"
-:*"
-    await    await update.message update.message.reply.reply_text(
-        welcome_text(
-        welcome_back,
-_back,
-        reply        reply_mark_markup=getup=get_main_menu_main_menu_key_keyboardboard(user_id(user_id),
-       ),
-        parse_mode parse_mode='Mark='Markdown'
-down'
-    )
-
-    )
-
-async defasync def menu( menu(update:update: Update, Update, context: ContextTypes context: ContextTypes.DEFAULT.DEFAULT_TYPE):
-_TYPE):
-    if    if update.callback_query update.callback_query:
-        msg:
-        msg = update.callback_query.message
- = update.callback_query.message
-        await        await update.call update.callback_queryback_query.answer.answer()
-   ()
+    guild = player[2]
+    welcome_back = "⚔️ *С возвращением в Гильдию!*\n\n"
+    if guild == 'BLACK':
+        welcome_back += "🕯️ Ты состоишь в Чёрной Гильдии.\n"
+    elif guild == 'WHITE':
+        welcome_back += "⚜️ Ты состоишь в Белой Гильдии.\n"
     else:
- else:
-        msg        msg = update.message
- = update.message
-    await    await msg.re msg.reply_textply_text("("🎮 *🎮 *ГлавГлавное менное меню*ю*", reply", reply_mark_markupup=get=get_main_menu_main_menu_keyboard_keyboard(), parse(), parse_mode='_mode='Markdown')
+        welcome_back += "Ты пока не в Гильдии. Вступи, чтобы получить бонусы.\n"
+    welcome_back += "\n🎮 *Твой терминал:*"
+    await update.message.reply_text(
+        welcome_back,
+        reply_markup=get_main_menu_keyboard(user_id),
+        parse_mode='Markdown'
+    )
 
-asyncMarkdown')
+async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.callback_query:
+        msg = update.callback_query.message
+        await update.callback_query.answer()
+    else:
+        msg = update.message
+    await msg.reply_text("🎮 *Главное меню*", reply_markup=get_main_menu_keyboard(), parse_mode='Markdown')
 
-async def add def add(update: Update(update: Update, context, context: Context: ContextTypesTypes.D.DEFAULT_TYPEEFAULT_TYPE):
-   ):
-    user_id user_id = update = update.eff.effective_user.id
-ective_user    if.id
-    if user_id user_id != ADMIN != ADMIN_ID:
-_ID:
-        await update.message        await.reply update.message_text(".reply_text("⛔ Не⛔ Недостадостаточно правточно прав.", reply.", reply_mark_markup=get_back_toup=get_back_to_menu_key_menu_keyboard())
-board())
+async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("⛔ Недостаточно прав.", reply_markup=get_back_to_menu_keyboard())
         return
-        return   
     try:
- try:
-        if        if update.message.reply_to_message:
-            target_user update.message.reply_to_message:
-            target_user = update = update.message.reply_to.message.re_message.fromply_to_message.from_user
-_user
-            target            target_id =_id = target_user target_user.id
-.id
-            target            target_name =_name = target_user target_user.username or.username or target_user target_user.first_name.first_name
-           
-            amount = amount = int(context int(context.args.args[0])
-[0])
-            update            update_balance_balance(target_id(target_id, target, target_name, amount)
-_name, amount)
-            await            await update.message update.message.reply.reply_text(f_text(f"✅"✅ Игроку {target Игроку_name} {target_name} начис начислено {лено {amount}amount} ОА ОАС.", reply_mС.", reply_markup=get_backarkup=get_back_to_menu_to_menu_keyboard_keyboard())
+        if update.message.reply_to_message:
+            target_user = update.message.reply_to_message.from_user
+            target_id = target_user.id
+            target_name = target_user.username or target_user.first_name
+            amount = int(context.args[0])
+            update_balance(target_id, target_name, amount)
+            await update.message.reply_text(f"✅ Игроку {target_name} начислено {amount} ОАС.", reply_markup=get_back_to_menu_keyboard())
         else:
-())
-        else:
-            await            await update.message update.message.reply.reply_text("_text("ОтветьтеОтветьте на сооб на сообщение пользоващение пользователя ителя и напишите напишите `/add `/add <сумма <сумма>`",>`", reply_m reply_markuparkup=get_back=get_back_to_menu_keyboard())
-    except (IndexError,_to_menu_keyboard())
-    except (IndexError, ValueError ValueError):
-       ):
-        await update.message.re await update.message.reply_textply_text("И("Использоваспользование:ние: ответьте ответьте на сооб на сообщение игрока ищение иг напишитерока и напишите `/add `/add <су <суммамма>`",>`", reply_m reply_markuparkup=get_back=get_back_to_menu_to_menu_keyboard_keyboard())
+            await update.message.reply_text("Ответьте на сообщение пользователя и напишите `/add <сумма>`", reply_markup=get_back_to_menu_keyboard())
+    except (IndexError, ValueError):
+        await update.message.reply_text("Использование: ответьте на сообщение игрока и напишите `/add <сумма>`", reply_markup=get_back_to_menu_keyboard())
 
-async())
+# Русские команды
+async def balance_ru(update: Update, context: ContextTypes.DEFAULT_TYPE): await balance(update, context)
+async def craft_ru(update: Update, context: ContextTypes.DEFAULT_TYPE): await craft(update, context)
+async def smoke_ru(update: Update, context: ContextTypes.DEFAULT_TYPE): await smoke(update, context)
+async def ritual_ru(update: Update, context: ContextTypes.DEFAULT_TYPE): await ritual(update, context)
+async def privilege_ru(update: Update, context: ContextTypes.DEFAULT_TYPE): await privilege(update, context)
+async def claim_ru(update: Update, context: ContextTypes.DEFAULT_TYPE): await claim(update, context)
+async def daily_ru(update: Update, context: ContextTypes.DEFAULT_TYPE): await daily(update, context)
+async def catalog_ru(update: Update, context: ContextTypes.DEFAULT_TYPE): await catalog(update, context)
+async def rush_ru(update: Update, context: ContextTypes.DEFAULT_TYPE): await rush(update, context)
 
-async def balance def balance_ru_ru(update(update: Update: Update, context, context: Context: ContextTypes.DTypes.DEFAULT_TYPEEFAULT_TYPE): await): await balance( balance(update,update, context)
- context)
-async defasync def craft_ craft_ru(ru(update: Update,update: Update, context: context: ContextTypes ContextTypes.DEFAULT_TYPE):.DEFAULT_TYPE): await craft await craft(update(update,, context context)
-async)
-async def def smoke_ru(update smoke_ru(update: Update: Update, context, context: Context: ContextTypes.DTypes.DEFAULT_TYPEEFAULT_TYPE): await): await smoke( smoke(update,update, context)
- context)
-async defasync def ritual_ru ritual_ru((update:update: Update, Update, context: context: ContextTypes ContextTypes.DEFAULT.DEFAULT_TYPE):_TYPE): await ritual await ritual(update(update, context, context)
-async)
-async def privilege def privilege_ru_ru(update(update: Update: Update, context, context: Context: ContextTypes.DTypes.DEFAULT_TYPEEFAULT_TYPE): await): await privilege( privilege(update,update, context)
- context)
-async defasync def claim_ claim_ru(ru(update:update: Update, Update, context: context: ContextTypes.DEFAULT ContextTypes.DEFAULT_TYPE):_TYPE): await claim await claim(update(update, context, context)
-async)
-async def daily def daily_ru_ru(update(update: Update: Update, context, context: Context: ContextTypes.DTypes.DEFAULT_TYPE): awaitEFAULT_TYPE): await daily( daily(update,update, context)
- context)
-asyncasync def def catalog_ catalog_ru(ru(update:update: Update, Update, context: context: ContextTypes ContextTypes.D.DEFAULT_TYPE):EFAULT_TYPE): await catalog await catalog(update(update, context, context)
-async)
-async def rush def rush_ru_ru(update(update: Update: Update, context, context: Context: ContextTypes.DTypes.DEFAULT_TYPEEFAULT_TYPE): await): await rush(update, rush(update, context)
+async def guild_join_ru(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    parts = text.split()
+    if len(parts) > 1:
+        context.args = parts[1:]
+    else:
+        context.args = []
+    await guild_join(update, context)
 
- context)
-
-async defasync def guild_ guild_join_ru(join_ru(update:update: Update, context: ContextTypes Update, context: ContextTypes.DEFAULT.DEFAULT_TYPE):
-_TYPE):
-    text    text = update = update.message.text.message.text
-   
-    parts = parts = text.split text.split()
-   ()
-    if len if len(parts(parts) >) > 1 1:
-       :
-        context.args context.args = parts = parts[1[1:]
-   :]
-    else else:
-:
-        context        context.args =.args = []
-    []
-    await guild await guild_join_join(update(update, context, context)
-
-async)
-
-async def handle def handle_chat_chat_short_shortcut(update:cut(update: Update, Update, context: context: ContextTypes ContextTypes.DEFAULT.DEFAULT_TYPE):
-_TYPE):
-    text    text = update = update.message.text.message.text.strip()..strip().lower()
-    mappinglower()
+async def handle_chat_shortcut(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip().lower()
     mapping = {
- = {
-        '        'фарфарм':м': farm, farm, 'farm 'farm': farm,
-       ': farm 'ду,
-       нуть': 'дунуть': smoke, smoke, 'sm 'smoke':oke': smoke,
- smoke,
-        '        'крафкрафт':т': craft, craft, 'craft 'craft': craft': craft,
-       ,
-        'баланс': balance, ' 'баланс': balance, 'balance':balance': balance,
- balance,
-        '        'колеколесосо': daily': daily, ', 'daily':daily': daily,
- daily,
-        'ускор        'ускорение': rush,ение': rush, 'rush 'rush': rush': rush
-   
+        'фарм': farm, 'farm': farm,
+        'дунуть': smoke, 'smoke': smoke,
+        'крафт': craft, 'craft': craft,
+        'баланс': balance, 'balance': balance,
+        'колесо': daily, 'daily': daily,
+        'ускорение': rush, 'rush': rush
     }
-    }
-    if text if text in mapping in mapping:
-       :
-        await mapping await mapping[text[text](update](update, context, context)
-
-def)
+    if text in mapping:
+        await mapping[text](update, context)
 
 def main():
- main():
-    print("===    print("=== [DEBUG [DEBUG] main] main() started() started ===" ===")
-   )
+    print("=== [DEBUG] main() started ===")
     try:
-        init try:
         init_db()
-_db()
-        print        print("===("=== [DEBUG [DEBUG] init] init_db()_db() completed == completed ===")
-=")
-    except    except Exception as Exception as e:
- e:
-        print        print(f"(f"====== [DEBUG] [DEBUG] init_db init_db()() FAIL FAILED:ED: {e {e} ==} ===")
-=")
-        raise        raise
-
-   
-
-    print(" print("====== [DEBUG] [DEBUG] Starting web Starting web server thread server thread... ==... ===")
-=")
-    web_thread =    web_thread = Thread(target=run Thread(target=run_web_web_server)
-_server)
-    web_thread    web_thread.d.daemonaemon = True = True
-   
-    web web_thread_thread.start()
-.start()
-    print    print("===("=== [DEBUG [DEBUG] Web server thread] Web server thread started == started ===")
-
-    print=")
-
-    print("=== [DEBUG] Building Application...("=== [DEBUG] Building Application... ===" ===")
-   )
-    app = app = Application.b Application.builder().token(TOKEN).build()
-   uilder().token(TOKEN).build()
-    print(" print("====== [DEBUG] [DEBUG] Application built Application built, registering, registering handlers... handlers... ===" ===")
-
-   )
-
-    app app.add.add_handler(_handler(CommandHandlerCommandHandler("start("start", start", start))
-   ))
-    app.add app.add_handler(CommandHandler_handler(CommandHandler("menu("menu", menu", menu))
-   ))
-    app.add app.add_handler(_handler(CommandHandlerCommandHandler("farm("farm", farm", farm))
-   ))
-    app.add app.add_handler(_handler(CommandHandler("balanceCommandHandler", balance("balance))
-   ", balance app.add))
-   _handler( app.add_handler(CommandHandlerCommandHandler("craft("craft", craft", craft))
-   ))
-    app.add app.add_handler(_handler(CommandHandlerCommandHandler("sm("smoke",oke", smoke))
- smoke))
-    app    app.add_handler.add_handler(Command(CommandHandler("Handler("ritualritual", ritual", ritual))
-   ))
-    app.add app.add_handler(CommandHandler_handler(CommandHandler("status("status", status", status))
-))
-       app.add app.add_handler(_handler(CommandHandlerCommandHandler("top("top", top", top))
-   ))
-    app.add app.add_handler(_handler(CommandHandlerCommandHandler("rules("rules", rules))
-   ", rules))
-    app.add app.add_handler(_handler(CommandHandlerCommandHandler("g("guild",uild", guild_ guild_join))
-join))
-    app    app.add_handler.add_handler(Command(CommandHandler("Handler("privilegeprivilege", privilege", privilege))
-   ))
-    app.add app.add_handler(_handler(CommandHandlerCommandHandler("claim("claim", claim", claim))
-   ))
-    app.add_handler( app.add_handler(CommandHandlerCommandHandler("daily("daily", daily", daily))
-   ))
-    app.add app.add_handler(_handler(CommandHandlerCommandHandler("proof("proof", proof", proof))
-   ))
-    app.add app.add_handler(_handler(CommandHandlerCommandHandler("pin("pin", pin", pin_message))
-_message))
-    app    app.add_handler(Command.add_handler(CommandHandler("Handler("catalogcatalog", catalog))
-    app.add", catalog))
-    app.add_handler(_handler(CommandHandlerCommandHandler("add("add", add", add))
-   ))
-    app.add app.add_handler(_handler(CommandHandlerCommandHandler("rush", rush("rush))
-   ", rush))
-    app.add app.add_handler(_handler(CommandHandlerCommandHandler("collect("collect", collect", collect))
-   ))
-    app.add app.add_handler(_handler(CommandHandlerCommandHandler("p("pulse", refresh_pulse", refresh_pulse))
-
-ulse))
-
-    app    app.add_handler.add_handler(Message(MessageHandler(fHandler(filters.Reilters.Regex(rgex(r'^'^/ба/балансланс$'),$'), balance_ balance_ru))
-ru))
-    app.add_handler    app.add_handler(Message(MessageHandler(fHandler(filters.Reilters.Regex(rgex(r'^'^/кра/крафтфт$'),$'), craft_ craft_ru))
-ru))
-    app    app.add_handler.add_handler(Message(MessageHandler(fHandler(filters.Reilters.Regex(rgex(r'^'^/ду/дунуть$нуть$'), smoke'), smoke_ru_ru))
-    app.add_handler())
-    app.add_handler(MessageHandlerMessageHandler(filters(filters.Regex.Regex(r(r''^/^/ритуритуал$ал$'), ritual'), ritual_ru_ru))
-    app.add))
-    app.add_handler(_handler(MessageHandlerMessageHandler(filters(filters.Regex.Regex(r'(r'^/^/привипривилегиялегия$'),$'), privilege_ privilege_ru))
-ru))
-    app    app.add_handler.add_handler(Message(MessageHandler(fHandler(filters.Reilters.Regex(rgex(r'^'^/за/забратьбрать(?:\s+((?:\s+(.+)).+))?$?$'), claim'), claim_ru))
-    app.add_handler(MessageHandler(filters.Regex(r'_ru))
-    app.add_handler(MessageHandler(filters.Regex(r'^/^/дейлидейли$'), daily_$'), daily_ruru))
-))
-    app    app.add_handler.add_handler(Message(MessageHandler(fHandler(filters.Reilters.Regex(rgex(r'^'^/ка/каталогталог$'),$'), catalog_ catalog_ru))
-ru))
-    app.add_handler    app.add_handler(Message(MessageHandler(fHandler(filters.Reilters.Regex(rgex(r'^/в'^/вступитьступить(?:\(?:\s+(s+(.+)).+))?$?$'), guild'), guild_join_join_ru_ru))
-   ))
-    app.add app.add_handler(_handler(MessageHandlerMessageHandler(filters(filters.Regex.Regex(r'(r'^/^/ускорускорение$ение$'), rush'), rush_ru_ru))
-
-    app.add))
-
-    app.add_handler(_handler(MessageHandlerMessageHandler(filters(filters.TEXT.TEXT & ~ & ~filtersfilters.COMM.COMMAND &AND & filters.Re filters.Regex(rgex(r'^('^(фарфарм|farm|м|дунутьfarm||smдунуть|smoke|oke|крафкрафт|т|craft|craft|баланбаланс|с|balance|balance|колесоколесо|daily|daily|у|ускорениескорение|rush)$'),|rush)$'), handle_ch handle_chat_at_shortcutshortcut))
-
-   ))
-
-    app.add app.add_handler(_handler(MessageHandlerMessageHandler(filters(filters.StatusUpdate.NEW.StatusUpdate_CHAT.NEW_MEM_CHAT_MEMBERS,BERS, welcome_new welcome_new_member_member))
-   ))
-    app.add app.add_handler_handler(C(CallbackQueryHandler(allbackQueryHandler(button_handlerbutton_handler))
-
-   ))
-
-    job_queue job_queue = app = app.job.job_queue
-_queue
-    job    job_queue.run_queue.run_repeating_repeating(ward(warden_en_whiswhisper, interval=per, interval=1440014400, first, first=10=10)
-   )
-    job_queue job_queue.run_re.run_repeating(peating(update_pupdate_pulse, interval=3600ulse, interval=3600,, first first=10=10)
-
-   )
-
-    print(" print("====== [DEBUG] [DEBUG] Handlers Handlers registered. registered. Starting polling Starting polling... ==... ===")
-=")
-    try    try:
-       :
-        app.run app.run_poll_polling()
-ing()
-    except    except Exception as Exception as e:
- e:
-        print        print(f"===(f"=== [DEBUG] [DEBUG] run_p run_pollingolling() CR() CRASHED: {ASHED: {e}e} ===" ===")
-       )
-        import trace import traceback
-back
-        trace        traceback.printback.print_exc_exc()
-       ()
+        print("=== [DEBUG] init_db() completed ===")
+    except Exception as e:
+        print(f"=== [DEBUG] init_db() FAILED: {e} ===")
         raise
 
- raise
+    print("=== [DEBUG] Starting web server thread... ===")
+    web_thread = Thread(target=run_web_server)
+    web_thread.daemon = True
+    web_thread.start()
+    print("=== [DEBUG] Web server thread started ===")
 
-if __if __name__name__ == '__ == '__main__':
-main__':
-    print("===    print("=== [DEBUG [DEBUG] Script] Script started ===")
- started ===")
-    try    try:
-       :
+    print("=== [DEBUG] Building Application... ===")
+    app = Application.builder().token(TOKEN).build()
+    print("=== [DEBUG] Application built, registering handlers... ===")
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("menu", menu))
+    app.add_handler(CommandHandler("farm", farm))
+    app.add_handler(CommandHandler("balance", balance))
+    app.add_handler(CommandHandler("craft", craft))
+    app.add_handler(CommandHandler("smoke", smoke))
+    app.add_handler(CommandHandler("ritual", ritual))
+    app.add_handler(CommandHandler("status", status))
+    app.add_handler(CommandHandler("top", top))
+    app.add_handler(CommandHandler("rules", rules))
+    app.add_handler(CommandHandler("guild", guild_join))
+    app.add_handler(CommandHandler("privilege", privilege))
+    app.add_handler(CommandHandler("claim", claim))
+    app.add_handler(CommandHandler("daily", daily))
+    app.add_handler(CommandHandler("proof", proof))
+    app.add_handler(CommandHandler("pin", pin_message))
+    app.add_handler(CommandHandler("catalog", catalog))
+    app.add_handler(CommandHandler("add", add))
+    app.add_handler(CommandHandler("rush", rush))
+    app.add_handler(CommandHandler("collect", collect))
+    app.add_handler(CommandHandler("pulse", refresh_pulse))
+
+    app.add_handler(MessageHandler(filters.Regex(r'^/баланс$'), balance_ru))
+    app.add_handler(MessageHandler(filters.Regex(r'^/крафт$'), craft_ru))
+    app.add_handler(MessageHandler(filters.Regex(r'^/дунуть$'), smoke_ru))
+    app.add_handler(MessageHandler(filters.Regex(r'^/ритуал$'), ritual_ru))
+    app.add_handler(MessageHandler(filters.Regex(r'^/привилегия$'), privilege_ru))
+    app.add_handler(MessageHandler(filters.Regex(r'^/забрать(?:\s+(.+))?$'), claim_ru))
+    app.add_handler(MessageHandler(filters.Regex(r'^/дейли$'), daily_ru))
+    app.add_handler(MessageHandler(filters.Regex(r'^/каталог$'), catalog_ru))
+    app.add_handler(MessageHandler(filters.Regex(r'^/вступить(?:\s+(.+))?$'), guild_join_ru))
+    app.add_handler(MessageHandler(filters.Regex(r'^/ускорение$'), rush_ru))
+
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(r'^(фарм|farm|дунуть|smoke|крафт|craft|баланс|balance|колесо|daily|ускорение|rush)$'), handle_chat_shortcut))
+
+    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_member))
+    app.add_handler(CallbackQueryHandler(button_handler))
+
+    job_queue = app.job_queue
+    job_queue.run_repeating(warden_whisper, interval=14400, first=10)
+    job_queue.run_repeating(update_pulse, interval=3600, first=10)
+
+    print("=== [DEBUG] Handlers registered. Starting polling... ===")
+    try:
+        app.run_polling()
+    except Exception as e:
+        print(f"=== [DEBUG] run_polling() CRASHED: {e} ===")
+        import traceback
+        traceback.print_exc()
+        raise
+
+if __name__ == '__main__':
+    print("=== [DEBUG] Script started ===")
+    try:
         main()
- main()
-    except    except Exception Exception as as e:
- e:
-        print(f"        print(f"====== [DEBUG] [DEBUG] FATAL FATAL ERROR in ERROR in main: main: { {e} ==e=")
-} ==        import=")
-        import traceback traceback
-        traceback
-        traceback.print_ex.print_exc()
-c()
+    except Exception as e:
+        print(f"=== [DEBUG] FATAL ERROR in main: {e} ===")
+        import traceback
+        traceback.print_exc()
