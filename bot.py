@@ -1,4 +1,4 @@
-# bot.py — ANTY SOCIAL SHOP RPG v2.0 (Полный финал, без ошибок, фикс event loop)
+# bot.py — ANTY SOCIAL SHOP RPG v2.0 (финальный фикс event loop)
 import asyncio, logging, os, random, time
 from datetime import datetime, timedelta, date
 from threading import Thread
@@ -731,9 +731,12 @@ async def reset_happy_hour(context):
     await context.bot.send_message(chat_id="@guild_antysocial", text="⏳ Час Удачи завершён.")
 
 # === ЗАПУСК ===
-async def main():
-    await init_db()
+if __name__ == "__main__":
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(init_db())
     Thread(target=run_web_server, daemon=True).start()
+
     app = Application.builder().token(TOKEN).build()
 
     for cmd, cbk in [("start", start), ("farm", farm_callback), ("balance", balance_callback),
@@ -763,12 +766,5 @@ async def main():
     job.run_repeating(weekly_guild_rating, interval=7*24*3600, first=first_seconds)
 
     print("BOT READY")
-    await app.run_polling()
-
-if __name__ == "__main__":
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        loop.run_until_complete(main())
-    finally:
-        loop.close()
+    app.run_polling()
+    loop.close()
