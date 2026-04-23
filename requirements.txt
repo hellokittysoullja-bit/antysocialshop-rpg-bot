@@ -1,3 +1,4 @@
-python-telegram-bot[job-queue]==20.8
-Flask==2.3.3
-anyio==4.4.0
+python-telegram-bot[job-queue]>=20.0
+flask
+aiosqlite
+cachetools
