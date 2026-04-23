@@ -259,7 +259,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         "▸ _Выбери свой путь:_")
         full_text = bonus_msg + welcome_text
         await update.message.reply_text(full_text, reply_markup=get_main_menu_keyboard(user_id), parse_mode='Markdown')
-        await update_pulse(context)
         return
 
     if not player:
@@ -282,49 +281,58 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    try: await query.answer()
+    except: pass
     data = query.data
     user_id = query.from_user.id
-    if data == 'menu': await menu(update, context)
-    elif data == 'farm': await farm(update, context)
-    elif data == 'balance': await balance(update, context)
-    elif data == 'craft': await craft(update, context)
-    elif data == 'smoke': await smoke(update, context)
-    elif data == 'ritual': await ritual(update, context)
-    elif data == 'collect': await collect(update, context)
-    elif data == 'status': await status(update, context)
-    elif data == 'top': await top(update, context)
-    elif data == 'guild_info': await guild_info(update, context)
-    elif data == 'rules': await rules(update, context)
-    elif data == 'privilege': await privilege(update, context)
-    elif data == 'catalog': await catalog(update, context)
-    elif data == 'daily': await daily(update, context)
-    elif data == 'activate_menu':
-        player = get_player(user_id)
-        if not player:
+
+    try:
+        if data == 'menu': await menu(update, context)
+        elif data == 'farm': await farm(update, context)
+        elif data == 'balance': await balance(update, context)
+        elif data == 'craft': await craft(update, context)
+        elif data == 'smoke': await smoke(update, context)
+        elif data == 'ritual': await ritual(update, context)
+        elif data == 'collect': await collect(update, context)
+        elif data == 'status': await status(update, context)
+        elif data == 'top': await top(update, context)
+        elif data == 'guild_info': await guild_info(update, context)
+        elif data == 'rules': await rules(update, context)
+        elif data == 'privilege': await privilege(update, context)
+        elif data == 'catalog': await catalog(update, context)
+        elif data == 'daily': await daily(update, context)
+        elif data == 'activate_menu':
+            player = get_player(user_id)
             username = query.from_user.username or query.from_user.first_name
-            update_balance(user_id, username, 0)
-            update_blunts(user_id, username, 0)
-            update_balance(user_id, username, 100)
-            bonus_msg = "🎁 Смотритель дарует тебе 100 🍬.\n\n"
+            if not player:
+                update_balance(user_id, username, 0)
+                update_blunts(user_id, username, 0)
+                update_balance(user_id, username, 100)
+                bonus_msg = "🎁 Смотритель дарует тебе 100 🍬.\n\n"
+            else:
+                bonus_msg = ""
+            welcome_text = ("🎉 *Добро пожаловать в Гильдию antysocialshop!*\n\n"
+                            "▸ _Смотритель приветствует тебя._\n"
+                            "▸ _Здесь добываются редкие экземпляры, зарабатывают Очки Антисошл (🍬), курят бланты и вступают в гильдии._\n\n"
+                            "🕯️ *ЧЁРНАЯ ГИЛЬДИЯ* — стабильность, ритуалы, власть.\n"
+                            "⚜️ *БЕЛАЯ ГИЛЬДИЯ* — азарт, удача, танец на лезвии.\n\n"
+                            "▸ _Выбери свой путь:_")
+            full_text = bonus_msg + welcome_text
+            await query.message.edit_text(full_text, reply_markup=get_main_menu_keyboard(user_id), parse_mode='Markdown')
+        elif data == 'play':
+            await play(update, context)
+        elif data == 'guild_join_BLACK':
+            set_guild(user_id, 'BLACK')
+            await query.message.edit_text("✅ Ты вступил в Гильдию 🕯️ *Чёрная*", parse_mode='Markdown')
+        elif data == 'guild_join_WHITE':
+            set_guild(user_id, 'WHITE')
+            await query.message.edit_text("✅ Ты вступил в Гильдию ⚜️ *Белая*", parse_mode='Markdown')
         else:
-            bonus_msg = ""
-        welcome_text = ("🎉 *Добро пожаловать в Гильдию antysocialshop!*\n\n"
-                        "▸ _Смотритель приветствует тебя._\n"
-                        "▸ _Здесь добываются редкие экземпляры, зарабатывают Очки Антисошл (🍬), курят бланты и вступают в гильдии._\n\n"
-                        "🕯️ *ЧЁРНАЯ ГИЛЬДИЯ* — стабильность, ритуалы, власть.\n"
-                        "⚜️ *БЕЛАЯ ГИЛЬДИЯ* — азарт, удача, танец на лезвии.\n\n"
-                        "▸ _Выбери свой путь:_")
-        full_text = bonus_msg + welcome_text
-        await query.message.edit_text(full_text, reply_markup=get_main_menu_keyboard(user_id), parse_mode='Markdown')
-    elif data == 'play':
-        await play(update, context)
-    elif data == 'guild_join_BLACK':
-        set_guild(user_id, 'BLACK')
-        await query.message.edit_text("✅ Ты вступил в Гильдию 🕯️ *Чёрная*", parse_mode='Markdown')
-    elif data == 'guild_join_WHITE':
-        set_guild(user_id, 'WHITE')
-        await query.message.edit_text("✅ Ты вступил в Гильдию ⚜️ *Белая*", parse_mode='Markdown')
+            await query.message.edit_text("❓ Неизвестная команда.")
+    except Exception as e:
+        error_text = f"⚠️ Ошибка: {str(e)[:100]}"
+        try: await query.message.edit_text(error_text)
+        except: await query.message.reply_text(error_text)
 
 async def play(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -873,19 +881,14 @@ async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Ответьте на сообщение пользователя.")
     except: await update.message.reply_text("/add <сумма> ответом на сообщение.")
 
-async def balance_ru(u,c): await balance(u,c)
-async def craft_ru(u,c): await craft(u,c)
-async def smoke_ru(u,c): await smoke(u,c)
-async def ritual_ru(u,c): await ritual(u,c)
-async def privilege_ru(u,c): await privilege(u,c)
-async def claim_ru(u,c): await claim(u,c)
-async def daily_ru(u,c): await daily(u,c)
-async def catalog_ru(u,c): await catalog(u,c)
-async def rush_ru(u,c): await rush(u,c)
-async def guild_join_ru(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    parts = update.message.text.split()
-    context.args = parts[1:] if len(parts) > 1 else []
-    await guild_join(update, context)
+# Русские команды (через CommandHandler)
+async def farm_ru(update: Update, context: ContextTypes.DEFAULT_TYPE): await farm(update, context)
+async def smoke_ru_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE): await smoke(update, context)
+async def craft_ru_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE): await craft(update, context)
+async def balance_ru_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE): await balance(update, context)
+async def daily_ru_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE): await daily(update, context)
+async def top_ru_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE): await top(update, context)
+async def status_ru_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE): await status(update, context)
 
 def main():
     print("=== [DEBUG] main() started ===")
@@ -898,6 +901,7 @@ def main():
     web_thread = Thread(target=run_web_server); web_thread.daemon = True; web_thread.start()
     app = Application.builder().token(TOKEN).build()
 
+    # Английские команды
     app.add_handler(CommandHandler("start", start)); app.add_handler(CommandHandler("menu", menu))
     app.add_handler(CommandHandler("farm", farm)); app.add_handler(CommandHandler("balance", balance))
     app.add_handler(CommandHandler("craft", craft)); app.add_handler(CommandHandler("smoke", smoke))
@@ -910,16 +914,14 @@ def main():
     app.add_handler(CommandHandler("rush", rush)); app.add_handler(CommandHandler("collect", collect))
     app.add_handler(CommandHandler("pulse", refresh_pulse)); app.add_handler(CommandHandler("play", play))
 
-    app.add_handler(MessageHandler(filters.Regex(r'^/баланс$'), balance_ru))
-    app.add_handler(MessageHandler(filters.Regex(r'^/крафт$'), craft_ru))
-    app.add_handler(MessageHandler(filters.Regex(r'^/дунуть$'), smoke_ru))
-    app.add_handler(MessageHandler(filters.Regex(r'^/ритуал$'), ritual_ru))
-    app.add_handler(MessageHandler(filters.Regex(r'^/привилегия$'), privilege_ru))
-    app.add_handler(MessageHandler(filters.Regex(r'^/забрать(?:\s+(.+))?$'), claim_ru))
-    app.add_handler(MessageHandler(filters.Regex(r'^/дейли$'), daily_ru))
-    app.add_handler(MessageHandler(filters.Regex(r'^/каталог$'), catalog_ru))
-    app.add_handler(MessageHandler(filters.Regex(r'^/ускорение$'), rush_ru))
-    app.add_handler(MessageHandler(filters.Regex(r'^/вступить(?:\s+(.+))?$'), guild_join_ru))
+    # Русские команды (теперь CommandHandler)
+    app.add_handler(CommandHandler("фарм", farm_ru)); app.add_handler(CommandHandler("баланс", balance_ru_cmd))
+    app.add_handler(CommandHandler("крафт", craft_ru_cmd)); app.add_handler(CommandHandler("дунуть", smoke_ru_cmd))
+    app.add_handler(CommandHandler("ритуал", ritual_ru)); app.add_handler(CommandHandler("статус", status_ru_cmd))
+    app.add_handler(CommandHandler("топ", top_ru_cmd)); app.add_handler(CommandHandler("колесо", daily_ru_cmd))
+    app.add_handler(CommandHandler("привилегия", privilege_ru)); app.add_handler(CommandHandler("забрать", claim_ru))
+    app.add_handler(CommandHandler("дейли", daily_ru)); app.add_handler(CommandHandler("каталог", catalog_ru))
+    app.add_handler(CommandHandler("ускорение", rush_ru)); app.add_handler(CommandHandler("вступить", guild_join_ru))
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(r'^(фарм|farm|дунуть|smoke|крафт|craft|баланс|balance|колесо|daily|топ|top|статус|status)$'), handle_chat_shortcut))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_member))
