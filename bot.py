@@ -893,6 +893,7 @@ async def privilege_ru(update: Update, context: ContextTypes.DEFAULT_TYPE): awai
 async def claim_ru(update: Update, context: ContextTypes.DEFAULT_TYPE): await claim(update, context)
 async def catalog_ru(update: Update, context: ContextTypes.DEFAULT_TYPE): await catalog(update, context)
 async def rush_ru(update: Update, context: ContextTypes.DEFAULT_TYPE): await rush(update, context)
+async def ritual_ru(update: Update, context: ContextTypes.DEFAULT_TYPE): await ritual(update, context)
 async def guild_join_ru(update: Update, context: ContextTypes.DEFAULT_TYPE):
     parts = update.message.text.split()
     context.args = parts[1:] if len(parts) > 1 else []
