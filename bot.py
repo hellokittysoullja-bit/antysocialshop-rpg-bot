@@ -1,4 +1,4 @@
-# bot.py — ANTY SOCIAL SHOP RPG v2.0 (Полный финал, без ошибок)
+# bot.py — ANTY SOCIAL SHOP RPG v2.0 (Полный финал, без ошибок, фикс event loop)
 import asyncio, logging, os, random, time
 from datetime import datetime, timedelta, date
 from threading import Thread
@@ -301,9 +301,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text(bonus + welcome, reply_markup=await get_main_menu_keyboard(user_id),
                                             parse_mode="Markdown")
-        return
-
-    if not player:
+    elif not player:
         await update_balance(user_id, username, 0)
         await update_blunts(user_id, username, 0)
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("▶️ АКТИВИРОВАТЬ ТЕРМИНАЛ", callback_data="activate_menu")]])
@@ -313,15 +311,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🎁 Нажми, чтобы получить `300` 🍬 и войти в 🔒 закрытый сектор.",
             reply_markup=kb, parse_mode="Markdown"
         )
-        return
-
-    guild = await get_guild(user_id)
-    back = "⚔️ *С возвращением в Гильдию!*\n\n"
-    if guild == "BLACK": back += "🕯️ Ты состоишь в *Чёрной Гильдии*.\n"
-    elif guild == "WHITE": back += "⚜️ Ты состоишь в *Белой Гильдии*.\n"
-    else: back += "Ты пока не в Гильдии. Вступи, чтобы получить бонусы.\n"
-    back += "\n🎮 *Твой терминал:*"
-    await update.message.reply_text(back, reply_markup=await get_main_menu_keyboard(user_id), parse_mode="Markdown")
+    else:
+        guild = await get_guild(user_id)
+        back = "⚔️ *С возвращением в Гильдию!*\n\n"
+        if guild == "BLACK": back += "🕯️ Ты состоишь в *Чёрной Гильдии*.\n"
+        elif guild == "WHITE": back += "⚜️ Ты состоишь в *Белой Гильдии*.\n"
+        else: back += "Ты пока не в Гильдии. Вступи, чтобы получить бонусы.\n"
+        back += "\n🎮 *Твой терминал:*"
+        await update.message.reply_text(back, reply_markup=await get_main_menu_keyboard(user_id), parse_mode="Markdown")
 
 async def farm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user, msg = get_user_and_msg(update)
@@ -335,16 +332,13 @@ async def farm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
     earned = random.randint(FARM_MIN, FARM_MAX)
-    # Бонус от блантов (до 3)
     blunts_bonus = 0
     if p and p[1] > 0:
         blunts_bonus = int(earned * 0.1 * min(p[1], 3))
         earned += blunts_bonus
-    # Красные Глаза (+5%)
     if p and p[12]:
         smoke_bonus = int(earned * 0.05)
         earned += smoke_bonus
-    # Благословение Ткани после дыма
     if context.user_data.get("last_smoke_time") and \
        datetime.now() - context.user_data["last_smoke_time"] < timedelta(minutes=5):
         earned += random.randint(3, 5)
@@ -362,8 +356,7 @@ async def farm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     new_p = await get_player_cached(uid)
     new_bal = new_p[0]
 
-    # Титулы
-    if new_p[14] == 1:       # farm_count
+    if new_p[14] == 1:
         await grant_title(uid, "🕯️", "Первый Шаг", context)
     if old_bal < 500 <= new_bal:
         await grant_title(uid, "✨", "Искра", context)
@@ -397,7 +390,6 @@ async def craft_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update_balance(uid, uname, -5)
     await update_blunts(uid, uname, 1)
     await increment_counter(uid, "craft_count")
-    # Искра Ткани (5%)
     if random.random() < 0.05:
         await update_blunts(uid, uname, 1)
         await context.bot.send_message(chat_id="@guild_antysocial",
@@ -428,7 +420,6 @@ async def smoke_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         effect = "💨 *Плацебо*\n[Тишина] «Дым рассеялся, ничего не изменилось...»"
 
-    # Красные Глаза
     if p and not p[12]:
         await add_title(uid, "💨")
         async with aiosqlite.connect("players.db") as db:
@@ -752,7 +743,6 @@ async def main():
                      ("collect", collect_callback)]:
         app.add_handler(CommandHandler(cmd, cbk))
 
-    # Русские команды
     for pat, cbk in [("/ритуал", ritual_callback), ("/фарм", farm_callback), ("/баланс", balance_callback),
                      ("/дунуть", smoke_callback), ("/статус", status_callback), ("/топ", top_callback),
                      ("/колесо", daily_callback)]:
@@ -765,7 +755,7 @@ async def main():
     job.run_repeating(update_pulse, interval=300, first=10)
     job.run_once(lambda c: job.run_repeating(happy_hour_trigger, interval=random.randint(14400, 28800),
                  first=random.randint(3600, 10800)), when=1)
-    # Круг Смотрителя каждую субботу в 12:00
+
     now = datetime.now()
     days_until_saturday = (5 - now.weekday()) % 7
     next_saturday = (now + timedelta(days=days_until_saturday)).replace(hour=12, minute=0, second=0, microsecond=0)
@@ -776,4 +766,9 @@ async def main():
     await app.run_polling()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(main())
+    finally:
+        loop.close()
