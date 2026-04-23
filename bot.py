@@ -1,3 +1,4 @@
+# bot.py
 import asyncio
 import logging
 import os
@@ -7,12 +8,11 @@ from datetime import datetime, timedelta, date
 from threading import Thread
 from functools import wraps
 
+import aiosqlite
+from cachetools import TTLCache
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
-
-import aiosqlite
-from cachetools import TTLCache
 
 # === ВЕБ-СЕРВЕР ДЛЯ RENDER ===
 web_app = Flask(__name__)
@@ -42,7 +42,7 @@ HAPPY_HOUR_MULTIPLIER = 2
 HAPPY_HOUR_DURATION_MIN = 30
 
 # === КЭШ ИГРОКОВ (быстрый доступ) ===
-player_cache = TTLCache(maxsize=500, ttl=30)  # 30 секунд
+player_cache = TTLCache(maxsize=500, ttl=30)
 
 def invalidate_cache(user_id):
     player_cache.pop(user_id, None)
@@ -65,7 +65,6 @@ async def init_db():
                       passive_level INTEGER DEFAULT 0,
                       passive_collected TIMESTAMP,
                       karma INTEGER DEFAULT 0)''')
-        # Миграции
         cur = await db.execute("PRAGMA table_info(players)")
         columns = [row[1] for row in await cur.fetchall()]
         if 'last_farm_date' not in columns:
@@ -77,11 +76,9 @@ async def init_db():
         if 'karma' not in columns:
             await db.execute('ALTER TABLE players ADD COLUMN karma INTEGER DEFAULT 0')
 
-        # Индексы
         await db.execute('CREATE INDEX IF NOT EXISTS idx_balance ON players(balance DESC)')
         await db.execute('CREATE INDEX IF NOT EXISTS idx_last_farm ON players(last_farm)')
 
-        # Резервы
         await db.execute('''CREATE TABLE IF NOT EXISTS reservations
                      (art TEXT PRIMARY KEY,
                       user_id INTEGER,
@@ -304,8 +301,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_back += "\n🎮 *Твой терминал:*"
     await update.message.reply_text(welcome_back, reply_markup=await get_main_menu_keyboard(user_id), parse_mode='Markdown')
 
-@timing
-@rate_limit
+# === КОЛБЭКИ ===
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -315,34 +311,20 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         if data == 'menu':
             await query.message.edit_text("🎮 *ГЛАВНОЕ МЕНЮ*", reply_markup=await get_main_menu_keyboard(user_id), parse_mode='Markdown')
-        elif data == 'farm':
-            await farm_callback(update, context)
-        elif data == 'balance':
-            await balance_callback(update, context)
-        elif data == 'craft':
-            await craft_callback(update, context)
-        elif data == 'smoke':
-            await smoke_callback(update, context)
-        elif data == 'ritual':
-            await ritual_callback(update, context)
-        elif data == 'collect':
-            await collect_callback(update, context)
-        elif data == 'status':
-            await status_callback(update, context)
-        elif data == 'top':
-            await top_callback(update, context)
-        elif data == 'guild_info':
-            await guild_info_callback(update, context)
-        elif data == 'rules':
-            await rules_callback(update, context)
-        elif data == 'privilege':
-            await privilege_callback(update, context)
-        elif data == 'catalog':
-            await catalog_callback(update, context)
-        elif data == 'daily':
-            await daily_callback(update, context)
+        elif data == 'farm': await farm_callback(update, context)
+        elif data == 'balance': await balance_callback(update, context)
+        elif data == 'craft': await craft_callback(update, context)
+        elif data == 'smoke': await smoke_callback(update, context)
+        elif data == 'ritual': await ritual_callback(update, context)
+        elif data == 'collect': await collect_callback(update, context)
+        elif data == 'status': await status_callback(update, context)
+        elif data == 'top': await top_callback(update, context)
+        elif data == 'guild_info': await guild_info_callback(update, context)
+        elif data == 'rules': await rules_callback(update, context)
+        elif data == 'privilege': await privilege_callback(update, context)
+        elif data == 'catalog': await catalog_callback(update, context)
+        elif data == 'daily': await daily_callback(update, context)
         elif data == 'activate_menu':
-            # обработка активации из кнопки
             user = query.from_user
             username = user.username or user.first_name
             player = await get_player_cached(user_id)
@@ -384,7 +366,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error in button_handler: {e}", exc_info=True)
         await query.message.edit_text("⚠️ Произошла ошибка. Попробуй позже.")
 
-# === КОЛБЭКИ ===
 async def farm_callback(update, context):
     user = update.callback_query.from_user
     msg = update.callback_query.message
@@ -417,7 +398,7 @@ async def farm_callback(update, context):
     old_balance = player[0] if player else 0
     await update_balance(user_id, username, earned)
     await update_last_farm(user_id)
-    new_player = await get_player_cached(user_id)  # кэш обновится
+    new_player = await get_player_cached(user_id)
     new_balance = new_player[0]
 
     if new_balance < 500: progress = f"📈 до ⚔️ {500 - new_balance} 🍬"
@@ -480,7 +461,6 @@ async def smoke_callback(update, context):
     if blunts < 1:
         await msg.reply_text("🌿 У тебя нет Блантов. Используй /craft", reply_markup=get_back_to_menu_keyboard())
         return
-    # бонус гильдии
     if guild == 'WHITE' and random.randint(1, 100) <= 20:
         save_blunt = True
     else:
@@ -763,14 +743,11 @@ async def pin_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_to_message.pin()
     await update.message.reply_text("📌 *ЗАКРЕПЛЕНО*\nСообщение закреплено на `1` час.\n💸 Списано: `200` 🍬", parse_mode='Markdown', reply_markup=get_back_to_menu_keyboard())
 
-# === ВСПОМОГАТЕЛЬНЫЕ ===
-async def check_rank_up(context, user_id, username, old_balance, new_balance):
-    if old_balance < 500 <= new_balance:
-        await context.bot.send_message(chat_id="@guild_antysocial", text=f"🎉 @{username} достиг ранга ⚔️ *Ветеран*! Гильдия рукоплещет.", parse_mode='Markdown')
-    if old_balance < 2000 <= new_balance:
-        await context.bot.send_message(chat_id="@guild_antysocial", text=f"👻 @{username} стал *Призраком*! Ткань реальности дрожит.", parse_mode='Markdown')
+async def welcome_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    for member in update.message.new_chat_members:
+        if member.is_bot: continue
+        await update.message.reply_text(f"🕯️ @{member.username or member.first_name}, добро пожаловать в Гильдию. Твой первый /farm уже ждёт.")
 
-# === ФОНОВЫЕ ЗАДАЧИ ===
 async def update_pulse(context: ContextTypes.DEFAULT_TYPE):
     async with aiosqlite.connect('players.db') as db:
         async with db.execute('SELECT COUNT(*), SUM(balance) FROM players') as cursor:
@@ -783,17 +760,22 @@ async def update_pulse(context: ContextTypes.DEFAULT_TYPE):
             white = (await cursor.fetchone())[0] or 0
         async with db.execute("SELECT COUNT(DISTINCT user_id) FROM players WHERE last_farm > ?", (datetime.now() - timedelta(hours=1),)) as cursor:
             online = (await cursor.fetchone())[0] or 0
+
     total_for_percent = black + white
     if total_for_percent > 0:
         black_percent = int(black / total_for_percent * 100)
         bar = "🕯️" + "▰" * (black_percent//10) + "▱" * (10 - black_percent//10) + f" ⚜️ {black_percent}%"
     else:
         bar = "🕯️▱▱▱▱▱▱▱▱▱▱ ⚜️ 50%"
+
     chat_desc = f"{bar} | 👥 {online}"
-    try:
-        await context.bot.set_chat_description(chat_id="@guild_antysocial", description=chat_desc)
-    except Exception as e:
-        logger.error(f"update_pulse error: {e}")
+    try: await context.bot.set_chat_description(chat_id="@guild_antysocial", description=chat_desc)
+    except: pass
+
+async def refresh_pulse(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID: return
+    await update_pulse(context)
+    await update.message.reply_text("✅ Пульс обновлён.")
 
 async def happy_hour_trigger(context: ContextTypes.DEFAULT_TYPE):
     context.bot_data['happy_hour_active'] = True
@@ -805,74 +787,113 @@ async def reset_happy_hour(context: ContextTypes.DEFAULT_TYPE):
     context.bot_data['happy_hour_active'] = False
     await context.bot.send_message(chat_id="@guild_antysocial", text="⏳ Час Удачи завершён.")
 
-# === ЗАПУСК ===
+async def handle_chat_shortcut(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip().lower()
+    mapping = {'фарм': farm_callback, 'farm': farm_callback, 'дунуть': smoke_callback, 'smoke': smoke_callback,
+               'крафт': craft_callback, 'craft': craft_callback, 'баланс': balance_callback, 'balance': balance_callback,
+               'колесо': daily_callback, 'daily': daily_callback, 'топ': top_callback, 'top': top_callback,
+               'статус': status_callback, 'status': status_callback}
+    if text in mapping:
+        # Создаём поддельный update, чтобы колбэки сработали (они ожидают callback_query)
+        update.callback_query = None
+        await mapping[text](update, context)
+
+async def check_rank_up(context: ContextTypes.DEFAULT_TYPE, user_id: int, username: str, old_balance: int, new_balance: int):
+    if old_balance < 500 <= new_balance:
+        await context.bot.send_message(chat_id="@guild_antysocial", text=f"🎉 @{username} достиг ранга ⚔️ *Ветеран*! Гильдия рукоплещет.", parse_mode='Markdown')
+    if old_balance < 2000 <= new_balance:
+        await context.bot.send_message(chat_id="@guild_antysocial", text=f"👻 @{username} стал *Призраком*! Ткань реальности дрожит.", parse_mode='Markdown')
+
+async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID: return await update.message.reply_text("⛔ Только Смотритель.")
+    try:
+        if update.message.reply_to_message:
+            target = update.message.reply_to_message.from_user
+            await update_balance(target.id, target.username or target.first_name, int(context.args[0]))
+            await update.message.reply_text(f"✅ @{target.username or target.first_name} получил {context.args[0]} 🍬.")
+        else:
+            await update.message.reply_text("Ответьте на сообщение пользователя.")
+    except: await update.message.reply_text("/add <сумма> ответом на сообщение.")
+
+# Русские команды (через MessageHandler)
+async def farm_ru(update: Update, context: ContextTypes.DEFAULT_TYPE): await farm_callback(update, context)
+async def smoke_ru(update: Update, context: ContextTypes.DEFAULT_TYPE): await smoke_callback(update, context)
+async def craft_ru(update: Update, context: ContextTypes.DEFAULT_TYPE): await craft_callback(update, context)
+async def balance_ru(update: Update, context: ContextTypes.DEFAULT_TYPE): await balance_callback(update, context)
+async def daily_ru(update: Update, context: ContextTypes.DEFAULT_TYPE): await daily_callback(update, context)
+async def top_ru(update: Update, context: ContextTypes.DEFAULT_TYPE): await top_callback(update, context)
+async def status_ru(update: Update, context: ContextTypes.DEFAULT_TYPE): await status_callback(update, context)
+async def privilege_ru(update: Update, context: ContextTypes.DEFAULT_TYPE): await privilege_callback(update, context)
+async def claim_ru(update: Update, context: ContextTypes.DEFAULT_TYPE): await claim(update, context)
+async def catalog_ru(update: Update, context: ContextTypes.DEFAULT_TYPE): await catalog_callback(update, context)
+async def rush_ru(update: Update, context: ContextTypes.DEFAULT_TYPE): await rush(update, context)
+async def guild_join_ru(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    parts = update.message.text.split()
+    context.args = parts[1:] if len(parts) > 1 else []
+    await update.message.reply_text("Для выбора Гильдии используй /guild join BLACK (или WHITE) или нажми /start активировать")
+
 async def main():
+    print("=== [DEBUG] main() started ===")
     await init_db()
-    await remove_expired_reservations()
+    print("=== [DEBUG] init_db() completed ===")
 
-    web_thread = Thread(target=run_web_server)
-    web_thread.daemon = True
-    web_thread.start()
-
+    web_thread = Thread(target=run_web_server); web_thread.daemon = True; web_thread.start()
     app = Application.builder().token(TOKEN).build()
 
-    # Команды
+    # Английские команды
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("menu", lambda u,c: start(u,c)))  # вызов меню
     app.add_handler(CommandHandler("farm", farm_callback))
     app.add_handler(CommandHandler("balance", balance_callback))
     app.add_handler(CommandHandler("craft", craft_callback))
     app.add_handler(CommandHandler("smoke", smoke_callback))
     app.add_handler(CommandHandler("ritual", ritual_callback))
-    app.add_handler(CommandHandler("collect", collect_callback))
     app.add_handler(CommandHandler("status", status_callback))
     app.add_handler(CommandHandler("top", top_callback))
     app.add_handler(CommandHandler("rules", rules_callback))
+    app.add_handler(CommandHandler("guild", guild_join_ru))  # используем RU-обработчик как универсальный
     app.add_handler(CommandHandler("privilege", privilege_callback))
     app.add_handler(CommandHandler("claim", claim))
     app.add_handler(CommandHandler("daily", daily_callback))
     app.add_handler(CommandHandler("proof", proof))
     app.add_handler(CommandHandler("pin", pin_message))
     app.add_handler(CommandHandler("catalog", catalog_callback))
+    app.add_handler(CommandHandler("add", add))
     app.add_handler(CommandHandler("rush", rush))
-    app.add_handler(CommandHandler("add", lambda u,c: update.message.reply_text("Команда add временно отключена")))  # админка по желанию
+    app.add_handler(CommandHandler("collect", collect_callback))
+    app.add_handler(CommandHandler("pulse", refresh_pulse))
 
-    # Русские команды через MessageHandler (полностью сохранил старую схему)
-    app.add_handler(MessageHandler(filters.Regex(r'^/фарм$'), farm_callback))
-    app.add_handler(MessageHandler(filters.Regex(r'^/баланс$'), balance_callback))
-    app.add_handler(MessageHandler(filters.Regex(r'^/крафт$'), craft_callback))
-    app.add_handler(MessageHandler(filters.Regex(r'^/дунуть$'), smoke_callback))
-    app.add_handler(MessageHandler(filters.Regex(r'^/ритуал$'), ritual_callback))
-    app.add_handler(MessageHandler(filters.Regex(r'^/статус$'), status_callback))
-    app.add_handler(MessageHandler(filters.Regex(r'^/топ$'), top_callback))
-    app.add_handler(MessageHandler(filters.Regex(r'^/колесо$'), daily_callback))
-    app.add_handler(MessageHandler(filters.Regex(r'^/привилегия$'), privilege_callback))
-    app.add_handler(MessageHandler(filters.Regex(r'^/забрать(?:\s+(.+))?$'), claim))
-    app.add_handler(MessageHandler(filters.Regex(r'^/каталог$'), catalog_callback))
-    app.add_handler(MessageHandler(filters.Regex(r'^/ускорение$'), rush))
-    app.add_handler(MessageHandler(filters.Regex(r'^/вступить(?:\s+(.+))?$'), lambda u,c: set_guild(u.effective_user.id, c.args[0].upper()) if c.args else None))
+    # Русские команды (через MessageHandler)
+    app.add_handler(MessageHandler(filters.Regex(r'^/фарм$'), farm_ru))
+    app.add_handler(MessageHandler(filters.Regex(r'^/баланс$'), balance_ru))
+    app.add_handler(MessageHandler(filters.Regex(r'^/крафт$'), craft_ru))
+    app.add_handler(MessageHandler(filters.Regex(r'^/дунуть$'), smoke_ru))
+    app.add_handler(MessageHandler(filters.Regex(r'^/ритуал$'), ritual_ru))
+    app.add_handler(MessageHandler(filters.Regex(r'^/статус$'), status_ru))
+    app.add_handler(MessageHandler(filters.Regex(r'^/топ$'), top_ru))
+    app.add_handler(MessageHandler(filters.Regex(r'^/колесо$'), daily_ru))
+    app.add_handler(MessageHandler(filters.Regex(r'^/привилегия$'), privilege_ru))
+    app.add_handler(MessageHandler(filters.Regex(r'^/забрать(?:\s+(.+))?$'), claim_ru))
+    app.add_handler(MessageHandler(filters.Regex(r'^/дейли$'), daily_ru))
+    app.add_handler(MessageHandler(filters.Regex(r'^/каталог$'), catalog_ru))
+    app.add_handler(MessageHandler(filters.Regex(r'^/ускорение$'), rush_ru))
+    app.add_handler(MessageHandler(filters.Regex(r'^/вступить(?:\s+(.+))?$'), guild_join_ru))
 
-    # Короткие текстовые команды
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(r'^(фарм|farm|дунуть|smoke|крафт|craft|баланс|balance|колесо|daily|топ|top|статус|status)$'),
-                                   lambda u,c: button_handler(u,c)))
-
-    # Приветствие новых
-    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS,
-                                   lambda u,c: u.message.reply_text(f"🕯️ @{(u.message.new_chat_members[0].username or u.message.new_chat_members[0].first_name)}, добро пожаловать в Гильдию. Твой первый /farm уже ждёт.")))
-
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(r'^(фарм|farm|дунуть|smoke|крафт|craft|баланс|balance|колесо|daily|топ|top|статус|status)$'), handle_chat_shortcut))
+    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_member))
     app.add_handler(CallbackQueryHandler(button_handler))
 
-    # Фон
-    app.job_queue.run_repeating(update_pulse, interval=300, first=10)
-    app.job_queue.run_repeating(remove_expired_reservations, interval=600, first=30)
-    # Час удачи запускаем через случайный интервал (как в оригинале)
-    app.job_queue.run_once(
-        lambda c: c.job_queue.run_repeating(happy_hour_trigger, interval=random.randint(14400, 28800), first=random.randint(3600, 10800)),
-        when=1
-    )
+    job_queue = app.job_queue
+    job_queue.run_repeating(update_pulse, interval=300, first=10)
+    job_queue.run_once(lambda c: c.job_queue.run_repeating(happy_hour_trigger, interval=random.randint(14400, 28800), first=random.randint(3600, 10800)), when=1)
 
-    logger.info("Bot polling started")
+    print("=== [DEBUG] Handlers registered. Starting polling... ===")
     await app.run_polling()
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    loop = asyncio.get_event_loop()
+    try:
+        loop.run_until_complete(main())
+    except KeyboardInterrupt:
+        pass
+    finally:
+        loop.close()
