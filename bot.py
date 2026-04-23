@@ -772,7 +772,6 @@ async def main():
     next_saturday = (now + timedelta(days=days_until_saturday)).replace(hour=12, minute=0, second=0, microsecond=0)
     first_seconds = max(1, (next_saturday - now).total_seconds())
     job.run_repeating(weekly_guild_rating, interval=7*24*3600, first=first_seconds)
-
     print("BOT READY")
     await app.run_polling()
 
