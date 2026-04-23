@@ -1,4 +1,4 @@
-# bot.py — ANTY SOCIAL SHOP RPG v2.0 (Полный финал)
+# bot.py — ANTY SOCIAL SHOP RPG v2.0 (Полный финал, без ошибок)
 import asyncio, logging, os, random, time
 from datetime import datetime, timedelta, date
 from threading import Thread
@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 TOKEN = os.getenv("TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 FARM_COOLDOWN_HOURS = 0.5
-FARM_MIN, FARM_MAX = 15, 35          # укрупнённый фарм
+FARM_MIN, FARM_MAX = 15, 35
 HAPPY_HOUR_MULTIPLIER = 2
 HAPPY_HOUR_DURATION_MIN = 30
 
@@ -41,7 +41,7 @@ player_cache = TTLCache(maxsize=500, ttl=30)
 def invalidate_cache(user_id):
     player_cache.pop(user_id, None)
 
-# === АСИНХРОННАЯ ИНИЦИАЛИЗАЦИЯ БД ===
+# === ИНИЦИАЛИЗАЦИЯ БД ===
 async def init_db():
     async with aiosqlite.connect("players.db") as db:
         await db.execute("PRAGMA journal_mode=WAL;")
@@ -217,7 +217,7 @@ async def get_main_menu_keyboard(user_id):
         guild = await get_guild(user_id)
         if guild == "BLACK":
             keyboard.append([InlineKeyboardButton("🕯️ Ритуал", callback_data="ritual")])
-        pc = player[9]  # passive_collected
+        pc = player[9]
         if pc:
             last = datetime.fromisoformat(pc) if isinstance(pc, str) else pc
             if (datetime.now() - last).total_seconds() / 3600 >= 1:
@@ -237,7 +237,7 @@ async def get_main_menu_keyboard(user_id):
 def get_back_to_menu_keyboard():
     return InlineKeyboardMarkup([[InlineKeyboardButton("📋 Меню", callback_data="menu")]])
 
-# === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===
+# === ВСПОМОГАТЕЛЬНЫЕ ===
 def get_user_and_msg(update: Update):
     if update.callback_query:
         return update.callback_query.from_user, update.callback_query.message
@@ -268,7 +268,7 @@ async def count_guilds():
             cnt[g] = c
     return cnt
 
-# === ОБРАБОТЧИКИ КОМАНД ===
+# === ОБРАБОТЧИКИ ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     username = update.effective_user.username or update.effective_user.first_name
@@ -490,13 +490,8 @@ async def collect_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await db.execute("UPDATE players SET passive_collected=? WHERE user_id=?", (datetime.now(), uid))
                 await db.commit()
             invalidate_cache(uid)
-            # Гровер после 5 сборов
-            new_p = await get_player_cached(uid)
-            if new_p[16] >= 5:   # craft_count? нужно отдельное поле. Используем collect_count - надо добавить.
-                # Для простоты: проверяем по passive_level? Нет, введём новый счётчик.
-                pass
-            # Пока оставим заглушку, добавим поле позже.
-            await msg.reply_text(f"🪴 *УРОЖАЙ СОБРАН*\nТвой куст принёс `{earned}` 🍬.\n💰 *Баланс:* `{new_p[0]}` 🍬",
+            new_bal = (await get_player_cached(uid))[0]
+            await msg.reply_text(f"🪴 *УРОЖАЙ СОБРАН*\nТвой куст принёс `{earned}` 🍬.\n💰 *Баланс:* `{new_bal}` 🍬",
                                  parse_mode="Markdown", reply_markup=get_back_to_menu_keyboard())
         else:
             await msg.reply_text("⏳ Пока нечего собирать.")
@@ -621,7 +616,7 @@ async def daily_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         prize = 300
         double = random.random() < 0.5
         if double:
-            await update_balance(uid, uname, prize*2)
+            await update_balance(uid, uname, prize * 2)
             txt = f"🌟 *_ДЖЕКПОТ!_* `+600` 🍬 → 💰 {(await get_player_cached(uid))[0]} 🍬\n🧛🏻‍♀️ Титул: **Призрачный Гончий**"
         else:
             await update_balance(uid, uname, prize)
@@ -638,6 +633,14 @@ async def daily_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def rush_help_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.message.reply_text("Используй /rush для сброса кулдауна фарма (тратит 1 🌿).")
+
+async def welcome_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    for member in update.message.new_chat_members:
+        if member.is_bot:
+            continue
+        await update.message.reply_text(
+            f"🕯️ @{member.username or member.first_name}, добро пожаловать в Гильдию. Твой первый /farm уже ждёт."
+        )
 
 # === КОЛБЭК КНОПОК ===
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -676,9 +679,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat_id="@guild_antysocial",
                 text=f"🕋 @{uname} вплёл свою нить в {g_emoji} {g_name} Ткань. Реальность стала плотнее."
             )
-        elif data == "activate_menu":
-            # аналогично start с активацией
-            pass
         else:
             await q.message.edit_text("❓ Неизвестная команда.")
     except Exception as e:
@@ -745,7 +745,6 @@ async def main():
     Thread(target=run_web_server, daemon=True).start()
     app = Application.builder().token(TOKEN).build()
 
-    # Команды
     for cmd, cbk in [("start", start), ("farm", farm_callback), ("balance", balance_callback),
                      ("craft", craft_callback), ("smoke", smoke_callback), ("ritual", ritual_callback),
                      ("status", status_callback), ("top", top_callback), ("rules", rules_callback),
@@ -772,6 +771,7 @@ async def main():
     next_saturday = (now + timedelta(days=days_until_saturday)).replace(hour=12, minute=0, second=0, microsecond=0)
     first_seconds = max(1, (next_saturday - now).total_seconds())
     job.run_repeating(weekly_guild_rating, interval=7*24*3600, first=first_seconds)
+
     print("BOT READY")
     await app.run_polling()
 
