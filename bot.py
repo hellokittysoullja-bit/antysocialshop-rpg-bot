@@ -213,7 +213,7 @@ def get_main_menu_keyboard(user_id=None):
         [InlineKeyboardButton("📊 Статус", callback_data='status'), InlineKeyboardButton("🏆 Топ", callback_data='top')],
         [InlineKeyboardButton("🕋 Гильдии", callback_data='guild_info'), InlineKeyboardButton("📜 Законы", callback_data='rules')],
         [InlineKeyboardButton("🪪 Скидка", callback_data='privilege'), InlineKeyboardButton("📦 Каталог", callback_data='catalog')],
-        [InlineKeyboardButton("🎡 Колесо", callback_data='daily'), InlineKeyboardButton("🎲 Ткань Судьбы", callback_data='play')]
+        [InlineKeyboardButton("🎡 Колесо", callback_data='daily'), InlineKeyboardButton("⚡ Ускорение", callback_data='rush_help')]
     ])
     return InlineKeyboardMarkup(keyboard)
 
@@ -258,7 +258,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         "⚜️ *БЕЛАЯ ГИЛЬДИЯ* — азарт, удача, танец на лезвии.\n\n"
                         "▸ _Выбери свой путь:_")
         full_text = bonus_msg + welcome_text
-        await update.message.reply_text(full_text, reply_markup=get_main_menu_keyboard(user_id), parse_mode='Markdown')
+        if not get_guild(user_id):
+            guild_text = "\n🕋 Прежде чем начать, выбери свою Гильдию:"
+            guild_kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🕯️ Чёрная", callback_data='guild_join_BLACK'),
+                 InlineKeyboardButton("⚜️ Белая", callback_data='guild_join_WHITE')]
+            ])
+            await update.message.reply_text(full_text + guild_text, reply_markup=guild_kb, parse_mode='Markdown')
+        else:
+            await update.message.reply_text(full_text, reply_markup=get_main_menu_keyboard(user_id), parse_mode='Markdown')
         return
 
     if not player:
@@ -318,9 +326,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             "⚜️ *БЕЛАЯ ГИЛЬДИЯ* — азарт, удача, танец на лезвии.\n\n"
                             "▸ _Выбери свой путь:_")
             full_text = bonus_msg + welcome_text
-            await query.message.edit_text(full_text, reply_markup=get_main_menu_keyboard(user_id), parse_mode='Markdown')
-        elif data == 'play':
-            await play(update, context)
+            if not get_guild(user_id):
+                guild_text = "\n🕋 Прежде чем начать, выбери свою Гильдию:"
+                guild_kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🕯️ Чёрная", callback_data='guild_join_BLACK'),
+                     InlineKeyboardButton("⚜️ Белая", callback_data='guild_join_WHITE')]
+                ])
+                await query.message.edit_text(full_text + guild_text, reply_markup=guild_kb, parse_mode='Markdown')
+            else:
+                await query.message.edit_text(full_text, reply_markup=get_main_menu_keyboard(user_id), parse_mode='Markdown')
         elif data == 'guild_join_BLACK':
             set_guild(user_id, 'BLACK')
             await query.message.edit_text("✅ Ты вступил в Гильдию 🕯️ *Чёрная*", parse_mode='Markdown')
@@ -333,44 +347,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         error_text = f"⚠️ Ошибка: {str(e)[:100]}"
         try: await query.message.edit_text(error_text)
         except: await query.message.reply_text(error_text)
-
-async def play(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    username = update.effective_user.username or update.effective_user.first_name
-    player = get_player(user_id)
-    if not player:
-        await (update.effective_message or update.message).reply_text("🕳️ Ты ещё не активирован. /start")
-        return
-    riddles = [
-        ("Смотритель предлагает выбор: Левая дверь — стабильность, Правая — риск.", "🚪 Левая", "🚪 Правая", 10, 5, 20),
-        ("Что выберешь: тёмный угол (стабильно) или свет (азарт)?", "🌑 Угол", "💡 Свет", 8, 4, 18),
-        ("Ткань шепчет: 'Безопасность или удача?'", "🔒 Безопасность", "🎲 Удача", 12, 6, 25)
-    ]
-    riddle, left_text, right_text, safe_reward, risk_min, risk_max = random.choice(riddles)
-    context.user_data['play_reward'] = (safe_reward, risk_min, risk_max)
-    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(left_text, callback_data='play_safe'), InlineKeyboardButton(right_text, callback_data='play_risk')]])
-    await (update.effective_message or update.message).reply_text(f"🎲 *ТКАНЬ СУДЬБЫ*\n\n{riddle}", reply_markup=keyboard, parse_mode='Markdown')
-
-async def play_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-    user_id = query.from_user.id
-    username = query.from_user.username or query.from_user.first_name
-    if 'play_reward' not in context.user_data:
-        await query.message.edit_text("🕳️ Судьба ускользнула. Попробуй снова.")
-        return
-    safe, rmin, rmax = context.user_data.pop('play_reward')
-    if data == 'play_safe':
-        earned = safe
-        update_balance(user_id, username, earned)
-        text = f"🔒 Ты выбрал стабильность. +{earned} 🍬"
-    else:
-        earned = random.randint(rmin, rmax)
-        update_balance(user_id, username, earned)
-        text = f"🎲 Ты рискнул! +{earned} 🍬"
-    new_balance = get_player(user_id)[0]
-    await query.message.edit_text(f"{text}\n💰 Баланс: `{new_balance}` 🍬", parse_mode='Markdown')
 
 async def farm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query:
@@ -386,7 +362,7 @@ async def farm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     player = context.user_data['player']
 
     if player:
-        balance, blunts, guild, last_farm_str, _, _, _, _, _, _, _, _ = player
+        balance, blunts, guild, last_farm_str, _, _, _, _, _, _, _ = player
         if last_farm_str:
             last_farm = datetime.fromisoformat(last_farm_str)
             if datetime.now() - last_farm < timedelta(hours=FARM_COOLDOWN_HOURS):
@@ -439,7 +415,7 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         balance_val = 0
         blunts = 0
     else:
-        balance_val, blunts, _, _, _, _, _, _, _, _, _, _ = player
+        balance_val, blunts, _, _, _, _, _, _, _, _, _ = player
 
     if balance_val < 500: progress = f"📈 до ⚔️ {500 - balance_val} 🍬"
     elif balance_val < 2000: progress = f"📈 до 👻 {2000 - balance_val} 🍬"
@@ -462,7 +438,7 @@ async def craft(update: Update, context: ContextTypes.DEFAULT_TYPE):
         balance_val = 0
         guild = None
     else:
-        balance_val, _, guild, _, _, _, _, _, _, _, _, _ = player
+        balance_val, _, guild, _, _, _, _, _, _, _, _ = player
 
     if balance_val < 5:
         text = "🕳️ Пусто. Нужно 5 🍬."
@@ -489,7 +465,7 @@ async def smoke(update: Update, context: ContextTypes.DEFAULT_TYPE):
         blunts = 0
         guild = None
     else:
-        _, blunts, guild, _, _, _, _, _, _, _, _, _ = player
+        _, blunts, guild, _, _, _, _, _, _, _, _ = player
 
     if blunts < 1:
         text = "🌿 У тебя нет Блантов. Используй /craft"
@@ -524,7 +500,7 @@ async def ritual(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not player:
         await msg.reply_text("🕳️ Ты ещё не активирован. /start")
         return
-    balance, blunts, guild, _, last_ritual_str, _, _, _, _, _, _, _ = player
+    balance, blunts, guild, _, last_ritual_str, _, _, _, _, _, _ = player
     if guild != 'BLACK':
         await msg.reply_text("❌ Только Чёрная Гильдия.")
         return
@@ -921,7 +897,7 @@ def main():
     app.add_handler(CommandHandler("proof", proof)); app.add_handler(CommandHandler("pin", pin_message))
     app.add_handler(CommandHandler("catalog", catalog)); app.add_handler(CommandHandler("add", add))
     app.add_handler(CommandHandler("rush", rush)); app.add_handler(CommandHandler("collect", collect))
-    app.add_handler(CommandHandler("pulse", refresh_pulse)); app.add_handler(CommandHandler("play", play))
+    app.add_handler(CommandHandler("pulse", refresh_pulse))
 
     # Русские команды (через MessageHandler)
     app.add_handler(MessageHandler(filters.Regex(r'^/фарм$'), farm_ru))
@@ -941,7 +917,6 @@ def main():
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(r'^(фарм|farm|дунуть|smoke|крафт|craft|баланс|balance|колесо|daily|топ|top|статус|status)$'), handle_chat_shortcut))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_member))
-    app.add_handler(CallbackQueryHandler(play_callback, pattern='^(play_safe|play_risk)$'))
     app.add_handler(CallbackQueryHandler(button_handler))
 
     job_queue = app.job_queue
