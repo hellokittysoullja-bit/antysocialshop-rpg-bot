@@ -219,16 +219,6 @@ def get_guild_bonus(user_id):
     else:
         return {'smoke_save_chance': 0, 'ritual_available': False, 'stable_discount': True}
 
-def format_message(text):
-    lines = text.split('\n')
-    max_len = max(len(line) for line in lines) if lines else 0
-    top_bottom = '─' * (max_len + 2)
-    formatted = f"┌{top_bottom}┐\n"
-    for line in lines:
-        formatted += f"│ {line.ljust(max_len)} │\n"
-    formatted += f"└{top_bottom}┘"
-    return formatted
-
 def get_main_menu_keyboard(user_id=None):
     keyboard = [
         [InlineKeyboardButton("🍬 Фармить", callback_data='farm')],
@@ -276,7 +266,6 @@ async def delete_message(context: ContextTypes.DEFAULT_TYPE):
             del last_bot_messages[data['chat_id']]
     except: pass
 
-# === ОСНОВНЫЕ КОМАНДЫ ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     username = update.effective_user.username or update.effective_user.first_name
@@ -365,7 +354,7 @@ async def play(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = update.effective_user.username or update.effective_user.first_name
     player = get_player(user_id)
     if not player:
-        await update.effective_message.reply_text("🕳️ Ты ещё не активирован. /start")
+        await (update.effective_message or update.message).reply_text("🕳️ Ты ещё не активирован. /start")
         return
     riddles = [
         ("Смотритель предлагает выбор: Левая дверь — стабильность, Правая — риск.", "🚪 Левая", "🚪 Правая", 10, 5, 20),
@@ -374,13 +363,8 @@ async def play(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     riddle, left_text, right_text, safe_reward, risk_min, risk_max = random.choice(riddles)
     context.user_data['play_reward'] = (safe_reward, risk_min, risk_max)
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton(left_text, callback_data='play_safe'),
-         InlineKeyboardButton(right_text, callback_data='play_risk')]
-    ])
-    await (update.effective_message.reply_text if update.effective_message else update.message.reply_text)(
-        f"🎲 *ТКАНЬ СУДЬБЫ*\n\n{riddle}", reply_markup=keyboard, parse_mode='Markdown'
-    )
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(left_text, callback_data='play_safe'), InlineKeyboardButton(right_text, callback_data='play_risk')]])
+    await (update.effective_message or update.message).reply_text(f"🎲 *ТКАНЬ СУДЬБЫ*\n\n{riddle}", reply_markup=keyboard, parse_mode='Markdown')
 
 async def play_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -414,17 +398,15 @@ async def farm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = update.message
     user_id = user.id
     username = user.username or user.first_name
-    if 'player' not in context.user_data:
-        context.user_data['player'] = get_player(user_id)
+    if 'player' not in context.user_data: context.user_data['player'] = get_player(user_id)
     player = context.user_data['player']
 
     if player:
         balance, blunts, guild, last_farm_str, _, _, _, _, _, _, _, _ = player
         if last_farm_str:
             last_farm = datetime.fromisoformat(last_farm_str)
-            cooldown = timedelta(hours=FARM_COOLDOWN_HOURS)
-            if datetime.now() - last_farm < cooldown:
-                remaining = cooldown - (datetime.now() - last_farm)
+            if datetime.now() - last_farm < timedelta(hours=FARM_COOLDOWN_HOURS):
+                remaining = timedelta(hours=FARM_COOLDOWN_HOURS) - (datetime.now() - last_farm)
                 text = f"⏳ Жди {remaining.seconds//60} мин."
                 if update.effective_chat.type == "private":
                     await msg.reply_text(text, reply_markup=get_back_to_menu_keyboard())
@@ -435,7 +417,6 @@ async def farm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     earned = random.randint(FARM_MIN, FARM_MAX)
     if happy_hour_active and datetime.now() < happy_hour_end_time:
         earned *= HAPPY_HOUR_MULTIPLIER
-        await msg.reply_text("🌟 *Час Удачи!* x2 🍬", parse_mode='Markdown')
     if random.randint(1, 100) == 1:
         earned *= 5
         await context.bot.send_message(chat_id="@guild_antysocial", text=f"🌟 @{username} наткнулся на *Золотую жилу*! +{earned} 🍬", parse_mode='Markdown')
@@ -451,14 +432,9 @@ async def farm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['player'] = new_player
     new_balance = new_player[0]
 
-    if new_balance < 500:
-        need = 500 - new_balance
-        progress = f"📈 до ⚔️ {need} 🍬"
-    elif new_balance < 2000:
-        need = 2000 - new_balance
-        progress = f"📈 до 👻 {need} 🍬"
-    else:
-        progress = "👑 Максимальный ранг"
+    if new_balance < 500: progress = f"📈 до ⚔️ {500 - new_balance} 🍬"
+    elif new_balance < 2000: progress = f"📈 до 👻 {2000 - new_balance} 🍬"
+    else: progress = "👑 Максимальный ранг"
 
     bonus_str = f" (+{first_bonus}🎁)" if first_bonus else ""
     text = f"🍬 +{earned}{bonus_str} → 💰 {new_balance}\n{progress}"
@@ -466,18 +442,12 @@ async def farm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text(text, reply_markup=get_back_to_menu_keyboard())
     else:
         await send_selfdestruct_message(update, context, text, reply_markup=get_back_to_menu_keyboard())
-
     await check_rank_up(context, user_id, username, old_balance, new_balance)
     await check_secret_titles(user_id, username, context)
 
 async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.callback_query:
-        user = update.callback_query.from_user
-        msg = update.callback_query.message
-        await update.callback_query.answer()
-    else:
-        user = update.effective_user
-        msg = update.message
+    user = update.effective_user
+    msg = update.effective_message or update.message
     user_id = user.id
     username = user.username or user.first_name
     player = get_player(user_id)
@@ -488,14 +458,9 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         balance_val, blunts, _, _, _, _, _, _, _, _, _, _ = player
 
-    if balance_val < 500:
-        need = 500 - balance_val
-        progress = f"📈 до ⚔️ {need} 🍬"
-    elif balance_val < 2000:
-        need = 2000 - balance_val
-        progress = f"📈 до 👻 {need} 🍬"
-    else:
-        progress = "👑 Максимальный ранг"
+    if balance_val < 500: progress = f"📈 до ⚔️ {500 - balance_val} 🍬"
+    elif balance_val < 2000: progress = f"📈 до 👻 {2000 - balance_val} 🍬"
+    else: progress = "👑 Максимальный ранг"
 
     text = f"💰 *БАЛАНС*\n`{balance_val}` 🍬\n🌿 `{blunts}` Бланта\n{progress}"
     if update.effective_chat.type == "private":
@@ -504,13 +469,8 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_selfdestruct_message(update, context, text, reply_markup=get_back_to_menu_keyboard())
 
 async def craft(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.callback_query:
-        user = update.callback_query.from_user
-        msg = update.callback_query.message
-        await update.callback_query.answer()
-    else:
-        user = update.effective_user
-        msg = update.message
+    user = update.effective_user
+    msg = update.effective_message or update.message
     user_id = user.id
     username = user.username or user.first_name
     player = get_player(user_id)
@@ -523,32 +483,21 @@ async def craft(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if balance_val < 5:
         text = "🕳️ Пусто. Нужно 5 🍬."
-        if update.effective_chat.type == "private":
-            await msg.reply_text(text, reply_markup=get_back_to_menu_keyboard())
-        else:
-            await send_selfdestruct_message(update, context, text, reply_markup=get_back_to_menu_keyboard())
+        if update.effective_chat.type == "private": await msg.reply_text(text, reply_markup=get_back_to_menu_keyboard())
+        else: await send_selfdestruct_message(update, context, text, reply_markup=get_back_to_menu_keyboard())
         return
 
     update_balance(user_id, username, -5)
     update_blunts(user_id, username, 1)
     new_player = get_player(user_id)
     new_balance, new_blunts = new_player[0], new_player[1]
-
-    craft_msg = "🌿 Ты свернул Блант. Пальцы пахнут уважением."
-    text = f"{craft_msg} → 💰 {new_balance} | 🌿 {new_blunts}"
-    if update.effective_chat.type == "private":
-        await msg.reply_text(text, reply_markup=get_back_to_menu_keyboard())
-    else:
-        await send_selfdestruct_message(update, context, text, reply_markup=get_back_to_menu_keyboard())
+    text = f"🌿 Ты свернул Блант. Пальцы пахнут уважением. → 💰 {new_balance} | 🌿 {new_blunts}"
+    if update.effective_chat.type == "private": await msg.reply_text(text, reply_markup=get_back_to_menu_keyboard())
+    else: await send_selfdestruct_message(update, context, text, reply_markup=get_back_to_menu_keyboard())
 
 async def smoke(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.callback_query:
-        user = update.callback_query.from_user
-        msg = update.callback_query.message
-        await update.callback_query.answer()
-    else:
-        user = update.effective_user
-        msg = update.message
+    user = update.effective_user
+    msg = update.effective_message or update.message
     user_id = user.id
     username = user.username or user.first_name
     player = get_player(user_id)
@@ -561,46 +510,32 @@ async def smoke(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if blunts < 1:
         text = "🌿 У тебя нет Блантов. Используй /craft"
-        if update.effective_chat.type == "private":
-            await msg.reply_text(text, reply_markup=get_back_to_menu_keyboard())
-        else:
-            await send_selfdestruct_message(update, context, text, reply_markup=get_back_to_menu_keyboard())
+        if update.effective_chat.type == "private": await msg.reply_text(text, reply_markup=get_back_to_menu_keyboard())
+        else: await send_selfdestruct_message(update, context, text, reply_markup=get_back_to_menu_keyboard())
         return
 
     bonus_info = get_guild_bonus(user_id)
     save_blunt = bonus_info['smoke_save_chance'] > 0 and random.randint(1, 100) <= bonus_info['smoke_save_chance']
-    if not save_blunt:
-        update_blunts(user_id, username, -1)
+    if not save_blunt: update_blunts(user_id, username, -1)
 
     r = random.randint(1, 100)
     if r <= 50:
         effect = "💨 *Лёгкий приход*\n[Гул Фабрики №9] «Станки работают в ритме твоего сердца...»\n🍬 +10"
-        oas_gain = 10
-        update_balance(user_id, username, oas_gain)
+        update_balance(user_id, username, 10)
     elif r <= 75:
         effect = "💨 *Паранойя...*\n[Зловещий шёпот] «Смотритель наблюдает...»\n✨ Никакого видимого эффекта."
-        oas_gain = 0
     else:
         effect = "💨 *Плацебо*\n[Тишина] «Дым рассеялся, ничего не изменилось...»"
-        oas_gain = 0
     new_balance = get_player(user_id)[0]
-    text = effect + (f"\n💰 Баланс: `{new_balance}` 🍬" if oas_gain else "")
-    if save_blunt:
-        text += "\n⚜️ *Белая Гильдия сохранила твой Блант!*"
-    if update.effective_chat.type == "private":
-        await msg.reply_text(text, parse_mode='Markdown', reply_markup=get_back_to_menu_keyboard())
-    else:
-        await send_selfdestruct_message(update, context, text, reply_markup=get_back_to_menu_keyboard())
+    text = effect + (f"\n💰 Баланс: `{new_balance}` 🍬" if r <= 50 else "")
+    if save_blunt: text += "\n⚜️ *Белая Гильдия сохранила твой Блант!*"
+    if update.effective_chat.type == "private": await msg.reply_text(text, parse_mode='Markdown', reply_markup=get_back_to_menu_keyboard())
+    else: await send_selfdestruct_message(update, context, text, reply_markup=get_back_to_menu_keyboard())
     await check_secret_titles(user_id, username, context)
 
 async def ritual(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.callback_query:
-        user = update.callback_query.from_user
-        msg = update.callback_query.message
-        await update.callback_query.answer()
-    else:
-        user = update.effective_user
-        msg = update.message
+    user = update.effective_user
+    msg = update.effective_message or update.message
     user_id = user.id
     username = user.username or user.first_name
     player = get_player(user_id)
@@ -625,13 +560,8 @@ async def ritual(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await check_secret_titles(user_id, username, context)
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.callback_query:
-        user = update.callback_query.from_user
-        msg = update.callback_query.message
-        await update.callback_query.answer()
-    else:
-        user = update.effective_user
-        msg = update.message
+    user = update.effective_user
+    msg = update.effective_message or update.message
     user_id = user.id
     username = user.username or user.first_name
     player = get_player(user_id)
@@ -644,7 +574,6 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         balance_val, blunts, guild, _, _, _, titles, _, _, _, karma, _ = player
     rank = "👻 Призрак" if balance_val >= 2000 else "⚔️ Ветеран" if balance_val >= 500 else "💉 Рекрут"
     guild_emoji = " 🕯️" if guild == 'BLACK' else " ⚜️" if guild == 'WHITE' else ""
-    guild_name = "Чёрная" if guild == 'BLACK' else "Белая" if guild == 'WHITE' else "Нет"
     text = (f"👤 *{username}*{guild_emoji}\n"
             f"👻 *Ранг:* {rank}\n"
             f"💰 *ОАС:* `{balance_val}` 🍬\n"
@@ -652,17 +581,11 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🛡️ *Карма:* `{karma}`\n"
             f"🪴 *Урожай:* `+{player[8]*5 if player else 0}` 🍬 / час\n"
             f"🧬 *Титулы:* {titles if titles else '—'}")
-    if update.effective_chat.type == "private":
-        await msg.reply_text(text, parse_mode='Markdown', reply_markup=get_back_to_menu_keyboard())
-    else:
-        await send_selfdestruct_message(update, context, text, reply_markup=get_back_to_menu_keyboard())
+    if update.effective_chat.type == "private": await msg.reply_text(text, parse_mode='Markdown', reply_markup=get_back_to_menu_keyboard())
+    else: await send_selfdestruct_message(update, context, text, reply_markup=get_back_to_menu_keyboard())
 
 async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.callback_query:
-        msg = update.callback_query.message
-        await update.callback_query.answer()
-    else:
-        msg = update.message
+    msg = update.effective_message or update.message
     user_id = update.effective_user.id
     top_players = get_top(10)
     if not top_players:
@@ -679,10 +602,8 @@ async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pos = c.fetchone()[0] + 1
     conn.close()
     text += f"\n📊 *Твоя позиция:* `{pos}`"
-    if update.effective_chat.type == "private":
-        await msg.reply_text(text, parse_mode='Markdown', reply_markup=get_back_to_menu_keyboard())
-    else:
-        await send_selfdestruct_message(update, context, text, reply_markup=get_back_to_menu_keyboard())
+    if update.effective_chat.type == "private": await msg.reply_text(text, parse_mode='Markdown', reply_markup=get_back_to_menu_keyboard())
+    else: await send_selfdestruct_message(update, context, text, reply_markup=get_back_to_menu_keyboard())
 
 async def rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = ("📜 **ЗАКОНЫ ГИЛЬДИИ**\n\n"
@@ -751,7 +672,7 @@ async def privilege(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📉 Максимум: `{int(max_percent*100)}%` от цены\n"
             f"{guild_note}\n")
     if target:
-        percent = int(balance / target * 100)
+        percent = min(100, int(balance / target * 100))
         bar = "🟩" * (percent//10) + "⬛" * (10 - percent//10)
         text += f"\n⚔️ *Прогресс:* {bar} `{percent}%`\n"
         phrase = ("«Ты слышишь шёпот Фабрики...»" if percent<30 else
@@ -827,21 +748,11 @@ async def daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⏳ Колесо спит. Жди {remaining.seconds//3600} ч.")
         return
     r = random.randint(1, 100)
-    if r <= 40:
-        prize, prize_text = 5, "+5 🍬"
-        update_balance(user_id, username, prize)
-    elif r <= 65:
-        prize, prize_text = 10, "+10 🍬"
-        update_balance(user_id, username, prize)
-    elif r <= 80:
-        prize, prize_text = 1, "+1 🌿 Блант"
-        update_blunts(user_id, username, prize)
-    elif r <= 90:
-        prize, prize_text = 20, "+20 🍬"
-        update_balance(user_id, username, prize)
-    elif r <= 97:
-        prize, prize_text = 2, "+2 🌿 Бланта"
-        update_blunts(user_id, username, prize)
+    if r <= 40: prize, prize_text = 5, "+5 🍬"; update_balance(user_id, username, prize)
+    elif r <= 65: prize, prize_text = 10, "+10 🍬"; update_balance(user_id, username, prize)
+    elif r <= 80: prize, prize_text = 1, "+1 🌿 Блант"; update_blunts(user_id, username, prize)
+    elif r <= 90: prize, prize_text = 20, "+20 🍬"; update_balance(user_id, username, prize)
+    elif r <= 97: prize, prize_text = 2, "+2 🌿 Бланта"; update_blunts(user_id, username, prize)
     else:
         prize, prize_text = 50, "🌟 *ДЖЕКПОТ!* +50 🍬"
         update_balance(user_id, username, prize)
@@ -853,7 +764,7 @@ async def daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def catalog(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔗 Перейти", url="https://t.me/antysocialshop")]])
-    await update.message.reply_text("🕯️ *ANTYSOCIALSHOP · КАТАЛОГ*", parse_mode='Markdown', reply_markup=keyboard)
+    await (update.effective_message or update.message).reply_text("🕯️ *ANTYSOCIALSHOP · КАТАЛОГ*", parse_mode='Markdown', reply_markup=keyboard)
 
 async def claim(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -926,41 +837,34 @@ async def update_pulse(context: ContextTypes.DEFAULT_TYPE):
     online = c.fetchone()[0] or 0
     conn.close()
 
-    total_players_for_percent = black + white
-    if total_players_for_percent > 0:
-        black_percent = int(black / total_players_for_percent * 100)
-        white_percent = 100 - black_percent
-        bar_filled = int(black_percent / 10)
-        bar = "🕯️" + "▰" * bar_filled + "▱" * (10 - bar_filled) + f" ⚜️ {black_percent}%"
+    total_for_percent = black + white
+    if total_for_percent > 0:
+        black_percent = int(black / total_for_percent * 100)
+        bar = "🕯️" + "▰" * (black_percent//10) + "▱" * (10 - black_percent//10) + f" ⚜️ {black_percent}%"
     else:
         bar = "🕯️▱▱▱▱▱▱▱▱▱▱ ⚜️ 50%"
 
     chat_desc = f"{bar} | 👥 {online}"
-    try:
-        await context.bot.set_chat_description(chat_id="@guild_antysocial", description=chat_desc)
-    except Exception as e:
-        print(f"Ошибка обновления описания чата: {e}")
+    try: await context.bot.set_chat_description(chat_id="@guild_antysocial", description=chat_desc)
+    except: pass
 
 async def refresh_pulse(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
+    if update.effective_user.id != ADMIN_ID: return
     await update_pulse(context)
     await update.message.reply_text("✅ Пульс обновлён.")
 
 async def scan_leads(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-    await update.message.reply_text("🔍 Сканирование запущено (заглушка). В реальности здесь был бы парсер.")
+    if update.effective_user.id != ADMIN_ID: return
+    await update.message.reply_text("🔍 Сканирование запущено (заглушка).")
 
 async def trends(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
+    if update.effective_user.id != ADMIN_ID: return
     conn = sqlite3.connect('players.db')
     c = conn.cursor()
     c.execute('SELECT art, claims FROM item_views ORDER BY claims DESC LIMIT 5')
     rows = c.fetchall()
     conn.close()
-    text = "📈 *ТРЕНДЫ*\n\n" + "\n".join([f"`{art}` — {claims} резервов" for art, claims in rows]) if rows else "Нет данных."
+    text = "📈 *ТРЕНДЫ*\n\n" + ("\n".join([f"`{art}` — {claims} резервов" for art, claims in rows]) if rows else "Нет данных.")
     await update.message.reply_text(text, parse_mode='Markdown')
 
 async def echo_past(context: ContextTypes.DEFAULT_TYPE):
@@ -1001,8 +905,7 @@ async def handle_chat_shortcut(update: Update, context: ContextTypes.DEFAULT_TYP
     mapping = {'фарм': farm, 'farm': farm, 'дунуть': smoke, 'smoke': smoke, 'крафт': craft, 'craft': craft,
                'баланс': balance, 'balance': balance, 'колесо': daily, 'daily': daily, 'топ': top, 'top': top,
                'статус': status, 'status': status}
-    if text in mapping:
-        await mapping[text](update, context)
+    if text in mapping: await mapping[text](update, context)
 
 async def check_secret_titles(user_id, username, context):
     player = get_player(user_id)
@@ -1036,35 +939,28 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.reply_text("🎮 *ГЛАВНОЕ МЕНЮ*", reply_markup=get_main_menu_keyboard(update.effective_user.id), parse_mode='Markdown')
 
 async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("⛔ Только Смотритель.")
-        return
+    if update.effective_user.id != ADMIN_ID: return await update.message.reply_text("⛔ Только Смотритель.")
     try:
         if update.message.reply_to_message:
-            target_user = update.message.reply_to_message.from_user
-            target_id = target_user.id
-            target_name = target_user.username or target_user.first_name
-            amount = int(context.args[0])
-            update_balance(target_id, target_name, amount)
-            await update.message.reply_text(f"✅ @{target_name} получил {amount} 🍬.")
+            target = update.message.reply_to_message.from_user
+            update_balance(target.id, target.username or target.first_name, int(context.args[0]))
+            await update.message.reply_text(f"✅ @{target.username or target.first_name} получил {context.args[0]} 🍬.")
         else:
-            await update.message.reply_text("Ответьте на сообщение пользователя и напишите `/add <сумма>`")
-    except (IndexError, ValueError):
-        await update.message.reply_text("Использование: ответьте на сообщение игрока и напишите `/add <сумма>`")
+            await update.message.reply_text("Ответьте на сообщение пользователя.")
+    except: await update.message.reply_text("/add <сумма> ответом на сообщение.")
 
-# Русские команды (заглушки)
-async def balance_ru(update: Update, context: ContextTypes.DEFAULT_TYPE): await balance(update, context)
-async def craft_ru(update: Update, context: ContextTypes.DEFAULT_TYPE): await craft(update, context)
-async def smoke_ru(update: Update, context: ContextTypes.DEFAULT_TYPE): await smoke(update, context)
-async def ritual_ru(update: Update, context: ContextTypes.DEFAULT_TYPE): await ritual(update, context)
-async def privilege_ru(update: Update, context: ContextTypes.DEFAULT_TYPE): await privilege(update, context)
-async def claim_ru(update: Update, context: ContextTypes.DEFAULT_TYPE): await claim(update, context)
-async def daily_ru(update: Update, context: ContextTypes.DEFAULT_TYPE): await daily(update, context)
-async def catalog_ru(update: Update, context: ContextTypes.DEFAULT_TYPE): await catalog(update, context)
-async def rush_ru(update: Update, context: ContextTypes.DEFAULT_TYPE): await rush(update, context)
+# Русские команды
+async def balance_ru(u,c): await balance(u,c)
+async def craft_ru(u,c): await craft(u,c)
+async def smoke_ru(u,c): await smoke(u,c)
+async def ritual_ru(u,c): await ritual(u,c)
+async def privilege_ru(u,c): await privilege(u,c)
+async def claim_ru(u,c): await claim(u,c)
+async def daily_ru(u,c): await daily(u,c)
+async def catalog_ru(u,c): await catalog(u,c)
+async def rush_ru(u,c): await rush(u,c)
 async def guild_join_ru(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    parts = text.split()
+    parts = update.message.text.split()
     context.args = parts[1:] if len(parts) > 1 else []
     await guild_join(update, context)
 
@@ -1076,41 +972,21 @@ def main():
     except Exception as e:
         print(f"=== [DEBUG] init_db() FAILED: {e} ===")
         raise
-
-    print("=== [DEBUG] Starting web server thread... ===")
-    web_thread = Thread(target=run_web_server)
-    web_thread.daemon = True
-    web_thread.start()
-    print("=== [DEBUG] Web server thread started ===")
-
-    print("=== [DEBUG] Building Application... ===")
+    web_thread = Thread(target=run_web_server); web_thread.daemon = True; web_thread.start()
     app = Application.builder().token(TOKEN).build()
-    print("=== [DEBUG] Application built, registering handlers... ===")
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("menu", menu))
-    app.add_handler(CommandHandler("farm", farm))
-    app.add_handler(CommandHandler("balance", balance))
-    app.add_handler(CommandHandler("craft", craft))
-    app.add_handler(CommandHandler("smoke", smoke))
-    app.add_handler(CommandHandler("ritual", ritual))
-    app.add_handler(CommandHandler("status", status))
-    app.add_handler(CommandHandler("top", top))
-    app.add_handler(CommandHandler("rules", rules))
-    app.add_handler(CommandHandler("guild", guild_join))
-    app.add_handler(CommandHandler("privilege", privilege))
-    app.add_handler(CommandHandler("claim", claim))
-    app.add_handler(CommandHandler("daily", daily))
-    app.add_handler(CommandHandler("proof", proof))
-    app.add_handler(CommandHandler("pin", pin_message))
-    app.add_handler(CommandHandler("catalog", catalog))
-    app.add_handler(CommandHandler("add", add))
-    app.add_handler(CommandHandler("rush", rush))
-    app.add_handler(CommandHandler("collect", collect))
-    app.add_handler(CommandHandler("pulse", refresh_pulse))
-    app.add_handler(CommandHandler("play", play))
-    app.add_handler(CommandHandler("scan", scan_leads))
-    app.add_handler(CommandHandler("trends", trends))
+    app.add_handler(CommandHandler("start", start)); app.add_handler(CommandHandler("menu", menu))
+    app.add_handler(CommandHandler("farm", farm)); app.add_handler(CommandHandler("balance", balance))
+    app.add_handler(CommandHandler("craft", craft)); app.add_handler(CommandHandler("smoke", smoke))
+    app.add_handler(CommandHandler("ritual", ritual)); app.add_handler(CommandHandler("status", status))
+    app.add_handler(CommandHandler("top", top)); app.add_handler(CommandHandler("rules", rules))
+    app.add_handler(CommandHandler("guild", guild_join)); app.add_handler(CommandHandler("privilege", privilege))
+    app.add_handler(CommandHandler("claim", claim)); app.add_handler(CommandHandler("daily", daily))
+    app.add_handler(CommandHandler("proof", proof)); app.add_handler(CommandHandler("pin", pin_message))
+    app.add_handler(CommandHandler("catalog", catalog)); app.add_handler(CommandHandler("add", add))
+    app.add_handler(CommandHandler("rush", rush)); app.add_handler(CommandHandler("collect", collect))
+    app.add_handler(CommandHandler("pulse", refresh_pulse)); app.add_handler(CommandHandler("play", play))
+    app.add_handler(CommandHandler("scan", scan_leads)); app.add_handler(CommandHandler("trends", trends))
 
     app.add_handler(MessageHandler(filters.Regex(r'^/баланс$'), balance_ru))
     app.add_handler(MessageHandler(filters.Regex(r'^/крафт$'), craft_ru))
@@ -1120,8 +996,8 @@ def main():
     app.add_handler(MessageHandler(filters.Regex(r'^/забрать(?:\s+(.+))?$'), claim_ru))
     app.add_handler(MessageHandler(filters.Regex(r'^/дейли$'), daily_ru))
     app.add_handler(MessageHandler(filters.Regex(r'^/каталог$'), catalog_ru))
-    app.add_handler(MessageHandler(filters.Regex(r'^/вступить(?:\s+(.+))?$'), guild_join_ru))
     app.add_handler(MessageHandler(filters.Regex(r'^/ускорение$'), rush_ru))
+    app.add_handler(MessageHandler(filters.Regex(r'^/вступить(?:\s+(.+))?$'), guild_join_ru))
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(r'^(фарм|farm|дунуть|smoke|крафт|craft|баланс|balance|колесо|daily|топ|top|статус|status)$'), handle_chat_shortcut))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_member))
@@ -1135,19 +1011,7 @@ def main():
     job_queue.run_once(lambda c: c.job_queue.run_repeating(happy_hour_trigger, interval=random.randint(14400, 28800), first=random.randint(3600, 10800)), when=1)
 
     print("=== [DEBUG] Handlers registered. Starting polling... ===")
-    try:
-        app.run_polling()
-    except Exception as e:
-        print(f"=== [DEBUG] run_polling() CRASHED: {e} ===")
-        import traceback
-        traceback.print_exc()
-        raise
+    app.run_polling()
 
 if __name__ == '__main__':
-    print("=== [DEBUG] Script started ===")
-    try:
-        main()
-    except Exception as e:
-        print(f"=== [DEBUG] FATAL ERROR in main: {e} ===")
-        import traceback
-        traceback.print_exc()
+    main()
