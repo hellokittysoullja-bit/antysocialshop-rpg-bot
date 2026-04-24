@@ -1,4 +1,4 @@
-# bot.py — ANTY SOCIAL SHOP RPG v3.0 (финальный прод-код)
+# bot.py — ANTY SOCIAL SHOP RPG v3.0 (финальный прод-код, исправлен)
 import asyncio, logging, os, random, re, time
 from datetime import datetime, timedelta, date
 from threading import Thread
@@ -50,10 +50,9 @@ RE_STATUS = re.compile(r'^/статус$')
 RE_TOP = re.compile(r'^/топ$')
 RE_DAILY = re.compile(r'^/колесо$')
 RE_PRIVILEGE = re.compile(r'^/привилегия$')
-RE_CLAIM = re.compile(r'^/забрать(?:\s+(.+))?$')
 RE_CATALOG = re.compile(r'^/каталог$')
-RE_RUSH = re.compile(r'^/ускорение$')  # сама команда удалена, но паттерн останется
-RE_GUILD_JOIN = re.compile(r'^/вступить(?:\s+(.+))?$')
+RE_CRAFT = re.compile(r'^/крафт$')  # <-- исправлено
+RE_GUILD = re.compile(r'^/guild$|^/вступить$')  # чтобы работала команда вступления
 
 # Быстрые сообщения без "/" (только в группах)
 RE_SHORTCUTS = re.compile(r'^(фарм|farm|дунуть|smoke|крафт|craft|баланс|balance|колесо|daily|топ|top|статус|status)$', re.IGNORECASE)
@@ -528,7 +527,6 @@ async def collect_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("🕳️ Ты ещё не активирован. /start"); return
     bal = p[0]
     if bal < 5000:
-        # Отправляем на превью
         await msg.reply_text("❌ Доступно с ранга ⚔️ Ветеран (5000 ОАС)", reply_markup=get_back_to_menu_keyboard())
         return
     lvl = 3 if bal >= 20000 else 2   # Призрак / Ветеран
@@ -646,7 +644,6 @@ async def privilege_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not p:
         await msg.reply_text("🕳️ Ты ещё не активирован. /start"); return
     bal, guild = p[0], p[2]
-    # Обновлённые дивизоры (курс ×3)
     if bal >= 20000: rank, div, maxp, target = "👻 Призрак", 30, 0.20, None
     elif bal >= 5000: rank, div, maxp, target = "⚔️ Ветеран", 45, 0.15, 20000
     else: rank, div, maxp, target = "💉 Рекрут", 60, 0.10, 5000
@@ -781,6 +778,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Button error: {e}")
 
+# === ОБРАБОТЧИК ВСТУПЛЕНИЯ ПО КОМАНДЕ ===
+async def guild_join_ru(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if await get_guild(user_id):
+        await update.message.reply_text("❌ Ты уже состоишь в Гильдии.")
+        return
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🕯️ Чёрная", callback_data="guild_join_BLACK"),
+         InlineKeyboardButton("⚜️ Белая", callback_data="guild_join_WHITE")]
+    ])
+    await update.message.reply_text("🕋 Выбери свою Гильдию, Странник:", reply_markup=keyboard)
+
 # === БЫСТРЫЕ СООБЩЕНИЯ БЕЗ СЛЕША (только в группах) ===
 async def handle_chat_shortcut(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip().lower()
@@ -795,30 +804,6 @@ async def handle_chat_shortcut(update: Update, context: ContextTypes.DEFAULT_TYP
     }
     if text in mapping:
         await mapping[text](update, context)
-
-# === ЕЖЕНЕДЕЛЬНЫЙ КРУГ СМОТРИТЕЛЯ ===
-async def weekly_guild_rating(context: ContextTypes.DEFAULT_TYPE):
-    async with aiosqlite.connect("players.db") as db:
-        await db.execute("UPDATE guild_weekly SET total_farmed=0")
-        await db.execute("""
-            UPDATE guild_weekly SET total_farmed = (
-                SELECT COALESCE(SUM(balance),0) FROM players WHERE guild = guild_weekly.guild
-            )
-        """)
-        await db.execute("UPDATE guild_weekly SET week_start=?", (date.today(),))
-        await db.commit()
-        cur = await db.execute("SELECT guild, total_farmed FROM guild_weekly")
-        rows = await cur.fetchall()
-    if len(rows) >= 2:
-        black = next((r[1] for r in rows if r[0]=="BLACK"), 0)
-        white = next((r[1] for r in rows if r[0]=="WHITE"), 0)
-        winner = "BLACK" if black > white else "WHITE"
-        wrd = "ритуалу" if winner=="BLACK" else "сохранению бланта"
-        await context.bot.send_message(
-            chat_id="@guild_antysocial",
-            text=f"🎉 *_КРУГ СОБРАН_*\nТвоя гильдия под благословением: `+5%` к {wrd} на неделю",
-            parse_mode="Markdown"
-        )
 
 # === СЛУЖЕБНЫЕ ЗАДАЧИ ===
 async def update_pulse(context):
@@ -854,6 +839,30 @@ async def cleanup_expired_reservations(context):
         await db.execute("DELETE FROM reservations WHERE expires_at < ?", (datetime.now(),))
         await db.commit()
 
+# === КРУГ СМОТРИТЕЛЯ ===
+async def weekly_guild_rating(context: ContextTypes.DEFAULT_TYPE):
+    async with aiosqlite.connect("players.db") as db:
+        await db.execute("UPDATE guild_weekly SET total_farmed=0")
+        await db.execute("""
+            UPDATE guild_weekly SET total_farmed = (
+                SELECT COALESCE(SUM(balance),0) FROM players WHERE guild = guild_weekly.guild
+            )
+        """)
+        await db.execute("UPDATE guild_weekly SET week_start=?", (date.today(),))
+        await db.commit()
+        cur = await db.execute("SELECT guild, total_farmed FROM guild_weekly")
+        rows = await cur.fetchall()
+    if len(rows) >= 2:
+        black = next((r[1] for r in rows if r[0]=="BLACK"), 0)
+        white = next((r[1] for r in rows if r[0]=="WHITE"), 0)
+        winner = "BLACK" if black > white else "WHITE"
+        wrd = "ритуалу" if winner=="BLACK" else "сохранению бланта"
+        await context.bot.send_message(
+            chat_id="@guild_antysocial",
+            text=f"🎉 *_КРУГ СОБРАН_*\nТвоя гильдия под благословением: `+5%` к {wrd} на неделю",
+            parse_mode="Markdown"
+        )
+
 # === ЗАПУСК ===
 if __name__ == "__main__":
     loop = asyncio.new_event_loop()
@@ -881,9 +890,8 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.Regex(RE_TOP), top_callback))
     app.add_handler(MessageHandler(filters.Regex(RE_DAILY), daily_callback))
     app.add_handler(MessageHandler(filters.Regex(RE_PRIVILEGE), privilege_callback))
-    app.add_handler(MessageHandler(filters.Regex(RE_CLAIM), claim))  # если надо
     app.add_handler(MessageHandler(filters.Regex(RE_CATALOG), catalog_callback))
-    app.add_handler(MessageHandler(filters.Regex(RE_GUILD_JOIN), guild_join_ru))
+    app.add_handler(MessageHandler(filters.Regex(RE_GUILD), guild_join_ru))
 
     # Быстрые сообщения без слеша (только в группах)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(RE_SHORTCUTS), handle_chat_shortcut))
@@ -896,10 +904,8 @@ if __name__ == "__main__":
     job.run_repeating(update_pulse, interval=300, first=10)
     job.run_once(lambda c: job.run_repeating(happy_hour_trigger, interval=random.randint(14400, 28800),
                  first=random.randint(3600, 10800)), when=1)
-    # Очистка резерваций раз в час
     job.run_repeating(cleanup_expired_reservations, interval=3600, first=60)
 
-    # Круг Смотрителя каждую субботу в 12:00
     now = datetime.now()
     days_until_saturday = (5 - now.weekday()) % 7
     next_saturday = (now + timedelta(days=days_until_saturday)).replace(hour=12, minute=0, second=0, microsecond=0)
