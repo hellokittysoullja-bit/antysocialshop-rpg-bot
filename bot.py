@@ -1,6 +1,7 @@
 # bot.py — ANTY SOCIAL SHOP RPG v3.0 FINAL
 # (Тёмная/Светлая гильдии, Час Триумфа, нейро-статусы, обновлённый баланс,
-#  сообщение Ветерана для Куста, все шрифты утверждены и вшиты)
+#  сообщение Ветерана для Куста, все шрифты утверждены и вшиты,
+#  ответы всегда в том же чате, откуда пришёл запрос)
 import asyncio, logging, os, random, re, time
 from datetime import datetime, timedelta, date
 from threading import Thread
@@ -326,7 +327,11 @@ async def send_whisper(context: ContextTypes.DEFAULT_TYPE, chat_id: str, text: s
     context.job_queue.run_once(lambda c: c.bot.delete_message(chat_id, msg.message_id), when=life_seconds)
 
 async def send_whisper_dm(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, life_seconds: int = 15):
-    chat_id = update.effective_chat.id
+    # Всегда отвечаем в тот же чат, откуда пришёл запрос
+    if update.callback_query:
+        chat_id = update.callback_query.message.chat.id
+    else:
+        chat_id = update.effective_chat.id
     msg = await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
     context.job_queue.run_once(lambda c: c.bot.delete_message(chat_id=chat_id, message_id=msg.message_id), when=life_seconds)
 
@@ -390,7 +395,7 @@ async def farm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         last_farm = datetime.fromisoformat(p[3])
         if datetime.now() - last_farm < timedelta(hours=FARM_COOLDOWN_HOURS):
             remain = int((timedelta(hours=FARM_COOLDOWN_HOURS) - (datetime.now() - last_farm)).seconds / 60)
-            await send_whisper_dm(update, context, f"🍬 *OAC копятся* 🌿\n\n**Подожди `{remain}` мин.**", life_seconds=10)
+            await send_whisper_dm(update, context, f"🍬 *OAC копятся* 🌿\n\n**Подожди {remain} мин.**", life_seconds=10)
             return
 
     earned = random.randint(FARM_MIN, FARM_MAX)
@@ -418,11 +423,11 @@ async def farm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if old_bal < 500 <= new_bal:
         await grant_title(uid, "✨", "Искра", context)
 
-    progress = (f"⚔️ **До Ветерана:** `{5000 - new_bal}` OAC" if new_bal < 5000
-                else f"🪦 **До Призрака:** `{20000 - new_bal}` OAC" if new_bal < 20000
+    progress = (f"⚔️ **До Ветерана:** {5000 - new_bal} OAC" if new_bal < 5000
+                else f"🪦 **До Призрака:** {20000 - new_bal} OAC" if new_bal < 20000
                 else "👑 Максимальный ранг")
     text = (f"💎 *Ты нафармил OAC:* **+{earned}** 🍬\n"
-            f"⚜️ *У тебя:* `{new_bal}` 🍬\n\n"
+            f"⚜️ *У тебя:* {new_bal} 🍬\n\n"
             f"{progress}\n"
             f"🕯️ _Гильдия ждёт твоего триумфа._ 🌿")
     await send_whisper_dm(update, context, text, life_seconds=15)
@@ -433,12 +438,12 @@ async def balance_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = user.id
     p = await get_player_cached(uid)
     bal, bl = (p[0], p[1]) if p else (0, 0)
-    progress = (f"⚔️ **До Ветерана:** `{5000 - bal}` OAC" if bal < 5000
-                else f"🪦 **До Призрака:** `{20000 - bal}` OAC" if bal < 20000
+    progress = (f"⚔️ **До Ветерана:** {5000 - bal} OAC" if bal < 5000
+                else f"🪦 **До Призрака:** {20000 - bal} OAC" if bal < 20000
                 else "👑 Максимальный ранг")
     text = (f"⚜️ *Баланс Странника*\n\n"
-            f"🛡️ **ОАС:** {bal} 🍬\n"
-            f"🌿 **Бланты:** {bl}\n\n"
+            f"🛡️ ОАС: {bal} 🍬\n"
+            f"🌿 Бланты: {bl}\n\n"
             f"{progress}")
 
     can_berserk = False
@@ -512,7 +517,7 @@ async def smoke_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await increment_counter(uid, "smoke_count")
 
     new_bal = (await get_player_cached(uid))[0]
-    text = effect + (f"\n💰 Баланс: `{new_bal}` 🍬" if r <= 0.5 else "")
+    text = effect + (f"\n💰 Баланс: {new_bal} 🍬" if r <= 0.5 else "")
     if save: text += "\n⚜️ *Светлая Гильдия сохранила твой Блант!*"
     await send_whisper_dm(update, context, text, life_seconds=15)
 
@@ -539,8 +544,10 @@ async def ritual_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if extra:
         await update_balance(uid, uname, extra)
     new_bal = (await get_player_cached(uid))[0]
-    text = (f"🕯️ *РИТУАЛ ЗАВЕРШЁН*\n«Тьма одарила тебя стабильностью.»\n🍬 `+150` → 💰 {new_bal}"
-            + ("\n🕯️ Ткань шепчет: «Ты избран»." if extra else ""))
+    text = (f"🕯️ *РИТУАЛ ЗАВЕРШЁН*\n"
+            f"Ритуал принёс тебе *150 OAC* 🍬\n"
+            f"⚜️ *У тебя: {new_bal}* 🍬\n\n"
+            f"_«Тьма одарила тебя стабильностью»_ 🌿")
     await send_whisper_dm(update, context, text, life_seconds=15)
     await check_rank_up(context, uid, uname, old_bal, new_bal)
 
@@ -553,7 +560,7 @@ async def collect_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     bal = p[0]
     if bal < 5000:
-        # Сообщение только при вызове команды /collect (обычный текст)
+        # Твой утверждённый текст, обычное сообщение без автоудаления
         await msg.reply_text(
             "🪴 *Выращивать кусты — привилегия Ветерана* 💎\n"
             f"⚔️ *До ранга Ветеран осталось:* {5000 - bal} / 5000 🍬",
@@ -714,7 +721,7 @@ async def privilege_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             f"⚜️ **РАНГ:** {rank_emoji} **{rank_name}**\n"
             f"💎 **OAC:** {bal}\n\n"
             f"🔮 ***До след. уровня силы:***\n"
-            f"{progress_bar} **{percent}%**\n\n"
+            f"{progress_bar} {percent}%\n\n"
             f"{quote}")
     await msg.reply_text(text, parse_mode="Markdown", reply_markup=get_back_to_menu_keyboard())
 
@@ -733,7 +740,7 @@ async def daily_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         last = datetime.fromisoformat(p[5])
         if datetime.now() - last < timedelta(hours=24):
             await send_whisper_dm(update, context,
-                                  f"🎡 **Колесо не готово**\n\n💎 Испытаешь через `{(timedelta(hours=24) - (datetime.now() - last)).seconds // 3600}` ч.",
+                                  f"🎡 **Колесо не готово**\n\n💎 Испытаешь через {(timedelta(hours=24) - (datetime.now() - last)).seconds // 3600} ч.",
                                   life_seconds=10)
             return
     r = random.random()
@@ -962,7 +969,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             g_name = "Тёмная" if guild=="BLACK" else "Светлая"
             uname = q.from_user.username or q.from_user.first_name
             await q.message.edit_text(
-                f"🎉 *_ГИЛЬДИЯ ПРИНЯЛА_*\nТы теперь — {g_emoji} **{g_name} Гильдия** ·\n✅ Ткань стала плотнее...",
+                f"🎉 *_ГИЛЬДИЯ ПРИНЯЛА_*\n"
+                f"Ты теперь — {g_emoji} **{g_name} Гильдия** ·\n\n"
+                f"_✅ Ткань стала плотнее..._",
                 parse_mode="Markdown"
             )
             await context.bot.send_message(
