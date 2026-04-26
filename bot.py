@@ -241,7 +241,8 @@ async def grant_title(user_id, emoji, name, context):
         await context.bot.send_message(chat_id=user_id, text=text, parse_mode='HTML')
     except Exception:
         pass
-        async def get_main_menu_keyboard(user_id):
+async def 
+get_main_menu_keyboard(user_id):
     whisper = random.choice(WHISPERS)
     keyboard = [
         [InlineKeyboardButton("🍬 Фармить", callback_data="farm")],
