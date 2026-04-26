@@ -1170,7 +1170,7 @@ if __name__ == "__main__":
 
     print("BOT READY")
     app.run_polling()
-    loop.close()": "🔵"}.get(rarity, "🟢")
+    loop.close()
             text += f"\n   {color} «{name}»"
     text += f"\n\n🧬 <i>титулы:</i> {titles}"
     text += f"\n🧠 <i>нейро-статус:</i> {neuro}"
