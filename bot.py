@@ -1,5 +1,6 @@
 # bot.py — ANTY SOCIAL SHOP RPG v3.0 FINAL
-# (Тёмная/Светлая гильдии, Час Триумфа, нейро-статусы, обновлённый баланс)
+# (Тёмная/Светлая гильдии, Час Триумфа, нейро-статусы, обновлённый баланс,
+#  сообщение Ветерана для Куста, все шрифты утверждены и вшиты)
 import asyncio, logging, os, random, re, time
 from datetime import datetime, timedelta, date
 from threading import Thread
@@ -325,12 +326,9 @@ async def send_whisper(context: ContextTypes.DEFAULT_TYPE, chat_id: str, text: s
     context.job_queue.run_once(lambda c: c.bot.delete_message(chat_id, msg.message_id), when=life_seconds)
 
 async def send_whisper_dm(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, life_seconds: int = 15):
-    if update.callback_query:
-        user_id = update.callback_query.from_user.id
-    else:
-        user_id = update.effective_user.id
-    msg = await context.bot.send_message(chat_id=user_id, text=text, parse_mode="Markdown")
-    context.job_queue.run_once(lambda c: c.bot.delete_message(chat_id=user_id, message_id=msg.message_id), when=life_seconds)
+    chat_id = update.effective_chat.id
+    msg = await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
+    context.job_queue.run_once(lambda c: c.bot.delete_message(chat_id=chat_id, message_id=msg.message_id), when=life_seconds)
 
 # === ОБРАБОТЧИКИ ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -555,7 +553,12 @@ async def collect_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     bal = p[0]
     if bal < 5000:
-        await send_whisper_dm(update, context, "❌ Доступно с ранга ⚔️ Ветеран (5000 ОАС)", life_seconds=10)
+        # Сообщение только при вызове команды /collect (обычный текст)
+        await msg.reply_text(
+            "🪴 *Выращивать кусты — привилегия Ветерана* 💎\n"
+            f"⚔️ *До ранга Ветеран осталось:* {5000 - bal} / 5000 🍬",
+            parse_mode="Markdown"
+        )
         return
     lvl = 3 if bal >= 20000 else 2
     pc = p[9]
@@ -683,31 +686,24 @@ async def privilege_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await msg.reply_text("🕳️ Ты ещё не активирован. /start")
         return
     bal = p[0]
-    # Определяем ранг
     rank_emoji, rank_name = "🪓", "Рекрут"
     for emoji, threshold, _ in RANKS:
         if bal >= threshold:
             rank_emoji = emoji
             rank_name = emoji_to_name(emoji)
-    # Считаем процент прогресса
     if bal >= 20000:
         percent = 100
         active = 10
-        next_rank = "👑 Максимум"
     elif bal >= 5000:
         next_threshold = 20000
         percent = min(100, int((bal - 5000) / (next_threshold - 5000) * 100))
         active = percent // 10
-        next_rank = f"🪦 Призрак: {next_threshold} OAC"
     else:
         next_threshold = 5000
         percent = min(100, int(bal / next_threshold * 100))
         active = percent // 10
-        next_rank = f"⚔️ Ветеран: {next_threshold} OAC"
-    
     inactive = 10 - active
     progress_bar = "🟪" * active + "⬛️" * inactive
-    # Цитата в зависимости от процента
     if percent < 30:
         quote = "🩸 _Кровь питает Ткань. Павшие дают скидку_"
     elif percent < 70:
