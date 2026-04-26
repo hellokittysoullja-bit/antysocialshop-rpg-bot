@@ -1,6 +1,6 @@
 # bot.py — ANTY SOCIAL SHOP RPG v4.0 FINAL
 import asyncio, logging, os, random, re, json
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, time  # добавлен time
 from threading import Thread
 
 import aiosqlite
@@ -485,7 +485,6 @@ async def handle_named_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = await update.message.reply_text("❌ Имя не может быть пустым. Придумай что-то особенное.")
         context.job_queue.run_once(lambda c: c.bot.delete_message(chat_id=msg.chat.id, message_id=msg.message_id), when=10)
         return
-    # Экранируем HTML-символы правильно (сначала &, потом <, >)
     name = name.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
     async with aiosqlite.connect("players.db") as db:
         cur = await db.execute("SELECT inventory FROM players WHERE user_id=?", (uid,))
@@ -1141,7 +1140,7 @@ if __name__ == "__main__":
     job.run_once(lambda c: job.run_repeating(happy_hour_trigger, interval=random.randint(14400, 28800),
                  first=random.randint(3600, 10800)), when=1)
     job.run_repeating(process_crystals, interval=86400, first=3600)
-    job.run_daily(echo_of_distortion, time=datetime.time(hour=18, minute=0))
+    job.run_daily(echo_of_distortion, time=time(hour=18, minute=0))  # исправлено
     now = datetime.now()
     days_until_saturday = (5 - now.weekday()) % 7
     next_saturday = (now + timedelta(days=days_until_saturday)).replace(hour=12, minute=0, second=0, microsecond=0)
