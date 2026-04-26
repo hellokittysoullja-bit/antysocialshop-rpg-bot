@@ -240,7 +240,8 @@ async def grant_title(user_id, emoji, name, context):
     try:
         await context.bot.send_message(chat_id=user_id, text=text, parse_mode='HTML')
     except Exception:
-        passasync def get_main_menu_keyboard(user_id):
+        pass
+        async def get_main_menu_keyboard(user_id):
     whisper = random.choice(WHISPERS)
     keyboard = [
         [InlineKeyboardButton("🍬 Фармить", callback_data="farm")],
@@ -694,7 +695,8 @@ async def profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text += f"\n\n🧬 <i>титулы:</i> {titles}"
     text += f"\n🧠 <i>нейро-статус:</i> {neuro}"
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("📋 В меню", callback_data="menu")]])
-    await msg.reply_text(text, parse_mode='HTML', reply_markup=kb)async def top_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await msg.reply_text(text, parse_mode='HTML', reply_markup=kb)
+    async def top_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user, msg = get_user_and_msg(update)
     uid = user.id
     top = await get_top(10)
@@ -1101,7 +1103,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await q.answer("Неизвестная команда.")
     except Exception as e:
-        logger.error(f"Button error: {e}")if __name__ == "__main__":
+        logger.error(f"Button error: {e}")
+        if __name__ == "__main__":
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(init_db())
