@@ -1,7 +1,4 @@
-# bot.py — ANTY SOCIAL SHOP RPG v3.0 FINAL
-# (Тёмная/Светлая гильдии, Час Триумфа, нейро-статусы, обновлённый баланс,
-#  сообщение Ветерана для Куста, все шрифты утверждены и вшиты,
-#  ответы всегда в том же чате, откуда пришёл запрос)
+# bot.py — ANTY SOCIAL SHOP RPG v3.0 FINAL (Markdown, все баги исправлены)
 import asyncio, logging, os, random, re, time
 from datetime import datetime, timedelta, date
 from threading import Thread
@@ -43,6 +40,14 @@ player_cache = TTLCache(maxsize=500, ttl=30)
 
 def invalidate_cache(user_id):
     player_cache.pop(user_id, None)
+
+# === ЭКРАНИРОВАНИЕ ДЛЯ MARKDOWN ===
+def escape_md(text: str) -> str:
+    """Экранирует спецсимволы Markdown, чтобы Telegram не ломал разметку."""
+    if not text:
+        return "странник"
+    escape_chars = r'_*[]()~`>#+-=|{}.!'
+    return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
 
 # === КОМПИЛИРОВАННЫЕ РЕГУЛЯРКИ ===
 RE_RITUAL = re.compile(r'^/ритуал$')
@@ -227,7 +232,11 @@ async def check_rank_up(context, user_id, username, old_balance, new_balance):
         if old_balance < threshold <= new_balance:
             if bonus:
                 await update_balance(user_id, username, bonus)
-            text = f"🎉 *_РАНГ ПОВЫШЕН!_*\n@{username} теперь — {emoji} **{emoji_to_name(emoji)}**\n`+{bonus}` 🍬 закапало на баланс"
+            text = (
+                "🎉 *_РАНГ ПОВЫШЕН!_*\n"
+                f"@{escape_md(username)} теперь — {emoji} **{emoji_to_name(emoji)}**\n"
+                f"`+{bonus}` 🍬 закапало на баланс"
+            )
             await context.bot.send_message(chat_id="@guild_antysocial", text=text, parse_mode="Markdown")
 
 def emoji_to_name(emoji):
@@ -327,7 +336,6 @@ async def send_whisper(context: ContextTypes.DEFAULT_TYPE, chat_id: str, text: s
     context.job_queue.run_once(lambda c: c.bot.delete_message(chat_id, msg.message_id), when=life_seconds)
 
 async def send_whisper_dm(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, life_seconds: int = 15):
-    # Всегда отвечаем в тот же чат, откуда пришёл запрос
     if update.callback_query:
         chat_id = update.callback_query.message.chat.id
     else:
@@ -338,7 +346,7 @@ async def send_whisper_dm(update: Update, context: ContextTypes.DEFAULT_TYPE, te
 # === ОБРАБОТЧИКИ ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    username = update.effective_user.username or update.effective_user.first_name
+    username = escape_md(update.effective_user.username or update.effective_user.first_name)
     player = await get_player_cached(user_id)
 
     if context.args and context.args[0] == "activate":
@@ -389,7 +397,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def farm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user, msg = get_user_and_msg(update)
-    uid = user.id; uname = user.username or user.first_name
+    uid = user.id; uname = escape_md(user.username or user.first_name)
     p = await get_player_cached(uid)
     if p and p[3]:
         last_farm = datetime.fromisoformat(p[3])
@@ -464,7 +472,7 @@ async def balance_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def craft_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user, msg = get_user_and_msg(update)
-    uid = user.id; uname = user.username or user.first_name
+    uid = user.id; uname = escape_md(user.username or user.first_name)
     p = await get_player_cached(uid)
     bal = p[0] if p else 0
     if bal < 15:
@@ -485,7 +493,7 @@ async def craft_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def smoke_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user, msg = get_user_and_msg(update)
-    uid = user.id; uname = user.username or user.first_name
+    uid = user.id; uname = escape_md(user.username or user.first_name)
     p = await get_player_cached(uid)
     if not p or p[1] < 1:
         await send_whisper_dm(update, context, "🌿 У тебя нет Блантов. /craft", life_seconds=10)
@@ -523,7 +531,7 @@ async def smoke_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def ritual_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user, msg = get_user_and_msg(update)
-    uid = user.id; uname = user.username or user.first_name
+    uid = user.id; uname = escape_md(user.username or user.first_name)
     p = await get_player_cached(uid)
     if not p:
         await send_whisper_dm(update, context, "🕳️ Ты ещё не активирован. /start", life_seconds=10)
@@ -553,14 +561,13 @@ async def ritual_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def collect_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user, msg = get_user_and_msg(update)
-    uid = user.id; uname = user.username or user.first_name
+    uid = user.id; uname = escape_md(user.username or user.first_name)
     p = await get_player_cached(uid)
     if not p:
         await send_whisper_dm(update, context, "🕳️ Ты ещё не активирован. /start", life_seconds=10)
         return
     bal = p[0]
     if bal < 5000:
-        # Твой утверждённый текст, обычное сообщение без автоудаления
         await msg.reply_text(
             "🪴 *Выращивать кусты — привилегия Ветерана* 💎\n"
             f"⚔️ *До ранга Ветеран осталось:* {5000 - bal} / 5000 🍬",
@@ -594,7 +601,7 @@ async def collect_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def status_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user, msg = get_user_and_msg(update)
-    uid = user.id; uname = user.username or user.first_name
+    uid = user.id; uname = escape_md(user.username or user.first_name)
     p = await get_player_cached(uid)
     if not p:
         await msg.reply_text("Сначала активируйся: /start")
@@ -618,12 +625,12 @@ async def status_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Предел синаптической проводимости"
     ])
     text = (f"👤 *{uname}*{g_emoji}\n"
-            f"⚜️ : {rank_emoji} **{rank_name}**\n"
+            f"⚜️ **Ранг:** {rank_emoji} **{rank_name}**\n"
             f"💰 *ОАС:* {bal} 🍬\n"
             f"🌿 *Бланты:* {bl}\n"
             f"🪴 *Куст:* +{30 * (3 if bal >= 20000 else 2 if bal >= 5000 else 0)} 🍬 / час | /collect чтобы собрать\n"
             f"🧬 *Титулы:* {titles}\n"
-            f"🧠 *Нейро-статус:* _{neuro}_")
+            f"🧠 _Нейро-статус: {neuro}_")
     await msg.reply_text(text, parse_mode="Markdown", reply_markup=get_back_to_menu_keyboard())
 
 async def top_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -637,7 +644,7 @@ async def top_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for i, (name, bal, guild) in enumerate(top, 1):
         medal = "🥇" if i==1 else "🥈" if i==2 else "🥉" if i==3 else f"{i}."
         g = "🕯️" if guild=="BLACK" else "⚜️" if guild=="WHITE" else ""
-        text += f"{medal} {name} {g} — {bal} 🍬\n"
+        text += f"{medal} {escape_md(name)} {g} — {bal} 🍬\n"
     async with aiosqlite.connect("players.db") as db:
         async with db.execute("SELECT COUNT(*) FROM players WHERE balance > (SELECT balance FROM players WHERE user_id=?)", (uid,)) as cur:
             pos = (await cur.fetchone())[0] + 1
@@ -731,7 +738,7 @@ async def catalog_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def daily_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user, msg = get_user_and_msg(update)
-    uid = user.id; uname = user.username or user.first_name
+    uid = user.id; uname = escape_md(user.username or user.first_name)
     p = await get_player_cached(uid)
     if not p:
         await send_whisper_dm(update, context, "🕳️ Ты ещё не активирован. /start", life_seconds=10)
@@ -774,14 +781,14 @@ async def welcome_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if member.is_bot:
             continue
         await update.message.reply_text(
-            f"🕯️ @{member.username or member.first_name}, добро пожаловать в Гильдию. Твой первый /farm уже ждёт."
+            f"🕯️ @{escape_md(member.username or member.first_name)}, добро пожаловать в Гильдию. Твой первый /farm уже ждёт."
         )
 
 async def berserk_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     uid = query.from_user.id
-    uname = query.from_user.username or query.from_user.first_name
+    uname = escape_md(query.from_user.username or query.from_user.first_name)
     p = await get_player_cached(uid)
     if not p or p[0] < 300:
         await query.answer("❌ Недостаточно ОАС", show_alert=True)
@@ -834,9 +841,10 @@ async def crystal_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             (target_user_id, target_username, description, amount_rub, daily_oas, datetime.now())
         )
         await db.commit()
+    safe_desc = escape_md(description)
     await context.bot.send_message(chat_id=target_user_id, text=(
         f"💎 *КРИСТАЛЛ АКТИВИРОВАН*\n\n"
-        f"Заказ «{description}» на {amount_rub} ₽\n"
+        f"Заказ «{safe_desc}» на {amount_rub} ₽\n"
         f"Каждый день ты будешь получать `+{daily_oas}` ОАС, пока товар в пути.\n\n"
         f"🕯️ _Если отменишь заказ, Кристалл разобьётся, и все накопленные ОАС сгорят._"
     ), parse_mode="Markdown")
@@ -859,9 +867,10 @@ async def crystal_complete(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await db.execute("UPDATE crystals SET completed=1 WHERE id=?", (crystal_id,))
         await db.commit()
     await grant_title(target_user.id, "💎", "Кристальный", context)
+    safe_desc = escape_md(desc)
     await context.bot.send_message(chat_id=target_user.id, text=(
         f"💎 *КРИСТАЛЛ РАСКРЫЛСЯ*\n"
-        f"Заказ «{desc}» получен.\n"
+        f"Заказ «{safe_desc}» получен.\n"
         f"Ты сохранил `{earned}` ОАС.\n"
         f"🧬 Титул: **Кристальный**"
     ), parse_mode="Markdown")
@@ -884,9 +893,10 @@ async def crystal_void(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await db.execute("UPDATE players SET balance=MAX(0, balance-?) WHERE user_id=?", (earned, target_user.id))
         await db.execute("UPDATE crystals SET cancelled=1 WHERE id=?", (crystal_id,))
         await db.commit()
+    safe_desc = escape_md(desc)
     await context.bot.send_message(chat_id=target_user.id, text=(
         f"💎 *КРИСТАЛЛ РАЗБИТ*\n"
-        f"Заказ «{desc}» отменён.\n"
+        f"Заказ «{safe_desc}» отменён.\n"
         f"`{earned}` ОАС сгорело."
     ), parse_mode="Markdown")
     await update.message.reply_text("💔 Кристалл отменён.")
@@ -967,7 +977,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await set_guild(uid, guild)
             g_emoji = "🕯️" if guild=="BLACK" else "⚜️"
             g_name = "Тёмная" if guild=="BLACK" else "Светлая"
-            uname = q.from_user.username or q.from_user.first_name
+            uname = escape_md(q.from_user.username or q.from_user.first_name)
             await q.message.edit_text(
                 f"🎉 *_ГИЛЬДИЯ ПРИНЯЛА_*\n"
                 f"Ты теперь — {g_emoji} **{g_name} Гильдия** ·\n\n"
