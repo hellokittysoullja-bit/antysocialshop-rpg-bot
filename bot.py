@@ -241,6 +241,7 @@ async def grant_title(user_id, emoji, name, context):
         await context.bot.send_message(chat_id=user_id, text=text, parse_mode='HTML')
     except Exception:
         pass
+
 async def get_main_menu_keyboard(user_id):
     whisper = random.choice(WHISPERS)
     keyboard = [
@@ -484,6 +485,7 @@ async def handle_named_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = await update.message.reply_text("❌ Имя не может быть пустым. Придумай что-то особенное.")
         context.job_queue.run_once(lambda c: c.bot.delete_message(chat_id=msg.chat.id, message_id=msg.message_id), when=10)
         return
+    # Экранируем HTML-символы правильно (сначала &, потом <, >)
     name = name.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
     async with aiosqlite.connect("players.db") as db:
         cur = await db.execute("SELECT inventory FROM players WHERE user_id=?", (uid,))
@@ -696,7 +698,8 @@ async def profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text += f"\n🧠 <i>нейро-статус:</i> {neuro}"
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("📋 В меню", callback_data="menu")]])
     await msg.reply_text(text, parse_mode='HTML', reply_markup=kb)
-    async def top_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+async def top_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user, msg = get_user_and_msg(update)
     uid = user.id
     top = await get_top(10)
@@ -1104,7 +1107,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer("Неизвестная команда.")
     except Exception as e:
         logger.error(f"Button error: {e}")
-        if __name__ == "__main__":
+        await q.answer("Что-то пошло не так. Попробуй ещё раз.", show_alert=True)
+
+if __name__ == "__main__":
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(init_db())
