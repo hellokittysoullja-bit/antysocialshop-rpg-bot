@@ -705,7 +705,14 @@ async def profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for item in named:
             name = item["name"]
             rarity = item.get("rarity", "common")
-            color = {"legendary": "🟡", "epic": "🟣", "rareasync def top_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+            color = {"legendary": "🟡", "epic": "🟣", "rare": "🔵"}.get(rarity, "🟢")
+            text += f"\n   {color} «{name}»"
+    text += f"\n\n🧬 <i>титулы:</i> {titles}"
+    text += f"\n🧠 <i>нейро-статус:</i> {neuro}"
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("📋 В меню", callback_data="menu")]])
+    await msg.reply_text(text, parse_mode='HTML', reply_markup=kb)
+    
+async def top_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user, msg = get_user_and_msg(update)
     uid = user.id
     top = await get_top(10)
@@ -722,7 +729,6 @@ async def profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pos = (await cur.fetchone())[0] + 1
     text += f"\n📊 <i>Твоя позиция:</i> {pos}"
     await msg.reply_text(text, parse_mode='HTML', reply_markup=get_back_to_menu_keyboard())
-
 async def guild_info_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user, msg = get_user_and_msg(update)
     uid = user.id
