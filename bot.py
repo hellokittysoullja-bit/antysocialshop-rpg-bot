@@ -1,4 +1,4 @@
-# bot.py — ANTY SOCIAL SHOP RPG v5.0 FINAL (исправлены критические ошибки)
+# bot.py — ANTY SOCIAL SHOP RPG v5.0 FINAL (all style + logic fixes)
 import asyncio, logging, os, random, re, json, hashlib
 from datetime import datetime, timedelta, date, time
 from threading import Thread
@@ -53,11 +53,11 @@ RE_SHORTCUTS = re.compile(r'^(фарм|farm|дунуть|smoke|крафт|craft|
 
 # === СПИСКИ ===
 WHISPERS = [
-    "🩸 Искажение наблюдает за твоими нитями...",
-    "💠 Кристалл твоей судьбы пульсирует.",
-    "🕯️ Смотритель помнит всех.",
-    "🩸 Искажение шепчет твоё имя.",
-    "🌀 Нити реальности натянуты до предела."
+    "🩸 Искажение наблюдает за твоими нитями",
+    "💠 Кристалл твоей судьбы пульсирует",
+    "🕯️ Смотритель помнит всех",
+    "🩸 Искажение шепчет твоё имя",
+    "🌀 Нити реальности натянуты до предела"
 ]
 
 NEURO_STATUSES = [
@@ -350,14 +350,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = user.username or user.first_name
     player = await get_player_cached(user_id)
 
-    # Обработка реферальной ссылки
     if context.args and context.args[0].startswith("blunt_"):
         ref_blunt_id = context.args[0].replace("blunt_", "")
         creator_id = None
 
-        # Только для новых игроков – ищем создателя бланта
         if not player:
-            # Точный поиск владельца по id бланта
             async with aiosqlite.connect("players.db") as db:
                 async with db.execute("SELECT user_id, inventory FROM players") as cur:
                     async for uid, inv_json in cur:
@@ -373,7 +370,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             break
 
             if creator_id:
-                # Проверка, не был ли уже приглашён (invited_by уже установлен)
                 async with aiosqlite.connect("players.db") as db:
                     cur = await db.execute("SELECT invited_by FROM players WHERE user_id=?", (user_id,))
                     row = await cur.fetchone()
@@ -382,9 +378,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     async with aiosqlite.connect("players.db") as db:
                         await db.execute("UPDATE players SET invited_by=? WHERE user_id=?", (creator_id, user_id))
                         await db.commit()
-                    # Награда создателю
                     await update_balance(creator_id, username, 50)
-                    # Легендарный блант создателю
                     new_name = random.choice(["Крик Бездны", "Пепел Короля", "Шёпот Склепа", "Коготь Хаоса", "Вздох Пожирателя"])
                     async with aiosqlite.connect("players.db") as db:
                         cur = await db.execute("SELECT inventory FROM players WHERE user_id=?", (creator_id,))
@@ -411,12 +405,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         parse_mode='HTML'
                     )
 
-        # Активируем новичка
         if not player:
             await update_balance(user_id, username, 0)
             await update_blunts(user_id, username, 0)
             await update_balance(user_id, username, 800)
-            # Бесплатный первый именной блант
             new_name = random.choice(["Крик Бездны", "Пепел Короля", "Шёпот Склепа"])
             async with aiosqlite.connect("players.db") as db:
                 cur = await db.execute("SELECT inventory FROM players WHERE user_id=?", (user_id,))
@@ -449,7 +441,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text(bonus + welcome, reply_markup=guild_kb, parse_mode='HTML')
             return
 
-    # Стандартный старт (не реферальный)
     if not player:
         await update_balance(user_id, username, 0)
         await update_blunts(user_id, username, 0)
@@ -469,7 +460,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif guild == "WHITE": back += "⚜️ Ты состоишь в <i>Светлой Гильдии</i>.\n"
     else: back += "Ты пока не в Гильдии. Нажми /guild чтобы вступить.\n"
     kb, whisper = await get_main_menu_keyboard(user_id)
-    text = f"<b><i>🎮 ГЛАВНОЕ МЕНЮ</i></b>\n{whisper}\n\n" + back
+    text = f"<b>🎮 ГЛАВНОЕ МЕНЮ</b>\n\n<i>{whisper}</i>\n\n" + back
     await msg.reply_text(text, reply_markup=kb, parse_mode='HTML')
 
 async def farm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -577,7 +568,6 @@ async def handle_craft_named(update: Update, context: ContextTypes.DEFAULT_TYPE)
             life_seconds=20)
         return
     context.user_data['awaiting_named_blunt'] = True
-    # Автосброс через 5 минут
     context.job_queue.run_once(lambda c: context.user_data.update({'awaiting_named_blunt': False}), 300)
     text = (
         "<b><i>💍 ИМЕННОЙ БЛАНТ</i></b>\n\n"
@@ -598,9 +588,8 @@ async def handle_named_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.job_queue.run_once(lambda c: c.bot.delete_message(chat_id=msg.chat.id, message_id=msg.message_id), when=10)
         return
     name = name.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-    context.user_data['awaiting_named_blunt'] = False  # сбрасываем флаг
+    context.user_data['awaiting_named_blunt'] = False
 
-    # Генерация уникального id
     blunt_id = f"blunt_{uid}_{int(datetime.now().timestamp()*1000)}_{random.randint(1000,9999)}"
 
     async with aiosqlite.connect("players.db") as db:
@@ -612,7 +601,6 @@ async def handle_named_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif rare < 0.1: rarity = "epic"; color = "🟣"; prefix = "E"
         elif rare < 0.35: rarity = "rare"; color = "🔵"; prefix = "R"
         else: rarity = "common"; color = "🟢"; prefix = "C"
-        # NFT-реестр
         cur = await db.execute("INSERT INTO nft_registry (blunt_id, created_by, rarity, created_at) VALUES (?, ?, ?, ?)",
                                (blunt_id, uid, rarity, datetime.now()))
         await db.commit()
@@ -620,7 +608,6 @@ async def handle_named_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
         hash_input = f"{name}{serial}{datetime.now().timestamp()}"
         hash_hex = hashlib.sha256(hash_input.encode()).hexdigest()[:12].upper()
         short_hash = f"0x{hash_hex[:6]}...{hash_hex[-4:]}"
-        # Локальный номер редкости
         cur = await db.execute("SELECT COUNT(*) FROM nft_registry WHERE rarity=?", (rarity,))
         rare_count = (await cur.fetchone())[0]
         rare_number = f"{prefix}-{rare_count:04d}"
@@ -635,7 +622,6 @@ async def handle_named_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "rare_number": rare_number,
             "hash": short_hash,
             "reaction": reaction,
-            "genesis": serial <= 50,
             "owner_history": [{"user_id": uid, "since": datetime.now().isoformat()}]
         }
         inv.append(new_blunt)
@@ -655,7 +641,6 @@ async def handle_named_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📋 В меню", callback_data="menu")]
     ])
     await update.message.reply_text(text, reply_markup=kb, parse_mode='HTML')
-    # Эхо в канал
     await context.bot.send_message(
         chat_id="@guild_antysocial",
         text=(
@@ -857,10 +842,10 @@ async def profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         f"<b>⚜️ ПРОФИЛЬ</b>\n\n"
         f"👤 <b>{uname}</b>{g_emoji}\n\n"
-        f"<b>Ранг:</b> {rank_emoji} <b>{rank_name}</b>\n"
-        f"<b>ОАС:</b> <b>{bal} OAC</b> 🍬\n"
-        f"<b>Блантов в свёртке:</b> <b>{bl}</b>\n"
-        f"<b>Куст:</b> <b>+{30 * (3 if bal >= 20000 else 2 if bal >= 5000 else 0)} OAC/ч</b>\n"
+        f"⚜️ <b>Ранг:</b> <i>{rank_name}</i>\n"
+        f"🛡️ <b>ОАС:</b> <i>{bal} OAC</i> 🍬\n"
+        f"🌿 <b>Блантов в свёртке:</b> <i>{bl}</i>\n"
+        f"🪴 <b>Куст:</b> <i>+{30 * (3 if bal >= 20000 else 2 if bal >= 5000 else 0)} OAC/ч</i>\n"
     )
     inv = json.loads(p[19]) if len(p) > 19 and p[19] else []
     named = [item for item in inv if item.get("type") == "named"]
@@ -871,12 +856,11 @@ async def profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             name = item["name"]
             rarity = item.get("rarity", "common")
             color = {"legendary": "🟡", "epic": "🟣", "rare": "🔵"}.get(rarity, "🟢")
-            genesis_mark = " 🌟" if item.get("genesis") else ""
             rare_number = item.get("rare_number", "?-????")
             hash_code = item.get("hash", "0x????...????")
             text += (
-                f"\n   {color} <b><i>«{name}»</i></b>{genesis_mark}\n"
-                f"   🩸 Серийный номер: <b>#{rare_number}</b> · <code>{hash_code}</code>\n"
+                f"\n   {color} <b>{name}</b>\n"
+                f"   🩸 <b><i>Серийный номер:</i></b> <b><i>#{rare_number}</i></b> · <code>{hash_code}</code>\n"
             )
             detail_buttons.append([InlineKeyboardButton(f"🩸 Детали #{rare_number}", callback_data=f"blunt_details_{item['id']}")])
         final_rows = detail_buttons + [[InlineKeyboardButton("📋 В меню", callback_data="menu")]]
@@ -884,7 +868,7 @@ async def profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         final_kb = InlineKeyboardMarkup([[InlineKeyboardButton("📋 В меню", callback_data="menu")]])
     text += f"\n\n<b>🧬 Титулы:</b> {titles}"
-    text += f"\n<b>🧠 Нейро-статус:</b> {neuro}"
+    text += f"\n<b>🧠 Нейро-статус:</b> <i>{neuro}</i>"
     await msg.reply_text(text, parse_mode='HTML', reply_markup=final_kb)
 
 async def check_blunt(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -914,21 +898,18 @@ async def check_blunt(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
     name = item["name"]; rarity = item.get("rarity", "common")
     color = {"legendary": "🟡", "epic": "🟣", "rare": "🔵"}.get(rarity, "🟢")
-    reaction = item.get("reaction", ""); genesis = "🌟 GENESIS" if item.get("genesis") else ""
+    reaction = item.get("reaction", "")
     rare_number = item.get("rare_number", "?-????"); hash_code = item.get("hash", "0x????...????")
     details = (
-        f"<b><i>🩸 ПРОВЕРКА ПОДЛИННОСТИ</i></b>\n\n"
-        f"<b>Код:</b> {nft_id}\n"
-        f"<b>Серийный №:</b> {serial}\n"
-        f"<b>Редкостный номер:</b> #{rare_number}\n"
-        f"<b>Владелец:</b> @{owner_id}\n"
-        f"<b>Редкость:</b> {rarity} {color}\n"
-        f"<b>Имя:</b> <b><i>«{name}»</i></b> {genesis}\n"
-        f"<b>Хеш:</b> <code>{hash_code}</code>\n"
-        f"<b>Реакция:</b> <i>{reaction}</i>\n"
+        f"<b>ДЕТАЛИ NFT БЛАНТА 💎</b>\n\n"
+        f"{color} <b>{name}</b>\n\n"
+        f"<b>Редкость:</b> <i>{rarity}</i> {color}\n\n"
+        f"🩸 <b>Серийный номер:</b> <b>#{rare_number}</b>\n"
+        f"🔗 <b>Хеш:</b> <b>{hash_code}</b>\n"
+        f"📜 <b>Реакция:</b> <i>{reaction}</i>\n"
     )
     if "owner_history" in item:
-        details += "<b>История:</b>\n"
+        details += "\n🔄 История владения:\n"
         for entry in item["owner_history"]:
             details += f"   @{entry.get('user_id', '?')} с {entry.get('since', '?')}\n"
     await update.message.reply_text(details, parse_mode='HTML')
@@ -955,10 +936,10 @@ async def guild_info_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     counts = await count_guilds()
     guild = await get_guild(uid)
     text = (f"<b>🕋 ГИЛЬДИИ</b>\n\n"
-            f"🕯️ Тёмная: <code>{counts['BLACK']}</code> странников\n"
-            f"⚜️ Светлая: <code>{counts['WHITE']}</code> странников\n\n"
-            f"🕯️ Ритуал: <code>+150</code> 🍬 раз в 24 ч.\n"
-            f"⚜️ Удача: <code>20%</code> сохранить Блант при 💨.")
+            f"🕯️ <b>Тёмная</b>: <code>{counts['BLACK']}</code> странников\n"
+            f"⚜️ <b>Светлая</b>: <code>{counts['WHITE']}</code> странников\n\n"
+            f"🕯️ <b>Ритуал</b>: <code>+150</code> 🍬 раз в 24 ч.\n"
+            f"⚜️ <b>Удача</b>: <code>20%</code> сохранить Блант при 💨.")
     if guild:
         g_emoji = "🕯️" if guild == "BLACK" else "⚜️"
         g_name = "Тёмная" if guild == "BLACK" else "Светлая"
@@ -983,14 +964,12 @@ async def rules_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "💨 <code>/smoke</code> — дунуть блант\n"
         "🎲 <code>/luck</code> — раздел Удачи\n\n"
         "<b>💍 Именные бланты</b>\n"
-        "💎 Создай свой <b><i>вечный именной</i></b> блант через меню «Крафт». "
-        "Он не курится, получает редкость и навсегда остаётся в твоей коллекции. "
-        "Показать свой блант в чат — через Профиль.\n\n"
+        "💎 ▸ Создай свой <b>вечный именной Блант</b> через меню «<b>Крафт</b>». Он не курится, получает редкость и <b>навсегда</b> остаётся в твоей коллекции. Показать свой блант в чат — через «<b>Профиль</b>».\n\n"
         "<b>🕋 Гильдии и развитие</b>\n"
-        "🕯️ Тёмная: <code>/ritual</code> (+150 OAC раз в 24 ч)\n"
-        "⚜️ Светлая: 20% шанс сохранить блант при 💨\n"
-        "🪴 Куст: пассивный доход с ранга ⚔️ Ветеран\n"
-        "🐾 Питомец: доступен с ранга ⚔️ Ветеран\n\n"
+        "🕯️ <b>Тёмная</b>: <code>/ritual</code> (+150 OAC раз в 24 ч)\n"
+        "⚜️ <b>Светлая</b>: 20% шанс сохранить блант при 💨\n"
+        "🪴 <b>Куст</b>: пассивный доход с ранга ⚔️ <b>Ветеран</b>\n"
+        "🐾 <b>Питомец</b>: доступен с ранга ⚔️ <b>Ветеран</b>\n\n"
         "<b>ℹ️ Информация</b>\n"
         "⚜️ <code>/profile</code> — твой профиль и коллекция\n"
         "🏆 <code>/top</code> — список сильнейших\n\n"
@@ -1088,7 +1067,6 @@ async def luck_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, acti
             await grant_title(uid, "🧛🏻‍♀️", "Призрачный Гончий", context)
             await context.bot.send_message(chat_id="@guild_antysocial",
                                            text=f"🌟 @{uname} сорвал Джекпот! {txt}", parse_mode='HTML')
-        # Применяем happy_hour для обычного выигрыша
         if context.bot_data.get("happy_hour") and isinstance(prize, int) and prize <= 150:
             prize *= HAPPY_HOUR_MULTIPLIER
             txt = f"+{prize} OAC 🍬"
@@ -1173,7 +1151,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         if data == "menu":
             await q.answer(); kb, whisper = await get_main_menu_keyboard(uid)
-            text = f"<b><i>🎮 ГЛАВНОЕ МЕНЮ</i></b>\n{whisper}"
+            text = f"<b>🎮 ГЛАВНОЕ МЕНЮ</b>\n\n<i>{whisper}</i>"
             await q.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
         elif data == "farm": await q.answer(); await farm_callback(update, context)
         elif data == "craft": await q.answer(); await craft_callback(update, context)
@@ -1218,22 +1196,20 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not item: await q.answer("Блант не найден."); return
             name = item["name"]; rarity = item.get("rarity", "common")
             color = {"legendary": "🟡", "epic": "🟣", "rare": "🔵"}.get(rarity, "🟢")
-            serial = item.get("serial", "?"); nft_id = item.get("nft_id", "VOID-????-????-????")
-            genesis = "🌟 GENESIS" if item.get("genesis") else ""
             reaction = item.get("reaction", ""); rare_number = item.get("rare_number", "?-????")
             hash_code = item.get("hash", "0x????...????")
             details = (
-                f"<b><i>🩸 ДЕТАЛИ БЛАНТА</i></b>\n\n"
-                f"<b>#{serial}</b> {color} <b><i>«{name}»</i></b> {genesis}\n"
-                f"<b>Код:</b> {nft_id}\n"
-                f"<b>Редкостный номер:</b> #{rare_number}\n"
-                f"<b>Хеш:</b> <code>{hash_code}</code>\n"
-                f"<b>Редкость:</b> {rarity}\n"
-                f"<b>Реакция:</b> <i>{reaction}</i>\n\n"
-                f"<b>История владения:</b>\n"
+                f"<b>ДЕТАЛИ NFT БЛАНТА 💎</b>\n\n"
+                f"{color} <b>{name}</b>\n\n"
+                f"<b>Редкость:</b> <i>{rarity}</i> {color}\n\n"
+                f"🩸 <b>Серийный номер:</b> <b>#{rare_number}</b>\n"
+                f"🔗 <b>Хеш:</b> <b>{hash_code}</b>\n"
+                f"📜 <b>Реакция:</b> <i>{reaction}</i>\n"
             )
-            for entry in item.get("owner_history", []):
-                details += f"   @{entry.get('user_id', '?')} с {entry.get('since', '?')}\n"
+            if "owner_history" in item:
+                details += "\n🔄 История владения:\n"
+                for entry in item["owner_history"]:
+                    details += f"   @{entry.get('user_id', '?')} с {entry.get('since', '?')}\n"
             await send_whisper_dm(update, context, details, life_seconds=20)
         elif data == "pet_preview": await q.answer(); await send_whisper_dm(update, context, "<b><i>🐾 ПИТОМЕЦ</i></b>\n\n⚔️ Доступен с ранга Ветеран (5000 OAC).", life_seconds=10)
         elif data == "bush_preview": await q.answer(); await send_whisper_dm(update, context, "<b><i>🪴 КУСТ</i></b>\n\n⚔️ Доступен с ранга Ветеран (5000 OAC).", life_seconds=10)
