@@ -1746,22 +1746,22 @@ if __name__ == "__main__":
     Thread(target=run_web_server, daemon=True).start()
     app = Application.builder().token(TOKEN).build()
     for cmd, cbk in [
-        ("start", start), ("старт", start),
-        ("farm", farm_callback), ("фарм", farm_callback),
-        ("craft", craft_callback), ("крафт", craft_callback),
-        ("smoke", smoke_callback), ("дунуть", smoke_callback),
-        ("ritual", ritual_callback), ("ритуал", ritual_callback),
-        ("profile", profile_callback), ("профиль", profile_callback),
-        ("top", top_callback), ("топ", top_callback),
-        ("rules", rules_callback), ("правила", rules_callback),
-        ("privilege", privilege_callback), ("привилегия", privilege_callback),
-        ("catalog", catalog_callback), ("каталог", catalog_callback),
-        ("luck", luck_callback), ("удача", luck_callback),
-        ("collect", collect_callback), ("сбор", collect_callback),
-        ("check", check_blunt), ("проверка", check_blunt),
-        ("guild", guild_join_ru), ("гильдия", guild_join_ru),
-        ("repent", confess_callback), ("исповедь", confess_callback)
-    ]:
+    ("start", start),
+    ("farm", farm_callback),
+    ("craft", craft_callback),
+    ("smoke", smoke_callback),
+    ("ritual", ritual_callback),
+    ("profile", profile_callback),
+    ("top", top_callback),
+    ("rules", rules_callback),
+    ("privilege", privilege_callback),
+    ("catalog", catalog_callback),
+    ("luck", luck_callback),
+    ("collect", collect_callback),
+    ("check", check_blunt),
+    ("guild", guild_join_ru),
+    ("repent", confess_callback)
+]:
         app.add_handler(CommandHandler(cmd, cbk))
     app.add_handler(MessageHandler(filters.Regex(RE_FARM), farm_callback))
     app.add_handler(MessageHandler(filters.Regex(RE_CRAFT), craft_callback))
