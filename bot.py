@@ -1886,9 +1886,7 @@ async def keep_db_alive(context):
 if __name__ == "__main__":
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    
-loop.run_until_complete(init_db_pool())   
-# ← используем Neon, а не SQLite
+    loop.run_until_complete(init_db_pool())
     Thread(target=run_web_server, daemon=True).start()
     app = Application.builder().token(TOKEN).build()
 
