@@ -1,4 +1,4 @@
-# bot.py — ANTY SOCIAL SHOP RPG v7.5.1 FINAL FIXED
+# bot.py — ANTY SOCIAL SHOP RPG v7.5.1 FINAL (Luck fix)
 import asyncio, logging, os, random, re, json, hashlib, html
 from datetime import datetime, timedelta, date, time
 from threading import Thread
@@ -455,7 +455,6 @@ async def create_named_blunt(uid, name, rarity=None, conn=None):
         return await _create_named_blunt_inner(uid, name, rarity, conn)
 
 async def _create_named_blunt_inner(uid, name, rarity, conn):
-    blunt_id = f"blunt_{uid}_{int(datetime.now().timestamp()*1000)}_{random.randint(1000,9999)}"
     await conn.execute("""
         INSERT INTO players(user_id, username, balance, blunts)
         VALUES($1, '', 0, 0)
@@ -473,7 +472,6 @@ async def _create_named_blunt_inner(uid, name, rarity, conn):
     prefix_map = {"legendary":"L","epic":"E","rare":"R","common":"C"}
     color = color_map.get(rarity, "🟢")
     prefix = prefix_map.get(rarity, "C")
-    # rare_number генерируем до вставки, чтобы получить serial
     async with conn.transaction():
         serial_row = await conn.fetchrow(
             "INSERT INTO nft_registry(blunt_id,created_by,rarity,created_at) VALUES($1,$2,$3,$4) RETURNING serial",
@@ -483,7 +481,6 @@ async def _create_named_blunt_inner(uid, name, rarity, conn):
         count_row = await conn.fetchrow("SELECT COUNT(*) as cnt FROM nft_registry WHERE rarity=$1", rarity)
         rare_count = count_row["cnt"]
         rare_number = f"{prefix}-{rare_count:04d}"
-        # Обновляем rare_number в записи
         await conn.execute("UPDATE nft_registry SET rare_number=$1 WHERE blunt_id=$2", rare_number, blunt_id)
     hash_hex = hashlib.sha256(f"{name}{serial}{datetime.now().timestamp()}".encode()).hexdigest()[:12].upper()
     short_hash = f"0x{hash_hex[:6]}...{hash_hex[-4:]}"
@@ -1793,7 +1790,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data == "rules": await q.answer(); await rules_callback(update, context)
         elif data == "privilege": await q.answer(); await privilege_callback(update, context)
         elif data == "catalog": await q.answer(); await catalog_callback(update, context)
-        elif data == "luck": await q.answer(); await luck_callback(update, context)
+        elif data == "luck":
+            await q.answer()
+            try:
+                await luck_callback(update, context)
+            except Exception as e:
+                logger.error(f"Luck callback error: {e}")
+                await q.message.edit_text("⚠️ Не удалось открыть Удачу. Попробуй позже.", reply_markup=get_back_to_menu_keyboard())
         elif data in ("luck_wheel", "luck_berserk", "alchemy_start", "alchemy_confirm"): await q.answer(); await luck_callback(update, context, action=data)
         elif data == "craft_normal": await q.answer(); await handle_craft_normal(update, context)
         elif data == "craft_named": await q.answer(); await handle_craft_named(update, context)
