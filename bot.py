@@ -1,4 +1,4 @@
-# bot.py — ANTY SOCIAL SHOP RPG v7.3 NEON EDITION (FINAL COMPLETE)
+# bot.py — ANTY SOCIAL SHOP RPG v7.3 NEON FINAL COMPLETE
 import asyncio, logging, os, random, re, json, hashlib, html
 from datetime import datetime, timedelta, date, time
 from threading import Thread
@@ -562,7 +562,7 @@ async def get_main_menu_keyboard(user_id):
 def get_back_to_menu_keyboard():
     return InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
 
-# ========== ОБРАБОТЧИКИ КОМАНД ==========
+# ========== ОБРАБОТЧИКИ ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user, msg = get_user_and_msg(update)
     user_id = user.id
@@ -673,6 +673,7 @@ async def process_daily_login(user_id, context):
 async def grant_title(user_id, emoji, name, context):
     await add_title(user_id, emoji)
 
+# Фарм (с безопасной проверкой smoke_count)
 async def farm_callback(update, context):
     user, msg = get_user_and_msg(update)
     uid = user.id; uname = user.username or user.first_name
@@ -1377,7 +1378,6 @@ async def luck_callback(update, context, action=None):
             await context.bot.send_message(chat_id="@guild_antysocial", text=f"🌟 @{uname} сорвал Джекпот! {txt}", parse_mode='HTML')
         elif prize_type == "oac":
             await update_balance(uid, uname, final_prize)
-            # Новый вывод Дар Искажения
             new_p = await get_player_cached(uid)
             new_bal = new_p["balance"]
             next_rank_name = ""
