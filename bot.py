@@ -1,4 +1,4 @@
-# bot.py — ANTY SOCIAL SHOP RPG v7.5.1 FINAL (Luck fix)
+# bot.py — ANTY SOCIAL SHOP RPG v7.8 FINAL
 import asyncio, logging, os, random, re, json, hashlib, html
 from datetime import datetime, timedelta, date, time
 from threading import Thread
@@ -11,6 +11,7 @@ from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     ContextTypes, MessageHandler, filters
 )
+from telegram.error import BadRequest
 
 # === ВЕБ-СЕРВЕР ===
 web_app = Flask(__name__)
@@ -41,16 +42,14 @@ RE_CRAFT = re.compile(r'^/крафт$'); RE_RITUAL = re.compile(r'^/ритуал
 RE_TOP = re.compile(r'^/топ$'); RE_LUCK = re.compile(r'^/удача$|^/luck$')
 RE_PROFILE = re.compile(r'^/профиль$|^/profile$')
 RE_GUILD = re.compile(r'^/guild$|^/вступить$|^/гильдия$')
-RE_SHORTCUTS = re.compile(r'^(фарм|farm|дунуть|smoke|крафт|craft|топ|top|удача|luck|профиль|profile|сбор|правила|исповедь|repent|гильдия|привилегия|каталог|проверка|ритуал)$', re.IGNORECASE)
+RE_SHORTCUTS = re.compile(r'^(фарм|farm|дунуть|smoke|крафт|craft|топ|top|удача|luck|профиль|profile|сбор|правила|исповедь|repent|гильдия|привилегия|каталог|проверка|ритуал|лабиринт|питомец)$', re.IGNORECASE)
 
-# Обновлённые шёпоты
 WHISPERS = [
     "🩸 Искажение наблюдает за твоими нитями",
     "💠 Кристалл твоей судьбы пульсирует",
     "🩸 Искажение шепчет твоё имя",
     "🌙 «Ночь опустилась на Гильдию. Смотритель пробудился.»"
 ]
-
 NEURO_STATUSES = [
     "Альфа-ритмы нестабильны", "Сенсорная депривация 80%", "Фаза быстрого сна",
     "Нейро-шунт активен", "Предел синаптической проводимости", "Резонанс с Искажением: 12%"
@@ -68,7 +67,6 @@ RANKS = [
     ("🪦 Призрак", 20000, 6000),
     ("🪬 Некромант", 50000, 15000)
 ]
-# Новый список достижений
 ACHIEVEMENTS = [
     {"id": "farm_1", "name": "Первый Шаг", "emoji": "🕯️", "desc": "Совершить 1 фарм очков (АнтиСошл)", "reward": "Титул 🕯️"},
     {"id": "craft_1", "name": "О! Росточек!", "emoji": "🌱", "desc": "Скрутить свой первый блант — главное средство успокоения от бед в этом мире", "reward": "Титул 🌱"},
@@ -135,6 +133,14 @@ LABYRINTH_ROOMS = [
 # ========== БАЗА ДАННЫХ NEON ==========
 db_pool = None
 BLUNTS_PER_PAGE = 5
+
+# Заглушки для картинок блантов (замени на свои file_id)
+BLUNT_IMAGES = {
+    "common": "",    # вставь file_id для обычного бланта
+    "rare": "",      # для редкого
+    "epic": "",      # для эпического
+    "legendary": ""  # для легендарного
+}
 
 async def init_db_pool():
     global db_pool
@@ -203,7 +209,8 @@ async def create_tables(conn):
             guild TEXT PRIMARY KEY,
             total_farmed INTEGER DEFAULT 0,
             total_donated INTEGER DEFAULT 0,
-            week_start DATE
+            week_start DATE,
+            war_active BOOLEAN DEFAULT FALSE
         )
     """)
     await conn.execute("""
@@ -447,7 +454,6 @@ async def check_achievements(user_id, context):
         await award_achievement(user_id, "lunar_lord", context)
 
 async def create_named_blunt(uid, name, rarity=None, conn=None):
-    blunt_id = f"blunt_{uid}_{int(datetime.now().timestamp()*1000)}_{random.randint(1000,9999)}"
     if conn is None:
         async with db_pool.acquire() as conn:
             return await _create_named_blunt_inner(uid, name, rarity, conn)
@@ -455,6 +461,7 @@ async def create_named_blunt(uid, name, rarity=None, conn=None):
         return await _create_named_blunt_inner(uid, name, rarity, conn)
 
 async def _create_named_blunt_inner(uid, name, rarity, conn):
+    blunt_id = f"blunt_{uid}_{int(datetime.now().timestamp()*1000)}_{random.randint(1000,9999)}"
     await conn.execute("""
         INSERT INTO players(user_id, username, balance, blunts)
         VALUES($1, '', 0, 0)
@@ -465,8 +472,8 @@ async def _create_named_blunt_inner(uid, name, rarity, conn):
     if not rarity:
         rare = random.random()
         if rare < 0.02: rarity = "legendary"
-        elif rare < 0.1: rarity = "epic"
-        elif rare < 0.35: rarity = "rare"
+        elif rare < 0.11: rarity = "epic"
+        elif rare < 0.37: rarity = "rare"
         else: rarity = "common"
     color_map = {"legendary":"🟡","epic":"🟣","rare":"🔵","common":"🟢"}
     prefix_map = {"legendary":"L","epic":"E","rare":"R","common":"C"}
@@ -582,7 +589,58 @@ async def get_main_menu_keyboard(user_id):
 def get_back_to_menu_keyboard():
     return InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
 
-# ========== ОБРАБОТЧИКИ ==========
+# ========== ВОЙНА ГИЛЬДИЙ ==========
+async def add_war_score(user_id, points):
+    """Добавляет очки войне гильдии, если она активна."""
+    if not db_pool:
+        return
+    async with db_pool.acquire() as conn:
+        war = await conn.fetchrow("SELECT war_active FROM guild_weekly WHERE war_active = TRUE LIMIT 1")
+        if not war:
+            return
+        row = await conn.fetchrow("SELECT guild FROM players WHERE user_id = $1", user_id)
+        guild = row["guild"] if row else None
+        if not guild or guild not in ("BLACK", "WHITE"):
+            return
+        await conn.execute("""
+            INSERT INTO guild_weekly (guild, week_start, total_farmed)
+            VALUES ($1, CURRENT_DATE, $2)
+            ON CONFLICT (guild) DO UPDATE SET total_farmed = guild_weekly.total_farmed + $2
+        """, guild, points)
+
+async def give_war_reward(context, user_id, username, small=False):
+    """Выдаёт сундук с ресурсами победителю войны."""
+    if small:
+        oac = random.randint(50, 150)
+        blunts = random.randint(1, 3)
+        dust = random.randint(0, 1)
+    else:
+        oac = random.randint(200, 500)
+        blunts = random.randint(3, 7)
+        dust = random.randint(1, 3)
+
+    await update_balance(user_id, username, oac)
+    await update_blunts(user_id, username, blunts)
+    if dust:
+        await update_essence(user_id, dust)
+
+    text = f"🎁 <b>СУНДУК ВОЙНЫ</b>\n\nТвоя гильдия победила! Ты получаешь:\n💎 {oac} OAC\n🌿 {blunts} блантов"
+    if dust:
+        text += f"\n💠 {dust} Кристальной Пыли"
+    try:
+        await context.bot.send_message(chat_id=user_id, text=text, parse_mode='HTML')
+    except Exception as e:
+        logger.error(f"Error sending war reward to {user_id}: {e}")
+
+async def send_blunt_image(context, chat_id, rarity):
+    file_id = BLUNT_IMAGES.get(rarity)
+    if file_id:
+        try:
+            await context.bot.send_photo(chat_id=chat_id, photo=file_id)
+        except Exception as e:
+            logger.error(f"Blunt image error: {e}")
+
+# ========== ОБРАБОТЧИКИ КОМАНД ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user, msg = get_user_and_msg(update)
     user_id = user.id
@@ -697,7 +755,7 @@ async def process_daily_login(user_id, context):
 async def grant_title(user_id, emoji, name, context):
     await add_title(user_id, emoji)
 
-# Фарм
+# Фарм (с безопасной проверкой smoke_count)
 async def farm_callback(update, context):
     user, msg = get_user_and_msg(update)
     uid = user.id; uname = user.username or user.first_name
@@ -723,6 +781,7 @@ async def farm_callback(update, context):
     await update_balance(uid, uname, earned)
     await update_last_farm(uid)
     await increment_counter(uid, "farm_count")
+    await add_war_score(uid, earned)  # Очки войне гильдии
     new_p = await get_player_cached(uid)
     new_bal = new_p["balance"]
     next_ms = next((th for th in [1,10,50,100,500] if th > new_p["farm_count"]), None) or new_p["farm_count"]
@@ -764,6 +823,7 @@ async def handle_craft_normal(update, context):
             if random.random() < 0.05:
                 await update_blunts(uid, uname, 1)
             await increment_counter(uid, "craft_count")
+    await add_war_score(uid, 10)  # очки войне
     if random.random() < 0.05:
         await send_whisper(context, "@guild_antysocial", f"⚡ @{html.escape(uname)} высек Искру Искажения из рутины. +1 🌿", life_seconds=45)
     new_p = await get_player_cached(uid)
@@ -823,11 +883,14 @@ async def handle_named_name(update, context):
             await update_balance(uid, uname, -50)
             await increment_counter(uid, "craft_count")
             item = await create_named_blunt(uid, name, conn=conn)
+    await add_war_score(uid, 25)  # очки войне
     blunt_id = item["id"]
     name_escaped = html.escape(name)
     uname_escaped = html.escape(uname)
     color = {"legendary":"🟡","epic":"🟣","rare":"🔵"}.get(item["rarity"], "🟢")
     reaction = item["reaction"]
+    # Отправляем картинку бланта, если есть
+    await send_blunt_image(context, update.effective_chat.id, item["rarity"])
     text = (
         f"<b><i>💍 БЛАНТ СОТКАН</i></b>\n\n"
         f"🩸 <i>Ты вплёл в <b>Искажение</b> свой именной блант:</i>\n"
@@ -860,7 +923,9 @@ async def handle_use_dust(update, context):
             await update_essence(uid, -1)
             name = random.choice(["Крик Бездны","Пепел Короля","Шёпот Склепа","Коготь Хаоса","Вздох Пожирателя"])
             item = await create_named_blunt(uid, name, rarity="legendary", conn=conn)
+    await add_war_score(uid, 50)
     reaction = item["reaction"]
+    await send_blunt_image(context, query.message.chat.id, "legendary")
     text = (
         f"<b><i>💠 ПЫЛЬ ИСПОЛЬЗОВАНА</i></b>\n\n"
         f"🟡 <b><i>«{name}»</i></b> (Легендарный) 🌿\n"
@@ -923,6 +988,7 @@ async def do_smoke(update, context):
     if not save:
         await update_blunts(uid, uname, -1)
     r = random.random()
+    earned = 0
     if r < 0.18:
         earned = random.randint(15,40)
         if context.bot_data.get("happy_hour"): earned *= HAPPY_HOUR_MULTIPLIER
@@ -939,6 +1005,8 @@ async def do_smoke(update, context):
         effect = "<b><i>💨 ДЫМ РАССЕЯЛСЯ</i></b>\n\n🛋️ <b>Паралич</b>\n📺 «Тело стало ватным, смотришь в одну точку и не можешь пошевелиться»"
     else:
         effect = "<b><i>💨 ДЫМ РАССЕЯЛСЯ</i></b>\n\n🧘 <b>Глубокое Озарение</b>\n🕯️ «Ты понял, что блант — это ключ к разгадке бытия»"
+    if earned:
+        await add_war_score(uid, earned)
     if p and not p["inhaled"]:
         await add_title(uid, "💨")
         async with db_pool.acquire() as conn:
@@ -980,6 +1048,7 @@ async def ritual_callback(update, context):
     await increment_counter(uid, "ritual_count")
     extra = 15 if random.random() < 0.1 else 0
     if extra: await update_balance(uid, uname, extra)
+    await add_war_score(uid, reward + extra)
     new_p = await get_player_cached(uid)
     new_bal = new_p["balance"]
     next_ms = next((th for th in [1,5,25,100] if th > new_p["ritual_count"]), None) or new_p["ritual_count"]
@@ -1047,6 +1116,13 @@ async def profile_callback(update, context):
     if p["login_streak"]>=7: badges.append("🔥")
     if p["check_count"]>=10: badges.append("👁️")
     badge_str = ' '.join(badges) if badges else "—"
+    # Фото профиля игрока
+    try:
+        photos = await context.bot.get_user_profile_photos(uid, limit=1)
+        if photos.photos:
+            await context.bot.send_photo(chat_id=msg.chat.id, photo=photos.photos[0][0].file_id)
+    except:
+        pass
     text = (
         f"<b>⚜️ ПРОФИЛЬ</b>\n"
         f"👤 <b>{uname}</b>{g_emoji}\n"
@@ -1073,6 +1149,8 @@ async def profile_callback(update, context):
             color = {"legendary": "🟡", "epic": "🟣", "rare": "🔵"}.get(rarity, "🟢")
             rare_number = item.get("rare_number", "?-????")
             hash_code = item.get("hash", "0x????...????")
+            # Отправляем картинку бланта
+            await send_blunt_image(context, msg.chat.id, rarity)
             text += (
                 f"\n   {color} <b>💍 Имя Бланта:</b> <b>{name}</b>\n"
                 f"   🩸 Серийный номер: <b>#{rare_number}</b> · <i>{hash_code}</i>\n"
@@ -1119,6 +1197,8 @@ async def my_blunts_callback(update, context, page=0):
         color = {"legendary": "🟡", "epic": "🟣", "rare": "🔵"}.get(rarity, "🟢")
         rare_number = item.get("rare_number", "?-????")
         hash_code = item.get("hash", "0x????...????")
+        # Отправляем картинку бланта
+        await send_blunt_image(context, query.message.chat.id, rarity)
         text += f"{color} <b>{name}</b> · #{rare_number} · {hash_code}\n"
 
     kb_rows = []
@@ -1247,6 +1327,17 @@ async def guild_info_callback(update, context):
         f"🕯️ <b>Тёмная: {counts['BLACK']}</b> странников | {progress_bar(black_perc)} <b>{black_perc}%</b>\n"
         f"⚜️ <b>Светлая: {counts['WHITE']}</b> странников | {progress_bar(white_perc)} <b>{white_perc}%</b>\n\n"
     )
+
+    # Война гильдий
+    war = False
+    async with db_pool.acquire() as conn:
+        war_row = await conn.fetchrow("SELECT war_active FROM guild_weekly WHERE war_active = TRUE LIMIT 1")
+        if war_row:
+            war = True
+            scores = await conn.fetch("SELECT guild, total_farmed FROM guild_weekly")
+            black_score = next((r["total_farmed"] for r in scores if r["guild"] == "BLACK"), 0)
+            white_score = next((r["total_farmed"] for r in scores if r["guild"] == "WHITE"), 0)
+            text += f"\n⚔️ <b>Война гильдий идёт!</b>\n🕯️ Тёмные: {black_score} очков\n⚜️ Светлые: {white_score} очков\n"
 
     kb_rows = []
     if guild:
@@ -1453,6 +1544,7 @@ async def luck_callback(update, context, action=None):
                 logger.error(f"Ошибка отправки в канал: {e}")
         elif prize_type == "oac":
             await update_balance(uid, uname, final_prize)
+            await add_war_score(uid, final_prize)
             new_p = await get_player_cached(uid)
             new_bal = new_p["balance"]
             next_rank_name = ""
@@ -1474,14 +1566,22 @@ async def luck_callback(update, context, action=None):
                 f"⚜️ <b>У тебя:</b> <i>{new_bal} OAC</i>\n\n"
                 f"{progress_text}"
             )
-            await msg.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]), parse_mode='HTML')
+            try:
+                await msg.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]), parse_mode='HTML')
+            except BadRequest as e:
+                if "message is not modified" not in str(e).lower():
+                    raise
             return
         else:
             await update_blunts(uid, uname, prize)
             txt = f"+{prize} 🌿 Блант"
         new_bal = (await get_player_cached(uid))["balance"]
         text = f"<b><i>🎲 КОЛЕСО СМОТРИТЕЛЯ</i></b>\n\n{txt} → 💰 <b>{new_bal} OAC</b> 🍬"
-        await msg.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]), parse_mode='HTML')
+        try:
+            await msg.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]), parse_mode='HTML')
+        except BadRequest as e:
+            if "message is not modified" not in str(e).lower():
+                raise
         return
     if action == "luck_berserk":
         if not berserk_available:
@@ -1494,7 +1594,12 @@ async def luck_callback(update, context, action=None):
         await update_last_berserk(uid)
         if random.random() < 0.6: await update_balance(uid, uname, 200); res_text = f"<b><i>🎲 БЕЗДНА ОТВЕТИЛА</i></b>\n\nИскажение благосклонно! +<b>200 OAC</b> 🍬."
         else: await update_balance(uid, uname, -300); res_text = f"<b><i>🕳️ БЕЗДНА МОЛЧИТ</i></b>\n\nИскажение промолчало. –<b>300 OAC</b>."
-        await msg.edit_text(res_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]), parse_mode='HTML')
+        await add_war_score(uid, 200 if "200" in res_text else -300)
+        try:
+            await msg.edit_text(res_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]), parse_mode='HTML')
+        except BadRequest as e:
+            if "message is not modified" not in str(e).lower():
+                raise
         return
     if action == "alchemy_start":
         query = update.callback_query
@@ -1514,7 +1619,11 @@ async def luck_callback(update, context, action=None):
             [InlineKeyboardButton("🧪 Запустить реакцию", callback_data="alchemy_confirm")],
             [InlineKeyboardButton("🔙 Назад", callback_data="luck")]
         ])
-        await msg.edit_text(text, reply_markup=kb, parse_mode='HTML')
+        try:
+            await msg.edit_text(text, reply_markup=kb, parse_mode='HTML')
+        except BadRequest as e:
+            if "message is not modified" not in str(e).lower():
+                raise
         return
     if action == "alchemy_confirm":
         if p["blunts"] < 5 or bal < 50:
@@ -1542,9 +1651,18 @@ async def luck_callback(update, context, action=None):
                             text=f"🌟 @{uname} провёл Алхимический Ритуал и получил легендарный блант <b><i>«{name}»</i></b>!", parse_mode='HTML')
                     except Exception as e:
                         logger.error(f"Ошибка отправки в канал: {e}")
-        await msg.edit_text(result_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]), parse_mode='HTML')
+        await add_war_score(uid, 30)
+        try:
+            await msg.edit_text(result_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]), parse_mode='HTML')
+        except BadRequest as e:
+            if "message is not modified" not in str(e).lower():
+                raise
         return
-    await msg.edit_text(text, reply_markup=kb, parse_mode='HTML')
+    try:
+        await msg.edit_text(text, reply_markup=kb, parse_mode='HTML')
+    except BadRequest as e:
+        if "message is not modified" not in str(e).lower():
+            raise
 
 async def check_blunt(update, context):
     if not context.args: await update.message.reply_text("Укажи серийный номер бланта: /check R-0001"); return
@@ -1574,6 +1692,8 @@ async def check_blunt(update, context):
     name = item["name"]; rarity = item.get("rarity","common")
     color = {"legendary":"🟡","epic":"🟣","rare":"🔵"}.get(rarity,"🟢")
     reaction = item.get("reaction",""); hash_code = item.get("hash","0x????...????")
+    # Отправляем картинку бланта
+    await send_blunt_image(context, update.effective_chat.id, rarity)
     details = f"<b>ДЕТАЛИ NFT БЛАНТА 💎</b>\n\n{color} <b>{name}</b>\n\n<b>Редкость:</b> <i>{rarity}</i> {color}\n\n🩸 <b>Серийный номер:</b> <b>#{rare_number}</b>\n🔗 <b>Хеш:</b> <b>{hash_code}</b>\n📜 <b>Реакция:</b> <i>{reaction}</i>\n"
     if "owner_history" in item:
         details += "\n🔄 История владения:\n"
@@ -1681,6 +1801,7 @@ async def handle_lab_option(update, context, option_index):
         if "reward_oac" in opt:
             earned = random.randint(*opt["reward_oac"])
             await update_balance(uid, p["username"], earned)
+            await add_war_score(uid, earned)
             context.user_data.setdefault("lab_rewards", []).append(f"+{earned} OAC")
             await query.message.edit_text(f"Успех! +{earned} OAC.")
         elif "reward_fragment" in opt:
@@ -1718,6 +1839,7 @@ async def show_lab_final(update, context):
     await update_balance(uid, p["username"], 50)
     await update_essence(uid, 1)
     await increment_counter(uid, "lab_chests")
+    await add_war_score(uid, 80)
     context.user_data.pop("lab_room", None); context.user_data.pop("lab_lives", None); context.user_data.pop("lab_rewards", None)
     context.user_data.pop("lab_msg_id", None); context.user_data.pop("lab_chat_id", None)
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 К Лабиринту", callback_data="lab_start")], [InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
@@ -1760,13 +1882,18 @@ async def handle_chat_shortcut(update, context):
         "сбор": collect_callback,
         "правила": rules_callback,
         "исповедь": confess_callback, "repent": confess_callback,
-        "гильдия": guild_join_ru,
+        "гильдия": guild_info_callback,
         "привилегия": privilege_callback,
         "каталог": catalog_callback,
         "проверка": check_blunt,
-        "ритуал": ritual_callback
+        "ритуал": ritual_callback,
+        "лабиринт": lab_enter,
+        "питомец": pet_preview
     }
     if text in mapping: await mapping[text](update, context)
+
+async def pet_preview(update, context):
+    await update.effective_message.reply_text("🐾 Питомцы пока не реализованы.")
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -1840,6 +1967,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             name = item["name"]; rarity = item.get("rarity","common")
             color = {"legendary":"🟡","epic":"🟣","rare":"🔵"}.get(rarity,"🟢")
             reaction = item.get("reaction",""); rare_number = item.get("rare_number","?-????"); hash_code = item.get("hash","0x????...????")
+            await send_blunt_image(context, q.message.chat.id, rarity)
             details = f"<b>ДЕТАЛИ NFT БЛАНТА 💎</b>\n\n{color} <b>{name}</b>\n\n<b>Редкость:</b> <i>{rarity}</i> {color}\n\n🩸 <b>Серийный номер:</b> <b>#{rare_number}</b>\n🔗 <b>Хеш:</b> <b>{hash_code}</b>\n📜 <b>Реакция:</b> <i>{reaction}</i>\n"
             if "owner_history" in item:
                 details += "\n🔄 История владения:\n"
@@ -1890,6 +2018,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer()
             kb = InlineKeyboardMarkup([
                 [InlineKeyboardButton("💬 Выбрать титул", callback_data="choose_title")],
+                [InlineKeyboardButton("🖼️ Выбрать фон", callback_data="choose_bg")],
                 [InlineKeyboardButton("🔙 Назад", callback_data="profile")]
             ])
             await q.message.edit_text("<b>🎨 СКИНЫ</b>\n\nВыбери, что хочешь изменить.", reply_markup=kb, parse_mode='HTML')
@@ -1921,6 +2050,38 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Возврат в скины
             kb = InlineKeyboardMarkup([
                 [InlineKeyboardButton("💬 Выбрать титул", callback_data="choose_title")],
+                [InlineKeyboardButton("🖼️ Выбрать фон", callback_data="choose_bg")],
+                [InlineKeyboardButton("🔙 Назад", callback_data="profile")]
+            ])
+            await q.message.edit_text("<b>🎨 СКИНЫ</b>\n\nВыбери, что хочешь изменить.", reply_markup=kb, parse_mode='HTML')
+        elif data == "choose_bg":
+            await q.answer()
+            p = await get_player_cached(uid)
+            skins = json.loads(p["profile_skins"]) if p and p["profile_skins"] else {}
+            unlocked = skins.get("unlocked_backgrounds", [])
+            if not unlocked:
+                await send_whisper_dm(update, context, "У тебя пока нет разблокированных фонов.", life_seconds=10)
+                return
+            active_bg = skins.get("active_background", "")
+            kb_rows = []
+            for bg in unlocked:
+                mark = " ✅" if bg == active_bg else ""
+                kb_rows.append([InlineKeyboardButton(f"{bg}{mark}", callback_data=f"set_bg_{bg}")])
+            kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="skins_menu")])
+            await q.message.edit_text("<b>🖼️ ВЫБОР ФОНА</b>\n\nВыбери фон:", reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode='HTML')
+        elif data.startswith("set_bg_"):
+            await q.answer()
+            bg = data.replace("set_bg_", "")
+            p = await get_player_cached(uid)
+            skins = json.loads(p["profile_skins"]) if p and p["profile_skins"] else {}
+            skins["active_background"] = bg
+            async with db_pool.acquire() as conn:
+                await conn.execute("UPDATE players SET profile_skins=$1 WHERE user_id=$2", json.dumps(skins), uid)
+            invalidate_cache(uid)
+            await send_whisper_dm(update, context, f"✨ Фон «{bg}» активирован!", life_seconds=10)
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("💬 Выбрать титул", callback_data="choose_title")],
+                [InlineKeyboardButton("🖼️ Выбрать фон", callback_data="choose_bg")],
                 [InlineKeyboardButton("🔙 Назад", callback_data="profile")]
             ])
             await q.message.edit_text("<b>🎨 СКИНЫ</b>\n\nВыбери, что хочешь изменить.", reply_markup=kb, parse_mode='HTML')
@@ -1991,21 +2152,43 @@ async def echo_of_distortion(context):
 
 async def weekly_guild_rating(context):
     async with db_pool.acquire() as conn:
-        await conn.execute("UPDATE guild_weekly SET total_farmed=0")
-        await conn.execute("UPDATE guild_weekly SET total_farmed = (SELECT COALESCE(SUM(balance),0) FROM players WHERE guild = guild_weekly.guild)")
-        await conn.execute("UPDATE guild_weekly SET week_start=$1", date.today())
-        rows = await conn.fetch("SELECT guild, total_farmed FROM guild_weekly")
-    if len(rows)>=2:
-        black = next((r["total_farmed"] for r in rows if r["guild"]=="BLACK"),0)
-        white = next((r["total_farmed"] for r in rows if r["guild"]=="WHITE"),0)
-        winner = "BLACK" if black > white else "WHITE"
-        wrd = "ритуалу" if winner=="BLACK" else "сохранению бланта"
-        winner_name = "Тёмная" if winner=="BLACK" else "Светлая"
-        try:
-            await context.bot.send_message(chat_id="@guild_antysocial",
-                text=f"<b><i>🎉 ЧАС ТРИУМФА</i></b>\n🕯️ {winner_name} Гильдия получает благословение: <code>+5%</code> к {wrd} на неделю", parse_mode='HTML')
-        except Exception as e:
-            logger.error(f"Weekly guild rating error: {e}")
+        war = await conn.fetchrow("SELECT war_active FROM guild_weekly WHERE war_active = TRUE LIMIT 1")
+        if not war:
+            # Запускаем войну (суббота 12:00)
+            await conn.execute("UPDATE guild_weekly SET total_farmed = 0, war_active = TRUE")
+            try:
+                await context.bot.send_message(chat_id="@guild_antysocial", 
+                    text="⚔️ <b>ВОЙНА ГИЛЬДИЙ НАЧАЛАСЬ!</b>\n🕯️ Тёмные vs ⚜️ Светлые\nЗарабатывай OAC, крафти, проходи лабиринт — всё идёт в зачёт гильдии!\nПобедители получат сундук с ресурсами! 🎁", parse_mode='HTML')
+            except Exception as e:
+                logger.error(f"War start announce error: {e}")
+        else:
+            # Завершаем войну (воскресенье 12:00)
+            await conn.execute("UPDATE guild_weekly SET war_active = FALSE")
+            rows = await conn.fetch("SELECT guild, total_farmed FROM guild_weekly")
+            black = next((r["total_farmed"] for r in rows if r["guild"] == "BLACK"), 0)
+            white = next((r["total_farmed"] for r in rows if r["guild"] == "WHITE"), 0)
+            if black == white:
+                for guild in ("BLACK", "WHITE"):
+                    players = await conn.fetch("SELECT user_id, username FROM players WHERE guild = $1", guild)
+                    for p in players:
+                        await give_war_reward(context, p["user_id"], p["username"], small=True)
+                try:
+                    await context.bot.send_message(chat_id="@guild_antysocial", 
+                        text=f"🤝 Ничья! Обе гильдии набрали {black} очков. Каждый участник получает маленький сундук!", parse_mode='HTML')
+                except Exception as e:
+                    logger.error(f"War draw announce error: {e}")
+            else:
+                winner = "BLACK" if black > white else "WHITE"
+                players = await conn.fetch("SELECT user_id, username FROM players WHERE guild = $1", winner)
+                for p in players:
+                    await give_war_reward(context, p["user_id"], p["username"])
+                loser = "WHITE" if winner == "BLACK" else "BLACK"
+                loser_score = white if winner == "BLACK" else black
+                try:
+                    await context.bot.send_message(chat_id="@guild_antysocial", 
+                        text=f"🎉 <b>ВОЙНА ГИЛЬДИЙ ЗАВЕРШЕНА!</b>\n{('🕯️' if winner == 'BLACK' else '⚜️')} <b>Победитель: {winner} гильдия</b> ({black if winner == 'BLACK' else white} очков)\nКаждый участник получает сундук с ресурсами! 🎁\n{('⚜️' if loser == 'WHITE' else '🕯️')} {loser} гильдия набрала {loser_score} очков.", parse_mode='HTML')
+                except Exception as e:
+                    logger.error(f"War end announce error: {e}")
 
 async def keep_db_alive(context):
     if db_pool:
@@ -2037,16 +2220,15 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("luck", luck_callback))
     app.add_handler(CommandHandler("collect", collect_callback))
     app.add_handler(CommandHandler("check", check_blunt))
-    app.add_handler(CommandHandler("guild", guild_join_ru))
+    app.add_handler(CommandHandler("guild", guild_info_callback))
     app.add_handler(CommandHandler("repent", confess_callback))
+    app.add_handler(CommandHandler("lab", lab_enter))
+    app.add_handler(CommandHandler("pet", pet_preview))
 
-    # Только текстовые сокращения (без слеша)
+    # Текстовые сокращения
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(RE_SHORTCUTS), handle_chat_shortcut))
-    # Ввод имени бланта (режим ожидания)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_named_name))
-    # Новые участники
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_member))
-    # Кнопки
     app.add_handler(CallbackQueryHandler(button_handler))
 
     # Джобы
