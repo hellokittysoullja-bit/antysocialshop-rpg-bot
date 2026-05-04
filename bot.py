@@ -2467,7 +2467,12 @@ if __name__ == "__main__":
         }
         if command in mapping:
             await mapping[command](update, context)
+async def get_file_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.photo:
+        fid = update.message.photo[-1].file_id
+        await update.message.reply_text(fid)
 
+app.add_handler(MessageHandler(filters.PHOTO, get_file_id))
     app.add_handler(MessageHandler(filters.COMMAND, handle_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_chat_shortcut))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_named_name))
