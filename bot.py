@@ -1596,8 +1596,6 @@ if update.callback_query:
         await msg.edit_text(text, reply_markup=kb, parse_mode='HTML')
     else:
         await msg.reply_text(text, reply_markup=kb, parse_mode='HTML')
-    else:
-        await msg.reply_text(text, reply_markup=kb, parse_mode='HTML')
 async def guild_shrine_callback(update, context):
     query = update.callback_query
     await query.answer()
