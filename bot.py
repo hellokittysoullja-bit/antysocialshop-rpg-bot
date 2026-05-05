@@ -1375,7 +1375,7 @@ async def profile_callback(update, context):
     if len(named) > 2:
         kb_rows.append([InlineKeyboardButton(f"💍 Все именные бланты ({len(named)})", callback_data="my_blunts")])
     kb_rows.append([InlineKeyboardButton("📜 Кодекс", callback_data="rules")])
-    kb_rows.append([InlineKeyboardButton("🎨 Кастомизация", callback_data="skins_menu"),
+    kb_rows.append([InlineKeyboardButton("🫧 Кастомизация", callback_data="skins_menu"),
                     InlineKeyboardButton("🏆 Достижения", callback_data="achievements")])
     kb_rows.append([InlineKeyboardButton("🏰 В меню", callback_data="menu")])
     await msg.reply_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb_rows))
