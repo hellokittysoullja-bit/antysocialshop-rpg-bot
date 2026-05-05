@@ -1593,7 +1593,6 @@ async def guild_info_callback(update, context):
     kb_rows.append([InlineKeyboardButton("🏰 В меню", callback_data="menu")])
     kb = InlineKeyboardMarkup(kb_rows)
     if update.callback_query:
-        if update.callback_query:
         await msg.edit_text(text, reply_markup=kb, parse_mode='HTML')
     else:
         await msg.reply_text(text, reply_markup=kb, parse_mode='HTML')
