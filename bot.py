@@ -1571,8 +1571,10 @@ async def guild_info_callback(update, context):
                         InlineKeyboardButton("⚜️ Вступить в Светлую", callback_data="guild_join_WHITE")])
     kb_rows.append([InlineKeyboardButton("🏰 В меню", callback_data="menu")])
     kb = InlineKeyboardMarkup(kb_rows)
-    await msg.edit_text(text, reply_markup=kb, parse_mode='HTML')
-
+    if update.callback_query:
+        await msg.edit_text(text, reply_markup=kb, parse_mode='HTML')
+    else:
+        await msg.reply_text(text, reply_markup=kb, parse_mode='HTML')
 async def guild_shrine_callback(update, context):
     query = update.callback_query
     await query.answer()
