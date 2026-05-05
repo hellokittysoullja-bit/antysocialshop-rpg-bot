@@ -266,8 +266,24 @@ async def get_player_cached(user_id):
         row = await conn.fetchrow("SELECT * FROM players WHERE user_id=$1", user_id)
     if row:
         p = dict(row)
-        inv = p.get("inventory", [])
-        p["inventory"] = inv if isinstance(inv, list) else []
+        # Безопасно достаём inventory
+        inv_raw = p.get("inventory", "[]")
+        if isinstance(inv_raw, str):
+            try:
+                p["inventory"] = json.loads(inv_raw)
+            except:
+                p["inventory"] = []
+        else:
+            p["inventory"] = inv_raw if isinstance(inv_raw, list) else []
+        # Безопасно достаём profile_skins
+        skins_raw = p.get("profile_skins", "{}")
+        if isinstance(skins_raw, str):
+            try:
+                p["profile_skins"] = json.loads(skins_raw)
+            except:
+                p["profile_skins"] = {}
+        else:
+            p["profile_skins"] = skins_raw if isinstance(skins_raw, dict) else {}
         player_cache[user_id] = p
         return p
     return None
