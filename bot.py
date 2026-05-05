@@ -1344,7 +1344,7 @@ async def profile_callback(update, context):
             color = {"legendary": "🟡", "epic": "🟣", "rare": "🔵"}.get(rarity, "🟢")
             rare_number = item.get("rare_number", "?-????")
             hash_code = item.get("hash", "0x????...????")
-            await send_blunt_image(context, msg.chat.id, rarity)
+            #await send_blunt_image(context, msg.chat.id, rarity)
             text += (
                 f"\n   {color} <b>💍 Имя Бланта:</b> <b>{name}</b>\n"
                 f"   🩸 Серийный номер: <b>#{rare_number}</b> · <i>{hash_code}</i>\n"
