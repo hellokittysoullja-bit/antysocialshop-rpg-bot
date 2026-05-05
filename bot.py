@@ -1,4 +1,4 @@
-# bot.py — ANTY SOCIAL SHOP RPG v7.15 FIXED
+# bot.py — ANTY SOCIAL SHOP RPG v7.15 FIXED (ПОЛНЫЙ)
 import asyncio, logging, os, random, re, json, hashlib, html
 from datetime import datetime, timedelta, date, time
 from threading import Thread
@@ -149,7 +149,7 @@ LABYRINTH_ROOMS = [
     }
 ]
 
-# ========== БАЗА ДАННЫХ NEON ==========
+# ========== БАЗА ДАННЫХ ==========
 db_pool = None
 BLUNTS_PER_PAGE = 3
 
@@ -561,24 +561,51 @@ async def send_whisper(context, chat_id, text):
     except Exception as e:
         logger.error(f"Whisper error: {e}")
 
+# ========== НОВЫЕ УТИЛИТЫ ДЛЯ НАДЁЖНОЙ ОТПРАВКИ ==========
 async def send_whisper_dm(update, context, text, reply_markup=None):
+    """
+    Всегда отправляет новое сообщение в чат, даже если исходное сообщение колбэка пропало.
+    """
+    chat_id = None
     if update.callback_query:
-        msg = update.callback_query.message
+        q = update.callback_query
+        if q.message:
+            chat_id = q.message.chat_id
+        else:
+            chat_id = update.effective_chat.id if update.effective_chat else None
     elif update.message:
-        msg = update.message
-    else:
-        msg = None
-    if msg:
+        chat_id = update.message.chat_id
+    if not chat_id:
+        logger.error("send_whisper_dm: не удалось определить chat_id")
+        return
+    try:
+        await context.bot.send_message(chat_id=chat_id, text=text, parse_mode='HTML', reply_markup=reply_markup)
+    except Exception as e:
+        logger.error(f"send_whisper_dm HTML failed: {e}. Sending plain text.")
         try:
-            await msg.reply_text(text, parse_mode='HTML', reply_markup=reply_markup)
-        except Exception as e:
-            logger.error(f"HTML send failed: {e}. Sending without formatting.")
+            await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
+        except Exception as e2:
+            logger.error(f"send_whisper_dm plain also failed: {e2}")
+
+async def safe_callback_edit(query, text, reply_markup=None, parse_mode='HTML'):
+    """
+    Пытается изменить исходное сообщение колбэка.
+    Если не удаётся (сообщение удалено/не изменено) — отправляет новое.
+    """
+    try:
+        await query.message.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+    except BadRequest as e:
+        if "message is not modified" in str(e).lower():
+            pass  # всё ок, ничего не делаем
+        else:
+            logger.warning(f"safe_callback_edit: BadRequest: {e}, отправляем новое сообщение")
             try:
-                await msg.reply_text(text, reply_markup=reply_markup)
-            except Exception as e2:
-                logger.error(f"Plain text send also failed: {e2}")
-    else:
-        logger.error("No message to reply to.")
+                await query.message.reply_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+            except:
+                await query.message.chat.send_message(text, reply_markup=reply_markup, parse_mode=parse_mode)
+    except Exception as e:
+        logger.error(f"safe_callback_edit failed: {e}")
+        await query.message.chat.send_message(text, reply_markup=reply_markup, parse_mode=parse_mode)
 
 def format_date(iso_string):
     try:
@@ -648,23 +675,6 @@ def get_rank_progress(balance):
                 f"<b>{balance} / {next_th} OAC</b>"
             )
     return ""
-    if balance >= RANKS[-1][1]:
-        emoji = RANKS[-1][0]
-        name = emoji.split(' ',1)[1]
-        return f"⚜️ Ранг: {emoji} {name} (Максимум)\n▓▓▓▓▓▓▓▓▓▓ 100%"
-    for i in range(len(RANKS)-1):
-        curr_emoji, curr_th, _ = RANKS[i]
-        next_emoji, next_th, _ = RANKS[i+1]
-        if balance < next_th:
-            curr_name = curr_emoji.split(' ',1)[1] if ' ' in curr_emoji else curr_emoji
-            progress = int((balance - curr_th) / (next_th - curr_th) * 100)
-            bar = "▓" * (progress // 10) + "░" * (10 - progress // 10)
-            return (
-                f"⚜️ Ранг: {curr_emoji} → {next_emoji}\n"
-                f"{bar} {progress}%\n"
-                f"{balance} / {next_th} OAC"
-            )
-    return ""
 
 async def add_war_score(user_id, points):
     if not db_pool:
@@ -721,12 +731,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username_escaped = html.escape(username)
     player = await get_player_cached(user_id)
 
-    # Реферальная система – исправлена
+    # Реферальная система
     if context.args and len(context.args[0]) > 0:
         deep_link = context.args[0]
-        # Полный deep_link вида blunt_<blunt_id> или что-то ещё
         if deep_link.startswith("blunt_"):
-            blunt_id = deep_link  # не убираем префикс, это полный ID
+            blunt_id = deep_link
             async with db_pool.acquire() as conn:
                 creator_row = await conn.fetchrow("SELECT created_by FROM nft_registry WHERE blunt_id=$1", blunt_id)
             if creator_row:
@@ -875,7 +884,6 @@ async def farm_callback(update, context):
                 p_new["inventory"] = json.loads(p_new.get("inventory", "[]"))
                 player_cache[uid] = p_new
             else:
-                # Игрок не существовал, создаём запись через стандартную функцию
                 await update_balance(uid, uname, earned)
                 await increment_counter(uid, "farm_count")
                 await update_last_farm(uid)
@@ -922,10 +930,9 @@ async def craft_callback(update, context):
         kb_rows.append([InlineKeyboardButton(f"💠 Использовать Пыль (1 доза)", callback_data="use_dust")])
     kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="menu")])
     if update.callback_query:
-            await msg.edit_text(text, reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode='HTML')
+        await safe_callback_edit(update.callback_query, text, reply_markup=InlineKeyboardMarkup(kb_rows))
     else:
-            await msg.reply_text(text,
-    reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode='HTML')
+        await msg.reply_text(text, reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode='HTML')
 
 async def handle_craft_normal(update, context):
     query = update.callback_query
@@ -981,11 +988,7 @@ async def handle_craft_normal(update, context):
         f"\n🎯 <b>Крафтинг:</b> {new_count}\n{progress_bar_str}\n\n"
         f"🚬 <i>Блантов в свёртке:</i> <b>{p_new['blunts']}</b>"
     )
-    # Отправляем результат в то же сообщение, если была кнопка, иначе новым
-    if update.callback_query:
-        await update.callback_query.message.reply_text(text, parse_mode='HTML')
-    else:
-        await update.message.reply_text(text, parse_mode='HTML')
+    await send_whisper_dm(update, context, text)
     await check_achievements(uid, context)
 
 async def handle_craft_named(update, context):
@@ -1077,7 +1080,7 @@ async def handle_use_dust(update, context):
         f"📜 Реакция: <i>{reaction}</i>"
     )
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
-    await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
+    await safe_callback_edit(query, text, reply_markup=kb)
     try:
         await context.bot.send_message(chat_id="@guild_antysocial",
             text=f"<b><i>🩸 ЭХО ИСКАЖЕНИЯ</i></b>\n\n⚜️ <b>@{html.escape(p['username'])}</b> использовал 💠 Пыль и получил легендарный блант <b><i>«{name}»</i></b>!", parse_mode='HTML')
@@ -1102,23 +1105,27 @@ async def smoke_callback(update, context):
     uid = user.id; uname = html.escape(user.username or user.first_name)
     p = await get_player_cached(uid)
     if not p or p["blunts"] < 1:
-        await msg.edit_text(
-            "<b>💨 ДУНУТЬ</b>\n\n"
-            "<b>🌿 Твой свёрток пуст</b>\n"
-            "\n"
-            "<i>🎈 Скрути новый блант</i>",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🌿 Крафт", callback_data="craft")],
-                [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
-            ]),
-            parse_mode='HTML')
+        text = ("<b>💨 ДУНУТЬ</b>\n\n"
+                "<b>🌿 Твой свёрток пуст</b>\n\n"
+                "<i>🎈 Скрути новый блант</i>")
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🌿 Крафт", callback_data="craft")],
+            [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
+        ])
+        if update.callback_query:
+            await safe_callback_edit(update.callback_query, text, reply_markup=kb)
+        else:
+            await msg.reply_text(text, reply_markup=kb, parse_mode='HTML')
         return
-    await msg.edit_text(
-        f"<b><i>💨 ДУНУТЬ</i></b>\n\n🌿 <i>блантов в свёртке:</i> <b>{p['blunts']}</b>",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("💨 Дунуть", callback_data="do_smoke")],
-            [InlineKeyboardButton("🔙 Назад", callback_data="menu")]
-        ]), parse_mode='HTML')
+    text = f"<b><i>💨 ДУНУТЬ</i></b>\n\n🌿 <i>блантов в свёртке:</i> <b>{p['blunts']}</b>"
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("💨 Дунуть", callback_data="do_smoke")],
+        [InlineKeyboardButton("🔙 Назад", callback_data="menu")]
+    ])
+    if update.callback_query:
+        await safe_callback_edit(update.callback_query, text, reply_markup=kb)
+    else:
+        await msg.reply_text(text, reply_markup=kb, parse_mode='HTML')
 
 async def do_smoke(update, context):
     query = update.callback_query
@@ -1133,16 +1140,9 @@ async def do_smoke(update, context):
     if r < 0.18:
         earned = random.randint(15,40)
         if context.bot_data.get("happy_hour"): earned *= HAPPY_HOUR_MULTIPLIER
-    elif r < 0.36:
-        pass
-    elif r < 0.53:
-        pass
     elif r < 0.70:
         earned = -5
-    elif r < 0.85:
-        pass
-    else:
-        pass
+    # остальные промежутки — без изменений баланса
 
     async with db_pool.acquire() as conn:
         async with conn.transaction():
@@ -1208,7 +1208,7 @@ async def do_smoke(update, context):
         [InlineKeyboardButton("💨 Дунуть ещё", callback_data="do_smoke") if bl_left>=1 else InlineKeyboardButton("🌿 Крафтить ещё", callback_data="craft")],
         [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
     ])
-    await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
+    await safe_callback_edit(query, text, reply_markup=kb)
     await check_achievements(uid, context)
 
 async def ritual_callback(update, context):
@@ -1308,8 +1308,7 @@ async def profile_callback(update, context):
     uid = user.id; uname = html.escape(user.username or user.first_name)
     p = await get_player_cached(uid)
     if not p:
-        await msg.reply_text("Сначала активируйся: /start")
-        return
+        await msg.reply_text("Сначала активируйся: /start"); return
     bal, bl, guild = p["balance"], p["blunts"], p["guild"]
     rank_emoji, rank_name = "🪓", "Рекрут"
     for emoji, threshold, _ in RANKS:
@@ -1322,7 +1321,7 @@ async def profile_callback(update, context):
     else: g_emoji = ""
     neuro = random.choice(NEURO_STATUSES)
     skins = p.get("profile_skins", {})
-    bg = skins.get("active_background", "") if isinstance(skins, dict) else ""
+    bg = skins.get("active_background", "—") if isinstance(skins, dict) else "—"
     active_title = skins.get("active_title", "—") if isinstance(skins, dict) else "—"
     inv_data = p.get("inventory", [])
     badges = []
@@ -1335,8 +1334,7 @@ async def profile_callback(update, context):
         photos = await context.bot.get_user_profile_photos(uid, limit=1)
         if photos.photos:
             await context.bot.send_photo(chat_id=msg.chat.id, photo=photos.photos[0][0].file_id)
-    except:
-        pass
+    except: pass
 
     rank_progress = get_rank_progress(bal)
     text = (
@@ -1365,7 +1363,6 @@ async def profile_callback(update, context):
             color = {"legendary": "🟡", "epic": "🟣", "rare": "🔵"}.get(rarity, "🟢")
             rare_number = item.get("rare_number", "?-????")
             hash_code = item.get("hash", "0x????...????")
-            #await send_blunt_image(context, msg.chat.id, rarity)
             text += (
                 f"\n   {color} <b>💍 Имя Бланта:</b> <b>{name}</b>\n"
                 f"   🩸 Серийный номер: <b>#{rare_number}</b> · <i>{hash_code}</i>\n"
@@ -1390,20 +1387,16 @@ async def my_blunts_callback(update, context, page=0):
     named = [it for it in inv_data if it.get("type") == "named"]
     rarity_order = {"legendary": 0, "epic": 1, "rare": 2, "common": 3}
     named.sort(key=lambda x: (rarity_order.get(x.get("rarity", "common"), 3), x.get("serial", 999999)))
-
     if not named:
-        await query.message.edit_text("🏆 У тебя пока нет именных блантов.",
-                                      reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 В профиль", callback_data="profile")]]))
+        await safe_callback_edit(query, "🏆 У тебя пока нет именных блантов.",
+                                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 В профиль", callback_data="profile")]]))
         return
-
     total_pages = (len(named) + BLUNTS_PER_PAGE - 1) // BLUNTS_PER_PAGE
     start = page * BLUNTS_PER_PAGE
     end = start + BLUNTS_PER_PAGE
     page_blunts = named[start:end]
-
     rarity_names = {"legendary": "Легендарный", "epic": "Эпический", "rare": "Редкий", "common": "Обычный"}
     text = f"<b>💎 ТВОИ ИМЕННЫЕ БЛАНТЫ ({len(named)})</b>\n\n"
-
     kb_rows = []
     for i, item in enumerate(page_blunts, start=1):
         name = item["name"]
@@ -1412,16 +1405,14 @@ async def my_blunts_callback(update, context, page=0):
         rare_number = item.get("rare_number", "?-????")
         hash_code = item.get("hash", "0x????...????")
         rarity_name = rarity_names.get(rarity, rarity)
-
         text += (
-            f"{start + i}) {color} <b>«{name}»</b> <i>({rarity_name})</i>\n"
+            f"{i}) {color} <b>«{name}»</b> <i>({rarity_name})</i>\n"
             f"<b>🩸Серийный номер и хеш:</b>\n<i>#{rare_number} · {hash_code}</i>\n\n"
         )
         kb_rows.append([
-            InlineKeyboardButton(f"{color} Детали ({start + i})", callback_data=f"blunt_details_{item['id']}"),
+            InlineKeyboardButton(f"{color} Детали ({i})", callback_data=f"blunt_details_{item['id']}"),
             InlineKeyboardButton("🔗 Поделиться", callback_data=f"share_blunt_{item['id']}")
         ])
-
     nav_buttons = []
     if page > 0:
         nav_buttons.append(InlineKeyboardButton("◀ Назад", callback_data=f"blunts_page_{page-1}"))
@@ -1430,8 +1421,7 @@ async def my_blunts_callback(update, context, page=0):
     if nav_buttons:
         kb_rows.append(nav_buttons)
     kb_rows.append([InlineKeyboardButton("🔙 В профиль", callback_data="profile")])
-
-    await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode='HTML')
+    await safe_callback_edit(query, text, reply_markup=InlineKeyboardMarkup(kb_rows))
 
 ACHIEVEMENTS_PER_PAGE = 5
 async def achievements_callback(update, context, page=0):
@@ -1467,7 +1457,7 @@ async def achievements_callback(update, context, page=0):
     if nav_buttons:
         kb_rows.append(nav_buttons)
     kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="profile")])
-    await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode='HTML')
+    await safe_callback_edit(query, text, reply_markup=InlineKeyboardMarkup(kb_rows))
 
 async def top_callback(update, context):
     user, msg = get_user_and_msg(update)
@@ -1483,7 +1473,6 @@ async def top_callback(update, context):
         g = "🕯️" if guild=="BLACK" else "⚜️" if guild=="WHITE" else ""
         text += f"{medal} <b>{name}</b> {g} — <b>{bal} OAC</b> 🍬\n"
 
-    # Исправлен расчёт позиции и десятого места
     async with db_pool.acquire() as conn:
         user_row = await conn.fetchrow("SELECT balance FROM players WHERE user_id=$1", uid)
         if user_row:
@@ -1593,9 +1582,10 @@ async def guild_info_callback(update, context):
     kb_rows.append([InlineKeyboardButton("🏰 В меню", callback_data="menu")])
     kb = InlineKeyboardMarkup(kb_rows)
     if update.callback_query:
-        await msg.edit_text(text, reply_markup=kb, parse_mode='HTML')
+        await safe_callback_edit(update.callback_query, text, reply_markup=kb)
     else:
         await msg.reply_text(text, reply_markup=kb, parse_mode='HTML')
+
 async def guild_shrine_callback(update, context):
     query = update.callback_query
     await query.answer()
@@ -1619,7 +1609,7 @@ async def guild_shrine_callback(update, context):
         [InlineKeyboardButton("💎 Пожертвовать 500 OAC", callback_data="shrine_donate_500")],
         [InlineKeyboardButton("🔙 Назад", callback_data="guild_info")]
     ])
-    await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
+    await safe_callback_edit(query, text, reply_markup=kb)
 
 async def confess_callback(update, context):
     query = update.callback_query
@@ -1644,7 +1634,7 @@ async def confess_callback(update, context):
     else:
         name = random.choice(["Крик Бездны","Пепел Короля","Шёпот Склепа"])
         text = f"<b><i>⚜️ ИСПОВЕДЬ</i></b>\n\n🌟 Чудо! Легендарный блант «{name}»!"
-    await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="guild_info")]]), parse_mode='HTML')
+    await safe_callback_edit(query, text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="guild_info")]]))
 
 async def rules_callback(update, context):
     user, msg = get_user_and_msg(update)
@@ -1783,10 +1773,10 @@ async def luck_callback(update, context, action=None):
                     next_rank_name = emoji; next_threshold = threshold; break
             progress_text = f"<b>🎯 До ранга {next_rank_name}: <i>{next_threshold - new_bal} OAC</i></b>" if next_threshold else "<b>🏆 Максимальный ранг!</b>"
             text = f"<b>🩸 ДАР ИСКАЖЕНИЯ</b>\n\n<b>💎 Ты нафармил +{final_prize} OAC 🍬!</b>\n⚜️ <b>У тебя:</b> <i>{new_bal} OAC</i>\n\n{progress_text}"
-            try:
+            if update.callback_query:
+                await safe_callback_edit(update.callback_query, text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]))
+            else:
                 await msg.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]), parse_mode='HTML')
-            except BadRequest as e:
-                if "message is not modified" not in str(e).lower(): raise
             return
         else:
             await update_blunts(uid, uname, prize)
@@ -1794,9 +1784,12 @@ async def luck_callback(update, context, action=None):
             txt = f"+{prize} 🌿 Блант"
             text = f"<b><i>🎲 КОЛЕСО СМОТРИТЕЛЯ</i></b>\n\n{txt} → 💰 <b>{new_bal} OAC</b> 🍬"
         try:
-            await msg.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]), parse_mode='HTML')
-        except BadRequest as e:
-            if "message is not modified" not in str(e).lower(): raise
+            if update.callback_query:
+                await safe_callback_edit(update.callback_query, text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]))
+            else:
+                await msg.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]), parse_mode='HTML')
+        except Exception as e:
+            logger.error(f"edit error: {e}")
         return
     if action == "luck_berserk":
         if not berserk_available:
@@ -1810,10 +1803,10 @@ async def luck_callback(update, context, action=None):
         if random.random() < 0.6: await update_balance(uid, uname, 200); res_text = f"<b><i>🎲 БЕЗДНА ОТВЕТИЛА</i></b>\n\nИскажение благосклонно! +<b>200 OAC</b> 🍬."
         else: await update_balance(uid, uname, -300); res_text = f"<b><i>🕳️ БЕЗДНА МОЛЧИТ</i></b>\n\nИскажение промолчало. –<b>300 OAC</b>."
         await add_war_score(uid, 200 if "200" in res_text else -300)
-        try:
+        if update.callback_query:
+            await safe_callback_edit(update.callback_query, res_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]))
+        else:
             await msg.edit_text(res_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]), parse_mode='HTML')
-        except BadRequest as e:
-            if "message is not modified" not in str(e).lower(): raise
         return
     if action == "alchemy_start":
         query = update.callback_query
@@ -1828,12 +1821,10 @@ async def luck_callback(update, context, action=None):
             [InlineKeyboardButton("🧪 Запустить реакцию", callback_data="alchemy_confirm")],
             [InlineKeyboardButton("🔙 Назад", callback_data="luck")]
         ])
-        try:
-            await msg.edit_text(text, reply_markup=kb, parse_mode='HTML')
-        except BadRequest as e:
-            if "message is not modified" not in str(e).lower(): raise
+        await safe_callback_edit(query, text, reply_markup=kb)
         return
     if action == "alchemy_confirm":
+        query = update.callback_query
         if p["blunts"] < 5 or bal < 50:
             await send_whisper_dm(update, context, "🔮 Недостаточно ресурсов.")
             return
@@ -1860,16 +1851,16 @@ async def luck_callback(update, context, action=None):
                     except Exception as e:
                         logger.error(f"Ошибка отправки в канал: {e}")
         await add_war_score(uid, 30)
-        try:
-            await msg.edit_text(result_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]), parse_mode='HTML')
-        except BadRequest as e:
-            if "message is not modified" not in str(e).lower(): raise
+        await safe_callback_edit(query, result_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]))
         return
-    # Основной показ меню удачи
+
     try:
-        await msg.edit_text(text, reply_markup=kb, parse_mode='HTML')
-    except BadRequest as e:
-        if "message is not modified" not in str(e).lower(): raise
+        if update.callback_query:
+            await safe_callback_edit(update.callback_query, text, reply_markup=kb)
+        else:
+            await msg.edit_text(text, reply_markup=kb, parse_mode='HTML')
+    except Exception as e:
+        logger.error(f"edit error: {e}")
 
 async def check_blunt(update, context):
     if not context.args:
@@ -1882,8 +1873,6 @@ async def check_blunt(update, context):
             await update.message.reply_text("🕳️ Блант с таким серийным номером не найден.")
             return
         blunt_id, creator_id, serial, rare_number = row["blunt_id"], row["created_by"], row["serial"], row["rare_number"]
-        # Поиск владельца через JSONB (владелец = создатель, т.к. нет передачи)
-        # Но на всякий случай поищем в inventory (без LIKE, через contains)
         owner_row = await conn.fetchrow("SELECT user_id, inventory FROM players WHERE inventory @> $1::jsonb", json.dumps([{"id": blunt_id}]))
         if owner_row:
             owner_id = owner_row["user_id"]
@@ -1908,7 +1897,7 @@ async def check_blunt(update, context):
     await update.message.reply_text(details, parse_mode='HTML')
     await increment_counter(update.effective_user.id, "check_count")
 
-# Лабиринт (без изменений в логике, только мелкие правки)
+# Лабиринт
 async def lab_enter(update, context):
     user, msg = get_user_and_msg(update)
     uid = user.id
@@ -1923,14 +1912,20 @@ async def lab_enter(update, context):
         hrs = int(remain // 3600); mins = int((remain % 3600) // 60)
         text = f"<b>🏛️ ЛАБИРИНТ ИСКАЖЕНИЯ 🔮</b>\n\n🎚️ Сегодня осталось <b>0 попыток</b>.\n⛓️‍💥 Жизни: <b>2</b>\n\n<i>– Портал откроется через <b>{hrs} ч {mins} мин</b>.</i>"
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="menu")]])
-        await msg.edit_text(text, reply_markup=kb, parse_mode='HTML')
+        if update.callback_query:
+            await safe_callback_edit(update.callback_query, text, reply_markup=kb)
+        else:
+            await msg.reply_text(text, reply_markup=kb, parse_mode='HTML')
         return
     text = f"<b>🏛️ ЛАБИРИНТ ИСКАЖЕНИЯ 🔮</b>\n\n🎚️ Сегодня осталась <b>1 попытка</b>.\n⛓️‍💥 Жизни: <b>2</b>\n\n<i>– Ты стоишь у входа. Портал отвечает.</i>\n\nВыбери действие:"
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🚪 Войти в Лабиринт", callback_data="lab_enter_confirm")],
         [InlineKeyboardButton("🔙 Назад", callback_data="menu")]
     ])
-    await msg.edit_text(text, reply_markup=kb, parse_mode='HTML')
+    if update.callback_query:
+        await safe_callback_edit(update.callback_query, text, reply_markup=kb)
+    else:
+        await msg.reply_text(text, reply_markup=kb, parse_mode='HTML')
 
 async def lab_enter_confirm(update, context):
     query = update.callback_query
@@ -2030,7 +2025,7 @@ async def show_lab_final(update, context):
     for key in ("lab_room","lab_lives","lab_rewards","lab_msg_id","lab_chat_id"):
         context.user_data.pop(key, None)
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 К Лабиринту", callback_data="lab_start")], [InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
-    await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
+    await safe_callback_edit(query, text, reply_markup=kb)
     await check_achievements(uid, context)
 
 async def show_lab_death(update, context):
@@ -2041,7 +2036,7 @@ async def show_lab_death(update, context):
     for key in ("lab_room","lab_lives","lab_rewards","lab_msg_id","lab_chat_id"):
         context.user_data.pop(key, None)
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 К Лабиринту", callback_data="lab_start")], [InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
-    await query.message.edit_text("<b><i>🪦 ЛАБИРИНТ ПОГЛОТИЛ ТЕБЯ</i></b>\n\n<i>Твои жизни иссякли. Искажение выбросило тебя обратно.</i>\n\n+50 OAC 🍬", reply_markup=kb, parse_mode='HTML')
+    await safe_callback_edit(query, "<b><i>🪦 ЛАБИРИНТ ПОГЛОТИЛ ТЕБЯ</i></b>\n\n<i>Твои жизни иссякли. Искажение выбросило тебя обратно.</i>\n\n+50 OAC 🍬", reply_markup=kb)
 
 async def welcome_new_member(update, context):
     for member in update.message.new_chat_members:
@@ -2085,7 +2080,7 @@ async def shop_callback(update, context):
         [InlineKeyboardButton("📦 Каталог", callback_data="catalog")],
         [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
     ])
-    await query.message.edit_text("<b>🛒 МАГАЗИН</b>", reply_markup=kb, parse_mode='HTML')
+    await safe_callback_edit(query, "<b>🛒 МАГАЗИН</b>", reply_markup=kb)
 
 async def setbluntpic(update, context):
     if update.effective_user.id != ADMIN_ID:
@@ -2101,6 +2096,88 @@ async def setbluntpic(update, context):
     names = {"common":"⚪ Обычный","rare":"🔵 Редкий","epic":"🟣 Эпический","legendary":"🟡 Легендарный"}
     await update.message.reply_text(f"✅ Изображение для {names[rarity]} обновлено!", parse_mode='HTML')
 
+# ========== НОВЫЕ ОБРАБОТЧИКИ ТИТУЛОВ И ФОНОВ ==========
+async def choose_title_callback(update, context):
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+    p = await get_player_cached(uid)
+    if not p:
+        return
+    titles_str = p.get("titles", "").strip()
+    available = [t for t in titles_str.split() if t] if titles_str else []
+    if not available:
+        await safe_callback_edit(query, "❌ У тебя пока нет разблокированных титулов.",
+                                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="skins_menu")]]))
+        return
+    skins = json.loads(p.get("profile_skins", "{}")) or {}
+    cur_active = skins.get("active_title", "—")
+    kb_rows = []
+    for emoji in available:
+        mark = "✅" if emoji == cur_active else ""
+        kb_rows.append([InlineKeyboardButton(f"{mark} {emoji}", callback_data=f"set_title_{emoji}")])
+    kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="skins_menu")])
+    await safe_callback_edit(query, "<b>💬 Выбери титул</b>", reply_markup=InlineKeyboardMarkup(kb_rows))
+
+async def set_title_callback(update, context):
+    query = update.callback_query
+    emoji = query.data.split("_", 2)[2]
+    uid = query.from_user.id
+    p = await get_player_cached(uid)
+    if not p:
+        return await query.answer()
+    titles_str = p.get("titles", "").strip()
+    if emoji not in titles_str:
+        await query.answer("Этот титул тебе не принадлежит.", show_alert=True)
+        return
+    skins = json.loads(p.get("profile_skins", "{}")) or {}
+    skins["active_title"] = emoji
+    async with db_pool.acquire() as conn:
+        await conn.execute("UPDATE players SET profile_skins=$1 WHERE user_id=$2", json.dumps(skins), uid)
+    invalidate_cache(uid)
+    await query.answer("Титул установлен!", show_alert=True)
+    await choose_title_callback(update, context)
+
+async def choose_bg_callback(update, context):
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+    p = await get_player_cached(uid)
+    if not p:
+        return
+    skins = json.loads(p.get("profile_skins", "{}")) or {}
+    backgrounds = skins.get("unlocked_backgrounds", [])
+    if not backgrounds:
+        await safe_callback_edit(query, "❌ У тебя нет разблокированных фонов.",
+                                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="skins_menu")]]))
+        return
+    cur = skins.get("active_background", "—")
+    kb_rows = []
+    for bg_emoji in backgrounds:
+        mark = "✅" if bg_emoji == cur else ""
+        kb_rows.append([InlineKeyboardButton(f"{mark} {bg_emoji}", callback_data=f"set_bg_{bg_emoji}")])
+    kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="skins_menu")])
+    await safe_callback_edit(query, "<b>🖼️ Выбери фон</b>", reply_markup=InlineKeyboardMarkup(kb_rows))
+
+async def set_bg_callback(update, context):
+    query = update.callback_query
+    emoji = query.data.split("_", 2)[2]
+    uid = query.from_user.id
+    p = await get_player_cached(uid)
+    if not p:
+        return await query.answer()
+    skins = json.loads(p.get("profile_skins", "{}")) or {}
+    if emoji not in skins.get("unlocked_backgrounds", []):
+        await query.answer("Этот фон не разблокирован.", show_alert=True)
+        return
+    skins["active_background"] = emoji
+    async with db_pool.acquire() as conn:
+        await conn.execute("UPDATE players SET profile_skins=$1 WHERE user_id=$2", json.dumps(skins), uid)
+    invalidate_cache(uid)
+    await query.answer("Фон установлен!", show_alert=True)
+    await choose_bg_callback(update, context)
+
+# ========== ОБРАБОТЧИК КНОПОК ==========
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     data = q.data
@@ -2110,8 +2187,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer()
             kb, whisper = await get_main_menu_keyboard(uid)
             menu_text = f"<b>🎮 ГЛАВНОЕ МЕНЮ</b>\n\n<i>{whisper}</i>"
-            try: await q.message.edit_text(menu_text, reply_markup=kb, parse_mode='HTML')
-            except Exception: await q.message.reply_text(menu_text, reply_markup=kb, parse_mode='HTML')
+            await safe_callback_edit(q, menu_text, reply_markup=kb)
         elif data == "farm": await q.answer(); await farm_callback(update, context)
         elif data == "craft": await q.answer(); await craft_callback(update, context)
         elif data == "smoke": await q.answer(); await smoke_callback(update, context)
@@ -2178,7 +2254,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if file_id:
                 await q.message.reply_photo(photo=file_id, caption=text, reply_markup=kb, parse_mode='HTML')
             else:
-                await q.message.edit_text(text=text, reply_markup=kb, parse_mode='HTML')
+                await safe_callback_edit(q, text, reply_markup=kb)
         elif data == "lab_start": await q.answer(); await lab_enter(update, context)
         elif data == "lab_enter_confirm": await q.answer(); await lab_enter_confirm(update, context)
         elif data.startswith("lab_option_"): await q.answer(); await handle_lab_option(update, context, int(data.split("_")[-1]))
@@ -2196,7 +2272,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data == "confess": await q.answer(); await confess_callback(update, context)
         elif data == "pet_preview": await q.answer("❌ Доступно с ранга ⚔️ Ветеран (5000 OAC 🍬)", show_alert=True)
         elif data == "bush_preview": await q.answer("❌ Доступно с ранга ⚔️ Ветеран (5000 OAC 🍬)", show_alert=True)
-        elif data == "activate_menu": await q.answer(); # устаревшая кнопка, не используется
+        elif data == "activate_menu": await q.answer()
         elif data == "skins_menu":
             await q.answer()
             kb = InlineKeyboardMarkup([
@@ -2204,13 +2280,23 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("🖼️ Выбрать фон", callback_data="choose_bg")],
                 [InlineKeyboardButton("🔙 Назад", callback_data="profile")]
             ])
-            await q.message.edit_text("<b>🫧 СКИНЫ</b>\n\nВыбери, что хочешь изменить.", reply_markup=kb, parse_mode='HTML')
-        elif data.startswith("set_title_") or data.startswith("set_bg_"):
-            # базовые реализации (не изменялись)
-            pass
+            await safe_callback_edit(q, "<b>🫧 СКИНЫ</b>\n\nВыбери, что хочешь изменить.", reply_markup=kb)
+        elif data == "choose_title":
+            await q.answer()
+            await choose_title_callback(update, context)
+        elif data == "choose_bg":
+            await q.answer()
+            await choose_bg_callback(update, context)
+        elif data.startswith("set_title_"):
+            await q.answer()
+            await set_title_callback(update, context)
+        elif data.startswith("set_bg_"):
+            await q.answer()
+            await set_bg_callback(update, context)
         elif data == "shop": await shop_callback(update, context)
         else: await q.answer("Неизвестная команда.")
-    except Exception as e: logger.error(f"Button error: {e}")
+    except Exception as e:
+        logger.error(f"Button error: {e}")
 
 # ========== ДЖОБЫ ==========
 async def update_pulse(context):
@@ -2229,8 +2315,7 @@ async def happy_hour_trigger(context):
         await context.bot.send_message(chat_id="@guild_antysocial", text="🌟 <b>ЧАС УДАЧИ!</b> Все действия приносят x2 🍬 30 минут!", parse_mode='HTML')
     except Exception as e: logger.error(f"Happy hour announce error: {e}")
     context.job_queue.run_once(reset_happy_hour, HAPPY_HOUR_DURATION_MIN*60)
-    # Планируем следующий случайный happy hour
-    next_delay = random.randint(4*3600, 8*3600)  # 4-8 часов
+    next_delay = random.randint(4*3600, 8*3600)
     context.job_queue.run_once(happy_hour_trigger, next_delay, name="happy_hour")
 
 async def reset_happy_hour(context):
@@ -2340,7 +2425,6 @@ if __name__ == "__main__":
 
     job = app.job_queue
     job.run_repeating(update_pulse, interval=900, first=10)
-    # Первый happy hour случайным образом через 1-3 часа, затем каждые 4-8 часов динамически
     first_hh = random.randint(3600, 10800)
     job.run_once(happy_hour_trigger, first_hh, name="happy_hour")
     job.run_daily(echo_of_distortion, time=time(hour=18, minute=0))
