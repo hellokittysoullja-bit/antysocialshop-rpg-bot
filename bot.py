@@ -1,4 +1,4 @@
-# bot.py — ANTY SOCIAL SHOP RPG v7.15 FIXED (ПОЛНЫЙ)
+# bot.py — ANTY SOCIAL SHOP RPG v7.15 FIXED (ПОЛНЫЙ) + ОТЛАДКА
 import asyncio, logging, os, random, re, json, hashlib, html
 from datetime import datetime, timedelta, date, time
 from threading import Thread
@@ -148,7 +148,6 @@ LABYRINTH_ROOMS = [
         ]
     }
 ]
-
 # ========== БАЗА ДАННЫХ ==========
 db_pool = None
 BLUNTS_PER_PAGE = 3
@@ -476,8 +475,7 @@ async def check_achievements(user_id, context):
     all_ids = {a["id"] for a in ACHIEVEMENTS if a["id"] != "lunar_lord"}
     if all_ids.issubset(awarded) and "lunar_lord" not in awarded:
         await award_achievement(user_id, "lunar_lord", context)
-
-async def create_named_blunt(uid, name, rarity=None, conn=None):
+    async def create_named_blunt(uid, name, rarity=None, conn=None):
     if conn is None:
         async with db_pool.acquire() as conn:
             return await _create_named_blunt_inner(uid, name, rarity, conn)
@@ -563,9 +561,6 @@ async def send_whisper(context, chat_id, text):
 
 # ========== НОВЫЕ УТИЛИТЫ ДЛЯ НАДЁЖНОЙ ОТПРАВКИ ==========
 async def send_whisper_dm(update, context, text, reply_markup=None):
-    """
-    Всегда отправляет новое сообщение в чат, даже если исходное сообщение колбэка пропало.
-    """
     chat_id = None
     if update.callback_query:
         q = update.callback_query
@@ -588,15 +583,11 @@ async def send_whisper_dm(update, context, text, reply_markup=None):
             logger.error(f"send_whisper_dm plain also failed: {e2}")
 
 async def safe_callback_edit(query, text, reply_markup=None, parse_mode='HTML'):
-    """
-    Пытается изменить исходное сообщение колбэка.
-    Если не удаётся (сообщение удалено/не изменено) — отправляет новое.
-    """
     try:
         await query.message.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
     except BadRequest as e:
         if "message is not modified" in str(e).lower():
-            pass  # всё ок, ничего не делаем
+            pass
         else:
             logger.warning(f"safe_callback_edit: BadRequest: {e}, отправляем новое сообщение")
             try:
@@ -722,7 +713,6 @@ async def get_main_menu_keyboard(user_id):
 
 def get_back_to_menu_keyboard():
     return InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
-
 # ========== ОБРАБОТЧИКИ КОМАНД ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user, msg = get_user_and_msg(update)
@@ -731,7 +721,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username_escaped = html.escape(username)
     player = await get_player_cached(user_id)
 
-    # Реферальная система
     if context.args and len(context.args[0]) > 0:
         deep_link = context.args[0]
         if deep_link.startswith("blunt_"):
@@ -842,7 +831,11 @@ async def farm_callback(update, context):
     user, msg = get_user_and_msg(update)
     uid = user.id; uname = user.username or user.first_name
     uname_escaped = html.escape(uname)
+    logger.info(f"FARM: начат, uid={uid}")                    # ОТЛАДКА
+
     p = await get_player_cached(uid)
+    logger.info(f"FARM: после get_player_cached, uid={uid}")  # ОТЛАДКА
+
     if p and p.get("last_farm"):
         last = p["last_farm"]
         if isinstance(last, str):
@@ -868,6 +861,8 @@ async def farm_callback(update, context):
 
     old_bal = p["balance"] if p else 0
     old_count = p["farm_count"] if p else 0
+    logger.info(f"FARM: перед апдейтом БД, uid={uid}")       # ОТЛАДКА
+
     async with db_pool.acquire() as conn:
         async with conn.transaction():
             row = await conn.fetchrow("""
@@ -888,8 +883,10 @@ async def farm_callback(update, context):
                 await increment_counter(uid, "farm_count")
                 await update_last_farm(uid)
                 p_new = await get_player_cached(uid)
+    logger.info(f"FARM: после апдейта БД, uid={uid}")        # ОТЛАДКА
 
     await add_war_score(uid, earned)
+    logger.info(f"FARM: после add_war_score, uid={uid}")     # ОТЛАДКА
 
     new_count = p_new["farm_count"]
     medal_text, medal_bonus = get_medal_text_and_reward(old_count, new_count, FARM_MEDALS)
@@ -899,6 +896,7 @@ async def farm_callback(update, context):
                 await conn.execute("UPDATE players SET balance = balance + $1 WHERE user_id = $2", medal_bonus, uid)
                 invalidate_cache(uid)
         p_new = await get_player_cached(uid)
+
     new_balance = p_new["balance"]
     progress_bar_str = get_medal_progress(new_count, FARM_MEDALS)
     rank_progress = get_rank_progress(new_balance)
@@ -913,8 +911,14 @@ async def farm_callback(update, context):
         f"{rank_progress}"
     )
     await send_whisper_dm(update, context, text)
+    logger.info(f"FARM: сообщение отправлено, uid={uid}")    # ОТЛАДКА
+
     await check_rank_up(context, uid, uname, old_bal, new_balance)
+    logger.info(f"FARM: после check_rank_up, uid={uid}")     # ОТЛАДКА
+
     await check_achievements(uid, context)
+    logger.info(f"FARM: после check_achievements, uid={uid}")  # ОТЛАДКА
+
 
 async def craft_callback(update, context):
     user, msg = get_user_and_msg(update)
@@ -1302,8 +1306,7 @@ async def collect_callback(update, context):
             await conn.execute("UPDATE players SET passive_collected=$1 WHERE user_id=$2", datetime.now(), uid)
         invalidate_cache(uid)
         await send_whisper_dm(update, context, "⏳ Авто‑сборщик активирован. Заходи через час.")
-
-async def profile_callback(update, context):
+    async def profile_callback(update, context):
     user, msg = get_user_and_msg(update)
     uid = user.id; uname = html.escape(user.username or user.first_name)
     p = await get_player_cached(uid)
@@ -1736,6 +1739,7 @@ async def luck_callback(update, context, action=None):
         kb_rows.append([InlineKeyboardButton("🔮 Алхимия (⚔️ Ветеран)", callback_data="alchemy_start")])
     kb_rows.append([InlineKeyboardButton("🏰 В меню", callback_data="menu")])
     kb = InlineKeyboardMarkup(kb_rows)
+
     if action == "luck_wheel":
         if not wheel_available:
             diff = timedelta(hours=24) - (now - last_daily)
@@ -1791,6 +1795,7 @@ async def luck_callback(update, context, action=None):
         except Exception as e:
             logger.error(f"edit error: {e}")
         return
+
     if action == "luck_berserk":
         if not berserk_available:
             if bal < 300: await send_whisper_dm(update, context, f"<b><i>🎲 Бездна требует жертву</i></b>\n\n⚠️ Недостаточно OAC (нужно ещё <b>{300-bal}</b>).")
@@ -1808,6 +1813,7 @@ async def luck_callback(update, context, action=None):
         else:
             await msg.edit_text(res_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]), parse_mode='HTML')
         return
+
     if action == "alchemy_start":
         query = update.callback_query
         if not veteran_alchemy:
@@ -1823,6 +1829,7 @@ async def luck_callback(update, context, action=None):
         ])
         await safe_callback_edit(query, text, reply_markup=kb)
         return
+
     if action == "alchemy_confirm":
         query = update.callback_query
         if p["blunts"] < 5 or bal < 50:
@@ -2096,14 +2103,12 @@ async def setbluntpic(update, context):
     names = {"common":"⚪ Обычный","rare":"🔵 Редкий","epic":"🟣 Эпический","legendary":"🟡 Легендарный"}
     await update.message.reply_text(f"✅ Изображение для {names[rarity]} обновлено!", parse_mode='HTML')
 
-# ========== НОВЫЕ ОБРАБОТЧИКИ ТИТУЛОВ И ФОНОВ ==========
 async def choose_title_callback(update, context):
     query = update.callback_query
     await query.answer()
     uid = query.from_user.id
     p = await get_player_cached(uid)
-    if not p:
-        return
+    if not p: return
     titles_str = p.get("titles", "").strip()
     available = [t for t in titles_str.split() if t] if titles_str else []
     if not available:
@@ -2124,8 +2129,7 @@ async def set_title_callback(update, context):
     emoji = query.data.split("_", 2)[2]
     uid = query.from_user.id
     p = await get_player_cached(uid)
-    if not p:
-        return await query.answer()
+    if not p: return await query.answer()
     titles_str = p.get("titles", "").strip()
     if emoji not in titles_str:
         await query.answer("Этот титул тебе не принадлежит.", show_alert=True)
@@ -2143,8 +2147,7 @@ async def choose_bg_callback(update, context):
     await query.answer()
     uid = query.from_user.id
     p = await get_player_cached(uid)
-    if not p:
-        return
+    if not p: return
     skins = json.loads(p.get("profile_skins", "{}")) or {}
     backgrounds = skins.get("unlocked_backgrounds", [])
     if not backgrounds:
@@ -2164,8 +2167,7 @@ async def set_bg_callback(update, context):
     emoji = query.data.split("_", 2)[2]
     uid = query.from_user.id
     p = await get_player_cached(uid)
-    if not p:
-        return await query.answer()
+    if not p: return await query.answer()
     skins = json.loads(p.get("profile_skins", "{}")) or {}
     if emoji not in skins.get("unlocked_backgrounds", []):
         await query.answer("Этот фон не разблокирован.", show_alert=True)
@@ -2176,12 +2178,13 @@ async def set_bg_callback(update, context):
     invalidate_cache(uid)
     await query.answer("Фон установлен!", show_alert=True)
     await choose_bg_callback(update, context)
-
-# ========== ОБРАБОТЧИК КНОПОК ==========
+    # ========== ОБРАБОТЧИК КНОПОК ==========
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     data = q.data
     uid = q.from_user.id
+    logger.info(f"BUTTON CLICK: user={uid} data={data}")   # ОТЛАДКА
+
     try:
         if data == "menu":
             await q.answer()
@@ -2294,6 +2297,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer()
             await set_bg_callback(update, context)
         elif data == "shop": await shop_callback(update, context)
+        elif data == "guild_join_BLACK":
+            await q.answer()
+            await set_guild(uid, "BLACK")
+            await add_title(uid, "🕯️")
+            await send_whisper_dm(update, context, "🕯️ Ты вступил в Тёмную Гильдию. Ритуалы ждут тебя.")
+        elif data == "guild_join_WHITE":
+            await q.answer()
+            await set_guild(uid, "WHITE")
+            await add_title(uid, "⚜️")
+            await send_whisper_dm(update, context, "⚜️ Ты вступил в Светлую Гильдию. Исповедь очищает.")
         else: await q.answer("Неизвестная команда.")
     except Exception as e:
         logger.error(f"Button error: {e}")
@@ -2435,7 +2448,7 @@ if __name__ == "__main__":
     job.run_repeating(weekly_guild_rating, interval=7*24*3600, first=max(1, (next_saturday - now).total_seconds()))
     job.run_repeating(keep_db_alive, interval=180, first=10)
 
-    print("BOT READY – all critical fixes applied")
+    print("BOT READY – all critical fixes applied with debug logs")
     app.run_polling()
     loop.run_until_complete(close_db_pool())
     loop.close()
