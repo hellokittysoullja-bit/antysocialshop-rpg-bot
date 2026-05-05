@@ -766,7 +766,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🕯️ Тёмная Гильдия", callback_data="guild_join_BLACK"),
              InlineKeyboardButton("⚜️ Светлая Гильдия", callback_data="guild_join_WHITE")]
         ])
-        await msg.reply_text(bonUS + welcome, reply_markup=guild_kb, parse_mode='HTML')
+        await msg.reply_text(bonus + welcome, reply_markup=guild_kb, parse_mode='HTML')
         return
 
     await process_daily_login(user_id, context)
@@ -1774,7 +1774,7 @@ async def luck_callback(update, context, action=None):
             progress_text = f"<b>🎯 До ранга {next_rank_name}: <i>{next_threshold - new_bal} OAC</i></b>" if next_threshold else "<b>🏆 Максимальный ранг!</b>"
             text = f"<b>🩸 ДАР ИСКАЖЕНИЯ</b>\n\n<b>💎 Ты нафармил +{final_prize} OAC 🍬!</b>\n⚜️ <b>У тебя:</b> <i>{new_bal} OAC</i>\n\n{progress_text}"
         else:
-            await update_blunts(UID, uname, prize)
+            await update_blunts(uid, uname, prize)
             new_bal = (await get_player_cached(uid))["balance"]
             text = f"<b><i>🎲 КОЛЕСО СМОТРИТЕЛЯ</i></b>\n\n+{prize} 🌿 Блант → 💰 <b>{new_bal} OAC</b> 🍬"
         if update.callback_query:
