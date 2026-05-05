@@ -905,9 +905,10 @@ async def craft_callback(update, context):
         kb_rows.append([InlineKeyboardButton(f"💠 Использовать Пыль (1 доза)", callback_data="use_dust")])
     kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="menu")])
     if update.callback_query:
-    await msg.edit_text(text, reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode='HTML')
+            await msg.edit_text(text, reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode='HTML')
     else:
-    await msg.reply_text(text, reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode='HTML')
+            await msg.reply_text(text,
+    reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode='HTML')
 
 async def handle_craft_normal(update, context):
     query = update.callback_query
