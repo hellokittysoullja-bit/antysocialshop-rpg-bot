@@ -266,24 +266,7 @@ async def get_player_cached(user_id):
         row = await conn.fetchrow("SELECT * FROM players WHERE user_id=$1", user_id)
     if row:
         p = dict(row)
-        # Безопасно достаём inventory
-        inv_raw = p.get("inventory", "[]")
-        if isinstance(inv_raw, str):
-            try:
-                p["inventory"] = json.loads(inv_raw)
-            except:
-                p["inventory"] = []
-        else:
-            p["inventory"] = inv_raw if isinstance(inv_raw, list) else []
-        # Безопасно достаём profile_skins
-        skins_raw = p.get("profile_skins", "{}")
-        if isinstance(skins_raw, str):
-            try:
-                p["profile_skins"] = json.loads(skins_raw)
-            except:
-                p["profile_skins"] = {}
-        else:
-            p["profile_skins"] = skins_raw if isinstance(skins_raw, dict) else {}
+        p["inventory"] = json.loads(p.get("inventory", "[]"))
         player_cache[user_id] = p
         return p
     return None
@@ -390,9 +373,7 @@ async def check_rank_up(context, user_id, username, old_balance, new_balance):
 async def unlock_border(user_id, emoji):
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow("SELECT profile_skins FROM players WHERE user_id=$1", user_id)
-        skins = row["profile_skins"] if row and row["profile_skins"] else {}
-        if not isinstance(skins, dict):
-            skins = {}
+        skins = json.loads(row["profile_skins"]) if row and row["profile_skins"] else {}
         borders = skins.get("unlocked_borders", [])
         if emoji not in borders:
             borders.append(emoji)
@@ -405,9 +386,7 @@ async def unlock_border(user_id, emoji):
 async def unlock_bg(user_id, emoji):
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow("SELECT profile_skins FROM players WHERE user_id=$1", user_id)
-        skins = row["profile_skins"] if row and row["profile_skins"] else {}
-        if not isinstance(skins, dict):
-            skins = {}
+        skins = json.loads(row["profile_skins"]) if row and row["profile_skins"] else {}
         backs = skins.get("unlocked_backgrounds", [])
         if emoji not in backs:
             backs.append(emoji)
@@ -513,8 +492,7 @@ async def _create_named_blunt_inner(uid, name, rarity, conn):
         ON CONFLICT (user_id) DO NOTHING
     """, uid)
     row = await conn.fetchrow("SELECT inventory FROM players WHERE user_id=$1", uid)
-    inv = row["inventory"] if row and row["inventory"] else []
-    inv = inv if isinstance(inv, list) else []
+    inv = json.loads(row["inventory"]) if row and row["inventory"] else []
     if not rarity:
         rare = random.random()
         if rare < 0.02: rarity = "legendary"
@@ -577,9 +555,29 @@ async def count_guilds():
             cnt[r["guild"]] = r["cnt"]
     return cnt
 
+async def send_whisper(context, chat_id, text):
+    try:
+        await context.bot.send_message(chat_id=chat_id, text=text, parse_mode='HTML')
+    except Exception as e:
+        logger.error(f"Whisper error: {e}")
+
 # ========== НОВЫЕ УТИЛИТЫ ДЛЯ НАДЁЖНОЙ ОТПРАВКИ ==========
 async def send_whisper_dm(update, context, text, reply_markup=None):
-    chat_id = update.effective_chat.id
+    """
+    Всегда отправляет новое сообщение в чат, даже если исходное сообщение колбэка пропало.
+    """
+    chat_id = None
+    if update.callback_query:
+        q = update.callback_query
+        if q.message:
+            chat_id = q.message.chat_id
+        else:
+            chat_id = update.effective_chat.id if update.effective_chat else None
+    elif update.message:
+        chat_id = update.message.chat_id
+    if not chat_id:
+        logger.error("send_whisper_dm: не удалось определить chat_id")
+        return
     try:
         await context.bot.send_message(chat_id=chat_id, text=text, parse_mode='HTML', reply_markup=reply_markup)
     except Exception as e:
@@ -590,18 +588,15 @@ async def send_whisper_dm(update, context, text, reply_markup=None):
             logger.error(f"send_whisper_dm plain also failed: {e2}")
 
 async def safe_callback_edit(query, text, reply_markup=None, parse_mode='HTML'):
-    if query.message is None:
-        chat_id = query.from_user.id
-        try:
-            await query.message.chat.send_message(text, reply_markup=reply_markup, parse_mode=parse_mode)
-        except:
-            await query.from_user.send_message(text, reply_markup=reply_markup, parse_mode=parse_mode)
-        return
+    """
+    Пытается изменить исходное сообщение колбэка.
+    Если не удаётся (сообщение удалено/не изменено) — отправляет новое.
+    """
     try:
         await query.message.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
     except BadRequest as e:
         if "message is not modified" in str(e).lower():
-            pass
+            pass  # всё ок, ничего не делаем
         else:
             logger.warning(f"safe_callback_edit: BadRequest: {e}, отправляем новое сообщение")
             try:
@@ -610,10 +605,7 @@ async def safe_callback_edit(query, text, reply_markup=None, parse_mode='HTML'):
                 await query.message.chat.send_message(text, reply_markup=reply_markup, parse_mode=parse_mode)
     except Exception as e:
         logger.error(f"safe_callback_edit failed: {e}")
-        try:
-            await query.message.chat.send_message(text, reply_markup=reply_markup, parse_mode=parse_mode)
-        except:
-            pass
+        await query.message.chat.send_message(text, reply_markup=reply_markup, parse_mode=parse_mode)
 
 def format_date(iso_string):
     try:
@@ -841,6 +833,7 @@ async def process_daily_login(user_id, context):
         )
         await context.bot.send_message(chat_id=user_id, text=msg, parse_mode='HTML')
     await check_achievements(user_id, context)
+
 async def grant_title(user_id, emoji, name, context):
     await add_title(user_id, emoji)
 
@@ -871,10 +864,7 @@ async def farm_callback(update, context):
     if random.randint(1,100) == 1:
         earned *= 10
         crit = True
-        try:
-            await context.bot.send_message(chat_id="@guild_antysocial", text=f"🌟 @{uname_escaped} наткнулся на <i>Золотую жилу</i>! +{earned} 🍬", parse_mode='HTML')
-        except:
-            pass
+        await send_whisper(context, "@guild_antysocial", f"🌟 @{uname_escaped} наткнулся на <i>Золотую жилу</i>! +{earned} 🍬")
 
     old_bal = p["balance"] if p else 0
     old_count = p["farm_count"] if p else 0
@@ -891,7 +881,7 @@ async def farm_callback(update, context):
             """, uid, earned)
             if row:
                 p_new = dict(row)
-                p_new["inventory"] = row["inventory"] if row["inventory"] else []
+                p_new["inventory"] = json.loads(p_new.get("inventory", "[]"))
                 player_cache[uid] = p_new
             else:
                 await update_balance(uid, uname, earned)
@@ -965,7 +955,7 @@ async def handle_craft_normal(update, context):
             """, uid)
             if row:
                 p_new = dict(row)
-                p_new["inventory"] = row["inventory"] if row["inventory"] else []
+                p_new["inventory"] = json.loads(p_new.get("inventory", "[]"))
                 player_cache[uid] = p_new
             else:
                 await update_balance(uid, uname, -15)
@@ -977,10 +967,7 @@ async def handle_craft_normal(update, context):
     await add_war_score(uid, 10)
     if random.random() < 0.05:
         await update_blunts(uid, uname, 1)
-        try:
-            await context.bot.send_message(chat_id="@guild_antysocial", text=f"⚡ @{html.escape(uname)} высек Искру Искажения из рутины. +1 🌿", parse_mode='HTML')
-        except:
-            pass
+        await send_whisper(context, "@guild_antysocial", f"⚡ @{html.escape(uname)} высек Искру Искажения из рутины. +1 🌿")
 
     new_count = p_new["craft_count"]
     medal_text, medal_bonus = get_medal_text_and_reward(old_count, new_count, CRAFT_MEDALS)
@@ -1155,6 +1142,7 @@ async def do_smoke(update, context):
         if context.bot_data.get("happy_hour"): earned *= HAPPY_HOUR_MULTIPLIER
     elif r < 0.70:
         earned = -5
+    # остальные промежутки — без изменений баланса
 
     async with db_pool.acquire() as conn:
         async with conn.transaction():
@@ -1168,7 +1156,7 @@ async def do_smoke(update, context):
             """, uid, save, earned)
             if row:
                 p_new = dict(row)
-                p_new["inventory"] = row["inventory"] if row["inventory"] else []
+                p_new["inventory"] = json.loads(p_new.get("inventory", "[]"))
                 player_cache[uid] = p_new
             else:
                 if not save: await update_blunts(uid, uname, -1)
@@ -1253,7 +1241,7 @@ async def ritual_callback(update, context):
             """, uid, reward, extra)
             if row:
                 p_new = dict(row)
-                p_new["inventory"] = row["inventory"] if row["inventory"] else []
+                p_new["inventory"] = json.loads(p_new.get("inventory", "[]"))
                 player_cache[uid] = p_new
             else:
                 await update_balance(uid, uname, reward + extra)
@@ -1333,10 +1321,8 @@ async def profile_callback(update, context):
     else: g_emoji = ""
     neuro = random.choice(NEURO_STATUSES)
     skins = p.get("profile_skins", {})
-    if not isinstance(skins, dict):
-        skins = {}
-    bg = skins.get("active_background", "—")
-    active_title = skins.get("active_title", "—")
+    bg = skins.get("active_background", "—") if isinstance(skins, dict) else "—"
+    active_title = skins.get("active_title", "—") if isinstance(skins, dict) else "—"
     inv_data = p.get("inventory", [])
     badges = []
     if any(it.get("rarity")=="legendary" for it in inv_data): badges.append("🟡")
@@ -1775,8 +1761,6 @@ async def luck_callback(update, context, action=None):
             try:
                 await context.bot.send_message(chat_id="@guild_antysocial", text=f"🌟 @{uname} сорвал Джекпот! +{final_prize} OAC", parse_mode='HTML')
             except: pass
-            await send_whisper_dm(update, context, f"<b>🎉 ДЖЕКПОТ!</b> +{final_prize} OAC 🍬")
-            return
         elif prize_type == "oac":
             await update_balance(uid, uname, final_prize)
             await add_war_score(uid, final_prize)
@@ -1789,14 +1773,23 @@ async def luck_callback(update, context, action=None):
                     next_rank_name = emoji; next_threshold = threshold; break
             progress_text = f"<b>🎯 До ранга {next_rank_name}: <i>{next_threshold - new_bal} OAC</i></b>" if next_threshold else "<b>🏆 Максимальный ранг!</b>"
             text = f"<b>🩸 ДАР ИСКАЖЕНИЯ</b>\n\n<b>💎 Ты нафармил +{final_prize} OAC 🍬!</b>\n⚜️ <b>У тебя:</b> <i>{new_bal} OAC</i>\n\n{progress_text}"
+            if update.callback_query:
+                await safe_callback_edit(update.callback_query, text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]))
+            else:
+                await msg.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]), parse_mode='HTML')
+            return
         else:
             await update_blunts(uid, uname, prize)
             new_bal = (await get_player_cached(uid))["balance"]
-            text = f"<b><i>🎲 КОЛЕСО СМОТРИТЕЛЯ</i></b>\n\n+{prize} 🌿 Блант → 💰 <b>{new_bal} OAC</b> 🍬"
-        if update.callback_query:
-            await safe_callback_edit(update.callback_query, text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]))
-        else:
-            await msg.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]), parse_mode='HTML')
+            txt = f"+{prize} 🌿 Блант"
+            text = f"<b><i>🎲 КОЛЕСО СМОТРИТЕЛЯ</i></b>\n\n{txt} → 💰 <b>{new_bal} OAC</b> 🍬"
+        try:
+            if update.callback_query:
+                await safe_callback_edit(update.callback_query, text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]))
+            else:
+                await msg.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]), parse_mode='HTML')
+        except Exception as e:
+            logger.error(f"edit error: {e}")
         return
     if action == "luck_berserk":
         if not berserk_available:
@@ -1839,7 +1832,6 @@ async def luck_callback(update, context, action=None):
             async with conn.transaction():
                 await update_blunts(uid, uname, -5)
                 await update_balance(uid, uname, -50)
-                await increment_counter(uid, "alchemy_count")
                 r = random.random()
                 if r < 0.40:
                     await update_essence(uid, 1)
@@ -1884,11 +1876,8 @@ async def check_blunt(update, context):
         owner_row = await conn.fetchrow("SELECT user_id, inventory FROM players WHERE inventory @> $1::jsonb", json.dumps([{"id": blunt_id}]))
         if owner_row:
             owner_id = owner_row["user_id"]
-            inv = owner_row["inventory"] if owner_row["inventory"] else []
-            if isinstance(inv, list):
-                item = next((it for it in inv if it.get("id") == blunt_id), None)
-            else:
-                item = None
+            inv = json.loads(owner_row["inventory"])
+            item = next((it for it in inv if it.get("id") == blunt_id), None)
         else:
             item = None
     if not item:
@@ -2071,6 +2060,7 @@ async def handle_chat_shortcut(update, context):
         "гильдия": guild_info_callback,
         "привилегия": privilege_callback,
         "каталог": catalog_callback,
+        "проверка": check_blunt,
         "ритуал": ritual_callback,
         "лабиринт": lab_enter,
         "питомец": pet_preview,
@@ -2120,9 +2110,7 @@ async def choose_title_callback(update, context):
         await safe_callback_edit(query, "❌ У тебя пока нет разблокированных титулов.",
                                  reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="skins_menu")]]))
         return
-    skins = p.get("profile_skins", {})
-    if not isinstance(skins, dict):
-        skins = {}
+    skins = json.loads(p.get("profile_skins", "{}")) or {}
     cur_active = skins.get("active_title", "—")
     kb_rows = []
     for emoji in available:
@@ -2142,9 +2130,7 @@ async def set_title_callback(update, context):
     if emoji not in titles_str:
         await query.answer("Этот титул тебе не принадлежит.", show_alert=True)
         return
-    skins = p.get("profile_skins", {})
-    if not isinstance(skins, dict):
-        skins = {}
+    skins = json.loads(p.get("profile_skins", "{}")) or {}
     skins["active_title"] = emoji
     async with db_pool.acquire() as conn:
         await conn.execute("UPDATE players SET profile_skins=$1 WHERE user_id=$2", json.dumps(skins), uid)
@@ -2159,9 +2145,7 @@ async def choose_bg_callback(update, context):
     p = await get_player_cached(uid)
     if not p:
         return
-    skins = p.get("profile_skins", {})
-    if not isinstance(skins, dict):
-        skins = {}
+    skins = json.loads(p.get("profile_skins", "{}")) or {}
     backgrounds = skins.get("unlocked_backgrounds", [])
     if not backgrounds:
         await safe_callback_edit(query, "❌ У тебя нет разблокированных фонов.",
@@ -2182,9 +2166,7 @@ async def set_bg_callback(update, context):
     p = await get_player_cached(uid)
     if not p:
         return await query.answer()
-    skins = p.get("profile_skins", {})
-    if not isinstance(skins, dict):
-        skins = {}
+    skins = json.loads(p.get("profile_skins", "{}")) or {}
     if emoji not in skins.get("unlocked_backgrounds", []):
         await query.answer("Этот фон не разблокирован.", show_alert=True)
         return
@@ -2312,16 +2294,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer()
             await set_bg_callback(update, context)
         elif data == "shop": await shop_callback(update, context)
-        elif data == "guild_join_BLACK":
-            await q.answer()
-            await set_guild(uid, "BLACK")
-            await update_balance(uid, html.escape(q.from_user.username or q.from_user.first_name), 0)
-            await send_whisper_dm(update, context, "🕯️ Ты вступил в Тёмную Гильдию. Ритуалы ждут тебя.")
-        elif data == "guild_join_WHITE":
-            await q.answer()
-            await set_guild(uid, "WHITE")
-            await update_balance(uid, html.escape(q.from_user.username or q.from_user.first_name), 0)
-            await send_whisper_dm(update, context, "⚜️ Ты вступил в Светлую Гильдию. Исповедь очищает.")
         else: await q.answer("Неизвестная команда.")
     except Exception as e:
         logger.error(f"Button error: {e}")
@@ -2357,9 +2329,7 @@ async def echo_of_distortion(context):
     all_named = []
     for row in rows:
         try:
-            inv = row["inventory"] if row["inventory"] else []
-            if not isinstance(inv, list):
-                inv = []
+            inv = json.loads(row["inventory"])
             for item in inv:
                 if item.get("type")=="named": all_named.append((row["user_id"], row["username"], item))
         except: continue
