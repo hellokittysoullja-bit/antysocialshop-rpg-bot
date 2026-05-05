@@ -555,29 +555,10 @@ async def count_guilds():
             cnt[r["guild"]] = r["cnt"]
     return cnt
 
-async def send_whisper(context, chat_id, text):
-    try:
-        await context.bot.send_message(chat_id=chat_id, text=text, parse_mode='HTML')
-    except Exception as e:
-        logger.error(f"Whisper error: {e}")
-
 # ========== НОВЫЕ УТИЛИТЫ ДЛЯ НАДЁЖНОЙ ОТПРАВКИ ==========
 async def send_whisper_dm(update, context, text, reply_markup=None):
-    """
-    Всегда отправляет новое сообщение в чат, даже если исходное сообщение колбэка пропало.
-    """
-    chat_id = None
-    if update.callback_query:
-        q = update.callback_query
-        if q.message:
-            chat_id = q.message.chat_id
-        else:
-            chat_id = update.effective_chat.id if update.effective_chat else None
-    elif update.message:
-        chat_id = update.message.chat_id
-    if not chat_id:
-        logger.error("send_whisper_dm: не удалось определить chat_id")
-        return
+    # Берём chat_id напрямую из update
+    chat_id = update.effective_chat.id
     try:
         await context.bot.send_message(chat_id=chat_id, text=text, parse_mode='HTML', reply_markup=reply_markup)
     except Exception as e:
@@ -588,15 +569,19 @@ async def send_whisper_dm(update, context, text, reply_markup=None):
             logger.error(f"send_whisper_dm plain also failed: {e2}")
 
 async def safe_callback_edit(query, text, reply_markup=None, parse_mode='HTML'):
-    """
-    Пытается изменить исходное сообщение колбэка.
-    Если не удаётся (сообщение удалено/не изменено) — отправляет новое.
-    """
+    if query.message is None:
+        # Сообщение удалено, отправляем новое в чат
+        chat_id = query.from_user.id
+        try:
+            await query.message.chat.send_message(text, reply_markup=reply_markup, parse_mode=parse_mode)
+        except:
+            await query.from_user.send_message(text, reply_markup=reply_markup, parse_mode=parse_mode)
+        return
     try:
         await query.message.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
     except BadRequest as e:
         if "message is not modified" in str(e).lower():
-            pass  # всё ок, ничего не делаем
+            pass  # всё ок
         else:
             logger.warning(f"safe_callback_edit: BadRequest: {e}, отправляем новое сообщение")
             try:
@@ -605,7 +590,10 @@ async def safe_callback_edit(query, text, reply_markup=None, parse_mode='HTML'):
                 await query.message.chat.send_message(text, reply_markup=reply_markup, parse_mode=parse_mode)
     except Exception as e:
         logger.error(f"safe_callback_edit failed: {e}")
-        await query.message.chat.send_message(text, reply_markup=reply_markup, parse_mode=parse_mode)
+        try:
+            await query.message.chat.send_message(text, reply_markup=reply_markup, parse_mode=parse_mode)
+        except:
+            pass
 
 def format_date(iso_string):
     try:
