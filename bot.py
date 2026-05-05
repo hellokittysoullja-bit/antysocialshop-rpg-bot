@@ -634,6 +634,23 @@ def get_rank_progress(balance):
     if balance >= RANKS[-1][1]:
         emoji = RANKS[-1][0]
         name = emoji.split(' ',1)[1]
+        return f"⚜️ <b>Ранг:</b> {emoji} <b>{name}</b> (Максимум)\n<b>▓▓▓▓▓▓▓▓▓▓ 100%</b>"
+    for i in range(len(RANKS)-1):
+        curr_emoji, curr_th, _ = RANKS[i]
+        next_emoji, next_th, _ = RANKS[i+1]
+        if balance < next_th:
+            curr_name = curr_emoji.split(' ',1)[1] if ' ' in curr_emoji else curr_emoji
+            progress = int((balance - curr_th) / (next_th - curr_th) * 100)
+            bar = "▓" * (progress // 10) + "░" * (10 - progress // 10)
+            return (
+                f"⚜️ <b>Ранг:</b> {curr_emoji} <b>{curr_name}</b>\n"
+                f"{bar} <b>{progress}%</b>\n"
+                f"<b>{balance} / {next_th} OAC</b>"
+            )
+    return ""
+    if balance >= RANKS[-1][1]:
+        emoji = RANKS[-1][0]
+        name = emoji.split(' ',1)[1]
         return f"⚜️ Ранг: {emoji} {name} (Максимум)\n▓▓▓▓▓▓▓▓▓▓ 100%"
     for i in range(len(RANKS)-1):
         curr_emoji, curr_th, _ = RANKS[i]
@@ -964,7 +981,11 @@ async def handle_craft_normal(update, context):
         f"\n🎯 <b>Крафтинг:</b> {new_count}\n{progress_bar_str}\n\n"
         f"🚬 <i>Блантов в свёртке:</i> <b>{p_new['blunts']}</b>"
     )
-    await send_whisper_dm(update, context, text)
+    # Отправляем результат в то же сообщение, если была кнопка, иначе новым
+    if update.callback_query:
+        await update.callback_query.message.reply_text(text, parse_mode='HTML')
+    else:
+        await update.message.reply_text(text, parse_mode='HTML')
     await check_achievements(uid, context)
 
 async def handle_craft_named(update, context):
@@ -1322,7 +1343,7 @@ async def profile_callback(update, context):
         f"<b>⚜️ ПРОФИЛЬ</b>\n"
         f"👤 <b>{uname}</b>{g_emoji}\n"
         f"🫧 Фон: {bg}\n\n"
-        f"{rank_progress}\n\n"
+        f"{rank_progress}\n"
         f"💎 <b>ОАС:</b> <b>{bal} OAC</b> 🍬\n"
         f"🌿 <b>Блантов в свёртке:</b> <b>{bl}</b>\n"
         f"🪴 <b>Куст:</b> <b>+{30 * (3 if bal>=20000 else 2 if bal>=5000 else 0)} OAC/ч</b>\n"
@@ -1381,7 +1402,7 @@ async def my_blunts_callback(update, context, page=0):
     page_blunts = named[start:end]
 
     rarity_names = {"legendary": "Легендарный", "epic": "Эпический", "rare": "Редкий", "common": "Обычный"}
-    text = f"<b>🏆 ТВОИ ИМЕННЫЕ БЛАНТЫ ({len(named)})</b>\n\n"
+    text = f"<b>💎 ТВОИ ИМЕННЫЕ БЛАНТЫ ({len(named)})</b>\n\n"
 
     kb_rows = []
     for i, item in enumerate(page_blunts, start=1):
@@ -1393,11 +1414,11 @@ async def my_blunts_callback(update, context, page=0):
         rarity_name = rarity_names.get(rarity, rarity)
 
         text += (
-            f"{start + i - 1}) {color} <b>«{name}»</b> <i>({rarity_name})</i>\n"
-            f"<i>#{rare_number} · {hash_code}</i>\n\n"
+            f"{start + i}) {color} <b>«{name}»</b> <i>({rarity_name})</i>\n"
+            f"<b>🩸Серийный номер и хеш:</b>\n<i>#{rare_number} · {hash_code}</i>\n\n"
         )
         kb_rows.append([
-            InlineKeyboardButton(f"💎 {start + i - 1}) Детали", callback_data=f"blunt_details_{item['id']}"),
+            InlineKeyboardButton(f"{color} Детали ({start + i})", callback_data=f"blunt_details_{item['id']}"),
             InlineKeyboardButton("🔗 Поделиться", callback_data=f"share_blunt_{item['id']}")
         ])
 
@@ -1572,7 +1593,10 @@ async def guild_info_callback(update, context):
     kb_rows.append([InlineKeyboardButton("🏰 В меню", callback_data="menu")])
     kb = InlineKeyboardMarkup(kb_rows)
     if update.callback_query:
+        if update.callback_query:
         await msg.edit_text(text, reply_markup=kb, parse_mode='HTML')
+    else:
+        await msg.reply_text(text, reply_markup=kb, parse_mode='HTML')
     else:
         await msg.reply_text(text, reply_markup=kb, parse_mode='HTML')
 async def guild_shrine_callback(update, context):
@@ -2176,7 +2200,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data == "pet_preview": await q.answer("❌ Доступно с ранга ⚔️ Ветеран (5000 OAC 🍬)", show_alert=True)
         elif data == "bush_preview": await q.answer("❌ Доступно с ранга ⚔️ Ветеран (5000 OAC 🍬)", show_alert=True)
         elif data == "activate_menu": await q.answer(); # устаревшая кнопка, не используется
-        elif data == "skins_menu": await q.answer(); # реализации опущены, но есть
+        elif data == "skins_menu":
+            await q.answer()
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("💬 Выбрать титул", callback_data="choose_title")],
+                [InlineKeyboardButton("🖼️ Выбрать фон", callback_data="choose_bg")],
+                [InlineKeyboardButton("🔙 Назад", callback_data="profile")]
+            ])
+            await q.message.edit_text("<b>🫧 СКИНЫ</b>\n\nВыбери, что хочешь изменить.", reply_markup=kb, parse_mode='HTML')
         elif data.startswith("set_title_") or data.startswith("set_bg_"):
             # базовые реализации (не изменялись)
             pass
