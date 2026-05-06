@@ -2259,7 +2259,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             menu_text = f"<b>🎮 ГЛАВНОЕ МЕНЮ</b>\n\n<i>{whisper}</i>"
             try: await q.message.edit_text(menu_text, reply_markup=kb, parse_mode='HTML')
             except Exception: await q.message.reply_text(menu_text, reply_markup=kb, parse_mode='HTML')
-        elif data == "farm": await q.answer(); await farm_callback(update, context)
+        elif data == "farm":
+            await q.answer()
+            try:
+                await farm_callback(update, context)
+            except Exception as e:
+                import traceback
+                err = traceback.format_exc()
+                await context.bot.send_message(
+                    chat_id=q.message.chat_id,
+                    text=f"❌ Ошибка в farm:\n<code>{html.escape(err[:800])}</code>",
+                    parse_mode='HTML'
+                )
         elif data == "craft": await q.answer(); await craft_callback(update, context)
         elif data == "smoke": await q.answer(); await smoke_callback(update, context)
         elif data == "ritual": await q.answer(); await ritual_callback(update, context)
