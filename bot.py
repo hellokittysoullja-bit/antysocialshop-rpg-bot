@@ -748,6 +748,37 @@ def get_back_to_menu_keyboard():
     return InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
 
 # ========== ОБРАБОТЧИКИ КОМАНД ==========
+# ========== ОБРАБОТЧИКИ КОМАНД (полный, надёжный, с лабиринтом) ==========
+
+async def safe_edit(update: Update, context, text: str, reply_markup=None, parse_mode='HTML'):
+    """Безопасное редактирование сообщения: при неудаче отправляет новое."""
+    try:
+        if update.callback_query:
+            await update.callback_query.message.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+        else:
+            await update.message.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+    except BadRequest as e:
+        if "message is not modified" not in str(e).lower():
+            logger.warning(f"safe_edit error: {e}")
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=reply_markup, parse_mode=parse_mode)
+    except Exception as e:
+        logger.error(f"safe_edit unexpected: {e}", exc_info=True)
+
+async def send_reply(update: Update, context, text, reply_markup=None, parse_mode='HTML'):
+    """Отправка или редактирование сообщения в зависимости от типа апдейта."""
+    try:
+        if update.callback_query:
+            await update.callback_query.message.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+        else:
+            await update.message.reply_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+    except BadRequest as e:
+        if "message is not modified" in str(e).lower():
+            return
+        logger.warning(f"send_reply error: {e}")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=reply_markup, parse_mode=parse_mode)
+    except Exception as e:
+        logger.error(f"send_reply unexpected: {e}", exc_info=True)
+    
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user, msg = get_user_and_msg(update)
     user_id = user.id
