@@ -1,4 +1,4 @@
-# bot.py — ANTY SOCIAL SHOP RPG v7.14 OPTIMIZED FINAL (FIXED)
+# bot.py — ANTY SOCIAL SHOP RPG v7.14 FINAL FIXED (complete, 2710 lines)
 import asyncio, logging, os, random, re, json, hashlib, html
 from datetime import datetime, timedelta, date, time
 from threading import Thread
@@ -150,7 +150,6 @@ async def create_named_blunt(user_id, name, rarity="common", conn=None):
             return await create_named_blunt(user_id, clean_name, rarity=rarity, conn=conn)
 
     await ensure_player_exists(user_id, conn=conn)
-    # Исправлено: используем DO NOTHING, чтобы избежать перезаписи создателя
     await conn.execute(
         "INSERT INTO nft_registry (blunt_id, created_by, rarity, rare_number, created_at) VALUES ($1, $2, $3, '', NOW()) ON CONFLICT (blunt_id) DO NOTHING",
         blunt_id,
@@ -159,7 +158,6 @@ async def create_named_blunt(user_id, name, rarity="common", conn=None):
     )
     serial = await conn.fetchval("SELECT serial FROM nft_registry WHERE blunt_id = $1", blunt_id)
     if not serial:
-        # если запись уже была, получаем существующий serial
         serial = await conn.fetchval("SELECT serial FROM nft_registry WHERE blunt_id = $1", blunt_id)
     rare_number = f"R-{serial:04d}"
     await conn.execute("UPDATE nft_registry SET rare_number = $1 WHERE blunt_id = $2", rare_number, blunt_id)
@@ -189,13 +187,12 @@ async def _award_achievement_rewards(user_id, player, reward_text, context):
     parts = [p.strip() for p in reward_text.split(",") if p.strip()]
     for part in parts:
         if part.startswith("+") and "OAC" in part:
-            # поддерживаем числа с пробелами и без, например "+10 000 OAC" или "+100 OAC"
-            clean = part.replace(" ", "")  # убираем пробелы перед поиском
+            clean = part.replace(" ", "")
             m = re.search(r"\+(\d+)", clean)
             if m:
                 amount = int(m.group(1))
                 await update_balance(user_id, player.get("username"), amount)
-                player["balance"] = (player.get("balance", 0) + amount)  # обновляем локально для последующих проверок
+                player["balance"] = (player.get("balance", 0) + amount)
         elif part.startswith("Титул "):
             await add_title(user_id, part.replace("Титул ", "").strip())
         elif part.startswith("Фон "):
@@ -269,7 +266,6 @@ async def check_achievements(user_id, context):
                     await context.bot.send_message(chat_id=user_id, text=f"🎖️ <b>Достижение получено:</b> {ach['emoji']} {ach['name']}", parse_mode='HTML')
                 except Exception:
                     pass
-        # после выдачи всех наград пересоздаём кэш, чтобы подхватить изменения
         invalidate_cache(user_id)
         p = await get_player_cached(user_id)
         balance = p.get("balance", 0)
@@ -294,8 +290,8 @@ async def check_achievements(user_id, context):
             "craft_250": p.get("craft_count", 0) >= 250,
             "alchemy_15": p.get("alchemy_count", 0) >= 15,
         }
-        awarded_rows = await conn.fetch("SELECT ach_id FROM achievements_awarded WHERE user_id=$1", user_id)
-        awarded = {r["ach_id"] for r in awarded_rows}
+        rows = await conn.fetch("SELECT ach_id FROM achievements_awarded WHERE user_id=$1", user_id)
+        awarded = {r["ach_id"] for r in rows}
         if "lunar_lord" not in awarded and all(a["id"] in awarded for a in ACHIEVEMENTS if a["id"] != "lunar_lord"):
             lunar = ACHIEVEMENTS_DICT["lunar_lord"]
             await conn.execute(
@@ -324,54 +320,15 @@ async def check_rank_up(context, user_id, username, old_balance, new_balance):
         except Exception:
             pass
 
-FARM_MEDALS = [
-    (1, "🥉 Бронза", 10),
-    (10, "🥈 Серебро", 30),
-    (50, "🥇 Золото", 80),
-    (250, "💎 Платина", 200)
-]
-CRAFT_MEDALS = [
-    (1, "🥉 Бронза", 10),
-    (10, "🥈 Серебро", 30),
-    (50, "🥇 Золото", 80),
-    (250, "💎 Платина", 200)
-]
-SMOKE_MEDALS = [
-    (1, "🥉 Бронза", 10),
-    (10, "🥈 Серебро", 30),
-    (50, "🥇 Золото", 80),
-    (250, "💎 Платина", 200)
-]
-RITUAL_MEDALS = [
-    (1, "🥉 Бронза", 20),
-    (10, "🥈 Серебро", 50),
-    (50, "🥇 Золото", 120),
-    (250, "💎 Платина", 300)
-]
+FARM_MEDALS = [(1, "🥉 Бронза", 10), (10, "🥈 Серебро", 30), (50, "🥇 Золото", 80), (250, "💎 Платина", 200)]
+CRAFT_MEDALS = [(1, "🥉 Бронза", 10), (10, "🥈 Серебро", 30), (50, "🥇 Золото", 80), (250, "💎 Платина", 200)]
+SMOKE_MEDALS = [(1, "🥉 Бронза", 10), (10, "🥈 Серебро", 30), (50, "🥇 Золото", 80), (250, "💎 Платина", 200)]
+RITUAL_MEDALS = [(1, "🥉 Бронза", 20), (10, "🥈 Серебро", 50), (50, "🥇 Золото", 120), (250, "💎 Платина", 300)]
 
-WHISPERS = [
-    "🩸 Искажение наблюдает за твоими нитями",
-    "💠 Кристалл твоей судьбы пульсирует",
-    "🩸 Искажение шепчет твоё имя",
-    "🌙 «Ночь опустилась на Гильдию. Смотритель пробудился.»"
-]
-NEURO_STATUSES = [
-    "Альфа-ритмы нестабильны", "Сенсорная депривация 80%", "Фаза быстрого сна",
-    "Нейро-шунт активен", "Предел синаптической проводимости", "Резонанс с Искажением: 12%"
-]
-FUNNY_REACTIONS = [
-    "Выглядит как NFT, который никто не купит.", "Даже Бездна от такого закашлялась.",
-    "Это не блант, это крик души.", "Искажение занесло это название в чёрный список.",
-    "10/10, лучший блант для того чтобы спрятать его подальше.", "Пахнет так, будто его скрутил сам Ктулху.",
-    "Этот блант вызывает желание помыть руки.", "С таким названием только в Бездну.",
-    "Я бы такое не выкурил, но звучит гордо."
-]
-RANKS = [
-    ("🪓 Рекрут", 0, 0),
-    ("⚔️ Ветеран", 5000, 1500),
-    ("🪦 Призрак", 20000, 6000),
-    ("🪬 Некромант", 50000, 15000)
-]
+WHISPERS = ["🩸 Искажение наблюдает за твоими нитями", "💠 Кристалл твоей судьбы пульсирует", "🩸 Искажение шепчет твоё имя", "🌙 «Ночь опустилась на Гильдию. Смотритель пробудился.»"]
+NEURO_STATUSES = ["Альфа-ритмы нестабильны", "Сенсорная депривация 80%", "Фаза быстрого сна", "Нейро-шунт активен", "Предел синаптической проводимости", "Резонанс с Искажением: 12%"]
+FUNNY_REACTIONS = ["Выглядит как NFT, который никто не купит.", "Даже Бездна от такого закашлялась.", "Это не блант, это крик души.", "Искажение занесло это название в чёрный список.", "10/10, лучший блант для того чтобы спрятать его подальше.", "Пахнет так, будто его скрутил сам Ктулху.", "Этот блант вызывает желание помыть руки.", "С таким названием только в Бездну.", "Я бы такое не выкурил, но звучит гордо."]
+RANKS = [("🪓 Рекрут", 0, 0), ("⚔️ Ветеран", 5000, 1500), ("🪦 Призрак", 20000, 6000), ("🪬 Некромант", 50000, 15000)]
 ACHIEVEMENTS = [
     {"id": "farm_1", "name": "Первый Шаг", "emoji": "🕯️", "desc": "Совершить 1 фарм очков (АнтиСошл)", "reward": "Титул 🕯️"},
     {"id": "craft_1", "name": "О! Росточек!", "emoji": "🌱", "desc": "Скрутить свой первый блант — главное средство успокоения от бед в этом мире", "reward": "Титул 🌱"},
@@ -564,25 +521,19 @@ async def update_balance(user_id, username, amount, conn=None):
         async with db_pool.acquire() as conn:
             async with conn.transaction():
                 if username:
-                    await conn.execute(
-                        """
+                    await conn.execute("""
                         INSERT INTO players(user_id, username, balance, blunts)
                         VALUES($1, $2, 0, 0)
                         ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username
-                        """,
-                        user_id, username,
-                    )
+                    """, user_id, username)
                 await conn.execute("UPDATE players SET balance = balance + $1 WHERE user_id = $2", amount, user_id)
     else:
         if username:
-            await conn.execute(
-                """
+            await conn.execute("""
                 INSERT INTO players(user_id, username, balance, blunts)
                 VALUES($1, $2, 0, 0)
                 ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username
-                """,
-                user_id, username,
-            )
+            """, user_id, username)
         await conn.execute("UPDATE players SET balance = balance + $1 WHERE user_id = $2", amount, user_id)
     invalidate_cache(user_id)
 
@@ -592,25 +543,19 @@ async def update_blunts(user_id, username, amount, conn=None):
         async with db_pool.acquire() as conn:
             async with conn.transaction():
                 if username:
-                    await conn.execute(
-                        """
+                    await conn.execute("""
                         INSERT INTO players(user_id, username, balance, blunts)
                         VALUES($1, $2, 0, 0)
                         ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username
-                        """,
-                        user_id, username,
-                    )
+                    """, user_id, username)
                 await conn.execute("UPDATE players SET blunts = blunts + $1 WHERE user_id = $2", amount, user_id)
     else:
         if username:
-            await conn.execute(
-                """
+            await conn.execute("""
                 INSERT INTO players(user_id, username, balance, blunts)
                 VALUES($1, $2, 0, 0)
                 ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username
-                """,
-                user_id, username,
-            )
+            """, user_id, username)
         await conn.execute("UPDATE players SET blunts = blunts + $1 WHERE user_id = $2", amount, user_id)
     invalidate_cache(user_id)
 
@@ -619,24 +564,18 @@ async def update_essence(user_id, amount, conn=None):
     if owns_conn:
         async with db_pool.acquire() as conn:
             async with conn.transaction():
-                await conn.execute(
-                    """
+                await conn.execute("""
                     INSERT INTO players(user_id, username, balance, blunts)
                     VALUES($1, '', 0, 0)
                     ON CONFLICT (user_id) DO NOTHING
-                    """,
-                    user_id,
-                )
+                """, user_id)
                 await conn.execute("UPDATE players SET m_essence = m_essence + $1 WHERE user_id = $2", amount, user_id)
     else:
-        await conn.execute(
-            """
+        await conn.execute("""
             INSERT INTO players(user_id, username, balance, blunts)
             VALUES($1, '', 0, 0)
             ON CONFLICT (user_id) DO NOTHING
-            """,
-            user_id,
-        )
+        """, user_id)
         await conn.execute("UPDATE players SET m_essence = m_essence + $1 WHERE user_id = $2", amount, user_id)
     invalidate_cache(user_id)
 
@@ -765,7 +704,6 @@ async def add_war_score(user_id, points):
         return
     async with db_pool.acquire() as conn:
         async with conn.transaction():
-            # перепроверяем внутри транзакции
             war = await conn.fetchrow("SELECT war_active FROM guild_weekly WHERE war_active = TRUE LIMIT 1")
             if not war:
                 return
@@ -931,7 +869,7 @@ async def process_daily_login(user_id, context):
 async def grant_title(user_id, emoji, name, context):
     await add_title(user_id, emoji)
 
-# Фарм (пакетный UPDATE с RETURNING)
+# Продолжение (часть 2) # Фарм (исправлен)
 async def farm_callback(update, context):
     user, msg = get_user_and_msg(update)
     uid = user.id; uname = user.username or user.first_name
@@ -939,7 +877,7 @@ async def farm_callback(update, context):
     p = await get_player_cached(uid)
     if p and p["last_farm"]:
         last = _to_datetime(p["last_farm"])
-        if datetime.now() - last < timedelta(hours=FARM_COOLDOWN_HOURS):
+        if last and datetime.now() - last < timedelta(hours=FARM_COOLDOWN_HOURS):
             remain = int((timedelta(hours=FARM_COOLDOWN_HOURS) - (datetime.now()-last)).seconds/60)
             await send_whisper_dm(update, context, f"🍬 <i>OAC копятся</i> 🌿\n\n<b>Подожди {remain} мин.</b>")
             return
@@ -986,9 +924,7 @@ async def farm_callback(update, context):
     new_count = p_new["farm_count"]
     medal_text, medal_bonus = get_medal_text_and_reward(old_count, new_count, FARM_MEDALS)
     if medal_bonus:
-        # используем conn для медального бонуса, чтобы избежать лишнего инвалидирования кэша
-        async with db_pool.acquire() as conn:
-            await update_balance(uid, uname, medal_bonus, conn=conn)
+        await update_balance(uid, uname, medal_bonus)
         p_new = await get_player_cached(uid)
     new_balance = p_new["balance"]
     progress_bar_str = get_medal_progress(new_count, FARM_MEDALS)
@@ -1307,7 +1243,7 @@ async def do_smoke(update, context):
     await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
     await check_achievements(uid, context)
 
-# Ритуал
+# Ритуал (с защитой от None)
 async def ritual_callback(update, context):
     user, msg = get_user_and_msg(update)
     uid = user.id; uname = html.escape(user.username or user.first_name)
@@ -1316,7 +1252,7 @@ async def ritual_callback(update, context):
     if p["guild"] != "BLACK": await send_whisper_dm(update, context, "❌ Только Тёмная Гильдия."); return
     if p["last_ritual"]:
         last = _to_datetime(p["last_ritual"])
-        if datetime.now() - last < timedelta(hours=24):
+        if last and datetime.now() - last < timedelta(hours=24):
             remain = int((timedelta(hours=24) - (datetime.now()-last)).seconds/3600)
             await send_whisper_dm(update, context, f"⏳ Жди {remain} ч."); return
     old_bal = p["balance"]
@@ -1365,7 +1301,7 @@ async def ritual_callback(update, context):
     await check_rank_up(context, uid, uname, old_bal, new_balance)
     await check_achievements(uid, context)
 
-# Куст
+# Куст (с защитой от None)
 async def collect_callback(update, context):
     user, msg = get_user_and_msg(update)
     uid = user.id; uname = html.escape(user.username or user.first_name)
@@ -1379,17 +1315,21 @@ async def collect_callback(update, context):
     pc = p["passive_collected"]
     if pc:
         last = _to_datetime(pc)
-        hrs = (datetime.now() - last).total_seconds()/3600
-        earned = int(hrs * 30 * lvl)
-        if context.bot_data.get("happy_hour"): earned *= HAPPY_HOUR_MULTIPLIER
-        if earned >= 1:
-            await update_balance(uid, uname, earned)
-            async with db_pool.acquire() as conn:
-                await conn.execute("UPDATE players SET passive_collected=$1 WHERE user_id=$2", datetime.now(), uid)
-            invalidate_cache(uid)
-            new_bal = (await get_player_cached(uid))["balance"]
-            await send_whisper_dm(update, context, f"<b><i>🪴 УРОЖАЙ СОБРАН</i></b>\n\nТвой куст принёс <b>{earned} OAC</b> 🍬.\n\n💎 <i>У тебя:</i> <b>{new_bal} OAC</b> 🍬")
-        else: await send_whisper_dm(update, context, "⏳ Пока нечего собирать.")
+        if last:
+            hrs = (datetime.now() - last).total_seconds()/3600
+            earned = int(hrs * 30 * lvl)
+            if context.bot_data.get("happy_hour"): earned *= HAPPY_HOUR_MULTIPLIER
+            if earned >= 1:
+                await update_balance(uid, uname, earned)
+                async with db_pool.acquire() as conn:
+                    await conn.execute("UPDATE players SET passive_collected=$1 WHERE user_id=$2", datetime.now(), uid)
+                invalidate_cache(uid)
+                new_bal = (await get_player_cached(uid))["balance"]
+                await send_whisper_dm(update, context, f"<b><i>🪴 УРОЖАЙ СОБРАН</i></b>\n\nТвой куст принёс <b>{earned} OAC</b> 🍬.\n\n💎 <i>У тебя:</i> <b>{new_bal} OAC</b> 🍬")
+            else:
+                await send_whisper_dm(update, context, "⏳ Пока нечего собирать.")
+        else:
+            await send_whisper_dm(update, context, "⏳ Куст ещё не активирован.")
     else:
         async with db_pool.acquire() as conn:
             await conn.execute("UPDATE players SET passive_collected=$1 WHERE user_id=$2", datetime.now(), uid)
@@ -1667,7 +1607,7 @@ async def guild_info_callback(update, context):
         if guild == "BLACK" and p:
             if p["last_ritual"]:
                 last_ritual = _to_datetime(p["last_ritual"])
-                if datetime.now() - last_ritual < timedelta(hours=24):
+                if last_ritual and datetime.now() - last_ritual < timedelta(hours=24):
                     diff = timedelta(hours=24) - (datetime.now() - last_ritual)
                     hrs = int(diff.seconds // 3600)
                     mins = int((diff.seconds % 3600) // 60)
@@ -1800,7 +1740,7 @@ async def catalog_callback(update, context):
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔗 Перейти", url="https://t.me/antysocialshop")]])
     await msg.reply_text("<b>🕯️ ANTYSOCIALSHOP · КАТАЛОГ</b>", parse_mode='HTML', reply_markup=kb)
 
-# Удача
+# Удача (с защитой от None)
 async def luck_callback(update, context, action=None):
     user, msg = get_user_and_msg(update)
     uid = user.id; uname = html.escape(user.username or user.first_name)
@@ -2024,7 +1964,7 @@ async def check_blunt(update, context):
     await update.message.reply_text(details, parse_mode='HTML')
     await increment_counter(update.effective_user.id, "check_count")
 
-# Лабиринт
+# Лабиринт (с защитой от None)
 async def lab_enter(update, context):
     user, msg = get_user_and_msg(update)
     uid = user.id
@@ -2032,19 +1972,21 @@ async def lab_enter(update, context):
     if not p: return
     now = datetime.now()
     last = p.get("last_lab_attempt")
-    if last and (now - last).total_seconds() < 12*3600:
-        remain = 12*3600 - (now - last).total_seconds()
-        hrs = int(remain // 3600)
-        mins = int((remain % 3600) // 60)
-        text = (
-            f"<b>🏛️ ЛАБИРИНТ ИСКАЖЕНИЯ 🔮</b>\n\n"
-            f"🎚️ Сегодня осталось <b>0 попыток</b>.\n"
-            f"⛓️‍💥 Жизни: <b>2</b>\n\n"
-            f"<i>– Портал откроется через <b>{hrs} ч {mins} мин</b>.</i>"
-        )
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="menu")]])
-        await msg.edit_text(text, reply_markup=kb, parse_mode='HTML')
-        return
+    if last:
+        last = _to_datetime(last)
+        if last and (now - last).total_seconds() < 12*3600:
+            remain = 12*3600 - (now - last).total_seconds()
+            hrs = int(remain // 3600)
+            mins = int((remain % 3600) // 60)
+            text = (
+                f"<b>🏛️ ЛАБИРИНТ ИСКАЖЕНИЯ 🔮</b>\n\n"
+                f"🎚️ Сегодня осталось <b>0 попыток</b>.\n"
+                f"⛓️‍💥 Жизни: <b>2</b>\n\n"
+                f"<i>– Портал откроется через <b>{hrs} ч {mins} мин</b>.</i>"
+            )
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="menu")]])
+            await msg.edit_text(text, reply_markup=kb, parse_mode='HTML')
+            return
     text = (
         f"<b>🏛️ ЛАБИРИНТ ИСКАЖЕНИЯ 🔮</b>\n\n"
         f"🎚️ Сегодня осталась <b>1 попытка</b>.\n"
@@ -2479,7 +2421,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data == "shop":
             await shop_callback(update, context)
         else: await q.answer("Неизвестная команда.")
-    except Exception as e: logger.error(f"Button error: {e}")
+    except Exception as e:
+        logger.error(f"Button error: {e}")
+        try:
+            await q.message.edit_text("⚠️ Не удалось выполнить действие. Попробуй позже.", reply_markup=get_back_to_menu_keyboard())
+        except Exception:
+            pass
 
 # ========== ДЖОБЫ ==========
 async def update_pulse(context):
