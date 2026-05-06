@@ -966,18 +966,21 @@ async def farm_callback(update, context):
             p_new["inventory"] = _json_safe_load(p_new.get("inventory"), [])
             player_cache[uid] = p_new
 
-            # War score в той же транзакции
-            war = await conn.fetchrow("SELECT war_active FROM guild_weekly WHERE war_active = TRUE LIMIT 1")
-            if war:
-                guild_row = await conn.fetchrow("SELECT guild FROM players WHERE user_id = $1", uid)
-                guild = guild_row["guild"] if guild_row else None
-                if guild in ("BLACK", "WHITE"):
-                    await conn.execute(
-                        "INSERT INTO guild_weekly (guild, week_start, total_farmed) "
-                        "VALUES ($1, CURRENT_DATE, $2) ON CONFLICT (guild) DO UPDATE SET "
-                        "total_farmed = guild_weekly.total_farmed + $2",
-                        guild, earned
-                    )
+            # War score (игнорируем ошибку, если таблица не готова)
+            try:
+                war = await conn.fetchrow("SELECT war_active FROM guild_weekly WHERE war_active = TRUE LIMIT 1")
+                if war:
+                    guild_row = await conn.fetchrow("SELECT guild FROM players WHERE user_id = $1", uid)
+                    guild = guild_row["guild"] if guild_row else None
+                    if guild in ("BLACK", "WHITE"):
+                        await conn.execute(
+                            "INSERT INTO guild_weekly (guild, week_start, total_farmed) "
+                            "VALUES ($1, CURRENT_DATE, $2) ON CONFLICT (guild) DO UPDATE SET "
+                            "total_farmed = guild_weekly.total_farmed + $2",
+                            guild, earned
+                        )
+            except Exception:
+                pass  # Таблица guild_weekly ещё не создана – просто пропускаем
 
     new_count = p_new["farm_count"]
     medal_text, medal_bonus = get_medal_text_and_reward(old_count, new_count, FARM_MEDALS)
