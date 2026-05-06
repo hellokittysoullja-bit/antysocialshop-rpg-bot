@@ -1015,7 +1015,7 @@ async def farm_callback(update, context):
 
     await check_rank_up(context, uid, uname, old_bal, new_balance)
     await check_achievements(uid, context)
-
+    
 # Крафт
 async def craft_callback(update, context):
     user, msg = get_user_and_msg(update)
