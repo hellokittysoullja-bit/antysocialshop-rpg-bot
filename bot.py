@@ -1902,8 +1902,8 @@ async def luck_callback(update, context, action=None):
                         await context.bot.send_message(chat_id="@guild_antysocial",
                             text=f"🌟 @{uname} провёл Алхимический Ритуал и получил легендарный блант <b><i>«{name}»</i></b>!", parse_mode='HTML')
                     except Exception as e:
-        logger.error(f"Button error: {e}", exc_info=True)
-        await q.answer(f"❌ Ошибка: {e}", show_alert=True)
+                        logger.error(f"Ошибка отправки в канал: {e}")
+                        # не прерываем выполнение
         await add_war_score(uid, 30)
         try:
             await msg.edit_text(result_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]), parse_mode='HTML')
@@ -1911,11 +1911,6 @@ async def luck_callback(update, context, action=None):
             if "message is not modified" not in str(e).lower():
                 raise
         return
-    try:
-        await msg.edit_text(text, reply_markup=kb, parse_mode='HTML')
-    except BadRequest as e:
-        if "message is not modified" not in str(e).lower():
-            raise
 
 # /check
 async def check_blunt(update, context):
