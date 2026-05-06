@@ -1129,31 +1129,32 @@ async def smoke_callback(update, context):
     uid = user.id; uname = html.escape(user.username or user.first_name)
     p = await get_player_cached(uid)
     if not p or p["blunts"] < 1:
-    empty_text = (
-        "<b>💨 ДУНУТЬ</b>\n\n"
-        "<b>🌿 Твой свёрток пуст</b>\n"
-        "\n"
-        "<i>🎈 Скрути новый блант</i>"
-    )
-    empty_kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🌿 Крафт", callback_data="craft")],
-        [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
+        empty_text = (
+            "<b>💨 ДУНУТЬ</b>\n\n"
+            "<b>🌿 Твой свёрток пуст</b>\n"
+            "\n"
+            "<i>🎈 Скрути новый блант</i>"
+        )
+        empty_kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🌿 Крафт", callback_data="craft")],
+            [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
+        ])
+        if update.callback_query:
+            await update.callback_query.message.edit_text(empty_text, reply_markup=empty_kb, parse_mode='HTML')
+        else:
+            await msg.reply_text(empty_text, reply_markup=empty_kb, parse_mode='HTML')
+        return
+
+    main_text = f"<b><i>💨 ДУНУТЬ</i></b>\n\n🌿 <i>блантов в свёртке:</i> <b>{p['blunts']}</b>"
+    main_kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("💨 Дунуть", callback_data="do_smoke")],
+        [InlineKeyboardButton("🔙 Назад", callback_data="menu")]
     ])
     if update.callback_query:
-        await update.callback_query.message.edit_text(empty_text, reply_markup=empty_kb, parse_mode='HTML')
+        await update.callback_query.message.edit_text(main_text, reply_markup=main_kb, parse_mode='HTML')
     else:
-        await msg.reply_text(empty_text, reply_markup=empty_kb, parse_mode='HTML')
-    return
-    main_text = f"<b><i>💨 ДУНУТЬ</i></b>\n\n🌿 <i>блантов в свёртке:</i> <b>{p['blunts']}</b>"
-main_kb = InlineKeyboardMarkup([
-    [InlineKeyboardButton("💨 Дунуть", callback_data="do_smoke")],
-    [InlineKeyboardButton("🔙 Назад", callback_data="menu")]
-])
-if update.callback_query:
-    await update.callback_query.message.edit_text(main_text, reply_markup=main_kb, parse_mode='HTML')
-else:
-    await msg.reply_text(main_text, reply_markup=main_kb, parse_mode='HTML')
-
+        await msg.reply_text(main_text, reply_markup=main_kb, parse_mode='HTML')
+        
 async def do_smoke(update, context):
     query = update.callback_query
     await query.answer()
