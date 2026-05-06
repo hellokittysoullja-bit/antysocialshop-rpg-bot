@@ -982,6 +982,21 @@ async def farm_callback(update, context):
     await check_achievements(uid, context)
 
 # Крафт
+async def craft_callback(update, context):
+    user, msg = get_user_and_msg(update)
+    uid = user.id; uname = html.escape(user.username or user.first_name)
+    p = await get_player_cached(uid)
+    bal = p["balance"] if p else 0
+    text = f"<b><i>🌿 КРАФТ БЛАНТА</i></b>\n\n🛡️ <i>у тебя:</i> <code>{bal}</code> 🍬"
+    kb_rows = [
+        [InlineKeyboardButton("🌿 Обычный блант (15 🍬)", callback_data="craft_normal")],
+        [InlineKeyboardButton("💍 Именной блант (50 🍬)", callback_data="craft_named")],
+    ]
+    if p and p.get("m_essence", 0) > 0:
+        kb_rows.append([InlineKeyboardButton(f"💠 Использовать Пыль (1 доза)", callback_data="use_dust")])
+    kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="menu")])
+    await send_reply(update, context, text, InlineKeyboardMarkup(kb_rows))
+    
 async def handle_craft_normal(update, context):
     query = update.callback_query
     await query.answer()
