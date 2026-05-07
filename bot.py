@@ -226,81 +226,98 @@ async def check_achievements(user_id, context):
     p = await get_player_cached(user_id)
     if not p:
         return
-    balance = p.get("balance", 0)
-    conditions = {
-        "farm_1": p.get("farm_count", 0) >= 1,
-        "craft_1": p.get("craft_count", 0) >= 1,
-        "smoke_1": p.get("smoke_count", 0) >= 1,
-        "balance_1000": balance >= 1000,
-        "smoke_10": p.get("smoke_count", 0) >= 10,
-        "craft_15": p.get("craft_count", 0) >= 15,
-        "ritual_5": p.get("ritual_count", 0) >= 5,
-        "craft_50": p.get("craft_count", 0) >= 50,
-        "smoke_25": p.get("smoke_count", 0) >= 25,
-        "lab_first": p.get("lab_chests", 0) >= 1,
-        "referral_1": p.get("referral_count", 0) >= 1,
-        "streak_7": p.get("login_streak", 0) >= 7,
-        "balance_20000": balance >= 20000,
-        "lab_chest_3": p.get("lab_chests", 0) >= 3,
-        "rank_phantom": balance >= 20000,
-        "lab_death_5": p.get("lab_deaths", 0) >= 5,
-        "lab_chest_10": p.get("lab_chests", 0) >= 10,
-        "craft_250": p.get("craft_count", 0) >= 250,
-        "alchemy_15": p.get("alchemy_count", 0) >= 15,
-    }
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("SELECT ach_id FROM achievements_awarded WHERE user_id=$1", user_id)
         awarded = {r["ach_id"] for r in rows}
         for ach in ACHIEVEMENTS:
             ach_id = ach["id"]
             if ach_id == "lunar_lord":
-                continue
-            if conditions.get(ach_id) and ach_id not in awarded:
+                continue           # обработаем отдельно после цикла
+            # Проверка условия
+            condition_met = False
+            balance = p.get("balance", 0)
+            if ach_id == "farm_1" and p.get("farm_count", 0) >= 1:
+                condition_met = True
+            elif ach_id == "craft_1" and p.get("craft_count", 0) >= 1:
+                condition_met = True
+            elif ach_id == "smoke_1" and p.get("smoke_count", 0) >= 1:
+                condition_met = True
+            elif ach_id == "balance_1000" and balance >= 1000:
+                condition_met = True
+            elif ach_id == "smoke_10" and p.get("smoke_count", 0) >= 10:
+                condition_met = True
+            elif ach_id == "craft_15" and p.get("craft_count", 0) >= 15:
+                condition_met = True
+            elif ach_id == "ritual_5" and p.get("ritual_count", 0) >= 5:
+                condition_met = True
+            elif ach_id == "craft_50" and p.get("craft_count", 0) >= 50:
+                condition_met = True
+            elif ach_id == "smoke_25" and p.get("smoke_count", 0) >= 25:
+                condition_met = True
+            elif ach_id == "lab_first" and p.get("lab_chests", 0) >= 1:
+                condition_met = True
+            elif ach_id == "referral_1" and p.get("referral_count", 0) >= 1:
+                condition_met = True
+            elif ach_id == "streak_7" and p.get("login_streak", 0) >= 7:
+                condition_met = True
+            elif ach_id == "balance_20000" and balance >= 20000:
+                condition_met = True
+            elif ach_id == "lab_chest_3" and p.get("lab_chests", 0) >= 3:
+                condition_met = True
+            elif ach_id == "rank_phantom" and balance >= 20000:
+                condition_met = True
+            elif ach_id == "balance_50000" and balance >= 50000:
+                condition_met = True
+            elif ach_id == "check_10" and p.get("check_count", 0) >= 10:
+                condition_met = True
+            elif ach_id == "lab_death_5" and p.get("lab_deaths", 0) >= 5:
+                condition_met = True
+            elif ach_id == "lab_chest_10" and p.get("lab_chests", 0) >= 10:
+                condition_met = True
+            elif ach_id == "craft_250" and p.get("craft_count", 0) >= 250:
+                condition_met = True
+            elif ach_id == "alchemy_15" and p.get("alchemy_count", 0) >= 15:
+                condition_met = True
+
+            if condition_met and ach_id not in awarded:
                 await conn.execute(
                     "INSERT INTO achievements_awarded(user_id, ach_id, awarded_at) VALUES($1, $2, NOW()) ON CONFLICT DO NOTHING",
-                    user_id,
-                    ach_id,
+                    user_id, ach_id
                 )
                 await _award_achievement_rewards(user_id, p, ach.get("reward", ""), context)
+                # Новый стиль уведомления
                 try:
-                    await context.bot.send_message(chat_id=user_id, text=f"🎖️ <b>Достижение получено:</b> {ach['emoji']} {ach['name']}", parse_mode='HTML')
-                except Exception:
-                    pass
-        invalidate_cache(user_id)
-        p = await get_player_cached(user_id)
-        balance = p.get("balance", 0)
-        conditions = {
-            "farm_1": p.get("farm_count", 0) >= 1,
-            "craft_1": p.get("craft_count", 0) >= 1,
-            "smoke_1": p.get("smoke_count", 0) >= 1,
-            "balance_1000": balance >= 1000,
-            "smoke_10": p.get("smoke_count", 0) >= 10,
-            "craft_15": p.get("craft_count", 0) >= 15,
-            "ritual_5": p.get("ritual_count", 0) >= 5,
-            "craft_50": p.get("craft_count", 0) >= 50,
-            "smoke_25": p.get("smoke_count", 0) >= 25,
-            "lab_first": p.get("lab_chests", 0) >= 1,
-            "referral_1": p.get("referral_count", 0) >= 1,
-            "streak_7": p.get("login_streak", 0) >= 7,
-            "balance_20000": balance >= 20000,
-            "lab_chest_3": p.get("lab_chests", 0) >= 3,
-            "rank_phantom": balance >= 20000,
-            "lab_death_5": p.get("lab_deaths", 0) >= 5,
-            "lab_chest_10": p.get("lab_chests", 0) >= 10,
-            "craft_250": p.get("craft_count", 0) >= 250,
-            "alchemy_15": p.get("alchemy_count", 0) >= 15,
-        }
+                    text = (
+                        f"<b>🕊️ СВИТОК ДОСТИЖЕНИЙ 🏆</b>\n\n"
+                        f"<b>🎉 Достижение разблокировано!</b>\n\n"
+                        f"<i>{ach['emoji']} «{ach['name']}» {ach['emoji']}</i>\n\n"
+                        f"<b>📜 Запись добавлена! 💎</b>"
+                    )
+                    await context.bot.send_message(chat_id=user_id, text=text, parse_mode='HTML')
+                except Exception as e:
+                    logger.error(f"Achievement notify error: {e}")
+
+        # lunar_lord отдельно
         rows = await conn.fetch("SELECT ach_id FROM achievements_awarded WHERE user_id=$1", user_id)
-        awarded = {r["ach_id"] for r in rows}
-        if "lunar_lord" not in awarded and all(a["id"] in awarded for a in ACHIEVEMENTS if a["id"] != "lunar_lord"):
+        awarded_ids = {r["ach_id"] for r in rows}
+        all_other_ids = {a["id"] for a in ACHIEVEMENTS if a["id"] != "lunar_lord"}
+        if "lunar_lord" not in awarded_ids and all_other_ids.issubset(awarded_ids):
             lunar = ACHIEVEMENTS_DICT["lunar_lord"]
             await conn.execute(
                 "INSERT INTO achievements_awarded(user_id, ach_id, awarded_at) VALUES($1, $2, NOW()) ON CONFLICT DO NOTHING",
-                user_id,
-                "lunar_lord",
+                user_id, "lunar_lord"
             )
             await _award_achievement_rewards(user_id, p, lunar.get("reward", ""), context)
-
+            try:
+                text = (
+                    f"<b>🕊️ СВИТОК ДОСТИЖЕНИЙ 🏆</b>\n\n"
+                    f"<b>🎉 Достижение разблокировано!</b>\n\n"
+                    f"<i>{lunar['emoji']} «{lunar['name']}» {lunar['emoji']}</i>\n\n"
+                    f"<b>📜 Запись добавлена! 💎</b>"
+                )
+                await context.bot.send_message(chat_id=user_id, text=text, parse_mode='HTML')
+            except Exception as e:
+                logger.error(f"Achievement notify error (lunar): {e}")
 async def check_rank_up(context, user_id, username, old_balance, new_balance):
     old_idx = 0
     new_idx = 0
