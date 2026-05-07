@@ -758,6 +758,58 @@ async def send_reply(update: Update, context, text, reply_markup=None, parse_mod
         await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=reply_markup, parse_mode=parse_mode)
     except Exception as e:
         logger.error(f"send_reply unexpected: {e}", exc_info=True)
+
+def get_medal_target(count, medals_list):
+    """Возвращает следующую цель (порог) для прогресса медалей."""
+    for th, name, reward in medals_list:
+        if count < th:
+            return th
+    return medals_list[-1][0]  # максимум
+
+def get_medal_progress(new_count, medals_list):
+    """Возвращает строку с прогресс-баром и названиями медалей (жирными)."""
+    cur_medal = medals_list[0][1]
+    cur_th = medals_list[0][0]
+    next_th = medals_list[1][0] if len(medals_list) > 1 else None
+    next_medal = medals_list[1][1] if len(medals_list) > 1 else ""
+    for th, name, _ in medals_list:
+        if new_count >= th:
+            cur_medal = name
+            cur_th = th
+        else:
+            next_th = th
+            next_medal = name
+            break
+    max_rank = new_count >= medals_list[-1][0]
+    if max_rank:
+        goal_str = f"<b>{cur_medal}</b> (Максимум)"
+        progress = 100
+        bar = "▓" * 10
+    else:
+        progress = int((new_count - cur_th) / (next_th - cur_th) * 100) if next_th != cur_th else 100
+        bar = "▓" * (progress // 10) + "░" * (10 - progress // 10)
+        goal_str = f"<b>{cur_medal}</b> → <b>{next_medal}</b>"
+    return f"{bar} {progress}%\n{goal_str}"
+
+def get_rank_progress(balance):
+    """Возвращает прогресс ранга с жирным "Ранг:" и жирным прогресс-баром."""
+    if balance >= RANKS[-1][1]:
+        emoji = RANKS[-1][0]
+        name = emoji.split(' ',1)[1]
+        return f"<b>⚜️ Ранг:</b> {emoji} {name} (Максимум)\n<b>▓▓▓▓▓▓▓▓▓▓ 100%</b>"
+    for i in range(len(RANKS)-1):
+        curr_emoji, curr_th, _ = RANKS[i]
+        next_emoji, next_th, _ = RANKS[i+1]
+        if balance < next_th:
+            curr_name = curr_emoji.split(' ',1)[1] if ' ' in curr_emoji else curr_emoji
+            progress = int((balance - curr_th) / (next_th - curr_th) * 100)
+            bar = "▓" * (progress // 10) + "░" * (10 - progress // 10)
+            return (
+                f"<b>⚜️ Ранг:</b> {curr_emoji} → {next_emoji}\n"
+                f"<b>{bar} {progress}%</b>\n"
+                f"{balance} / {next_th} OAC"
+            )
+    return ""
     
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user, msg = get_user_and_msg(update)
@@ -893,11 +945,10 @@ async def farm_callback(update, context):
             await context.bot.send_message(
                 chat_id=update.effective_chat.id,
                 text=f"🍬 <i>OAC копятся</i> 🌿\n\n<b>Подожди {remain} мин.</b>",
-                parse_mode='HTML',
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
             )
             if update.callback_query:
-                await update.callback_query.answer()   # просто убрать "часики" на кнопке
+                await update.callback_query.answer()
             return
 
     earned = random.randint(FARM_MIN, FARM_MAX)
@@ -945,16 +996,18 @@ async def farm_callback(update, context):
         await update_balance(uid, uname, medal_bonus)
         p_new = await get_player_cached(uid)
     new_balance = p_new["balance"]
+    target = get_medal_target(new_count, FARM_MEDALS)
     progress_bar_str = get_medal_progress(new_count, FARM_MEDALS)
     rank_progress = get_rank_progress(new_balance)
 
     crit_str = " (крит x10!)" if crit else ""
     happy_str = " 🌟x2" if happy else ""
     text = (
-        f"<b>💎 Ты нафармил:</b> <i>+{earned} OAC</i> 🍬{crit_str}{happy_str}\n"
-        f"⚜️ У тебя: <i>{new_balance} OAC</i>\n"
-        + (f"\n{medal_text}" if medal_text else "") +
-        f"\n🎯 <b>Фарминг:</b> {new_count}\n{progress_bar_str}\n\n"
+        f"<b>💎 Ты нафармил: +{earned} OAC</b> 🍬{crit_str}{happy_str}\n\n"
+        f"<b>⚜️ У тебя:</b> <i>{new_balance} OAC</i>\n\n"
+        f"{medal_text}"
+        f"<b>🎯 Фарминг:</b> {new_count}/{target}\n"
+        f"<b>{progress_bar_str}</b>\n\n"
         f"{rank_progress}"
     )
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
@@ -1032,26 +1085,69 @@ async def handle_craft_normal(update, context):
     await safe_edit(update, context, text, reply_markup=kb)
     await check_achievements(uid, context)
     
-async def handle_craft_named(update, context):
+async def handle_craft_normal(update, context):
     query = update.callback_query
     await query.answer()
-    uid = query.from_user.id
+    uid = query.from_user.id; uname = query.from_user.username or query.from_user.first_name
     p = await get_player_cached(uid)
-
-    if not p or p["balance"] < 50:
-        await send_whisper_dm(update, context, "<b><i>🌙 ИСКАЖЕНИЕ МОЛЧИТ</i></b>\n\n<i>🛡️ Недостаточно OAC.</i>\n🕯️ Требуется <b>50 OAC</b> 🍬.")
+    if not p or p["balance"] < 15:
+        await context.bot.send_message(
+            chat_id=query.message.chat.id,
+            text="<b>❌ Недостаточно OAC.</b>\n🕯️ Требуется <b>15 OAC</b> 🍬.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]]),
+            parse_mode='HTML'
+        )
         return
+    old_count = p["craft_count"]
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            UPDATE players SET
+                balance = balance - 15,
+                blunts = blunts + 1,
+                craft_count = craft_count + 1
+            WHERE user_id = $1
+            RETURNING *
+        """, uid)
+        if row:
+            p_new = dict(row)
+            p_new["inventory"] = _json_safe_load(p_new.get("inventory"), [])
+            player_cache[uid] = p_new
+        else:
+            await update_balance(uid, uname, -15)
+            await update_blunts(uid, uname, 1)
+            await increment_counter(uid, "craft_count")
+            invalidate_cache(uid)
+            p_new = await get_player_cached(uid)
 
-    context.user_data['awaiting_named_blunt'] = True
-    context.job_queue.run_once(clear_named_blunt_state, 300, data=uid)
-    await query.message.delete()
-    sent_msg = await context.bot.send_message(
-        chat_id=query.message.chat.id,
-        text="<b><i>💍 ИМЕННОЙ БЛАНТ</i></b>\n\n<i>Введи имя своего бланта (до 25 символов)</i>\n\n[❌ Отмена]",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel_named")]]),
-        parse_mode='HTML'
+    await add_war_score(uid, 10)
+    if random.random() < 0.05:
+        await update_blunts(uid, uname, 1)
+        await send_whisper(context, "@guild_antysocial", f"⚡ @{html.escape(uname)} высек Искру Искажения из рутины. +1 🌿")
+
+    new_count = p_new["craft_count"]
+    medal_text, medal_bonus = get_medal_text_and_reward(old_count, new_count, CRAFT_MEDALS)
+    if medal_bonus:
+        await update_balance(uid, uname, medal_bonus)
+        p_new = await get_player_cached(uid)
+    new_balance = p_new["balance"]
+    target = get_medal_target(new_count, CRAFT_MEDALS)
+    progress_bar_str = get_medal_progress(new_count, CRAFT_MEDALS)
+
+    text = (
+        f"<b>🌿 БЛАНТ СКРУЧЕН</b>\n\n"
+        f"<b>🛡️ Потрачено:</b> <b>15 OAC</b>\n"
+        f"<b>⚜️ У тебя:</b> <b>{new_balance} OAC</b> 🍬\n\n"
+        f"{medal_text}"
+        f"<b>🎯 Крафтинг:</b> {new_count}/{target}\n"
+        f"<b>{progress_bar_str}</b>\n\n"
+        f"<b>🍃 Блантов в свёртке:</b> <b>{p_new['blunts']}</b>"
     )
-    context.user_data['awaiting_named_blunt_msg_id'] = sent_msg.message_id
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🌿 Скрафтить ещё", callback_data="craft_normal")],
+        [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
+    ])
+    await safe_edit(update, context, text, reply_markup=kb)
+    await check_achievements(uid, context)
 
 async def handle_named_name(update, context):
     if not context.user_data.get('awaiting_named_blunt'):
@@ -1214,7 +1310,8 @@ async def do_smoke(update, context):
     uid = query.from_user.id; uname = html.escape(query.from_user.username or query.from_user.first_name)
     p = await get_player_cached(uid)
     if not p or p["blunts"] < 1:
-        await query.answer("Свёрток пуст."); return
+        await query.answer("Свёрток пуст.")
+        return
     save = (p["guild"]=="WHITE" and random.randint(1,100)<=20)
     r = random.random()
     earned = 0
@@ -1261,7 +1358,6 @@ async def do_smoke(update, context):
         async with db_pool.acquire() as conn:
             await conn.execute("UPDATE players SET inhaled=1 WHERE user_id=$1", uid)
         invalidate_cache(uid)
-        p_new = await get_player_cached(uid)
 
     context.user_data["last_smoke_time"] = datetime.now()
     new_count = p_new["smoke_count"]
@@ -1270,26 +1366,62 @@ async def do_smoke(update, context):
         await update_balance(uid, uname, medal_bonus)
         p_new = await get_player_cached(uid)
     bl_left = p_new["blunts"]
+    target = get_medal_target(new_count, SMOKE_MEDALS)
     progress_bar_str = get_medal_progress(new_count, SMOKE_MEDALS)
 
+    # Эффекты (с тире)
     if r < 0.18:
-        effect = f"<b><i>💨 ДЫМ РАССЕЯЛСЯ</i></b>\n\n💨 <b>Лёгкий приход</b>\n💡 «Станки Фабрики №9 работают в ритме твоего сердца»\n\n🍬 <b>+{earned} OAC</b>"
+        effect = (
+            f"<b>💨 ДЫМ РАССЕЯЛСЯ</b>\n"
+            f"– 😵‍💫 <b>Лёгкий приход</b>\n"
+            f"– <i>«Станки Фабрики №9 работают в ритме твоего сердца»</i>\n\n"
+            f"🍬 <b>+{earned} OAC</b>"
+        )
     elif r < 0.36:
-        effect = "<b><i>💨 ДЫМ РАССЕЯЛСЯ</i></b>\n\n💤 <b>Полный Штиль</b>\n🚬 «Дым рассеялся, оставив лишь лёгкий шлейф»"
+        effect = (
+            f"<b>💨 ДЫМ РАССЕЯЛСЯ</b>\n"
+            f"– 💤 <b>Полный Штиль</b>\n"
+            f"– <i>«Дым рассеялся, оставив лишь лёгкий шлейф»</i>"
+        )
     elif r < 0.53:
-        effect = "<b><i>💨 ДЫМ РАССЕЯЛСЯ</i></b>\n\n😵‍💫 <b>Паранойя</b>\n<i>Всё идёт не так. Тени сгущаются…</i>"
+        effect = (
+            f"<b>💨 ДЫМ РАССЕЯЛСЯ</b>\n"
+            f"– 😵‍💫 <b>Паранойя</b>\n"
+            f"– <i>Всё идёт не так. Тени сгущаются…</i>"
+        )
     elif r < 0.70:
-        effect = f"<b><i>💨 ДЫМ РАССЕЯЛСЯ</i></b>\n\n💨 <b>Кашель</b>\n💊 «Первая тяга была слишком жёсткой, пробило на кашель»\n\n📉 <b>{earned} OAC</b>"
+        effect = (
+            f"<b>💨 ДЫМ РАССЕЯЛСЯ</b>\n"
+            f"– 💨 <b>Кашель</b>\n"
+            f"– <i>«Первая тяга была слишком жёсткой, пробило на кашель»</i>\n\n"
+            f"📉 <b>{earned} OAC</b>"
+        )
     elif r < 0.85:
-        effect = "<b><i>💨 ДЫМ РАССЕЯЛСЯ</i></b>\n\n🛋️ <b>Паралич</b>\n📺 «Тело стало ватным, смотришь в одну точку и не можешь пошевелиться»"
+        effect = (
+            f"<b>💨 ДЫМ РАССЕЯЛСЯ</b>\n"
+            f"– 🛋️ <b>Паралич</b>\n"
+            f"– <i>«Тело стало ватным, смотришь в одну точку и не можешь пошевелиться»</i>"
+        )
     else:
-        effect = "<b><i>💨 ДЫМ РАССЕЯЛСЯ</i></b>\n\n🧘 <b>Глубокое Озарение</b>\n🕯️ «Ты понял, что блант — это ключ к разгадке бытия»"
+        effect = (
+            f"<b>💨 ДЫМ РАССЕЯЛСЯ</b>\n"
+            f"– 🧘 <b>Глубокое Озарение</b>\n"
+            f"– <i>«Ты понял, что блант — это ключ к разгадке бытия»</i>"
+        )
 
     if p and not p["inhaled"]:
         effect += "\n\n<b><i>🎉 ТИТУЛ РАЗБЛОКИРОВАН!</i></b>\n💨 Ты теперь — <b>Красные Глаза</b>"
 
-    text = f"{effect}\n\n🍃 В свёртке: <b>{bl_left}</b>\n{medal_text}💨 <b>Дым:</b> {new_count}\n{progress_bar_str}"
-    if save: text += "\n⚜️ <i>Светлая Гильдия сохранила твой Блант!</i>"
+    text = (
+        f"{effect}\n\n"
+        f"{medal_text}"
+        f"<b>💨 Дым:</b> {new_count}/{target}\n"
+        f"<b>{progress_bar_str}</b>\n\n"
+        f"<b>🍃 Блантов в свёртке:</b> <b>{bl_left}</b>"
+    )
+    if save:
+        text += "\n⚜️ <i>Светлая Гильдия сохранила твой Блант!</i>"
+
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("💨 Дунуть ещё", callback_data="do_smoke") if bl_left>=1 else InlineKeyboardButton("🌿 Крафтить ещё", callback_data="craft")],
         [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
@@ -1342,14 +1474,16 @@ async def ritual_callback(update, context):
         await update_balance(uid, uname, medal_bonus)
         p_new = await get_player_cached(uid)
     new_balance = p_new["balance"]
+    target = get_medal_target(new_count, RITUAL_MEDALS)
     progress_bar_str = get_medal_progress(new_count, RITUAL_MEDALS)
 
     text = (
-        f"<b><i>🕯️ РИТУАЛ ЗАВЕРШЁН</i></b>\n\n"
-        f"Ритуал принёс тебе <b>{reward} OAC</b> 🍬\n\n"
-        f"⚜️ У тебя: <b>{new_balance} OAC</b>\n"
-        + (f"{medal_text}" if medal_text else "") +
-        f"🕯️ <b>Ритуалы:</b> {new_count}\n{progress_bar_str}"
+        f"<b>🕯️ РИТУАЛ ЗАВЕРШЁН</b>\n\n"
+        f"Ритуал принёс тебе <b>{reward} OAC</b> 🍬\n"
+        f"<b>⚜️ У тебя:</b> <b>{new_balance} OAC</b>\n\n"
+        f"{medal_text}"
+        f"<b>🕯️ Ритуалы:</b> {new_count}/{target}\n"
+        f"<b>{progress_bar_str}</b>"
     )
     await send_whisper_dm(update, context, text)
     await check_rank_up(context, uid, uname, old_bal, new_balance)
