@@ -702,8 +702,8 @@ def get_rank_progress(balance):
 async def add_war_score(user_id, points):
     if not db_pool:
         return
-    async with db_pool.acquire() as conn:
-        async with conn.transaction():
+    try:
+        async with db_pool.acquire() as conn:
             war = await conn.fetchrow("SELECT war_active FROM guild_weekly WHERE war_active = TRUE LIMIT 1")
             if not war:
                 return
@@ -716,6 +716,8 @@ async def add_war_score(user_id, points):
                 VALUES ($1, CURRENT_DATE, $2)
                 ON CONFLICT (guild) DO UPDATE SET total_farmed = guild_weekly.total_farmed + $2
             """, guild, points)
+    except Exception as e:
+        logger.error(f"add_war_score error: {e}")
 
 async def send_blunt_image(context, chat_id, rarity):
     file_id = BLUNT_IMAGES.get(rarity)
