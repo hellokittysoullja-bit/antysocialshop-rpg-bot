@@ -1024,13 +1024,9 @@ async def farm_callback(update, context):
 
     if update.callback_query:
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
-        try:
-            await update.callback_query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
-        except Exception as e:
-            logger.error(f"edit_text failed: {e}")
-            await context.bot.send_message(chat_id=uid, text=text, reply_markup=kb, parse_mode='HTML')
+        await safe_edit(update, context, text, reply_markup=kb)
     else:
-        await send_whisper_dm(update, context, text)
+        await safe_edit(update, context, text)
 
     await check_rank_up(context, uid, uname, old_bal, new_balance)
     await check_achievements(uid, context)
@@ -1143,7 +1139,7 @@ async def handle_craft_normal(update, context):
     )
 
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
-    await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
+    await safe_edit(update, context, text, reply_markup=kb)
     await check_achievements(uid, context)
     
 async def handle_craft_named(update, context):
