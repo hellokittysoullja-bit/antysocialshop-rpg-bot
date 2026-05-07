@@ -1022,7 +1022,7 @@ async def craft_callback(update, context):
     uid = user.id; uname = html.escape(user.username or user.first_name)
     p = await get_player_cached(uid)
     bal = p["balance"] if p else 0
-    text = f"<b><i>🌿 КРАФТ БЛАНТА</i></b>\n\n🛡️ <i>у тебя:</i> <code>{bal}</code> 🍬"
+    text = f"<b>🌿 КРАФТ БЛАНТА</b>\n\n🛡️ <i>у тебя:</i> <code>{bal}</code> 🍬"
     kb_rows = [
         [InlineKeyboardButton("🌿 Обычный блант (15 🍬)", callback_data="craft_normal")],
         [InlineKeyboardButton("💍 Именной блант (50 🍬)", callback_data="craft_named")],
@@ -1295,7 +1295,7 @@ async def smoke_callback(update, context):
             await msg.reply_text(empty_text, reply_markup=empty_kb, parse_mode='HTML')
         return
 
-    main_text = f"<b><i>💨 ДУНУТЬ</i></b>\n\n🌿 <i>блантов в свёртке:</i> <b>{p['blunts']}</b>"
+    main_text = f"<b>💨 ДУНУТЬ</b>\n\n🌿 <i>блантов в свёртке:</i> <b>{p['blunts']}</b>"
     main_kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("💨 Дунуть", callback_data="do_smoke")],
         [InlineKeyboardButton("🔙 Назад", callback_data="menu")]
@@ -1441,7 +1441,11 @@ async def ritual_callback(update, context):
         last = _to_datetime(p["last_ritual"])
         if last and datetime.now() - last < timedelta(hours=24):
             remain = int((timedelta(hours=24) - (datetime.now()-last)).seconds/3600)
-            await send_whisper_dm(update, context, f"⏳ Жди {remain} ч."); return
+            await context.bot.send_message(
+    chat_id=update.effective_chat.id,
+    text=f"<b>🕯️ Тёмный алтарь истощён 🌙</b>\n\n<b>🗝️ Жди {remain} ч</b>",
+    parse_mode='HTML'
+); return
     old_bal = p["balance"]
     reward = 150
     if context.bot_data.get("happy_hour"): reward *= HAPPY_HOUR_MULTIPLIER
@@ -1516,17 +1520,9 @@ async def collect_callback(update, context):
                 new_bal = (await get_player_cached(uid))["balance"]
                 await send_whisper_dm(update, context, f"<b><i>🪴 УРОЖАЙ СОБРАН</i></b>\n\nТвой куст принёс <b>{earned} OAC</b> 🍬.\n\n💎 <i>У тебя:</i> <b>{new_bal} OAC</b> 🍬")
             else:
-                await context.bot.send_message(
-                    chat_id=update.effective_chat.id,
-                    text="<b>🪴 Кустик ещё не созрел 💎</b>\n\n<b>🌱 Загляни позже</b>",
-                    parse_mode='HTML'
-                )
+                await send_whisper_dm(update, context, "⏳ Пока нечего собирать.")
         else:
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text="<b>🪴 Кустик ещё не активирован 💎</b>\n\n<b>🌱 Активируй его, нажав «Сбор» ещё раз</b>",
-                parse_mode='HTML'
-            )
+            await send_whisper_dm(update, context, "⏳ Куст ещё не активирован.")
     else:
         async with db_pool.acquire() as conn:
             await conn.execute("UPDATE players SET passive_collected=$1 WHERE user_id=$2", datetime.now(), uid)
