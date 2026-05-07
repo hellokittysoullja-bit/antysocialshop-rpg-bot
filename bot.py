@@ -1520,14 +1520,26 @@ async def collect_callback(update, context):
                 new_bal = (await get_player_cached(uid))["balance"]
                 await send_whisper_dm(update, context, f"<b><i>🪴 УРОЖАЙ СОБРАН</i></b>\n\nТвой куст принёс <b>{earned} OAC</b> 🍬.\n\n💎 <i>У тебя:</i> <b>{new_bal} OAC</b> 🍬")
             else:
-                await send_whisper_dm(update, context, "⏳ Пока нечего собирать.")
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text="<b>🪴 Кустик ещё не созрел 💎</b>\n\n<b>🌱 Загляни позже</b>",
+                    parse_mode='HTML'
+                )
         else:
-            await send_whisper_dm(update, context, "⏳ Куст ещё не активирован.")
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="<b>🪴 Кустик ещё не активирован 💎</b>\n\n<b>🌱 Активируй его, нажав «Сбор» ещё раз</b>",
+                parse_mode='HTML'
+            )
     else:
         async with db_pool.acquire() as conn:
             await conn.execute("UPDATE players SET passive_collected=$1 WHERE user_id=$2", datetime.now(), uid)
         invalidate_cache(uid)
-        await send_whisper_dm(update, context, "⏳ Авто‑сборщик активирован. Заходи через час.")
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="<b>🪴 Авто‑сборщик активирован 💎</b>\n\n<b>🌱 Загляни позже</b>",
+            parse_mode='HTML'
+        )
 
 # Профиль
 async def profile_callback(update, context):
