@@ -944,7 +944,8 @@ async def farm_callback(update, context):
             remain = int((timedelta(hours=FARM_COOLDOWN_HOURS) - (datetime.now()-last)).seconds/60)
             await context.bot.send_message(
                 chat_id=update.effective_chat.id,
-                text=f"🍬 <i>OAC копятся</i> 🌿\n\n<b>Подожди {remain} мин.</b>",
+                text=f"<b>🍬 OAC копятся 🌱</b>\n\n<b>🍃 Подожди {remain} мин</b>",
+                parse_mode='HTML',
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
             )
             if update.callback_query:
