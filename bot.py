@@ -911,10 +911,20 @@ async def farm_callback(update, context):
     if p and p["last_farm"]:
         last = _to_datetime(p["last_farm"])
         if last and datetime.now() - last < timedelta(hours=FARM_COOLDOWN_HOURS):
-            remain = int((timedelta(hours=FARM_COOLDOWN_HOURS) - (datetime.now()-last)).seconds/60)
-            if update.callback_query:
-                await update.callback_query.answer(f"Подожди {remain} мин.", show_alert=True)
+            remain = int((timedelta(hours=FARM_COOLDOWN_HOURS) - (datetime.now()-last)).total_seconds() / 60)
+            if remain == 0:
+                remain = 1
+            # Берём callback_query (если есть) из update
+            q = update.callback_query
+            if q:
+                text = f"🍬 <i>OAC копятся</i> 🌿\n\n<b>Подожди {remain} мин.</b>"
+                kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 В меню", callback_data="menu")]])
+                try:
+                    await q.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
+                except Exception:
+                    pass
             else:
+                # Если вызов был не через кнопку, а командой
                 await send_whisper_dm(update, context, f"🍬 <i>OAC копятся</i> 🌿\n\n<b>Подожди {remain} мин.</b>")
             return
 
