@@ -2375,7 +2375,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logger.error(f"Luck callback error: {e}")
                 await q.message.edit_text("⚠️ Не удалось открыть Удачу. Попробуй позже.", reply_markup=get_back_to_menu_keyboard())
         elif data in ("luck_wheel", "luck_berserk", "alchemy_start", "alchemy_confirm"): await q.answer(); await luck_callback(update, context, action=data)
-        elif data == "craft_normal": await q.answer(); await handle_craft_normal(update, context)
+        elif data == "craft_normal":
+            await q.answer()
+            try:
+                await handle_craft_normal(update, context)
+            except Exception as e:
+                import traceback
+                err = traceback.format_exc()
+                await context.bot.send_message(
+                    chat_id=q.message.chat_id,
+                    text=f"❌ Ошибка в craft_normal:\n<code>{html.escape(err[:800])}</code>",
+                    parse_mode='HTML'
+                )
         elif data == "craft_named": await q.answer(); await handle_craft_named(update, context)
         elif data == "cancel_named": await q.answer(); await cancel_named(update, context)
         elif data == "do_smoke": await q.answer(); await do_smoke(update, context)
