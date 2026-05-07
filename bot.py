@@ -900,7 +900,7 @@ async def process_daily_login(user_id, context):
 async def grant_title(user_id, emoji, name, context):
     await add_title(user_id, emoji)
 
-# Продолжение (часть 2) # Фарм (исправлен)
+# Продолжение # Фарм (исправлен)
 async def farm_callback(update, context):
     user, msg = get_user_and_msg(update)
     uid = user.id
@@ -914,7 +914,6 @@ async def farm_callback(update, context):
             remain = int((timedelta(hours=FARM_COOLDOWN_HOURS) - (datetime.now()-last)).total_seconds() / 60)
             if remain == 0:
                 remain = 1
-            # Берём callback_query (если есть) из update
             q = update.callback_query
             if q:
                 text = f"🍬 <i>OAC копятся</i> 🌿\n\n<b>Подожди {remain} мин.</b>"
@@ -924,7 +923,6 @@ async def farm_callback(update, context):
                 except Exception:
                     pass
             else:
-                # Если вызов был не через кнопку, а командой
                 await send_whisper_dm(update, context, f"🍬 <i>OAC копятся</i> 🌿\n\n<b>Подожди {remain} мин.</b>")
             return
 
@@ -933,11 +931,9 @@ async def farm_callback(update, context):
         earned += int(earned * 0.05)
     if context.user_data.get("last_smoke_time") and datetime.now() - context.user_data["last_smoke_time"] < timedelta(minutes=5):
         earned += random.randint(3, 5)
-
     happy = context.bot_data.get("happy_hour", False)
     if happy:
         earned *= HAPPY_HOUR_MULTIPLIER
-
     crit = False
     if random.randint(1, 100) == 1:
         earned *= 10
@@ -946,7 +942,7 @@ async def farm_callback(update, context):
     old_bal = p["balance"] if p else 0
     old_count = p["farm_count"] if p else 0
 
-    # Все обновления в ОДНОЙ транзакции
+    # Единая транзакция
     async with db_pool.acquire() as conn:
         async with conn.transaction():
             row = await conn.fetchrow("""
@@ -960,7 +956,6 @@ async def farm_callback(update, context):
             """, uid, earned)
 
             if row is None:
-                # Игрок не найден – создаём и обновляем
                 await conn.execute(
                     "INSERT INTO players(user_id, username, balance, blunts) "
                     "VALUES($1, $2, 0, 0) ON CONFLICT (user_id) DO UPDATE SET username = $2",
@@ -976,7 +971,7 @@ async def farm_callback(update, context):
             p_new["inventory"] = _json_safe_load(p_new.get("inventory"), [])
             player_cache[uid] = p_new
 
-            # War score (игнорируем ошибку, если таблица не готова)
+            # War score (безопасно)
             try:
                 war = await conn.fetchrow("SELECT war_active FROM guild_weekly WHERE war_active = TRUE LIMIT 1")
                 if war:
@@ -990,7 +985,7 @@ async def farm_callback(update, context):
                             guild, earned
                         )
             except Exception:
-                pass  # Таблица guild_weekly ещё не создана – просто пропускаем
+                pass
 
     new_count = p_new["farm_count"]
     medal_text, medal_bonus = get_medal_text_and_reward(old_count, new_count, FARM_MEDALS)
@@ -1003,6 +998,17 @@ async def farm_callback(update, context):
 
     new_balance = p_new["balance"]
     progress_bar_str = get_medal_progress(new_count, FARM_MEDALS)
+
+    # Показываем прогресс X/Y
+    if new_count >= FARM_MEDALS[-1][0]:
+        farm_counter_text = f"🎯 <b>Фарминг:</b> {new_count} (Максимум)"
+    else:
+        for th, _, _ in FARM_MEDALS:
+            if new_count < th:
+                next_goal = th
+                break
+        farm_counter_text = f"🎯 <b>Фарминг:</b> {new_count}/{next_goal}"
+
     rank_progress = get_rank_progress(new_balance)
 
     crit_str = " (крит x10!)" if crit else ""
@@ -1012,7 +1018,7 @@ async def farm_callback(update, context):
         f"<b>💎 Ты нафармил:</b> <i>+{earned} OAC</i> 🍬{crit_str}{happy_str}\n"
         f"⚜️ У тебя: <i>{new_balance} OAC</i>\n"
         + (f"\n{medal_text}" if medal_text else "") +
-        f"\n🎯 <b>Фарминг:</b> {new_count}\n{progress_bar_str}\n\n"
+        f"\n{farm_counter_text}\n{progress_bar_str}\n\n"
         f"{rank_progress}"
     )
 
@@ -1028,6 +1034,11 @@ async def farm_callback(update, context):
 
     await check_rank_up(context, uid, uname, old_bal, new_balance)
     await check_achievements(uid, context)
+
+    if crit:
+        uname_escaped = html.escape(uname)
+        await send_whisper(context, "@guild_antysocial",
+                           f"🌟 @{uname_escaped} наткнулся на <i>Золотую жилу</i>! +{earned} 🍬")
     
 # Крафт
 async def craft_callback(update, context):
@@ -1048,53 +1059,89 @@ async def craft_callback(update, context):
 async def handle_craft_normal(update, context):
     query = update.callback_query
     await query.answer()
-    uid = query.from_user.id; uname = query.from_user.username or query.from_user.first_name
+    uid = query.from_user.id
+    uname = query.from_user.username or query.from_user.first_name
     p = await get_player_cached(uid)
+
     if not p or p["balance"] < 15:
         await query.answer("Недостаточно OAC.", show_alert=True)
         return
+
     old_count = p["craft_count"]
+
+    # Все обновления в одной транзакции
     async with db_pool.acquire() as conn:
-        row = await conn.fetchrow("""
-            UPDATE players SET
-                balance = balance - 15,
-                blunts = blunts + 1,
-                craft_count = craft_count + 1
-            WHERE user_id = $1
-            RETURNING *
-        """, uid)
-        if row:
+        async with conn.transaction():
+            row = await conn.fetchrow("""
+                UPDATE players
+                SET balance = balance - 15,
+                    blunts = blunts + 1,
+                    craft_count = craft_count + 1
+                WHERE user_id = $1 AND balance >= 15
+                RETURNING *
+            """, uid)
+
+            if row is None:
+                await query.answer("Недостаточно OAC.", show_alert=True)
+                return
+
             p_new = dict(row)
             p_new["inventory"] = _json_safe_load(p_new.get("inventory"), [])
             player_cache[uid] = p_new
-        else:
-            await update_balance(uid, uname, -15)
-            await update_blunts(uid, uname, 1)
-            await increment_counter(uid, "craft_count")
-            invalidate_cache(uid)
-            p_new = await get_player_cached(uid)
 
-    await add_war_score(uid, 10)
-    if random.random() < 0.05:
-        await update_blunts(uid, uname, 1)
-        await send_whisper(context, "@guild_antysocial", f"⚡ @{html.escape(uname)} высек Искру Искажения из рутины. +1 🌿")
+            # Доп. бонус 5%
+            if random.random() < 0.05:
+                await conn.execute("UPDATE players SET blunts = blunts + 1 WHERE user_id = $1", uid)
+                p_new["blunts"] += 1
+                await query.message.reply_text("⚡ Ты высек Искру Искажения и получил +1 блант!")
+
+            # War score
+            try:
+                war = await conn.fetchrow("SELECT war_active FROM guild_weekly WHERE war_active = TRUE LIMIT 1")
+                if war:
+                    guild_row = await conn.fetchrow("SELECT guild FROM players WHERE user_id = $1", uid)
+                    guild = guild_row["guild"] if guild_row else None
+                    if guild in ("BLACK", "WHITE"):
+                        await conn.execute(
+                            "INSERT INTO guild_weekly (guild, week_start, total_farmed) "
+                            "VALUES ($1, CURRENT_DATE, $2) ON CONFLICT (guild) DO UPDATE SET "
+                            "total_farmed = guild_weekly.total_farmed + $2",
+                            guild, 10
+                        )
+            except Exception:
+                pass
 
     new_count = p_new["craft_count"]
     medal_text, medal_bonus = get_medal_text_and_reward(old_count, new_count, CRAFT_MEDALS)
+
     if medal_bonus:
-        await update_balance(uid, uname, medal_bonus)
+        async with db_pool.acquire() as conn:
+            await conn.execute("UPDATE players SET balance = balance + $1 WHERE user_id = $2", medal_bonus, uid)
+        invalidate_cache(uid)
         p_new = await get_player_cached(uid)
+
     new_balance = p_new["balance"]
     progress_bar_str = get_medal_progress(new_count, CRAFT_MEDALS)
+
+    # Прогресс X/Y для крафта
+    if new_count >= CRAFT_MEDALS[-1][0]:
+        craft_counter_text = f"🎯 <b>Крафтинг:</b> {new_count} (Максимум)"
+    else:
+        for th, _, _ in CRAFT_MEDALS:
+            if new_count < th:
+                next_goal = th
+                break
+        craft_counter_text = f"🎯 <b>Крафтинг:</b> {new_count}/{next_goal}"
 
     text = (
         f"<b><i>🌿 БЛАНТ СКРУЧЕН</i></b>\n\n"
         f"🛡️ <i>Потрачено:</i> <b>15 OAC</b>\n"
         f"⚜️ <i>У тебя:</i> <b>{new_balance} OAC</b> 🍬\n"
         + (f"\n{medal_text}" if medal_text else "") +
-        f"\n🎯 <b>Крафтинг:</b> {new_count}\n{progress_bar_str}\n\n"
+        f"\n{craft_counter_text}\n{progress_bar_str}\n\n"
         f"🚬 <i>Блантов в свёртке:</i> <b>{p_new['blunts']}</b>"
     )
+
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
     await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
     await check_achievements(uid, context)
@@ -1104,9 +1151,11 @@ async def handle_craft_named(update, context):
     await query.answer()
     uid = query.from_user.id
     p = await get_player_cached(uid)
+
     if not p or p["balance"] < 50:
-        await send_whisper_dm(update, context, "<b><i>🕳️ ИСКАЖЕНИЕ МОЛЧИТ</i></b>\n\n<i>🛡️ Недостаточно OAC.</i>\n🕯️ Требуется <b>50 OAC</b> 🍬.")
+        await send_whisper_dm(update, context, "<b><i>🌙 ИСКАЖЕНИЕ МОЛЧИТ</i></b>\n\n<i>🛡️ Недостаточно OAC.</i>\n🕯️ Требуется <b>50 OAC</b> 🍬.")
         return
+
     context.user_data['awaiting_named_blunt'] = True
     context.job_queue.run_once(clear_named_blunt_state, 300, data=uid)
     await query.message.delete()
@@ -1171,15 +1220,36 @@ async def handle_use_dust(update, context):
     await query.answer()
     uid = query.from_user.id
     p = await get_player_cached(uid)
+
     if not p or p["m_essence"] < 1:
         await query.answer("Нет Кристальной Пыли.")
         return
+
+    # Единая транзакция
     async with db_pool.acquire() as conn:
         async with conn.transaction():
-            await update_essence(uid, -1, conn=conn)
+            # Тратим пыль
+            await conn.execute("UPDATE players SET m_essence = m_essence - 1 WHERE user_id = $1", uid)
             name = random.choice(["Крик Бездны","Пепел Короля","Шёпот Склепа","Коготь Хаоса","Вздох Пожирателя"])
             item = await create_named_blunt(uid, name, rarity="legendary", conn=conn)
-    await add_war_score(uid, 50)
+
+            # War score
+            try:
+                war = await conn.fetchrow("SELECT war_active FROM guild_weekly WHERE war_active = TRUE LIMIT 1")
+                if war:
+                    guild_row = await conn.fetchrow("SELECT guild FROM players WHERE user_id = $1", uid)
+                    guild = guild_row["guild"] if guild_row else None
+                    if guild in ("BLACK", "WHITE"):
+                        await conn.execute(
+                            "INSERT INTO guild_weekly (guild, week_start, total_farmed) "
+                            "VALUES ($1, CURRENT_DATE, $2) ON CONFLICT (guild) DO UPDATE SET "
+                            "total_farmed = guild_weekly.total_farmed + $2",
+                            guild, 50
+                        )
+            except Exception:
+                pass
+
+    await add_war_score(uid, 50)  # на всякий случай можно оставить, но он уже внутри транзакции
     reaction = item["reaction"]
     await send_blunt_image(context, query.message.chat.id, "legendary")
     text = (
@@ -1189,11 +1259,14 @@ async def handle_use_dust(update, context):
     )
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
     await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
+
+    # Оповещение в канал
     try:
         await context.bot.send_message(chat_id="@guild_antysocial",
             text=f"<b><i>🩸 ЭХО ИСКАЖЕНИЯ</i></b>\n\n⚜️ <b>@{html.escape(p['username'])}</b> использовал 💠 Пыль и получил легендарный блант <b><i>«{name}»</i></b>!", parse_mode='HTML')
     except Exception as e:
         logger.error(f"Ошибка отправки в канал: {e}")
+
     await check_achievements(uid, context)
 
 async def clear_named_blunt_state(context):
