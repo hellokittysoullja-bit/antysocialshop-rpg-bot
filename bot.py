@@ -1120,61 +1120,58 @@ async def handle_craft_named(update, context):
     context.user_data['awaiting_named_blunt_msg_id'] = sent_msg.message_id
     
 async def handle_named_name(update, context):
-    await context.bot.send_message(chat_id=update.effective_chat.id, text="🔍 handle_named_name вызвана")
-    await context.bot.send_message(chat_id=update.effective_chat.id, text="DEBUG: handle_named_name вызвана")
-    if not context.user_data.get('awaiting_named_blunt'):
-        return
-    user = update.effective_user
-    uid = user.id
-    name = update.message.text.strip()[:25]
-    if not name:
-        await update.message.reply_text("❌ Имя не может быть пустым.")
-        return
-    context.user_data['awaiting_named_blunt'] = False
-    msg_id = context.user_data.pop('awaiting_named_blunt_msg_id', None)
-    if msg_id:
-        try:
-            await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=msg_id)
-        except:
-            pass
-    uname = user.username or user.first_name
-    async with db_pool.acquire() as conn:
-        async with conn.transaction():
-            await update_balance(uid, uname, -50, conn=conn)
-            await increment_counter(uid, "craft_count", conn=conn)
-            item = await create_named_blunt(uid, name, conn=conn)
-    await add_war_score(uid, 25)
-    blunt_id = item["id"]
-    name_escaped = html.escape(name)
-    uname_escaped = html.escape(uname)
-    color = {"legendary":"🟡","epic":"🟣","rare":"🔵"}.get(item["rarity"], "🟢")
-    reaction = item["reaction"]
-
-    # Единое сообщение с фото и текстом
-    caption = (
-        f"<b>💍 БЛАНТ СОТКАН</b>\n\n"
-        f"🩸 <i>Ты вплёл в <b>Искажение</b> свой именной блант:</i>\n"
-        f"{color} <b><i>«{name_escaped}»</i></b> <i>Редкость:</i> <b>{item['rarity']}</b>\n\n"
-        f"💎 <i>Он навсегда останется в твоей коллекции.</i>\n\n"
-        f"🩸 <i>{reaction}</i>"
-    )
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔗 Поделиться", callback_data=f"share_blunt_{blunt_id}")],
-        [InlineKeyboardButton("🔙 В Крафт", callback_data="craft"), InlineKeyboardButton("🏰 В меню", callback_data="menu")]
-    ])
-    file_id = BLUNT_IMAGES.get(item["rarity"])
-    if file_id:
-        await context.bot.send_photo(chat_id=update.effective_chat.id, photo=file_id, caption=caption, reply_markup=kb, parse_mode='HTML')
-    else:
-        await update.message.reply_text(caption, reply_markup=kb, parse_mode='HTML')
-
-    # Пост в канал
     try:
-        await context.bot.send_message(chat_id="@guild_antysocial",
-            text=f"<b><i>🩸 ЭХО ИСКАЖЕНИЯ</i></b>\n\n⚜️ <b>@{uname_escaped}</b> создал свой блант {color} <b><i>«{name_escaped}»</i></b> 🌿\n<i>Редкость: {item['rarity']}</i>\n🩸 <i>{reaction}</i>", parse_mode='HTML')
+        user = update.effective_user
+        uid = user.id
+        name = update.message.text.strip()[:25]
+        if not name:
+            await update.message.reply_text("❌ Имя не может быть пустым.")
+            return
+
+        # Временно не проверяем флаг – создаём блант при любом вводе имени
+        uname = user.username or user.first_name
+        async with db_pool.acquire() as conn:
+            async with conn.transaction():
+                await update_balance(uid, uname, -50, conn=conn)
+                await increment_counter(uid, "craft_count", conn=conn)
+                item = await create_named_blunt(uid, name, conn=conn)
+        await add_war_score(uid, 25)
+        blunt_id = item["id"]
+        name_escaped = html.escape(name)
+        color = {"legendary":"🟡","epic":"🟣","rare":"🔵"}.get(item["rarity"], "🟢")
+        reaction = item["reaction"]
+
+        caption = (
+            f"<b>💍 БЛАНТ СОТКАН</b>\n\n"
+            f"🩸 <i>Ты вплёл в <b>Искажение</b> свой именной блант:</i>\n"
+            f"{color} <b><i>«{name_escaped}»</i></b> <i>Редкость:</i> <b>{item['rarity']}</b>\n\n"
+            f"💎 <i>Он навсегда останется в твоей коллекции.</i>\n\n"
+            f"🩸 <i>{reaction}</i>"
+        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔗 Поделиться", callback_data=f"share_blunt_{blunt_id}")],
+            [InlineKeyboardButton("🔙 В Крафт", callback_data="craft"), InlineKeyboardButton("🏰 В меню", callback_data="menu")]
+        ])
+        file_id = BLUNT_IMAGES.get(item["rarity"])
+        if file_id:
+            await context.bot.send_photo(chat_id=update.effective_chat.id, photo=file_id, caption=caption, reply_markup=kb, parse_mode='HTML')
+        else:
+            await update.message.reply_text(caption, reply_markup=kb, parse_mode='HTML')
+
+        # Пост в канал
+        try:
+            await context.bot.send_message(chat_id="@guild_antysocial",
+                text=f"<b><i>🩸 ЭХО ИСКАЖЕНИЯ</i></b>\n\n⚜️ <b>@{html.escape(uname)}</b> создал свой блант {color} <b><i>«{name_escaped}»</i></b> 🌿\n<i>Редкость: {item['rarity']}</i>\n🩸 <i>{reaction}</i>", parse_mode='HTML')
+        except Exception as e:
+            logger.error(f"Ошибка отправки в канал: {e}")
+        await check_achievements(uid, context)
+
     except Exception as e:
-        logger.error(f"Ошибка отправки в канал: {e}")
-    await check_achievements(uid, context)
+        import traceback
+        err = traceback.format_exc()
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"❌ Ошибка в named_name:\n<code>{html.escape(err[:800])}</code>", parse_mode='HTML')
+    finally:
+        context.user_data['awaiting_named_blunt'] = False
 
 async def handle_use_dust(update, context):
     query = update.callback_query
