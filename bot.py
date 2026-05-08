@@ -13,27 +13,6 @@ from telegram.ext import (
 )
 from telegram.error import BadRequest
 
-import functools
-import asyncio
-
-def db_retry(max_retries=3, delay=0.2):
-    """Автоматически повторяет запрос к БД при временных сбоях соединения."""
-    def decorator(func):
-        @functools.wraps(func)
-        async def wrapper(*args, **kwargs):
-            for attempt in range(max_retries):
-                try:
-                    return await func(*args, **kwargs)
-                except (asyncpg.exceptions.ConnectionDoesNotExistError,
-                        asyncpg.exceptions.InterfaceError,
-                        asyncpg.exceptions.PostgresConnectionError) as e:
-                    if attempt == max_retries - 1:
-                        raise
-                    logger.warning(f"DB retry {attempt+1}/{max_retries} for {func.__name__}: {e}")
-                    await asyncio.sleep(delay * (attempt + 1))
-        return wrapper
-    return decorator
-
 # === ВЕБ-СЕРВЕР ===
 web_app = Flask(__name__)
 @web_app.route("/")
@@ -98,6 +77,7 @@ async def ensure_player_exists(user_id, username=None, conn=None):
         username or "",
     )
 
+@db_retry()
 async def update_last_farm(user_id, conn=None):
     if conn is None:
         async with db_pool.acquire() as conn:
@@ -107,6 +87,7 @@ async def update_last_farm(user_id, conn=None):
     await conn.execute("UPDATE players SET last_farm = NOW(), last_farm_date = CURRENT_DATE WHERE user_id = $1", user_id)
     invalidate_cache(user_id)
 
+@db_retry()
 async def update_last_daily(user_id, conn=None):
     if conn is None:
         async with db_pool.acquire() as conn:
@@ -116,6 +97,7 @@ async def update_last_daily(user_id, conn=None):
     await conn.execute("UPDATE players SET last_daily = NOW() WHERE user_id = $1", user_id)
     invalidate_cache(user_id)
 
+@db_retry()
 async def update_last_ritual(user_id, conn=None):
     if conn is None:
         async with db_pool.acquire() as conn:
@@ -125,6 +107,7 @@ async def update_last_ritual(user_id, conn=None):
     await conn.execute("UPDATE players SET last_ritual = NOW() WHERE user_id = $1", user_id)
     invalidate_cache(user_id)
 
+@db_retry()
 async def update_last_berserk(user_id, conn=None):
     if conn is None:
         async with db_pool.acquire() as conn:
@@ -154,6 +137,7 @@ async def add_title(user_id, emoji, conn=None):
         await conn.execute("UPDATE players SET titles = $1 WHERE user_id = $2", " ".join(titles).strip(), user_id)
     invalidate_cache(user_id)
 
+@db_retry()
 async def create_named_blunt(user_id, name, rarity=None, conn=None):
     """Создаёт именной блант и добавляет его ТОЛЬКО в инвентарь."""
     if rarity not in ("common", "rare", "epic", "legendary"):
@@ -456,7 +440,6 @@ async def create_tables(conn):
     """)
 
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
-@db_retry()
 async def get_player_cached(user_id):
     if user_id in player_cache:
         return player_cache[user_id]
@@ -516,7 +499,6 @@ async def update_blunts(user_id, username, amount, conn=None):
         await conn.execute("UPDATE players SET blunts = blunts + $1 WHERE user_id = $2", amount, user_id)
     invalidate_cache(user_id)
 
-@db_retry()
 async def update_essence(user_id, amount, conn=None):
     owns_conn = conn is None
     if owns_conn:
@@ -538,8 +520,6 @@ async def update_essence(user_id, amount, conn=None):
     invalidate_cache(user_id)
 
 ALLOWED_COUNTERS = {"farm_count","craft_count","smoke_count","ritual_count","referral_count","check_count","lab_chests","lab_deaths","alchemy_count"}
-
-@db_retry()
 async def increment_counter(user_id, field, conn=None):
     if field not in ALLOWED_COUNTERS:
         return
@@ -550,11 +530,13 @@ async def increment_counter(user_id, field, conn=None):
         await conn.execute(f"UPDATE players SET {field} = COALESCE({field}, 0) + 1 WHERE user_id = $1", user_id)
     invalidate_cache(user_id)
 
+@db_retry()
 async def set_guild(user_id, guild):
     async with db_pool.acquire() as conn:
         await conn.execute("UPDATE players SET guild=$1 WHERE user_id=$2", guild, user_id)
     invalidate_cache(user_id)
 
+@db_retry()
 async def get_top(limit=10):
     now = datetime.now().timestamp()
     if top_cache["data"] and (now - top_cache["timestamp"]) < top_cache["ttl"]:
@@ -565,6 +547,7 @@ async def get_top(limit=10):
     top_cache["timestamp"] = now
     return rows
 
+@db_retry()
 async def count_guilds():
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("SELECT guild, COUNT(*) as cnt FROM players WHERE guild IS NOT NULL GROUP BY guild")
@@ -659,7 +642,6 @@ def get_rank_progress(balance):
             )
     return ""
 
-@db_retry()
 async def add_war_score(user_id, points):
     if not db_pool:
         return
