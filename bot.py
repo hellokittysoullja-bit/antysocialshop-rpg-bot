@@ -1113,7 +1113,7 @@ async def handle_craft_named(update, context):
     await query.message.delete()
     sent_msg = await context.bot.send_message(
         chat_id=query.message.chat.id,
-        text="<b>💍 ИМЕННОЙ БЛАНТ</b>\n\n<i>Введи имя своего бланта (до 25 символов)</i>\n\n[❌ Отмена]",
+        text="<b>💍 ИМЕННОЙ БЛАНТ</b>\n\n<i>Введи имя своего бланта (до 25 символов)</i>",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel_named")]]),
         parse_mode='HTML'
     )
