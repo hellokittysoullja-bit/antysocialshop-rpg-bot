@@ -392,9 +392,9 @@ async def init_db_pool():
         raise Exception("NEON_DATABASE_URL не установлена!")
     db_pool = await asyncpg.create_pool(database_url, min_size=5, max_size=20, command_timeout=15)
     async with db_pool.acquire() as conn:
-    await create_tables(conn)
-    await init_redis()
-logger.info("База данных Neon инициализирована...")
+        await create_tables(conn)
+        await init_redis()          # если добавили Redis
+    logger.info("База данных Neon инициализирована (пул 2-10, таймаут 10с).")
     
 async def close_db_pool():
     global db_pool
