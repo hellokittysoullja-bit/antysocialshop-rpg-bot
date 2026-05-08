@@ -722,6 +722,38 @@ async def get_main_menu_keyboard(user_id):
 def get_back_to_menu_keyboard():
     return InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
 
+import functools
+import traceback
+
+def error_handler(func):
+    """Middleware: перехватывает исключения в обработчиках, уведомляет пользователя и админа."""
+    @functools.wraps(func)
+    async def wrapper(update, context, *args, **kwargs):
+        try:
+            return await func(update, context, *args, **kwargs)
+        except Exception as e:
+            # Логируем полную трассировку
+            logger.error(f"Unhandled error in {func.__name__}:", exc_info=True)
+            # Сбрасываем состояние ожидания именного бланта
+            if 'awaiting_named_blunt' in context.user_data:
+                context.user_data['awaiting_named_blunt'] = False
+            # Уведомляем пользователя (всплывашка или сообщение)
+            if update.callback_query:
+                await update.callback_query.answer("⚠️ Внутренняя ошибка. Админ уже в курсе.", show_alert=True)
+            else:
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text="⚠️ Что-то пошло не так. Попробуйте позже."
+                )
+            # Отправляем детали ошибки админу в Telegram
+            if ADMIN_ID:
+                try:
+                    err_msg = f"🚨 <b>Ошибка в {func.__name__}</b>\n<code>{html.escape(str(e))}</code>"
+                    await context.bot.send_message(chat_id=ADMIN_ID, text=err_msg, parse_mode='HTML')
+                except Exception as notify_err:
+                    logger.error(f"Failed to notify admin: {notify_err}")
+    return wrapper
+
 # ========== ОБРАБОТЧИКИ КОМАНД ==========
 # ========== ОБРАБОТЧИКИ КОМАНД (полный, надёжный, с лабиринтом) ==========
 
@@ -928,6 +960,7 @@ async def grant_title(user_id, emoji, name, context):
     await add_title(user_id, emoji)
 
 # Продолжение # Фарм (исправлен)
+@error_handler
 async def farm_callback(update, context):
     user, msg = get_user_and_msg(update)
     uid = user.id; uname = user.username or user.first_name
@@ -1000,6 +1033,7 @@ async def farm_callback(update, context):
     await check_achievements(uid, context)
     
 # Крафт
+@error_handler
 async def craft_callback(update, context):
     user, msg = get_user_and_msg(update)
     uid = user.id; uname = html.escape(user.username or user.first_name)
@@ -1066,6 +1100,7 @@ async def handle_craft_normal(update, context):
     await safe_edit(update, context, text, reply_markup=kb)
     await check_achievements(uid, context)
 
+@error_handler
 async def handle_craft_named(update, context):
     query = update.callback_query
     await query.answer()
@@ -1239,6 +1274,7 @@ async def cancel_named(update, context):
     await craft_callback(update, context)
 
 # Дунуть
+@error_handler
 async def smoke_callback(update, context):
     user, msg = get_user_and_msg(update)
     uid = user.id; uname = html.escape(user.username or user.first_name)
@@ -1269,7 +1305,8 @@ async def smoke_callback(update, context):
         await update.callback_query.message.edit_text(main_text, reply_markup=main_kb, parse_mode='HTML')
     else:
         await msg.reply_text(main_text, reply_markup=main_kb, parse_mode='HTML')
-        
+
+@error_handler
 async def do_smoke(update, context):
     query = update.callback_query
     await query.answer()
@@ -1396,6 +1433,7 @@ async def do_smoke(update, context):
     await check_achievements(uid, context)
 
 # Ритуал (с защитой от None)
+@error_handler
 async def ritual_callback(update, context):
     user, msg = get_user_and_msg(update)
     uid = user.id; uname = html.escape(user.username or user.first_name)
@@ -1448,6 +1486,7 @@ async def ritual_callback(update, context):
     await check_achievements(uid, context)
 
 # Куст (с защитой от None)
+@error_handler
 async def collect_callback(update, context):
     user, msg = get_user_and_msg(update)
     uid = user.id; uname = html.escape(user.username or user.first_name)
@@ -1498,6 +1537,7 @@ async def collect_callback(update, context):
         )
 
 # Профиль
+@error_handler
 async def profile_callback(update, context):
     user, msg = get_user_and_msg(update)
     uid = user.id; uname = html.escape(user.username or user.first_name)
@@ -1654,6 +1694,7 @@ async def achievements_callback(update: Update, context: ContextTypes.DEFAULT_TY
     await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode='HTML')
 
 # Топ
+@error_handler
 async def top_callback(update, context):
     user, msg = get_user_and_msg(update)
     uid = user.id
@@ -1707,6 +1748,7 @@ async def top_scout_callback(update, context):
     await send_whisper_dm(update, context, text)
 
 # Гильдии
+@error_handler
 async def guild_info_callback(update, context):
     user, msg = get_user_and_msg(update)
     uid = user.id
@@ -1900,6 +1942,7 @@ async def catalog_callback(update, context):
     await msg.reply_text("<b>🕯️ ANTYSOCIALSHOP · КАТАЛОГ</b>", parse_mode='HTML', reply_markup=kb)
 
 # Удача (с защитой от None)
+@error_handler
 async def luck_callback(update, context, action=None):
     user, msg = get_user_and_msg(update)
     uid = user.id; uname = html.escape(user.username or user.first_name)
@@ -2119,6 +2162,7 @@ async def check_blunt(update, context):
     await increment_counter(update.effective_user.id, "check_count")
 
 # Лабиринт (с защитой от None)
+@error_handler
 async def lab_enter(update, context):
     user, msg = get_user_and_msg(update)
     uid = user.id
