@@ -1754,27 +1754,38 @@ async def top_scout_callback(update, context):
 async def guild_info_callback(update, context):
     user, msg = get_user_and_msg(update)
     uid = user.id
-    counts = await count_guilds()
     guild = await get_guild(uid)
     p = await get_player_cached(uid)
     if not p:
         await safe_edit(update, context, "Профиль не найден. Напиши /start")
         return
 
-    async with db_pool.acquire() as conn:
-        black_donated = await conn.fetchval("SELECT COALESCE(SUM(donated),0) FROM players WHERE guild='BLACK'")
-        white_donated = await conn.fetchval("SELECT COALESCE(SUM(donated),0) FROM players WHERE guild='WHITE'")
-    target = 50000
-    black_perc = min(100, int(black_donated / target * 100) if target else 0)
-    white_perc = min(100, int(white_donated / target * 100) if target else 0)
+    # Безопасный подсчёт гильдий
+    cnt = await count_guilds()
+    black_cnt = cnt.get("BLACK", 0) if isinstance(cnt, dict) else 0
+    white_cnt = cnt.get("WHITE", 0) if isinstance(cnt, dict) else 0
 
-    # Жирный заголовок, жирные названия, жирный прогресс-бар
+    # Пожертвования (с защитой)
+    async with db_pool.acquire() as conn:
+        black_donated = await conn.fetchval("SELECT COALESCE(SUM(donated),0) FROM players WHERE guild='BLACK'") or 0
+        white_donated = await conn.fetchval("SELECT COALESCE(SUM(donated),0) FROM players WHERE guild='WHITE'") or 0
+    target = 50000
+    black_perc = min(100, max(0, int(black_donated / target * 100)))
+    white_perc = min(100, max(0, int(white_donated / target * 100)))
+
+    # Прогресс-бары (с защитой)
+    def safe_progress_bar(perc):
+        perc = max(0, min(100, perc))
+        filled = perc // 10
+        return "▓" * filled + "░" * (10 - filled)
+
     text = (
         f"<b>🕋 ГИЛЬДИИ</b>\n\n"
-        f"🕯️ <b>Тёмная: {counts['BLACK']}</b> странников | <b>{progress_bar(black_perc)} {black_perc}%</b>\n"
-        f"⚜️ <b>Светлая: {counts['WHITE']}</b> странников | <b>{progress_bar(white_perc)} {white_perc}%</b>\n\n"
+        f"🕯️ <b>Тёмная: {black_cnt}</b> странников | <b>{safe_progress_bar(black_perc)} {black_perc}%</b>\n"
+        f"⚜️ <b>Светлая: {white_cnt}</b> странников | <b>{safe_progress_bar(white_perc)} {white_perc}%</b>\n\n"
     )
 
+    # Война гильдий (с защитой)
     async with db_pool.acquire() as conn:
         war_row = await conn.fetchrow("SELECT war_active FROM guild_weekly WHERE war_active = TRUE LIMIT 1")
         if war_row:
@@ -1782,27 +1793,23 @@ async def guild_info_callback(update, context):
             black_score = next((r["total_farmed"] for r in scores if r["guild"] == "BLACK"), 0)
             white_score = next((r["total_farmed"] for r in scores if r["guild"] == "WHITE"), 0)
             total_war = max(black_score + white_score, 1)
-            black_perc_war = int(black_score / total_war * 100)
-            white_perc_war = int(white_score / total_war * 100)
-            black_bar = "▓" * (black_perc_war // 10) + "░" * (10 - black_perc_war // 10)
-            white_bar = "▓" * (white_perc_war // 10) + "░" * (10 - white_perc_war // 10)
-            # Заголовок войны и прогресс-бары жирные
+            bp = int(black_score / total_war * 100)
+            wp = int(white_score / total_war * 100)
             text += (
                 f"<b>⚔️ Война гильдий</b>\n\n"
-                f"🕯️ Тёмные: {black_score} очков\n<b>{black_bar} {black_perc_war}%</b>\n\n"
-                f"⚜️ Светлые: {white_score} очков\n<b>{white_bar} {white_perc_war}%</b>\n"
+                f"🕯️ Тёмные: {black_score} очков\n<b>{safe_progress_bar(bp)} {bp}%</b>\n\n"
+                f"⚜️ Светлые: {white_score} очков\n<b>{safe_progress_bar(wp)} {wp}%</b>\n"
             )
 
     kb_rows = []
     if guild:
         g_emoji = "🕯️" if guild == "BLACK" else "⚜️"
         g_name = "Тёмная" if guild == "BLACK" else "Светлая"
-        # Название гильдии в строке «Ты состоишь в...» жирное
         text += f"Ты состоишь в {g_emoji} <b>{g_name} Гильдии</b>.\n"
         if guild == "BLACK" and p:
-            if p["last_ritual"]:
+            if p.get("last_ritual"):
                 last_ritual = _to_datetime(p["last_ritual"])
-                if datetime.now() - last_ritual < timedelta(hours=24):
+                if last_ritual and datetime.now() - last_ritual < timedelta(hours=24):
                     diff = timedelta(hours=24) - (datetime.now() - last_ritual)
                     hrs = int(diff.seconds // 3600)
                     mins = int((diff.seconds % 3600) // 60)
@@ -1815,7 +1822,6 @@ async def guild_info_callback(update, context):
             kb_rows.append([InlineKeyboardButton("⚜️ Исповедь", callback_data="confess")])
         kb_rows.append([InlineKeyboardButton("🏛️ Храм Гильдии", callback_data="guild_shrine")])
     else:
-        # «Ты пока не в Гильдии» курсивом
         text += "<i>Ты пока не в Гильдии.</i>\n"
         kb_rows.append([InlineKeyboardButton("🕯️ Вступить в Тёмную", callback_data="guild_join_BLACK"),
                         InlineKeyboardButton("⚜️ Вступить в Светлую", callback_data="guild_join_WHITE")])
