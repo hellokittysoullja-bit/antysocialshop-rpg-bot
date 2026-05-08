@@ -903,6 +903,7 @@ async def farm_callback(update, context):
     uid = user.id; uname = user.username or user.first_name
     uname_escaped = html.escape(uname)
     p = await get_player_cached(uid)
+
     if p and p["last_farm"]:
         last = _to_datetime(p["last_farm"])
         if datetime.now() - last < timedelta(hours=FARM_COOLDOWN_HOURS):
@@ -933,28 +934,15 @@ async def farm_callback(update, context):
 
     old_bal = p["balance"] if p else 0
     old_count = p["farm_count"] if p else 0
-    async with db_pool.acquire() as conn:
-        row = await conn.fetchrow("""
-            UPDATE players SET
-                balance = balance + $2,
-                farm_count = farm_count + 1,
-                last_farm = NOW(),
-                last_farm_date = CURRENT_DATE
-            WHERE user_id = $1
-            RETURNING *
-        """, uid, earned)
-        if row:
-            p_new = dict(row)
-            p_new["inventory"] = _json_safe_load(p_new.get("inventory"), [])
-            player_cache[uid] = p_new
-        else:
-            await update_balance(uid, uname, earned)
-            await update_last_farm(uid)
-            await increment_counter(uid, "farm_count")
-            invalidate_cache(uid)
-            p_new = await get_player_cached(uid)
 
-    await add_war_score(uid, earned)
+    # Единая транзакция через один conn
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            await update_balance(uid, uname, earned, conn=conn)
+            await update_last_farm(uid, conn=conn)
+            await increment_counter(uid, "farm_count", conn=conn)
+            await add_war_score(uid, earned, conn=conn)
+        p_new = await get_player_cached(uid)
 
     new_count = p_new["farm_count"]
     medal_text, medal_bonus = get_medal_text_and_reward(old_count, new_count, FARM_MEDALS)
@@ -1010,31 +998,18 @@ async def handle_craft_normal(update, context):
             parse_mode='HTML'
         )
         return
+
     old_count = p["craft_count"]
     async with db_pool.acquire() as conn:
-        row = await conn.fetchrow("""
-            UPDATE players SET
-                balance = balance - 15,
-                blunts = blunts + 1,
-                craft_count = craft_count + 1
-            WHERE user_id = $1
-            RETURNING *
-        """, uid)
-        if row:
-            p_new = dict(row)
-            p_new["inventory"] = _json_safe_load(p_new.get("inventory"), [])
-            player_cache[uid] = p_new
-        else:
-            await update_balance(uid, uname, -15)
-            await update_blunts(uid, uname, 1)
-            await increment_counter(uid, "craft_count")
-            invalidate_cache(uid)
-            p_new = await get_player_cached(uid)
-
-    await add_war_score(uid, 10)
-    if random.random() < 0.05:
-        await update_blunts(uid, uname, 1)
-        await send_whisper(context, "@guild_antysocial", f"⚡ @{html.escape(uname)} высек Искру Искажения из рутины. +1 🌿")
+        async with conn.transaction():
+            await update_balance(uid, uname, -15, conn=conn)
+            await update_blunts(uid, uname, 1, conn=conn)
+            await increment_counter(uid, "craft_count", conn=conn)
+            await add_war_score(uid, 10, conn=conn)
+            if random.random() < 0.05:
+                await update_blunts(uid, uname, 1, conn=conn)
+                await send_whisper(context, "@guild_antysocial", f"⚡ @{html.escape(uname)} высек Искру Искажения из рутины. +1 🌿")
+        p_new = await get_player_cached(uid)
 
     new_count = p_new["craft_count"]
     medal_text, medal_bonus = get_medal_text_and_reward(old_count, new_count, CRAFT_MEDALS)
@@ -1402,36 +1377,24 @@ async def ritual_callback(update, context):
         if last and datetime.now() - last < timedelta(hours=24):
             remain = int((timedelta(hours=24) - (datetime.now()-last)).seconds/3600)
             await context.bot.send_message(
-    chat_id=update.effective_chat.id,
-    text=f"<b>🕯️ Тёмный алтарь истощён 🌙</b>\n\n<b>🗝️ Жди {remain} ч</b>",
-    parse_mode='HTML'
-); return
+                chat_id=update.effective_chat.id,
+                text=f"<b>🕯️ Тёмный алтарь истощён 🌙</b>\n\n<b>🗝️ Жди {remain} ч</b>",
+                parse_mode='HTML'
+            )
+            return
     old_bal = p["balance"]
     reward = 150
     if context.bot_data.get("happy_hour"): reward *= HAPPY_HOUR_MULTIPLIER
     old_count = p["ritual_count"]
     extra = 15 if random.random() < 0.1 else 0
-    async with db_pool.acquire() as conn:
-        row = await conn.fetchrow("""
-            UPDATE players SET
-                balance = balance + $2 + $3,
-                ritual_count = ritual_count + 1,
-                last_ritual = NOW()
-            WHERE user_id = $1
-            RETURNING *
-        """, uid, reward, extra)
-        if row:
-            p_new = dict(row)
-            p_new["inventory"] = _json_safe_load(p_new.get("inventory"), [])
-            player_cache[uid] = p_new
-        else:
-            await update_balance(uid, uname, reward + extra)
-            await conn.execute("UPDATE players SET last_ritual = NOW() WHERE user_id = $1", uid)
-            await increment_counter(uid, "ritual_count")
-            invalidate_cache(uid)
-            p_new = await get_player_cached(uid)
 
-    await add_war_score(uid, reward + extra)
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            await update_balance(uid, uname, reward + extra, conn=conn)
+            await conn.execute("UPDATE players SET last_ritual = NOW() WHERE user_id = $1", uid)
+            await increment_counter(uid, "ritual_count", conn=conn)
+            await add_war_score(uid, reward + extra, conn=conn)
+        p_new = await get_player_cached(uid)
 
     new_count = p_new["ritual_count"]
     medal_text, medal_bonus = get_medal_text_and_reward(old_count, new_count, RITUAL_MEDALS)
@@ -1473,11 +1436,12 @@ async def collect_callback(update, context):
             earned = int(hrs * 30 * lvl)
             if context.bot_data.get("happy_hour"): earned *= HAPPY_HOUR_MULTIPLIER
             if earned >= 1:
-                await update_balance(uid, uname, earned)
                 async with db_pool.acquire() as conn:
-                    await conn.execute("UPDATE players SET passive_collected=$1 WHERE user_id=$2", datetime.now(), uid)
-                invalidate_cache(uid)
-                new_bal = (await get_player_cached(uid))["balance"]
+                    async with conn.transaction():
+                        await update_balance(uid, uname, earned, conn=conn)
+                        await conn.execute("UPDATE players SET passive_collected=$1 WHERE user_id=$2", datetime.now(), uid)
+                        await add_war_score(uid, earned, conn=conn)
+                    new_bal = (await get_player_cached(uid))["balance"]
                 await send_whisper_dm(update, context, f"<b><i>🪴 УРОЖАЙ СОБРАН</i></b>\n\nТвой куст принёс <b>{earned} OAC</b> 🍬.\n\n💎 <i>У тебя:</i> <b>{new_bal} OAC</b> 🍬")
             else:
                 await context.bot.send_message(
@@ -1493,7 +1457,9 @@ async def collect_callback(update, context):
             )
     else:
         async with db_pool.acquire() as conn:
-            await conn.execute("UPDATE players SET passive_collected=$1 WHERE user_id=$2", datetime.now(), uid)
+            async with conn.transaction():
+                await conn.execute("UPDATE players SET passive_collected=$1 WHERE user_id=$2", datetime.now(), uid)
+                await add_war_score(uid, 0, conn=conn)   # фиксируем активацию
         invalidate_cache(uid)
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
@@ -2075,8 +2041,7 @@ async def luck_callback(update, context, action=None):
                             text=f"🌟 @{uname} провёл Алхимический Ритуал и получил легендарный блант <b><i>«{name}»</i></b>!", parse_mode='HTML')
                     except Exception as e:
                         logger.error(f"Ошибка отправки в канал: {e}")
-                        # не прерываем выполнение
-        await add_war_score(uid, 30)
+                await add_war_score(uid, 30, conn=conn)
         try:
             await msg.edit_text(result_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]), parse_mode='HTML')
         except BadRequest as e:
