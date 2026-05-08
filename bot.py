@@ -134,7 +134,7 @@ async def add_title(user_id, emoji, conn=None):
     invalidate_cache(user_id)
 
 async def create_named_blunt(user_id, name, rarity=None, conn=None):
-    """Создаёт именной блант и записывает в реестр + инвентарь (без падений)."""
+    """Создаёт именной блант и записывает в реестр + инвентарь (полностью без SELECT)."""
     if rarity not in ("common", "rare", "epic", "legendary"):
         r = random.random()
         if r < 0.01: rarity = "legendary"
@@ -194,11 +194,11 @@ async def create_named_blunt(user_id, name, rarity=None, conn=None):
         "owner_history": [{"user_id": str(user_id), "since": datetime.utcnow().isoformat()}],
     }
 
-    # Инвентарь
-    row_inv = await conn.fetchrow("SELECT inventory FROM players WHERE user_id = $1", user_id)
-    inventory = _json_safe_load(row_inv["inventory"] if row_inv else None, [])
-    inventory.append(item)
-    await conn.execute("UPDATE players SET inventory = $1 WHERE user_id = $2", json.dumps(inventory), user_id)
+    # Атомарно добавляем блант в инвентарь (без SELECT)
+    await conn.execute(
+        "UPDATE players SET inventory = COALESCE(inventory, '[]'::jsonb) || $1::jsonb WHERE user_id = $2",
+        json.dumps([item]), user_id
+    )
     invalidate_cache(user_id)
     return item
 
