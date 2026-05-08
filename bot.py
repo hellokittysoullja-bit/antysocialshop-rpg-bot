@@ -1174,6 +1174,7 @@ async def handle_craft_named(update, context):
     context.user_data['awaiting_named_blunt_msg_id'] = sent_msg.message_id
     
 async def handle_named_name(update, context):
+    await context.bot.send_message(chat_id=update.effective_chat.id, text="DEBUG: handle_named_name вызвана")
     if not context.user_data.get('awaiting_named_blunt'):
         return
     user = update.effective_user
