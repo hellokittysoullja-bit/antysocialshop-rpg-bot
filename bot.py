@@ -134,7 +134,7 @@ async def add_title(user_id, emoji, conn=None):
     invalidate_cache(user_id)
 
 async def create_named_blunt(user_id, name, rarity=None, conn=None):
-    """Создаёт именной блант с записью в реестр NFT (с защитой от падений)."""
+    """Генерирует данные бланта, но НЕ трогает базу данных."""
     if rarity not in ("common", "rare", "epic", "legendary"):
         r = random.random()
         if r < 0.01: rarity = "legendary"
@@ -147,64 +147,21 @@ async def create_named_blunt(user_id, name, rarity=None, conn=None):
         clean_name = "Безымянный"
 
     reaction = random.choice(FUNNY_REACTIONS)
+    blunt_id = f"blunt_{user_id}_{int(datetime.utcnow().timestamp()*1000)}_{random.randint(1000,9999)}"
     hash_code = "0x" + hashlib.sha256((clean_name + str(datetime.utcnow().timestamp())).encode("utf-8")).hexdigest()[:16]
 
-    if conn is None:
-        async with db_pool.acquire() as conn:
-            return await create_named_blunt(user_id, clean_name, rarity=rarity, conn=conn)
-
-    # Пытаемся вставить в реестр до 5 раз
-    serial = None
-    for attempt in range(5):
-        blunt_id = f"blunt_{user_id}_{int(datetime.utcnow().timestamp()*1000)}_{random.randint(1000,9999)}"
-        try:
-            # Вставка с возвратом serial, при конфликте ничего не делаем
-            row = await conn.fetchrow(
-                "INSERT INTO nft_registry (blunt_id, created_by, rarity, rare_number, created_at) "
-                "VALUES ($1, $2, $3, '', NOW()) "
-                "ON CONFLICT (blunt_id) DO NOTHING "
-                "RETURNING serial",
-                blunt_id, user_id, rarity
-            )
-            if row is not None and row["serial"] is not None:
-                serial = row["serial"]
-                break  # успех
-        except Exception as e:
-            logger.warning(f"Ошибка вставки в nft_registry (попытка {attempt+1}): {e}")
-            continue
-
-    # Если serial получен – формируем полный номер, иначе запасной случайный
-    if serial is not None:
-        rare_number = f"R-{serial:04d}"
-        # обновляем rare_number в реестре (он был пустым)
-        try:
-            await conn.execute("UPDATE nft_registry SET rare_number = $1 WHERE blunt_id = $2", rare_number, blunt_id)
-        except Exception:
-            pass
-    else:
-        # Реестр недоступен — используем случайный номер, чтобы блант всё равно создался
-        rare_number = f"R-{random.randint(1000,9999)}"
-
-    item = {
+    return {
         "id": blunt_id,
         "type": "named",
         "name": clean_name,
         "rarity": rarity,
-        "serial": serial,
-        "rare_number": rare_number,
+        "serial": None,
+        "rare_number": None,
         "hash": hash_code,
         "reaction": reaction,
         "created_at": datetime.utcnow().isoformat(),
         "owner_history": [{"user_id": str(user_id), "since": datetime.utcnow().isoformat()}],
     }
-
-    # Инвентарь
-    row_inv = await conn.fetchrow("SELECT inventory FROM players WHERE user_id = $1", user_id)
-    inventory = _json_safe_load(row_inv["inventory"] if row_inv else None, [])
-    inventory.append(item)
-    await conn.execute("UPDATE players SET inventory = $1 WHERE user_id = $2", json.dumps(inventory), user_id)
-    invalidate_cache(user_id)
-    return item
 
 async def _award_achievement_rewards(user_id, player, reward_text, context):
     if not reward_text:
@@ -1154,15 +1111,50 @@ async def handle_named_name(update, context):
             return
 
         uname = user.username or user.first_name
+
+        # Основная транзакция: списание OAC, создание бланта, реестр, инвентарь
         async with db_pool.acquire() as conn:
             async with conn.transaction():
                 await update_balance(uid, uname, -50, conn=conn)
                 await increment_counter(uid, "craft_count", conn=conn)
-                item = await create_named_blunt(uid, name, rarity=None, conn=conn)
-                inventory = _json_safe_load(row["inventory"] if row else None, [])
+
+                # Генерируем объект бланта (без участия БД)
+                item = await create_named_blunt(uid, name)
+
+                # Пытаемся записать в реестр и получить serial (до 5 попыток)
+                for attempt in range(5):
+                    try:
+                        row = await conn.fetchrow(
+                            "INSERT INTO nft_registry (blunt_id, created_by, rarity, rare_number, created_at) "
+                            "VALUES ($1, $2, $3, '', NOW()) "
+                            "ON CONFLICT (blunt_id) DO NOTHING "
+                            "RETURNING serial",
+                            item["id"], uid, item["rarity"]
+                        )
+                        if row is not None and row["serial"] is not None:
+                            item["serial"] = row["serial"]
+                            item["rare_number"] = f"R-{row['serial']:04d}"
+                            await conn.execute("UPDATE nft_registry SET rare_number = $1 WHERE blunt_id = $2",
+                                               item["rare_number"], item["id"])
+                            break
+                        else:
+                            # Конфликт ID – генерируем новый
+                            item["id"] = f"blunt_{uid}_{int(datetime.utcnow().timestamp()*1000)}_{random.randint(1000,9999)}"
+                    except Exception as e:
+                        logger.warning(f"Ошибка вставки в реестр (попытка {attempt+1}): {e}")
+                        continue
+
+                # Если serial так и не получен, даём случайный номер
+                if item["serial"] is None:
+                    item["rare_number"] = f"R-{random.randint(1000,9999)}"
+
+                # Добавляем в инвентарь
+                row_inv = await conn.fetchrow("SELECT inventory FROM players WHERE user_id = $1", uid)
+                inventory = _json_safe_load(row_inv["inventory"] if row_inv else None, [])
                 inventory.append(item)
                 await conn.execute("UPDATE players SET inventory = $1 WHERE user_id = $2", json.dumps(inventory), uid)
 
+        # Теперь item полностью готов: с id, rarity, rare_number, serial и т.д.
         await add_war_score(uid, 25)
         blunt_id = item["id"]
         name_escaped = html.escape(name)
@@ -1192,6 +1184,7 @@ async def handle_named_name(update, context):
                 text=f"<b><i>🩸 ЭХО ИСКАЖЕНИЯ</i></b>\n\n⚜️ <b>@{html.escape(uname)}</b> создал свой блант {color} <b><i>«{name_escaped}»</i></b> 🌿\n<i>Редкость: {item['rarity']}</i>\n🩸 <i>{reaction}</i>", parse_mode='HTML')
         except Exception as e:
             logger.error(f"Ошибка отправки в канал: {e}")
+
         await check_achievements(uid, context)
 
     except Exception as e:
