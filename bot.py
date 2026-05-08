@@ -134,7 +134,7 @@ async def add_title(user_id, emoji, conn=None):
     invalidate_cache(user_id)
 
 async def create_named_blunt(user_id, name, rarity=None, conn=None):
-    """Создаёт именной блант и записывает его в реестр NFT (без ошибок уникальности)."""
+    """Создаёт именной блант и записывает в реестр (абсолютно надёжно)."""
     if rarity not in ("common", "rare", "epic", "legendary"):
         r = random.random()
         if r < 0.01: rarity = "legendary"
@@ -142,41 +142,31 @@ async def create_named_blunt(user_id, name, rarity=None, conn=None):
         elif r < 0.20: rarity = "rare"
         else: rarity = "common"
 
-    clean_name = str(name or "").strip()[:25]
-    if not clean_name:
-        clean_name = "Безымянный"
-
+    clean_name = str(name or "").strip()[:25] or "Безымянный"
     reaction = random.choice(FUNNY_REACTIONS)
-    blunt_id = f"blunt_{user_id}_{int(datetime.utcnow().timestamp())}_{random.randint(1000,9999)}"
-    hash_code = "0x" + hashlib.sha256((blunt_id + ":hash").encode("utf-8")).hexdigest()[:16]
+    hash_code = "0x" + hashlib.sha256(
+        (str(datetime.utcnow().timestamp()) + clean_name).encode()
+    ).hexdigest()[:16]
 
     if conn is None:
-        async with db_pool.acquire() as conn:
-            return await create_named_blunt(user_id, clean_name, rarity=rarity, conn=conn)
+        async with db_pool.acquire() as new_conn:
+            return await create_named_blunt(user_id, clean_name, rarity, conn=new_conn)
 
-    # Получаем следующий серийный номер
-    next_serial = await conn.fetchval("SELECT COALESCE(MAX(serial), 0) + 1 FROM nft_registry")
-    rare_number = f"R-{next_serial:04d}"
-
-    # Вставляем запись сразу с готовым rare_number
-    await conn.execute(
-        "INSERT INTO nft_registry (blunt_id, created_by, rarity, rare_number, created_at) "
-        "VALUES ($1, $2, $3, $4, NOW())",
-        blunt_id, user_id, rarity, rare_number
+    row = await conn.fetchrow(
+        "INSERT INTO nft_registry (created_by, rarity) VALUES ($1, $2) RETURNING serial, blunt_id, rare_number",
+        user_id, rarity
     )
-
-    # Получаем фактический serial (на случай, если MAX дал не точный номер, подстрахуемся)
-    actual_serial = await conn.fetchval("SELECT serial FROM nft_registry WHERE blunt_id = $1", blunt_id)
-    if actual_serial is None:
-        raise RuntimeError("Не удалось получить serial бланта")
+    serial = row["serial"]
+    blunt_id = str(row["blunt_id"])
+    rare_number = row["rare_number"]
 
     item = {
         "id": blunt_id,
         "type": "named",
         "name": clean_name,
         "rarity": rarity,
-        "serial": actual_serial,
-        "rare_number": f"R-{actual_serial:04d}",
+        "serial": serial,
+        "rare_number": rare_number,
         "hash": hash_code,
         "reaction": reaction,
         "created_at": datetime.utcnow().isoformat(),
@@ -402,6 +392,38 @@ async def init_db_pool():
     async with db_pool.acquire() as conn:
         await create_tables(conn)
     logger.info("База данных Neon инициализирована (пул 2-10, таймаут 10с).")
+    
+async def migrate_nft_registry(conn):
+    """Обновляет таблицу nft_registry до надёжной схемы: UUID + генерируемый rare_number."""
+    # Проверяем, есть ли уже нужная колонка
+    col_exists = await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='nft_registry' AND column_name='rare_number_generated')"
+    )
+    if col_exists:
+        logger.info("nft_registry уже в новом формате.")
+        return
+
+    logger.info("Запущена миграция nft_registry...")
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS nft_registry_new (
+            serial SERIAL PRIMARY KEY,
+            blunt_id UUID DEFAULT gen_random_uuid() UNIQUE NOT NULL,
+            created_by BIGINT,
+            rarity TEXT DEFAULT 'common',
+            rare_number TEXT GENERATED ALWAYS AS ('R-' || LPAD(serial::TEXT, 4, '0')) STORED UNIQUE,
+            created_at TIMESTAMP DEFAULT NOW()
+        );
+    """)
+    # Переносим старые записи (если есть) – им присвоятся новые serial и rare_number
+    await conn.execute("""
+        INSERT INTO nft_registry_new (created_by, rarity, created_at)
+        SELECT created_by, rarity, created_at FROM nft_registry
+        WHERE rare_number IS NOT NULL AND rare_number != '';
+    """)
+    await conn.execute("DROP TABLE IF EXISTS nft_registry CASCADE;")
+    await conn.execute("ALTER TABLE nft_registry_new RENAME TO nft_registry;")
+    await conn.execute("SELECT setval('nft_registry_serial_seq', COALESCE((SELECT MAX(serial) FROM nft_registry), 0));")
+    logger.info("Миграция завершена.")
 
 async def close_db_pool():
     global db_pool
@@ -1130,6 +1152,7 @@ async def handle_craft_named(update, context):
     context.user_data['awaiting_named_blunt_msg_id'] = sent_msg.message_id
     
 async def handle_named_name(update, context):
+    """Обрабатывает ввод имени и создаёт именной блант."""
     try:
         user = update.effective_user
         uid = user.id
@@ -1150,7 +1173,7 @@ async def handle_named_name(update, context):
 
         blunt_id = item["id"]
         name_escaped = html.escape(name)
-        color = {"legendary":"🟡","epic":"🟣","rare":"🔵"}.get(item["rarity"], "🟢")
+        color = {"legendary": "🟡", "epic": "🟣", "rare": "🔵"}.get(item["rarity"], "🟢")
         reaction = item["reaction"]
 
         caption = (
@@ -1162,18 +1185,30 @@ async def handle_named_name(update, context):
         )
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("🔗 Поделиться", callback_data=f"share_blunt_{blunt_id}")],
-            [InlineKeyboardButton("🔙 В Крафт", callback_data="craft"), InlineKeyboardButton("🏰 В меню", callback_data="menu")]
+            [InlineKeyboardButton("🔙 В Крафт", callback_data="craft"),
+             InlineKeyboardButton("🏰 В меню", callback_data="menu")]
         ])
+
         file_id = BLUNT_IMAGES.get(item["rarity"])
         if file_id:
-            await context.bot.send_photo(chat_id=update.effective_chat.id, photo=file_id, caption=caption, reply_markup=kb, parse_mode='HTML')
+            await context.bot.send_photo(
+                chat_id=update.effective_chat.id,
+                photo=file_id,
+                caption=caption,
+                reply_markup=kb,
+                parse_mode='HTML'
+            )
         else:
             await update.message.reply_text(caption, reply_markup=kb, parse_mode='HTML')
 
         # Пост в канал
         try:
-            await context.bot.send_message(chat_id="@guild_antysocial",
-                text=f"<b><i>🩸 ЭХО ИСКАЖЕНИЯ</i></b>\n\n⚜️ <b>@{html.escape(uname)}</b> создал свой блант {color} <b><i>«{name_escaped}»</i></b> 🌿\n<i>Редкость: {item['rarity']}</i>\n🩸 <i>{reaction}</i>", parse_mode='HTML')
+            await context.bot.send_message(
+                chat_id="@guild_antysocial",
+                text=f"<b><i>🩸 ЭХО ИСКАЖЕНИЯ</i></b>\n\n⚜️ <b>@{html.escape(uname)}</b> создал свой блант {color} "
+                     f"<b><i>«{name_escaped}»</i></b> 🌿\n<i>Редкость: {item['rarity']}</i>\n🩸 <i>{reaction}</i>",
+                parse_mode='HTML'
+            )
         except Exception as e:
             logger.error(f"Ошибка отправки в канал: {e}")
 
@@ -1182,7 +1217,11 @@ async def handle_named_name(update, context):
     except Exception as e:
         import traceback
         err = traceback.format_exc()
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"❌ Ошибка в named_name:\n<code>{html.escape(err[:800])}</code>", parse_mode='HTML')
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=f"❌ Ошибка в named_name:\n<code>{html.escape(err[:800])}</code>",
+            parse_mode='HTML'
+        )
     finally:
         context.user_data['awaiting_named_blunt'] = False
 
