@@ -12,6 +12,27 @@ from telegram.ext import (
 )
 from telegram.error import BadRequest
 
+import functools
+import asyncio
+
+def db_retry(max_retries=3, delay=0.2):
+    """Автоматически повторяет запрос к БД при временных сбоях соединения."""
+    def decorator(func):
+        @functools.wraps(func)
+        async def wrapper(*args, **kwargs):
+            for attempt in range(max_retries):
+                try:
+                    return await func(*args, **kwargs)
+                except (asyncpg.exceptions.ConnectionDoesNotExistError,
+                        asyncpg.exceptions.InterfaceError,
+                        asyncpg.exceptions.PostgresConnectionError) as e:
+                    if attempt == max_retries - 1:
+                        raise
+                    logger.warning(f"DB retry {attempt+1}/{max_retries} for {func.__name__}: {e}")
+                    await asyncio.sleep(delay * (attempt + 1))
+        return wrapper
+    return decorator
+
 # === ВЕБ-СЕРВЕР ===
 web_app = Flask(__name__)
 @web_app.route("/")
