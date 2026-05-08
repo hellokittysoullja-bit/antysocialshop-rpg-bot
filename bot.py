@@ -1120,6 +1120,7 @@ async def handle_craft_named(update, context):
     context.user_data['awaiting_named_blunt_msg_id'] = sent_msg.message_id
     
 async def handle_named_name(update, context):
+    await context.bot.send_message(chat_id=update.effective_chat.id, text="🔍 handle_named_name вызвана")
     await context.bot.send_message(chat_id=update.effective_chat.id, text="DEBUG: handle_named_name вызвана")
     if not context.user_data.get('awaiting_named_blunt'):
         return
@@ -2770,7 +2771,6 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.PHOTO, get_file_id))
 
     app.add_handler(MessageHandler(filters.COMMAND, handle_command))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_chat_shortcut))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_member))
     app.add_handler(CallbackQueryHandler(button_handler))
 
