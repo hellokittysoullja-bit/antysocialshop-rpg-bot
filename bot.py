@@ -2771,6 +2771,7 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.PHOTO, get_file_id))
 
     app.add_handler(MessageHandler(filters.COMMAND, handle_command))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_chat_shortcut))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_member))
     app.add_handler(CallbackQueryHandler(button_handler))
 
