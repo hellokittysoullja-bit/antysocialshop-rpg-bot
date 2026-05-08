@@ -1030,7 +1030,7 @@ async def craft_callback(update, context):
     if p and p.get("m_essence", 0) > 0:
         kb_rows.append([InlineKeyboardButton(f"💠 Использовать Пыль (1 доза)", callback_data="use_dust")])
     kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="menu")])
-    await send_reply(update, context, text, InlineKeyboardMarkup(kb_rows)
+    await send_reply(update, context, text, InlineKeyboardMarkup(kb_rows))
                      
 async def handle_craft_normal(update, context):
     query = update.callback_query
