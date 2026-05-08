@@ -134,6 +134,7 @@ async def add_title(user_id, emoji, conn=None):
     invalidate_cache(user_id)
 
 async def create_named_blunt(user_id, name, rarity=None, conn=None):
+    """Создаёт именной блант и добавляет его ТОЛЬКО в инвентарь."""
     if rarity not in ("common", "rare", "epic", "legendary"):
         r = random.random()
         if r < 0.01: rarity = "legendary"
@@ -143,26 +144,16 @@ async def create_named_blunt(user_id, name, rarity=None, conn=None):
 
     clean_name = str(name or "").strip()[:25] or "Безымянный"
     reaction = random.choice(FUNNY_REACTIONS)
-    hash_code = "0x" + hashlib.sha256((str(datetime.utcnow().timestamp()) + clean_name).encode()).hexdigest()[:16]
-
-    if conn is None:
-        async with db_pool.acquire() as new_conn:
-            return await create_named_blunt(user_id, clean_name, rarity, conn=new_conn)
-
-    row = await conn.fetchrow(
-        "INSERT INTO nft_registry (created_by, rarity) VALUES ($1, $2) RETURNING serial, blunt_id, rare_number",
-        user_id, rarity
-    )
-    serial = row["serial"]
-    blunt_id = str(row["blunt_id"])
-    rare_number = row["rare_number"]
+    blunt_id = f"blunt_{user_id}_{int(datetime.utcnow().timestamp())}_{random.randint(1000,9999)}"
+    hash_code = "0x" + hashlib.sha256((blunt_id + ":hash").encode()).hexdigest()[:16]
+    rare_number = f"{rarity[0].upper()}-{random.randint(1000,9999)}"
 
     item = {
         "id": blunt_id,
         "type": "named",
         "name": clean_name,
         "rarity": rarity,
-        "serial": serial,
+        "serial": None,                # без реестра serial не хранится
         "rare_number": rare_number,
         "hash": hash_code,
         "reaction": reaction,
@@ -170,12 +161,21 @@ async def create_named_blunt(user_id, name, rarity=None, conn=None):
         "owner_history": [{"user_id": str(user_id), "since": datetime.utcnow().isoformat()}],
     }
 
-    inv_row = await conn.fetchrow("SELECT inventory FROM players WHERE user_id = $1", user_id)
-    inventory = _json_safe_load(inv_row["inventory"] if inv_row else None, [])
-    inventory.append(item)
-    await conn.execute("UPDATE players SET inventory = $1 WHERE user_id = $2", json.dumps(inventory), user_id)
-    invalidate_cache(user_id)
-    return item
+    if conn is None:
+        async with db_pool.acquire() as new_conn:
+            row = await new_conn.fetchrow("SELECT inventory FROM players WHERE user_id = $1", user_id)
+            inventory = _json_safe_load(row["inventory"] if row else None, [])
+            inventory.append(item)
+            await new_conn.execute("UPDATE players SET inventory = $1 WHERE user_id = $2", json.dumps(inventory), user_id)
+            invalidate_cache(user_id)
+            return item
+    else:
+        row = await conn.fetchrow("SELECT inventory FROM players WHERE user_id = $1", user_id)
+        inventory = _json_safe_load(row["inventory"] if row else None, [])
+        inventory.append(item)
+        await conn.execute("UPDATE players SET inventory = $1 WHERE user_id = $2", json.dumps(inventory), user_id)
+        invalidate_cache(user_id)
+        return item
 
 async def check_achievements(user_id, context):
     p = await get_player_cached(user_id)
@@ -346,47 +346,8 @@ async def init_db_pool():
     db_pool = await asyncpg.create_pool(database_url, min_size=5, max_size=20, command_timeout=15)
     async with db_pool.acquire() as conn:
         await create_tables(conn)
-        await migrate_nft_registry(conn)
     logger.info("База данных Neon инициализирована (пул 2-10, таймаут 10с).")
     
-async def migrate_nft_registry(conn):
-    # Проверяем, существует ли уже новая таблица (со столбцом rare_number_generated)
-    new_table_exists = await conn.fetchval(
-        "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name='nft_registry_new')"
-    )
-    if new_table_exists:
-        logger.info("Миграция уже выполнена, пропускаем.")
-        return
-
-    logger.info("Запущена миграция nft_registry на новую схему...")
-
-    # 1. Создаём новую таблицу с правильной структурой
-    await conn.execute("""
-        CREATE TABLE nft_registry_new (
-            serial SERIAL PRIMARY KEY,
-            blunt_id UUID DEFAULT gen_random_uuid() UNIQUE NOT NULL,
-            created_by BIGINT,
-            rarity TEXT DEFAULT 'common',
-            rare_number TEXT GENERATED ALWAYS AS ('R-' || LPAD(serial::TEXT, 4, '0')) STORED UNIQUE,
-            created_at TIMESTAMP DEFAULT NOW()
-        )
-    """)
-
-    # 2. Переносим данные: вставляем только created_by и rarity, остальное сгенерится само
-    await conn.execute("""
-        INSERT INTO nft_registry_new (created_by, rarity, created_at)
-        SELECT created_by, rarity, created_at FROM nft_registry
-        WHERE rare_number IS NOT NULL AND rare_number != ''
-    """)
-
-    # 3. Заменяем старую таблицу новой
-    await conn.execute("DROP TABLE IF EXISTS nft_registry CASCADE")
-    await conn.execute("ALTER TABLE nft_registry_new RENAME TO nft_registry")
-
-    # 4. Сбрасываем последовательность на следующий номер
-    await conn.execute("SELECT setval('nft_registry_serial_seq', COALESCE((SELECT MAX(serial) FROM nft_registry), 0))")
-    logger.info("Миграция успешно завершена.")
-
 async def close_db_pool():
     global db_pool
     if db_pool:
