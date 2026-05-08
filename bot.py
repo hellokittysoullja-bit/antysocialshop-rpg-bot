@@ -1150,6 +1150,29 @@ async def handle_craft_normal(update, context):
     await safe_edit(update, context, text, reply_markup=kb)
     await check_achievements(uid, context)
 
+async def handle_craft_named(update, context):
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+    p = await get_player_cached(uid)
+    if not p or p["balance"] < 50:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="<b>🕳️ ИСКАЖЕНИЕ МОЛЧИТ</b>\n\n<i>🛡️ Недостаточно OAC.</i>\n🕯️ Требуется <b>50 OAC</b> 🍬.",
+            parse_mode='HTML'
+        )
+        return
+    context.user_data['awaiting_named_blunt'] = True
+    context.job_queue.run_once(clear_named_blunt_state, 300, data=uid)
+    await query.message.delete()
+    sent_msg = await context.bot.send_message(
+        chat_id=query.message.chat.id,
+        text="<b>💍 ИМЕННОЙ БЛАНТ</b>\n\n<i>Введи имя своего бланта (до 25 символов)</i>\n\n[❌ Отмена]",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel_named")]]),
+        parse_mode='HTML'
+    )
+    context.user_data['awaiting_named_blunt_msg_id'] = sent_msg.message_id
+    
 async def handle_named_name(update, context):
     if not context.user_data.get('awaiting_named_blunt'):
         return
