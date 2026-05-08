@@ -149,7 +149,6 @@ async def create_named_blunt(user_id, name, rarity=None, conn=None):
         async with db_pool.acquire() as new_conn:
             return await create_named_blunt(user_id, clean_name, rarity, conn=new_conn)
 
-    # Вставляем запись и сразу получаем сгенерированные значения
     row = await conn.fetchrow(
         "INSERT INTO nft_registry (created_by, rarity) VALUES ($1, $2) RETURNING serial, blunt_id, rare_number",
         user_id, rarity
@@ -171,7 +170,6 @@ async def create_named_blunt(user_id, name, rarity=None, conn=None):
         "owner_history": [{"user_id": str(user_id), "since": datetime.utcnow().isoformat()}],
     }
 
-    # Добавляем в инвентарь
     inv_row = await conn.fetchrow("SELECT inventory FROM players WHERE user_id = $1", user_id)
     inventory = _json_safe_load(inv_row["inventory"] if inv_row else None, [])
     inventory.append(item)
@@ -352,36 +350,42 @@ async def init_db_pool():
     logger.info("База данных Neon инициализирована (пул 2-10, таймаут 10с).")
     
 async def migrate_nft_registry(conn):
-    """Обновляет таблицу nft_registry до надёжной схемы: UUID + генерируемый rare_number."""
-    # Проверяем, есть ли уже нужная колонка
-    col_exists = await conn.fetchval(
-        "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='nft_registry' AND column_name='rare_number_generated')"
+    # Проверяем, существует ли уже новая таблица (со столбцом rare_number_generated)
+    new_table_exists = await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name='nft_registry_new')"
     )
-    if col_exists:
-        logger.info("nft_registry уже в новом формате.")
+    if new_table_exists:
+        logger.info("Миграция уже выполнена, пропускаем.")
         return
 
-    logger.info("Запущена миграция nft_registry...")
+    logger.info("Запущена миграция nft_registry на новую схему...")
+
+    # 1. Создаём новую таблицу с правильной структурой
     await conn.execute("""
-        CREATE TABLE IF NOT EXISTS nft_registry_new (
+        CREATE TABLE nft_registry_new (
             serial SERIAL PRIMARY KEY,
             blunt_id UUID DEFAULT gen_random_uuid() UNIQUE NOT NULL,
             created_by BIGINT,
             rarity TEXT DEFAULT 'common',
             rare_number TEXT GENERATED ALWAYS AS ('R-' || LPAD(serial::TEXT, 4, '0')) STORED UNIQUE,
             created_at TIMESTAMP DEFAULT NOW()
-        );
+        )
     """)
-    # Переносим старые записи (если есть) – им присвоятся новые serial и rare_number
+
+    # 2. Переносим данные: вставляем только created_by и rarity, остальное сгенерится само
     await conn.execute("""
         INSERT INTO nft_registry_new (created_by, rarity, created_at)
         SELECT created_by, rarity, created_at FROM nft_registry
-        WHERE rare_number IS NOT NULL AND rare_number != '';
+        WHERE rare_number IS NOT NULL AND rare_number != ''
     """)
-    await conn.execute("DROP TABLE IF EXISTS nft_registry CASCADE;")
-    await conn.execute("ALTER TABLE nft_registry_new RENAME TO nft_registry;")
-    await conn.execute("SELECT setval('nft_registry_serial_seq', COALESCE((SELECT MAX(serial) FROM nft_registry), 0));")
-    logger.info("Миграция завершена.")
+
+    # 3. Заменяем старую таблицу новой
+    await conn.execute("DROP TABLE IF EXISTS nft_registry CASCADE")
+    await conn.execute("ALTER TABLE nft_registry_new RENAME TO nft_registry")
+
+    # 4. Сбрасываем последовательность на следующий номер
+    await conn.execute("SELECT setval('nft_registry_serial_seq', COALESCE((SELECT MAX(serial) FROM nft_registry), 0))")
+    logger.info("Миграция успешно завершена.")
 
 async def close_db_pool():
     global db_pool
