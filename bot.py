@@ -62,7 +62,7 @@ def emoji_to_name(emoji: str) -> str:
     return parts[1] if len(parts) > 1 else parts[0]
 
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
-import aioredis
+import redis.asyncio as aioredis
 
 redis = None
 player_cache = {}  # fallback-словарь, если Redis не подключён
