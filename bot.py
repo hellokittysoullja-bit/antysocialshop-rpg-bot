@@ -1153,11 +1153,10 @@ async def handle_named_name(update, context):
 
         async with db_pool.acquire() as conn:
             async with conn.transaction():
-                # Списание и статистика
                 await update_balance(uid, uname, -50, conn=conn)
                 await increment_counter(uid, "craft_count", conn=conn)
 
-                # Редкость
+                # Определяем редкость
                 r = random.random()
                 if r < 0.01: rarity = "legendary"
                 elif r < 0.05: rarity = "epic"
@@ -1167,7 +1166,7 @@ async def handle_named_name(update, context):
                 reaction = random.choice(FUNNY_REACTIONS)
                 hash_code = "0x" + hashlib.sha256((name + str(datetime.utcnow().timestamp())).encode("utf-8")).hexdigest()[:16]
 
-                # Вставка в реестр с получением serial (работает без SELECT)
+                # Вставка в реестр с получением serial
                 serial = None
                 for attempt in range(5):
                     blunt_id = f"blunt_{uid}_{int(datetime.utcnow().timestamp()*1000)}_{random.randint(1000,9999)}"
@@ -1215,8 +1214,7 @@ async def handle_named_name(update, context):
                     json.dumps([item]), uid
                 )
 
-        # Всё, транзакция завершена, блант полностью готов
-
+        # Всё, транзакция завершена
         await add_war_score(uid, 25)
         blunt_id = item["id"]
         name_escaped = html.escape(name)
