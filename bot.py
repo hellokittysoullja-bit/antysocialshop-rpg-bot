@@ -1178,9 +1178,10 @@ async def handle_named_name(update, context):
     uname_escaped = html.escape(uname)
     color = {"legendary":"🟡","epic":"🟣","rare":"🔵"}.get(item["rarity"], "🟢")
     reaction = item["reaction"]
-    await send_blunt_image(context, update.effective_chat.id, item["rarity"])
-    text = (
-        f"<b><i>💍 БЛАНТ СОТКАН</i></b>\n\n"
+
+    # Единое сообщение с фото и текстом
+    caption = (
+        f"<b>💍 БЛАНТ СОТКАН</b>\n\n"
         f"🩸 <i>Ты вплёл в <b>Искажение</b> свой именной блант:</i>\n"
         f"{color} <b><i>«{name_escaped}»</i></b> <i>Редкость:</i> <b>{item['rarity']}</b>\n\n"
         f"💎 <i>Он навсегда останется в твоей коллекции.</i>\n\n"
@@ -1190,7 +1191,13 @@ async def handle_named_name(update, context):
         [InlineKeyboardButton("🔗 Поделиться", callback_data=f"share_blunt_{blunt_id}")],
         [InlineKeyboardButton("🔙 В Крафт", callback_data="craft"), InlineKeyboardButton("🏰 В меню", callback_data="menu")]
     ])
-    await update.message.reply_text(text, reply_markup=kb, parse_mode='HTML')
+    file_id = BLUNT_IMAGES.get(item["rarity"])
+    if file_id:
+        await context.bot.send_photo(chat_id=update.effective_chat.id, photo=file_id, caption=caption, reply_markup=kb, parse_mode='HTML')
+    else:
+        await update.message.reply_text(caption, reply_markup=kb, parse_mode='HTML')
+
+    # Пост в канал
     try:
         await context.bot.send_message(chat_id="@guild_antysocial",
             text=f"<b><i>🩸 ЭХО ИСКАЖЕНИЯ</i></b>\n\n⚜️ <b>@{uname_escaped}</b> создал свой блант {color} <b><i>«{name_escaped}»</i></b> 🌿\n<i>Редкость: {item['rarity']}</i>\n🩸 <i>{reaction}</i>", parse_mode='HTML')
