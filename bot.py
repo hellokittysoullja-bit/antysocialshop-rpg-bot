@@ -4,7 +4,6 @@ from datetime import datetime, timedelta, date, time
 from threading import Thread
 
 import asyncpg
-from cachetools import TTLCache
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -33,11 +32,7 @@ FARM_MIN, FARM_MAX = 45, 100
 HAPPY_HOUR_MULTIPLIER = 2
 HAPPY_HOUR_DURATION_MIN = 30
 
-player_cache = TTLCache(maxsize=1000, ttl=60)
 top_cache = {"data": None, "timestamp": 0, "ttl": 60}
-
-def invalidate_cache(user_id):
-    player_cache.pop(user_id, None)
 
 def _json_safe_load(value, default):
     if isinstance(value, (list, dict)):
@@ -65,6 +60,53 @@ def emoji_to_name(emoji: str) -> str:
         return ""
     parts = str(emoji).split(" ", 1)
     return parts[1] if len(parts) > 1 else parts[0]
+
+# ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
+import aioredis
+
+redis = None
+player_cache = {}  # fallback-словарь, если Redis не подключён
+
+async def init_redis():
+    global redis
+    redis_url = os.getenv("REDIS_URL")
+    if redis_url:
+        redis = await aioredis.from_url(redis_url)
+        logger.info("Redis подключён – кэш активирован")
+    else:
+        logger.info("REDIS_URL не задан – используется in-memory кэш")
+
+async def get_player_cached(user_id):
+    # Пробуем Redis
+    if redis:
+        key = f"player:{user_id}"
+        data = await redis.get(key)
+        if data:
+            return json.loads(data)
+    # Fallback – старый кэш в памяти
+    if user_id in player_cache:
+        return player_cache[user_id]
+    # Запрос к БД
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM players WHERE user_id=$1", user_id)
+    if row:
+        p = dict(row)
+        p["inventory"] = _json_safe_load(p.get("inventory"), [])
+        p["profile_skins"] = _json_safe_load(p.get("profile_skins"), {})
+        # Сохраняем в Redis (TTL 10 секунд) или в словарь
+        if redis:
+            await redis.setex(key, 10, json.dumps(p, default=str))
+        else:
+            player_cache[user_id] = p
+        return p
+    return None
+
+def invalidate_cache(user_id):
+    """Сбрасывает кэш игрока (Redis + in-memory)."""
+    if redis:
+        asyncio.create_task(redis.delete(f"player:{user_id}"))
+    else:
+        player_cache.pop(user_id, None)
 
 async def ensure_player_exists(user_id, username=None, conn=None):
     if conn is None:
@@ -349,9 +391,10 @@ async def init_db_pool():
     if not database_url:
         raise Exception("NEON_DATABASE_URL не установлена!")
     db_pool = await asyncpg.create_pool(database_url, min_size=5, max_size=20, command_timeout=15)
-    async with db_pool.acquire() as conn:
-        await create_tables(conn)
-    logger.info("База данных Neon инициализирована (пул 2-10, таймаут 10с).")
+async with db_pool.acquire() as conn:
+    await create_tables(conn)
+    await init_redis()
+logger.info("База данных Neon инициализирована...")
     
 async def close_db_pool():
     global db_pool
@@ -440,19 +483,6 @@ async def create_tables(conn):
     """)
 
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
-async def get_player_cached(user_id):
-    if user_id in player_cache:
-        return player_cache[user_id]
-    async with db_pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT * FROM players WHERE user_id=$1", user_id)
-    if row:
-        p = dict(row)
-        p["inventory"] = _json_safe_load(p.get("inventory"), [])
-        p["profile_skins"] = _json_safe_load(p.get("profile_skins"), {})
-        player_cache[user_id] = p
-        return p
-    return None
-
 @db_retry()
 async def update_balance(user_id, username, amount, conn=None):
     owns_conn = conn is None
