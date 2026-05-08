@@ -13,6 +13,27 @@ from telegram.ext import (
 )
 from telegram.error import BadRequest
 
+import functools
+import asyncio
+
+def db_retry(max_retries=3, delay=0.2):
+    """Автоматически повторяет запрос к БД при временных сбоях соединения."""
+    def decorator(func):
+        @functools.wraps(func)
+        async def wrapper(*args, **kwargs):
+            for attempt in range(max_retries):
+                try:
+                    return await func(*args, **kwargs)
+                except (asyncpg.exceptions.ConnectionDoesNotExistError,
+                        asyncpg.exceptions.InterfaceError,
+                        asyncpg.exceptions.PostgresConnectionError) as e:
+                    if attempt == max_retries - 1:
+                        raise
+                    logger.warning(f"DB retry {attempt+1}/{max_retries} for {func.__name__}: {e}")
+                    await asyncio.sleep(delay * (attempt + 1))
+        return wrapper
+    return decorator
+
 # === ВЕБ-СЕРВЕР ===
 web_app = Flask(__name__)
 @web_app.route("/")
@@ -435,6 +456,7 @@ async def create_tables(conn):
     """)
 
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
+@db_retry()
 async def get_player_cached(user_id):
     if user_id in player_cache:
         return player_cache[user_id]
@@ -448,6 +470,7 @@ async def get_player_cached(user_id):
         return p
     return None
 
+@db_retry()
 async def update_balance(user_id, username, amount, conn=None):
     owns_conn = conn is None
     if owns_conn:
@@ -470,6 +493,7 @@ async def update_balance(user_id, username, amount, conn=None):
         await conn.execute("UPDATE players SET balance = balance + $1 WHERE user_id = $2", amount, user_id)
     invalidate_cache(user_id)
 
+@db_retry()
 async def update_blunts(user_id, username, amount, conn=None):
     owns_conn = conn is None
     if owns_conn:
@@ -492,6 +516,7 @@ async def update_blunts(user_id, username, amount, conn=None):
         await conn.execute("UPDATE players SET blunts = blunts + $1 WHERE user_id = $2", amount, user_id)
     invalidate_cache(user_id)
 
+@db_retry()
 async def update_essence(user_id, amount, conn=None):
     owns_conn = conn is None
     if owns_conn:
@@ -513,6 +538,8 @@ async def update_essence(user_id, amount, conn=None):
     invalidate_cache(user_id)
 
 ALLOWED_COUNTERS = {"farm_count","craft_count","smoke_count","ritual_count","referral_count","check_count","lab_chests","lab_deaths","alchemy_count"}
+
+@db_retry()
 async def increment_counter(user_id, field, conn=None):
     if field not in ALLOWED_COUNTERS:
         return
@@ -632,6 +659,7 @@ def get_rank_progress(balance):
             )
     return ""
 
+@db_retry()
 async def add_war_score(user_id, points):
     if not db_pool:
         return
