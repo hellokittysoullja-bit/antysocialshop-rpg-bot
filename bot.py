@@ -1147,27 +1147,7 @@ async def handle_named_name(update, context):
             async with conn.transaction():
                 await update_balance(uid, uname, -50, conn=conn)
                 await increment_counter(uid, "craft_count", conn=conn)
-                # Временная замена create_named_blunt
-                rarity = random.choices(
-                    ["common", "rare", "epic", "legendary"],
-                    weights=[70, 20, 7, 3]
-                )[0]
-                reaction = random.choice(FUNNY_REACTIONS)
-                blunt_id = f"blunt_{uid}_{int(datetime.now().timestamp())}_{random.randint(1000,9999)}"
-                hash_code = hashlib.md5(blunt_id.encode()).hexdigest()[:12]
-                item = {
-                    "id": blunt_id,
-                    "type": "named",
-                    "name": name,
-                    "rarity": rarity,
-                    "rare_number": f"{rarity[0].upper()}-{random.randint(1000,9999)}",
-                    "hash": hash_code,
-                    "reaction": reaction,
-                    "serial": None,
-                    "owner_history": [{"user_id": str(uid), "since": datetime.now().isoformat()}]
-                }
-                # Добавляем в инвентарь
-                row = await conn.fetchrow("SELECT inventory FROM players WHERE user_id = $1", uid)
+                item = await create_named_blunt(uid, name, rarity=None, conn=conn)
                 inventory = _json_safe_load(row["inventory"] if row else None, [])
                 inventory.append(item)
                 await conn.execute("UPDATE players SET inventory = $1 WHERE user_id = $2", json.dumps(inventory), uid)
