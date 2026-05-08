@@ -133,32 +133,44 @@ async def add_title(user_id, emoji, conn=None):
         await conn.execute("UPDATE players SET titles = $1 WHERE user_id = $2", " ".join(titles).strip(), user_id)
     invalidate_cache(user_id)
 
-async def create_named_blunt(user_id, name, rarity="common", conn=None):
-    rarity = (rarity or "common").lower()
+async def create_named_blunt(user_id, name, rarity=None, conn=None):
+    """Создаёт именной блант и записывает его в реестр NFT (без падений)."""
     if rarity not in ("common", "rare", "epic", "legendary"):
-        rarity = "common"
+        r = random.random()
+        if r < 0.01: rarity = "legendary"
+        elif r < 0.05: rarity = "epic"
+        elif r < 0.20: rarity = "rare"
+        else: rarity = "common"
+
     clean_name = str(name or "").strip()[:25]
     if not clean_name:
         clean_name = "Безымянный"
+
     reaction = random.choice(FUNNY_REACTIONS)
-    raw = f"{user_id}:{clean_name}:{rarity}:{datetime.utcnow().isoformat()}:{random.random()}"
-    blunt_id = "nft_" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
-    hash_code = "0x" + hashlib.sha256((raw + ":hash").encode("utf-8")).hexdigest()[:16]
+    blunt_id = f"blunt_{user_id}_{int(datetime.utcnow().timestamp())}_{random.randint(1000,9999)}"
+    hash_code = "0x" + hashlib.sha256((blunt_id + ":hash").encode("utf-8")).hexdigest()[:16]
 
     if conn is None:
         async with db_pool.acquire() as conn:
             return await create_named_blunt(user_id, clean_name, rarity=rarity, conn=conn)
 
-    await ensure_player_exists(user_id, conn=conn)
-    await conn.execute(
-        "INSERT INTO nft_registry (blunt_id, created_by, rarity, rare_number, created_at) VALUES ($1, $2, $3, '', NOW()) ON CONFLICT (blunt_id) DO NOTHING",
-        blunt_id,
-        user_id,
-        rarity,
-    )
+    # Вставляем в реестр (если такой blunt_id уже есть – генерируем новый)
+    for attempt in range(3):
+        try:
+            await conn.execute(
+                "INSERT INTO nft_registry (blunt_id, created_by, rarity, rare_number, created_at) "
+                "VALUES ($1, $2, $3, '', NOW()) ON CONFLICT (blunt_id) DO NOTHING",
+                blunt_id, user_id, rarity
+            )
+            break
+        except Exception:
+            blunt_id = f"blunt_{user_id}_{int(datetime.utcnow().timestamp())}_{random.randint(1000,9999)}"
+            hash_code = "0x" + hashlib.sha256((blunt_id + ":hash").encode("utf-8")).hexdigest()[:16]
+            if attempt == 2:
+                raise
+
+    # Получаем автоинкрементный serial
     serial = await conn.fetchval("SELECT serial FROM nft_registry WHERE blunt_id = $1", blunt_id)
-    if not serial:
-        serial = await conn.fetchval("SELECT serial FROM nft_registry WHERE blunt_id = $1", blunt_id)
     rare_number = f"R-{serial:04d}"
     await conn.execute("UPDATE nft_registry SET rare_number = $1 WHERE blunt_id = $2", rare_number, blunt_id)
 
@@ -172,8 +184,10 @@ async def create_named_blunt(user_id, name, rarity="common", conn=None):
         "hash": hash_code,
         "reaction": reaction,
         "created_at": datetime.utcnow().isoformat(),
-        "owner_history": [{"user_id": user_id, "since": datetime.utcnow().isoformat()}],
+        "owner_history": [{"user_id": str(user_id), "since": datetime.utcnow().isoformat()}],
     }
+
+    # Добавляем в инвентарь
     row = await conn.fetchrow("SELECT inventory FROM players WHERE user_id = $1", user_id)
     inventory = _json_safe_load(row["inventory"] if row else None, [])
     inventory.append(item)
