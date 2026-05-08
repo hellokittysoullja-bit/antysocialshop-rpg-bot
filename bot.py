@@ -134,7 +134,7 @@ async def add_title(user_id, emoji, conn=None):
     invalidate_cache(user_id)
 
 async def create_named_blunt(user_id, name, rarity=None, conn=None):
-    """Создаёт именной блант и записывает его в реестр NFT (без падений)."""
+    """Создаёт именной блант с записью в реестр NFT (с защитой от падений)."""
     if rarity not in ("common", "rare", "epic", "legendary"):
         r = random.random()
         if r < 0.01: rarity = "legendary"
@@ -147,32 +147,43 @@ async def create_named_blunt(user_id, name, rarity=None, conn=None):
         clean_name = "Безымянный"
 
     reaction = random.choice(FUNNY_REACTIONS)
-    blunt_id = f"blunt_{user_id}_{int(datetime.utcnow().timestamp())}_{random.randint(1000,9999)}"
-    hash_code = "0x" + hashlib.sha256((blunt_id + ":hash").encode("utf-8")).hexdigest()[:16]
+    hash_code = "0x" + hashlib.sha256((clean_name + str(datetime.utcnow().timestamp())).encode("utf-8")).hexdigest()[:16]
 
     if conn is None:
         async with db_pool.acquire() as conn:
             return await create_named_blunt(user_id, clean_name, rarity=rarity, conn=conn)
 
-    # Вставляем в реестр (если такой blunt_id уже есть – генерируем новый)
-    for attempt in range(3):
+    # Пытаемся вставить в реестр до 5 раз
+    serial = None
+    for attempt in range(5):
+        blunt_id = f"blunt_{user_id}_{int(datetime.utcnow().timestamp()*1000)}_{random.randint(1000,9999)}"
         try:
-            await conn.execute(
+            # Вставка с возвратом serial, при конфликте ничего не делаем
+            row = await conn.fetchrow(
                 "INSERT INTO nft_registry (blunt_id, created_by, rarity, rare_number, created_at) "
-                "VALUES ($1, $2, $3, '', NOW()) ON CONFLICT (blunt_id) DO NOTHING",
+                "VALUES ($1, $2, $3, '', NOW()) "
+                "ON CONFLICT (blunt_id) DO NOTHING "
+                "RETURNING serial",
                 blunt_id, user_id, rarity
             )
-            break
-        except Exception:
-            blunt_id = f"blunt_{user_id}_{int(datetime.utcnow().timestamp())}_{random.randint(1000,9999)}"
-            hash_code = "0x" + hashlib.sha256((blunt_id + ":hash").encode("utf-8")).hexdigest()[:16]
-            if attempt == 2:
-                raise
+            if row is not None and row["serial"] is not None:
+                serial = row["serial"]
+                break  # успех
+        except Exception as e:
+            logger.warning(f"Ошибка вставки в nft_registry (попытка {attempt+1}): {e}")
+            continue
 
-    # Получаем автоинкрементный serial
-    serial = await conn.fetchval("SELECT serial FROM nft_registry WHERE blunt_id = $1", blunt_id)
-    rare_number = f"R-{serial:04d}"
-    await conn.execute("UPDATE nft_registry SET rare_number = $1 WHERE blunt_id = $2", rare_number, blunt_id)
+    # Если serial получен – формируем полный номер, иначе запасной случайный
+    if serial is not None:
+        rare_number = f"R-{serial:04d}"
+        # обновляем rare_number в реестре (он был пустым)
+        try:
+            await conn.execute("UPDATE nft_registry SET rare_number = $1 WHERE blunt_id = $2", rare_number, blunt_id)
+        except Exception:
+            pass
+    else:
+        # Реестр недоступен — используем случайный номер, чтобы блант всё равно создался
+        rare_number = f"R-{random.randint(1000,9999)}"
 
     item = {
         "id": blunt_id,
@@ -187,9 +198,9 @@ async def create_named_blunt(user_id, name, rarity=None, conn=None):
         "owner_history": [{"user_id": str(user_id), "since": datetime.utcnow().isoformat()}],
     }
 
-    # Добавляем в инвентарь
-    row = await conn.fetchrow("SELECT inventory FROM players WHERE user_id = $1", user_id)
-    inventory = _json_safe_load(row["inventory"] if row else None, [])
+    # Инвентарь
+    row_inv = await conn.fetchrow("SELECT inventory FROM players WHERE user_id = $1", user_id)
+    inventory = _json_safe_load(row_inv["inventory"] if row_inv else None, [])
     inventory.append(item)
     await conn.execute("UPDATE players SET inventory = $1 WHERE user_id = $2", json.dumps(inventory), user_id)
     invalidate_cache(user_id)
