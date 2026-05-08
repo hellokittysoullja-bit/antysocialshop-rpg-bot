@@ -1155,71 +1155,10 @@ async def handle_named_name(update, context):
             async with conn.transaction():
                 await update_balance(uid, uname, -50, conn=conn)
                 await increment_counter(uid, "craft_count", conn=conn)
-
-                # 1. ЧИТАЕМ ИНВЕНТАРЬ (до вставки в реестр!)
-                row_inv = await conn.fetchrow("SELECT inventory FROM players WHERE user_id = $1", uid)
-                inventory = _json_safe_load(row_inv["inventory"] if row_inv else None, [])
-
-                # Определяем редкость
-                r = random.random()
-                if r < 0.01: rarity = "legendary"
-                elif r < 0.05: rarity = "epic"
-                elif r < 0.20: rarity = "rare"
-                else: rarity = "common"
-
-                reaction = random.choice(FUNNY_REACTIONS)
-                hash_code = "0x" + hashlib.sha256((name + str(datetime.utcnow().timestamp())).encode("utf-8")).hexdigest()[:16]
-
-                # 2. ВСТАВЛЯЕМ В РЕЕСТР (получаем serial)
-                serial = None
-                for attempt in range(5):
-                    blunt_id = f"blunt_{uid}_{int(datetime.utcnow().timestamp()*1000)}_{random.randint(1000,9999)}"
-                    try:
-                        row = await conn.fetchrow(
-                            "INSERT INTO nft_registry (blunt_id, created_by, rarity, rare_number, created_at) "
-                            "VALUES ($1, $2, $3, '', NOW()) "
-                            "ON CONFLICT (blunt_id) DO NOTHING "
-                            "RETURNING serial",
-                            blunt_id, uid, rarity
-                        )
-                        if row is not None and row["serial"] is not None:
-                            serial = row["serial"]
-                            break
-                    except Exception as e:
-                        logger.warning(f"Ошибка вставки в реестр (попытка {attempt+1}): {e}")
-                        continue
-
-                if serial is not None:
-                    rare_number = f"R-{serial:04d}"
-                    try:
-                        await conn.execute("UPDATE nft_registry SET rare_number = $1 WHERE blunt_id = $2", rare_number, blunt_id)
-                    except Exception:
-                        pass
-                else:
-                    rare_number = f"R-{random.randint(1000,9999)}"
-
-                # Собираем объект бланта
-                item = {
-                    "id": blunt_id,
-                    "type": "named",
-                    "name": name,
-                    "rarity": rarity,
-                    "serial": serial,
-                    "rare_number": rare_number,
-                    "hash": hash_code,
-                    "reaction": reaction,
-                    "created_at": datetime.utcnow().isoformat(),
-                    "owner_history": [{"user_id": str(uid), "since": datetime.utcnow().isoformat()}],
-                }
-
-                # 3. ДОБАВЛЯЕМ В ИНВЕНТАРЬ (простой UPDATE)
-                inventory.append(item)
-                await conn.execute("UPDATE players SET inventory = $1 WHERE user_id = $2", json.dumps(inventory), uid)
-
-        # Транзакция завершена, можно сбросить кэш
-        invalidate_cache(uid)
+                item = await create_named_blunt(uid, name, rarity=None, conn=conn)
 
         await add_war_score(uid, 25)
+
         blunt_id = item["id"]
         name_escaped = html.escape(name)
         color = {"legendary":"🟡","epic":"🟣","rare":"🔵"}.get(item["rarity"], "🟢")
@@ -1242,6 +1181,7 @@ async def handle_named_name(update, context):
         else:
             await update.message.reply_text(caption, reply_markup=kb, parse_mode='HTML')
 
+        # Пост в канал
         try:
             await context.bot.send_message(chat_id="@guild_antysocial",
                 text=f"<b><i>🩸 ЭХО ИСКАЖЕНИЯ</i></b>\n\n⚜️ <b>@{html.escape(uname)}</b> создал свой блант {color} <b><i>«{name_escaped}»</i></b> 🌿\n<i>Редкость: {item['rarity']}</i>\n🩸 <i>{reaction}</i>", parse_mode='HTML')
