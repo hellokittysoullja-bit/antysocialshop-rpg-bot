@@ -112,6 +112,16 @@ async def get_player_cached(user_id):
         row = await conn.fetchrow("SELECT * FROM players WHERE user_id=$1", user_id)
     if row:
         p = dict(row)
+        # Приводим все числовые поля, которые могут быть NULL, к 0
+        numeric_fields = [
+            'balance', 'blunts', 'farm_count', 'craft_count', 'smoke_count',
+            'ritual_count', 'referral_count', 'check_count', 'lab_chests',
+            'lab_deaths', 'alchemy_count', 'login_streak', 'donated', 'm_essence',
+            'passive_level', 'karma', 'inhaled', 'keys'
+        ]
+        for field in numeric_fields:
+            if p.get(field) is None:
+                p[field] = 0
         p["inventory"] = _json_safe_load(p.get("inventory"), [])
         p["profile_skins"] = _json_safe_load(p.get("profile_skins"), {})
         # Сохраняем в Redis (TTL 10 секунд) или в словарь
