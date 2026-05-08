@@ -4,3 +4,4 @@ anyio==4.4.0
 aiosqlite==0.20.0
 cachetools==5.3.3
 asyncpg
+aioredis==2.0.1
