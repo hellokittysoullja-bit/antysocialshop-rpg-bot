@@ -1759,7 +1759,8 @@ async def guild_info_callback(update, context):
     guild = await get_guild(uid)
     p = await get_player_cached(uid)
     if not p:
-        return await safe_edit(update, context, "Профиль не найден.")
+        await safe_edit(update, context, "Профиль не найден. Напиши /start")
+        return
 
     async with db_pool.acquire() as conn:
         black_donated = await conn.fetchval("SELECT COALESCE(SUM(donated),0) FROM players WHERE guild='BLACK'")
@@ -1768,10 +1769,11 @@ async def guild_info_callback(update, context):
     black_perc = min(100, int(black_donated / target * 100) if target else 0)
     white_perc = min(100, int(white_donated / target * 100) if target else 0)
 
+    # Жирный заголовок, жирные названия, жирный прогресс-бар
     text = (
         f"<b>🕋 ГИЛЬДИИ</b>\n\n"
-        f"🕯️ <b>Тёмная: {counts['BLACK']}</b> странников | {progress_bar(black_perc)} <b>{black_perc}%</b>\n"
-        f"⚜️ <b>Светлая: {counts['WHITE']}</b> странников | {progress_bar(white_perc)} <b>{white_perc}%</b>\n\n"
+        f"🕯️ <b>Тёмная: {counts['BLACK']}</b> странников | <b>{progress_bar(black_perc)} {black_perc}%</b>\n"
+        f"⚜️ <b>Светлая: {counts['WHITE']}</b> странников | <b>{progress_bar(white_perc)} {white_perc}%</b>\n\n"
     )
 
     async with db_pool.acquire() as conn:
@@ -1785,16 +1787,18 @@ async def guild_info_callback(update, context):
             white_perc_war = int(white_score / total_war * 100)
             black_bar = "▓" * (black_perc_war // 10) + "░" * (10 - black_perc_war // 10)
             white_bar = "▓" * (white_perc_war // 10) + "░" * (10 - white_perc_war // 10)
+            # Заголовок войны и прогресс-бары жирные
             text += (
-                f"\n⚔️ <b>Война гильдий</b>\n\n"
-                f"🕯️ Тёмные: {black_score} очков\n{black_bar} {black_perc_war}%\n\n"
-                f"⚜️ Светлые: {white_score} очков\n{white_bar} {white_perc_war}%\n"
+                f"<b>⚔️ Война гильдий</b>\n\n"
+                f"🕯️ Тёмные: {black_score} очков\n<b>{black_bar} {black_perc_war}%</b>\n\n"
+                f"⚜️ Светлые: {white_score} очков\n<b>{white_bar} {white_perc_war}%</b>\n"
             )
 
     kb_rows = []
     if guild:
         g_emoji = "🕯️" if guild == "BLACK" else "⚜️"
         g_name = "Тёмная" if guild == "BLACK" else "Светлая"
+        # Название гильдии в строке «Ты состоишь в...» жирное
         text += f"Ты состоишь в {g_emoji} <b>{g_name} Гильдии</b>.\n"
         if guild == "BLACK" and p:
             if p["last_ritual"]:
@@ -1812,10 +1816,11 @@ async def guild_info_callback(update, context):
             kb_rows.append([InlineKeyboardButton("⚜️ Исповедь", callback_data="confess")])
         kb_rows.append([InlineKeyboardButton("🏛️ Храм Гильдии", callback_data="guild_shrine")])
     else:
+        # «Ты пока не в Гильдии» курсивом
         text += "<i>Ты пока не в Гильдии.</i>\n"
         kb_rows.append([InlineKeyboardButton("🕯️ Вступить в Тёмную", callback_data="guild_join_BLACK"),
                         InlineKeyboardButton("⚜️ Вступить в Светлую", callback_data="guild_join_WHITE")])
-    kb_rows.append([InlineKeyboardButton("🏰 В меню", callback_data="menu")])
+    kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="menu")])
     kb = InlineKeyboardMarkup(kb_rows)
 
     await safe_edit(update, context, text, reply_markup=kb)
