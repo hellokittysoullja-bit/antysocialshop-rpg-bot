@@ -1030,62 +1030,8 @@ async def craft_callback(update, context):
     if p and p.get("m_essence", 0) > 0:
         kb_rows.append([InlineKeyboardButton(f"💠 Использовать Пыль (1 доза)", callback_data="use_dust")])
     kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="menu")])
-    await send_reply(update, context, text, InlineKeyboardMarkup(kb_rows))
-    
-async def handle_craft_normal(update, context):
-    query = update.callback_query
-    await query.answer()
-    uid = query.from_user.id; uname = query.from_user.username or query.from_user.first_name
-    p = await get_player_cached(uid)
-    if not p or p["balance"] < 15:
-        await query.answer("Недостаточно OAC.", show_alert=True)
-        return
-    old_count = p["craft_count"]
-    async with db_pool.acquire() as conn:
-        row = await conn.fetchrow("""
-            UPDATE players SET
-                balance = balance - 15,
-                blunts = blunts + 1,
-                craft_count = craft_count + 1
-            WHERE user_id = $1
-            RETURNING *
-        """, uid)
-        if row:
-            p_new = dict(row)
-            p_new["inventory"] = _json_safe_load(p_new.get("inventory"), [])
-            player_cache[uid] = p_new
-        else:
-            await update_balance(uid, uname, -15)
-            await update_blunts(uid, uname, 1)
-            await increment_counter(uid, "craft_count")
-            invalidate_cache(uid)
-            p_new = await get_player_cached(uid)
-
-    await add_war_score(uid, 10)
-    if random.random() < 0.05:
-        await update_blunts(uid, uname, 1)
-        await send_whisper(context, "@guild_antysocial", f"⚡ @{html.escape(uname)} высек Искру Искажения из рутины. +1 🌿")
-
-    new_count = p_new["craft_count"]
-    medal_text, medal_bonus = get_medal_text_and_reward(old_count, new_count, CRAFT_MEDALS)
-    if medal_bonus:
-        await update_balance(uid, uname, medal_bonus)
-        p_new = await get_player_cached(uid)
-    new_balance = p_new["balance"]
-    progress_bar_str = get_medal_progress(new_count, CRAFT_MEDALS)
-
-    text = (
-        f"<b><i>🌿 БЛАНТ СКРУЧЕН</i></b>\n\n"
-        f"🛡️ <i>Потрачено:</i> <b>15 OAC</b>\n"
-        f"⚜️ <i>У тебя:</i> <b>{new_balance} OAC</b> 🍬\n"
-        + (f"\n{medal_text}" if medal_text else "") +
-        f"\n🎯 <b>Крафтинг:</b> {new_count}\n{progress_bar_str}\n\n"
-        f"🚬 <i>Блантов в свёртке:</i> <b>{p_new['blunts']}</b>"
-    )
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
-    await safe_edit(update, context, text, reply_markup=kb)
-    await check_achievements(uid, context)
-    
+    await send_reply(update, context, text, InlineKeyboardMarkup(kb_rows)
+                     
 async def handle_craft_normal(update, context):
     query = update.callback_query
     await query.answer()
