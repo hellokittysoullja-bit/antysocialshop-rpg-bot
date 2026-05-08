@@ -1156,6 +1156,10 @@ async def handle_named_name(update, context):
                 await update_balance(uid, uname, -50, conn=conn)
                 await increment_counter(uid, "craft_count", conn=conn)
 
+                # 1. ЧИТАЕМ ИНВЕНТАРЬ (до вставки в реестр!)
+                row_inv = await conn.fetchrow("SELECT inventory FROM players WHERE user_id = $1", uid)
+                inventory = _json_safe_load(row_inv["inventory"] if row_inv else None, [])
+
                 # Определяем редкость
                 r = random.random()
                 if r < 0.01: rarity = "legendary"
@@ -1166,7 +1170,7 @@ async def handle_named_name(update, context):
                 reaction = random.choice(FUNNY_REACTIONS)
                 hash_code = "0x" + hashlib.sha256((name + str(datetime.utcnow().timestamp())).encode("utf-8")).hexdigest()[:16]
 
-                # Вставка в реестр с получением serial
+                # 2. ВСТАВЛЯЕМ В РЕЕСТР (получаем serial)
                 serial = None
                 for attempt in range(5):
                     blunt_id = f"blunt_{uid}_{int(datetime.utcnow().timestamp()*1000)}_{random.randint(1000,9999)}"
@@ -1208,13 +1212,13 @@ async def handle_named_name(update, context):
                     "owner_history": [{"user_id": str(uid), "since": datetime.utcnow().isoformat()}],
                 }
 
-                # Атомарно добавляем в инвентарь (без fetchrow!)
-                await conn.execute(
-                    "UPDATE players SET inventory = COALESCE(inventory, '[]'::jsonb) || $1::jsonb WHERE user_id = $2",
-                    json.dumps([item]), uid
-                )
+                # 3. ДОБАВЛЯЕМ В ИНВЕНТАРЬ (простой UPDATE)
+                inventory.append(item)
+                await conn.execute("UPDATE players SET inventory = $1 WHERE user_id = $2", json.dumps(inventory), uid)
 
-        # Всё, транзакция завершена
+        # Транзакция завершена, можно сбросить кэш
+        invalidate_cache(uid)
+
         await add_war_score(uid, 25)
         blunt_id = item["id"]
         name_escaped = html.escape(name)
@@ -1238,7 +1242,6 @@ async def handle_named_name(update, context):
         else:
             await update.message.reply_text(caption, reply_markup=kb, parse_mode='HTML')
 
-        # Пост в канал
         try:
             await context.bot.send_message(chat_id="@guild_antysocial",
                 text=f"<b><i>🩸 ЭХО ИСКАЖЕНИЯ</i></b>\n\n⚜️ <b>@{html.escape(uname)}</b> создал свой блант {color} <b><i>«{name_escaped}»</i></b> 🌿\n<i>Редкость: {item['rarity']}</i>\n🩸 <i>{reaction}</i>", parse_mode='HTML')
