@@ -143,15 +143,13 @@ async def create_named_blunt(user_id, name, rarity=None, conn=None):
 
     clean_name = str(name or "").strip()[:25] or "Безымянный"
     reaction = random.choice(FUNNY_REACTIONS)
-    hash_code = "0x" + hashlib.sha256(
-        (str(datetime.utcnow().timestamp()) + clean_name).encode()
-    ).hexdigest()[:16]
+    hash_code = "0x" + hashlib.sha256((str(datetime.utcnow().timestamp()) + clean_name).encode()).hexdigest()[:16]
 
     if conn is None:
         async with db_pool.acquire() as new_conn:
             return await create_named_blunt(user_id, clean_name, rarity, conn=new_conn)
 
-    # Вставляем одну строку и сразу получаем обратно все сгенерированные значения
+    # Вставляем запись и сразу получаем сгенерированные значения
     row = await conn.fetchrow(
         "INSERT INTO nft_registry (created_by, rarity) VALUES ($1, $2) RETURNING serial, blunt_id, rare_number",
         user_id, rarity
@@ -173,7 +171,7 @@ async def create_named_blunt(user_id, name, rarity=None, conn=None):
         "owner_history": [{"user_id": str(user_id), "since": datetime.utcnow().isoformat()}],
     }
 
-    # Добавляем блант в инвентарь игрока
+    # Добавляем в инвентарь
     inv_row = await conn.fetchrow("SELECT inventory FROM players WHERE user_id = $1", user_id)
     inventory = _json_safe_load(inv_row["inventory"] if inv_row else None, [])
     inventory.append(item)
@@ -350,6 +348,7 @@ async def init_db_pool():
     db_pool = await asyncpg.create_pool(database_url, min_size=5, max_size=20, command_timeout=15)
     async with db_pool.acquire() as conn:
         await create_tables(conn)
+        await migrate_nft_registry(conn)
     logger.info("База данных Neon инициализирована (пул 2-10, таймаут 10с).")
     
 async def migrate_nft_registry(conn):
