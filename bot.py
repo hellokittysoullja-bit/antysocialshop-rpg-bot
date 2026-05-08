@@ -2305,6 +2305,12 @@ async def welcome_new_member(update, context):
 
 # Текстовые сокращения
 async def handle_chat_shortcut(update, context):
+    # === ЭТОТ БЛОК ДОБАВЛЕН ===
+    if context.user_data.get('awaiting_named_blunt'):
+        await handle_named_name(update, context)
+        return
+    # =========================
+
     text = update.message.text.strip().lower()
     mapping = {
         "фарм": farm_callback, "farm": farm_callback,
@@ -2325,7 +2331,8 @@ async def handle_chat_shortcut(update, context):
         "питомец": pet_preview,
         "магазин": shop_callback
     }
-    if text in mapping: await mapping[text](update, context)
+    if text in mapping:
+        await mapping[text](update, context)
 
 async def pet_preview(update, context):
     await update.effective_message.reply_text("🐾 Питомцы пока не реализованы.")
@@ -2764,7 +2771,6 @@ if __name__ == "__main__":
 
     app.add_handler(MessageHandler(filters.COMMAND, handle_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_chat_shortcut))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_named_name))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_member))
     app.add_handler(CallbackQueryHandler(button_handler))
 
