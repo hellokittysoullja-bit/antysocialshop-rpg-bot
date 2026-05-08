@@ -134,7 +134,6 @@ async def add_title(user_id, emoji, conn=None):
     invalidate_cache(user_id)
 
 async def create_named_blunt(user_id, name, rarity=None, conn=None):
-    """Создаёт именной блант и записывает в реестр (абсолютно надёжно)."""
     if rarity not in ("common", "rare", "epic", "legendary"):
         r = random.random()
         if r < 0.01: rarity = "legendary"
@@ -152,6 +151,7 @@ async def create_named_blunt(user_id, name, rarity=None, conn=None):
         async with db_pool.acquire() as new_conn:
             return await create_named_blunt(user_id, clean_name, rarity, conn=new_conn)
 
+    # Вставляем одну строку и сразу получаем обратно все сгенерированные значения
     row = await conn.fetchrow(
         "INSERT INTO nft_registry (created_by, rarity) VALUES ($1, $2) RETURNING serial, blunt_id, rare_number",
         user_id, rarity
@@ -173,54 +173,13 @@ async def create_named_blunt(user_id, name, rarity=None, conn=None):
         "owner_history": [{"user_id": str(user_id), "since": datetime.utcnow().isoformat()}],
     }
 
-    # Добавляем в инвентарь
-    row = await conn.fetchrow("SELECT inventory FROM players WHERE user_id = $1", user_id)
-    inventory = _json_safe_load(row["inventory"] if row else None, [])
+    # Добавляем блант в инвентарь игрока
+    inv_row = await conn.fetchrow("SELECT inventory FROM players WHERE user_id = $1", user_id)
+    inventory = _json_safe_load(inv_row["inventory"] if inv_row else None, [])
     inventory.append(item)
     await conn.execute("UPDATE players SET inventory = $1 WHERE user_id = $2", json.dumps(inventory), user_id)
     invalidate_cache(user_id)
     return item
-
-async def _award_achievement_rewards(user_id, player, reward_text, context):
-    if not reward_text:
-        return
-    parts = [p.strip() for p in reward_text.split(",") if p.strip()]
-    for part in parts:
-        if part.startswith("+") and "OAC" in part:
-            clean = part.replace(" ", "")
-            m = re.search(r"\+(\d+)", clean)
-            if m:
-                amount = int(m.group(1))
-                await update_balance(user_id, player.get("username"), amount)
-                player["balance"] = (player.get("balance", 0) + amount)
-        elif part.startswith("Титул "):
-            await add_title(user_id, part.replace("Титул ", "").strip())
-        elif part.startswith("Фон "):
-            bg = part.replace("Фон ", "").strip()
-            skins = player.get("profile_skins", {})
-            if not isinstance(skins, dict):
-                skins = {}
-            unlocked = skins.get("unlocked_backgrounds", [])
-            if bg and bg not in unlocked:
-                unlocked.append(bg)
-            skins["unlocked_backgrounds"] = unlocked
-            async with db_pool.acquire() as conn:
-                await conn.execute("UPDATE players SET profile_skins=$1 WHERE user_id=$2", json.dumps(skins), user_id)
-            invalidate_cache(user_id)
-        elif part.startswith("Рамка "):
-            frame = part.replace("Рамка ", "").strip()
-            skins = player.get("profile_skins", {})
-            if not isinstance(skins, dict):
-                skins = {}
-            unlocked = skins.get("unlocked_frames", [])
-            if frame and frame not in unlocked:
-                unlocked.append(frame)
-            skins["unlocked_frames"] = unlocked
-            async with db_pool.acquire() as conn:
-                await conn.execute("UPDATE players SET profile_skins=$1 WHERE user_id=$2", json.dumps(skins), user_id)
-            invalidate_cache(user_id)
-        else:
-            logger.warning(f"Неизвестный формат награды: {part} для пользователя {user_id}")
 
 async def check_achievements(user_id, context):
     p = await get_player_cached(user_id)
