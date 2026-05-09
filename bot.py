@@ -854,27 +854,41 @@ async def send_reply(update: Update, context, text, reply_markup=None, parse_mod
     except Exception as e:
         logger.error(f"send_reply unexpected: {e}", exc_info=True)
         
-async def animate_progress_bar(update, context, title="", duration=0.4, steps=5):
-    """Быстрая и устойчивая анимация прогресс-бара."""
+import asyncio
+from telegram.error import BadRequest
+
+async def animate_progress_bar(update, context, title="", duration=0.6, steps=4):
+    """
+    Быстрая и надёжная анимация прогресс-бара.
+    - duration: общее время анимации в секундах (рекомендуется 0.4–0.8).
+    - steps: количество кадров (3–5). Чем меньше шагов, тем меньше запросов.
+    Возвращает None, если не удалось отправить даже первое сообщение.
+    """
     chat_id = update.effective_chat.id
+    title_text = f"<b>{title}</b>" if title else ""
+
     try:
-        msg = await context.bot.send_message(chat_id=chat_id, text=f"{title}\n[░░░░░░░░░░] 0%")
+        msg = await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"{title_text}\n[░░░░░░░░░░] 0%",
+            parse_mode='HTML'
+        )
     except Exception:
         return None
 
+    step_delay = duration / steps
     for i in range(1, steps + 1):
-        filled = "▓" * (i * 2)          # 2 символа на шаг, всего 10
+        await asyncio.sleep(step_delay)
+        filled = "▓" * (i * (10 // steps))   # масштабируем заполнение
         empty = "░" * (10 - len(filled))
         percent = i * (100 // steps)
-        await asyncio.sleep(duration / steps)
         try:
-            # asyncio.wait_for предотвращает зависание
             await asyncio.wait_for(
-                msg.edit_text(f"{title}\n[{filled}{empty}] {percent}%", parse_mode='HTML'),
-                timeout=0.5
+                msg.edit_text(f"{title_text}\n[{filled}{empty}] {percent}%", parse_mode='HTML'),
+                timeout=0.4
             )
         except (BadRequest, asyncio.TimeoutError, Exception):
-            # при любой ошибке прекращаем анимацию и возвращаем что есть
+            # При любой ошибке (включая таймаут) прекращаем анимацию
             return msg
     return msg
 
