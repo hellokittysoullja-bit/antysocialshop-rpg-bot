@@ -855,18 +855,23 @@ async def send_reply(update: Update, context, text, reply_markup=None, parse_mod
         logger.error(f"send_reply unexpected: {e}", exc_info=True)
         
 async def animate_progress_bar(update, context, title="", duration=0.8, steps=10):
-    """Показывает анимированный прогресс-бар и возвращает сообщение для финального результата."""
+    """Создаёт анимированный прогресс-бар, устойчивый к ошибкам Telegram."""
     chat_id = update.effective_chat.id
-    msg = await context.bot.send_message(chat_id=chat_id, text=f"{title}\n[░░░░░░░░░░] 0%")
-    for i in range(1, steps+1):
+    try:
+        msg = await context.bot.send_message(chat_id=chat_id, text=f"{title}\n[░░░░░░░░░░] 0%")
+    except Exception:
+        return None   # если не можем отправить сообщение, просто пропускаем анимацию
+
+    for i in range(1, steps + 1):
         filled = "▓" * i
         empty = "░" * (10 - i)
         percent = i * 10
         await asyncio.sleep(duration / steps)
         try:
             await msg.edit_text(f"{title}\n[{filled}{empty}] {percent}%", parse_mode='HTML')
-        except BadRequest:
-            pass
+        except Exception:
+            # если редактирование не удалось, прекращаем анимацию, но не падаем
+            return msg
     return msg
 
 def get_medal_target(count, medals_list):
@@ -1113,9 +1118,12 @@ async def farm_callback(update, context):
     )
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
 
-    # Анимированный прогресс-бар вместо мгновенного ответа
+    # Анимированный прогресс-бар (без падения при TimedOut)
     anim_msg = await animate_progress_bar(update, context, title="🍬 Фармим...")
-    await anim_msg.edit_text(text, reply_markup=kb, parse_mode='HTML')
+    if anim_msg is not None:
+        await anim_msg.edit_text(text, reply_markup=kb, parse_mode='HTML')
+    else:
+        await safe_edit(update, context, text, reply_markup=kb)
 
     await check_rank_up(context, uid, uname, old_bal, new_balance)
     await check_achievements(uid, context)
@@ -1190,7 +1198,10 @@ async def handle_craft_normal(update, context):
     ])
 
     anim_msg = await animate_progress_bar(update, context, title="🌿 Скручиваем...")
-    await anim_msg.edit_text(text, reply_markup=kb, parse_mode='HTML')
+    if anim_msg is not None:
+        await anim_msg.edit_text(text, reply_markup=kb, parse_mode='HTML')
+    else:
+        await safe_edit(update, context, text, reply_markup=kb)
     await check_achievements(uid, context)
 
 @error_handler
@@ -1577,8 +1588,11 @@ async def ritual_callback(update, context):
         f"<b>{progress_bar_str}</b>"
     )
 
-    anim_msg = await animate_progress_bar(update, context, title="🕯️ Проводим ритуал...")
-    await anim_msg.edit_text(text, parse_mode='HTML')
+    anim_msg = await animate_progress_bar(update, context, title="🕯️ Ритуал проводится...")
+    if anim_msg is not None:
+        await anim_msg.edit_text(text, parse_mode='HTML')
+    else:
+        await send_whisper_dm(update, context, text)
     await check_rank_up(context, uid, uname, old_bal, new_balance)
     await check_achievements(uid, context)
 
