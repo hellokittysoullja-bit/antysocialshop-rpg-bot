@@ -33,6 +33,30 @@ def db_retry(max_retries=3, delay=0.2):
         return wrapper
     return decorator
 
+def rate_limit(seconds: int = 2):
+    """Запрещает повторный вызов функции чаще, чем раз в seconds секунд."""
+    def decorator(func):
+        @functools.wraps(func)
+        async def wrapper(update, context, *args, **kwargs):
+            user_id = update.effective_user.id
+            key = f"rate_{func.__name__}_{user_id}"
+            now = datetime.now()
+            last_time = context.user_data.get(key)
+            if last_time and (now - last_time).total_seconds() < seconds:
+                # Показываем предупреждение, но не выполняем действие
+                if update.callback_query:
+                    await update.callback_query.answer("⏳ Слишком быстро! Подожди немного.", show_alert=True)
+                else:
+                    await context.bot.send_message(
+                        chat_id=update.effective_chat.id,
+                        text="⏳ Пожалуйста, не так быстро. Попробуй через пару секунд."
+                    )
+                return
+            context.user_data[key] = now
+            return await func(update, context, *args, **kwargs)
+        return wrapper
+    return decorator
+
 # === ВЕБ-СЕРВЕР ===
 web_app = Flask(__name__)
 @web_app.route("/")
@@ -992,6 +1016,7 @@ async def grant_title(user_id, emoji, name, context):
 
 # Продолжение # Фарм (исправлен)
 @error_handler
+@rate_limit(3)
 async def farm_callback(update, context):
     user, msg = get_user_and_msg(update)
     uid = user.id; uname = user.username or user.first_name
@@ -1065,6 +1090,7 @@ async def farm_callback(update, context):
     
 # Крафт
 @error_handler
+@rate_limit(2)
 async def craft_callback(update, context):
     user, msg = get_user_and_msg(update)
     uid = user.id; uname = html.escape(user.username or user.first_name)
@@ -1079,7 +1105,9 @@ async def craft_callback(update, context):
         kb_rows.append([InlineKeyboardButton(f"💠 Использовать Пыль (1 доза)", callback_data="use_dust")])
     kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="menu")])
     await send_reply(update, context, text, InlineKeyboardMarkup(kb_rows))
-                     
+
+@errror_handler
+@rate_limit(3)
 async def handle_craft_normal(update, context):
     query = update.callback_query
     await query.answer()
@@ -1338,6 +1366,7 @@ async def smoke_callback(update, context):
         await msg.reply_text(main_text, reply_markup=main_kb, parse_mode='HTML')
 
 @error_handler
+@rate_limit(2)
 async def do_smoke(update, context):
     query = update.callback_query
     await query.answer()
@@ -1465,6 +1494,7 @@ async def do_smoke(update, context):
 
 # Ритуал (с защитой от None)
 @error_handler
+@rate_limit(3)
 async def ritual_callback(update, context):
     user, msg = get_user_and_msg(update)
     uid = user.id; uname = html.escape(user.username or user.first_name)
