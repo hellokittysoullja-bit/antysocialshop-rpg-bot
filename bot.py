@@ -127,16 +127,21 @@ async def get_player_cached(user_id):
         key = f"player:{user_id}"
         data = await redis.get(key)
         if data:
-            return json.loads(data)
+            p = json.loads(data)
+            if isinstance(p, dict):
+                # Возвращаем как есть, Redis хранит уже нормализованные данные
+                return p
+
     # Fallback – старый кэш в памяти
     if user_id in player_cache:
         return player_cache[user_id]
+
     # Запрос к БД
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow("SELECT * FROM players WHERE user_id=$1", user_id)
     if row:
         p = dict(row)
-        # Приводим все числовые поля, которые могут быть NULL, к 0
+        # Приводим все числовые поля к 0, убираем None
         numeric_fields = [
             'balance', 'blunts', 'farm_count', 'craft_count', 'smoke_count',
             'ritual_count', 'referral_count', 'check_count', 'lab_chests',
@@ -144,8 +149,8 @@ async def get_player_cached(user_id):
             'passive_level', 'karma', 'inhaled', 'keys'
         ]
         for field in numeric_fields:
-            if p.get(field) is None:
-                p[field] = 0
+            p[field] = p.get(field) or 0
+        # Защита инвентаря и скинов
         p["inventory"] = _json_safe_load(p.get("inventory"), [])
         p["profile_skins"] = _json_safe_load(p.get("profile_skins"), {})
         # Сохраняем в Redis (TTL 10 секунд) или в словарь
