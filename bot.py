@@ -1816,7 +1816,8 @@ async def profile_callback(update, context):
     try:
         photos = await context.bot.get_user_profile_photos(uid, limit=1)
         if photos.photos:
-            await context.bot.send_photo(chat_id=msg.chat.id, photo=photos.photos[0][0].file_id)
+            await context.bot.send_photo(chat_id=msg.chat.id, photo=photos.photos[0][0].file_id,
+                                         caption="📸 Аватарка странника")
     except:
         pass
 
@@ -2104,19 +2105,58 @@ async def guild_shrine_callback(update, context):
     if not p or not p["guild"]:
         await query.answer("Ты не в гильдии.")
         return
-    total = 50000
-    donated = p.get("donated", 0)
-    perc = int(donated / total * 100)
-    bar = progress_bar(perc)
+
+    guild = p["guild"]
+    async with db_pool.acquire() as conn:
+        total_donated = await conn.fetchval(
+            "SELECT COALESCE(SUM(donated),0) FROM players WHERE guild=$1", guild
+        ) or 0
+
+    levels = [
+        {"level": 1, "cost": 0,      "bonus": 0},
+        {"level": 2, "cost": 15000,  "bonus": 5},
+        {"level": 3, "cost": 45000,  "bonus": 10},
+        {"level": 4, "cost": 100000, "bonus": 15},
+        {"level": 5, "cost": 250000, "bonus": 25},
+    ]
+
+    current_level = 1
+    for lvl in levels:
+        if total_donated >= lvl["cost"]:
+            current_level = lvl["level"]
+
+    if current_level < 5:
+        next_level = levels[current_level]
+        needed = next_level["cost"] - total_donated
+        progress = int(total_donated / next_level["cost"] * 100) if next_level["cost"] > 0 else 100
+    else:
+        next_level = None
+        needed = 0
+        progress = 100
+
+    bonus = levels[current_level-1]["bonus"]
+    bar = progress_bar(progress)
+
     text = (
         f"<b>🏛️ ХРАМ ГИЛЬДИИ</b>\n\n"
-        f"🔹 {p['guild']} Гильдия\n"
-        f"Прогресс строительства: {donated} / {total} OAC\n"
-        f"{bar} {perc}%\n"
+        f"🫧 <b>{guild}</b> Гильдия\n"
+        f"🌱 Уровень: <b>{current_level}</b>/5\n"
+        f"🎉 Бонус фарма: <b>+{bonus}%</b>\n\n"
     )
+    if current_level < 5:
+        text += (
+            f"<i>До уровня {current_level+1}:</i>\n"
+            f"<b>{bar} {progress}%</b>\n"
+            f"🍃 {total_donated} / {next_level['cost']} OAC\n\n"
+        )
+    else:
+        text += "<b>✨ Храм полностью возвышен! ✨</b>\n\n"
+
+    text += "<i>Каждое пожертвование усиливает всех членов гильдии.</i>"
+
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("💎 Пожертвовать 100 OAC", callback_data="shrine_donate_100")],
-        [InlineKeyboardButton("💎 Пожертвовать 500 OAC", callback_data="shrine_donate_500")],
+        [InlineKeyboardButton("💎 Внести 100 OAC", callback_data="shrine_donate_100"),
+         InlineKeyboardButton("💎 Внести 500 OAC", callback_data="shrine_donate_500")],
         [InlineKeyboardButton("🔙 Назад", callback_data="guild_info")]
     ])
     await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
@@ -2134,7 +2174,7 @@ async def guild_war_callback(update, context):
     async with db_pool.acquire() as conn:
         war = await conn.fetchrow("SELECT war_active FROM guild_weekly WHERE war_active = TRUE LIMIT 1")
         if not war:
-            await safe_edit(update, context, "⚔️ Сейчас нет активной войны.", 
+            await safe_edit(update, context, "🕊️ Сейчас мирное время.",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="guild_info")]]))
             return
 
@@ -2142,7 +2182,6 @@ async def guild_war_callback(update, context):
         black_score = next((r["total_farmed"] for r in scores if r["guild"] == "BLACK"), 0)
         white_score = next((r["total_farmed"] for r in scores if r["guild"] == "WHITE"), 0)
 
-        # Топ-3 участников (по очкам)
         top_black = await conn.fetch(
             "SELECT username, donated FROM players WHERE guild='BLACK' ORDER BY donated DESC LIMIT 3"
         )
@@ -2160,20 +2199,19 @@ async def guild_war_callback(update, context):
         return "▓" * filled + "░" * (10 - filled)
 
     text = (
-        f"<b>⚔️ ВОЙНА ГИЛЬДИЙ</b>\n\n"
-        f"🕯️ <b>Тёмная:</b> {black_score} очков\n"
+        f"<b>⚔️ БИТВА ГИЛЬДИЙ</b>\n\n"
+        f"🕯️ <b>Тёмная Гильдия:</b> {black_score} очков\n"
         f"<b>{safe_bar(bp)} {bp}%</b>\n\n"
-        f"⚜️ <b>Светлая:</b> {white_score} очков\n"
+        f"⚜️ <b>Светлая Гильдия:</b> {white_score} очков\n"
         f"<b>{safe_bar(wp)} {wp}%</b>\n\n"
     )
 
-    # Топы
     if top_black:
-        text += "🕯️ <b>Топ-3 Тёмных:</b>\n"
+        text += "🕯️ <b>Герои Тьмы:</b>\n"
         for i, row in enumerate(top_black, 1):
             text += f"  {i}. {html.escape(row['username'])} — {row['donated']} очков\n"
     if top_white:
-        text += "⚜️ <b>Топ-3 Светлых:</b>\n"
+        text += "⚜️ <b>Герои Света:</b>\n"
         for i, row in enumerate(top_white, 1):
             text += f"  {i}. {html.escape(row['username'])} — {row['donated']} очков\n"
 
