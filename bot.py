@@ -2526,12 +2526,14 @@ else:
             await send_whisper_dm(update, context, "🔮 Нужно 5 блантов и 50 OAC.")
             return
         text = (
-            f"<b><i>🔮 АЛХИМИЧЕСКИЙ КОТЁЛ</i></b>\n\n"
-            f"<b>5 блантов</b> и <b>50 OAC</b> – бросишь?\n\n"
-            f"🌀 <i>Искажение шепчет: «Лишь ветеран познает магию»</i>"
+            "<b>🔮 АЛХИМИЧЕСКИЙ КОТЁЛ</b>\n\n"
+            "<i>«Только тот, кто достиг <b>ветерана</b> и не боится потерь — "
+            "обретёт право использовать магию и истинную силу🗝️»</i>\n\n"
+            "У тебя есть <b>5 блантов</b> и <b>50 OAC</b>.\n"
+            "Бросить их в Котёл?"
         )
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🧪 Запустить", callback_data="alchemy_confirm")],
+            [InlineKeyboardButton("🧪 Запустить реакцию", callback_data="alchemy_confirm")],
             [InlineKeyboardButton("🔙 Назад", callback_data="luck")]
         ])
         await safe_edit(update, context, text, reply_markup=kb)
