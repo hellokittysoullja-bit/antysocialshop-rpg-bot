@@ -2393,18 +2393,22 @@ async def luck_callback(update, context, action=None):
         diff = timedelta(hours=24) - (now - last_daily_dt)
         hrs = int(diff.seconds // 3600); mins = int((diff.seconds % 3600) // 60)
         kb_rows.append([InlineKeyboardButton(f"🎡 Колесо набирает силу. Ещё {hrs} ч {mins} мин", callback_data="luck_wheel")])
+
     if berserk_available:
         kb_rows.append([InlineKeyboardButton("🎲 Рискнуть", callback_data="luck_berserk")])
     else:
-        if bal < 300: kb_rows.append([InlineKeyboardButton(f"🎲 нужно ещё {300 - bal} 🍬", callback_data="luck_berserk")])
+        if bal < 300:
+            kb_rows.append([InlineKeyboardButton(f"🎲 нужно ещё {300 - bal} 🍬", callback_data="luck_berserk")])
         else:
             diff = timedelta(hours=24) - (now - last_berserk_dt)
             hrs = int(diff.seconds // 3600); mins = int((diff.seconds % 3600) // 60)
             kb_rows.append([InlineKeyboardButton(f"🎲 Бездна шепчет всё громче. Жди {hrs} ч {mins} мин", callback_data="luck_berserk")])
+
     if veteran_alchemy:
-    kb_rows.append([InlineKeyboardButton("🔮 Алхимия", callback_data="alchemy_start")])
-else:
-    kb_rows.append([InlineKeyboardButton("🔮 Алхимия🔒", callback_data="alchemy_start")])
+        kb_rows.append([InlineKeyboardButton("🔮 Алхимия", callback_data="alchemy_start")])
+    else:
+        kb_rows.append([InlineKeyboardButton("🔒 Алхимия (⚔️ Ветеран)", callback_data="alchemy_start")])
+
     kb_rows.append([InlineKeyboardButton("🏰 В меню", callback_data="menu")])
     kb = InlineKeyboardMarkup(kb_rows)
 
