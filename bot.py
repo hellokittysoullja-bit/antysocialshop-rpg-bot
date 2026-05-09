@@ -1753,48 +1753,76 @@ async def profile_callback(update, context):
     await msg.reply_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb_rows))
 
 # Все бланты
-async def my_blunts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, page=0):
+@error_handler
+@rate_limit(1)
+async def my_blunts_callback(update, context, page=0):
     query = update.callback_query
+    await query.answer()
     uid = query.from_user.id
     p = await get_player_cached(uid)
     if not p:
-        await query.answer("Профиль не найден.", show_alert=True)
         return
 
-    named = [it for it in p.get("inventory", []) if it.get("type") == "named"]
-    if not named:
-        await query.answer("У тебя нет именных блантов.", show_alert=True)
-        return
+    # Безопасно получаем инвентарь (уже список, как в profile_callback)
+    inv_data = p.get("inventory", [])
+    named = [it for it in inv_data if it.get("type") == "named"]
 
+    # Сортировка: сначала по редкости, потом по серийному номеру
     rarity_order = {"legendary": 0, "epic": 1, "rare": 2, "common": 3}
-    # ✅ Исправленная сортировка
     named.sort(key=lambda x: (rarity_order.get(x.get("rarity") or "common", 3),
                                x.get("serial") or 999999))
 
-    per_page = BLUNTS_PER_PAGE
-    total_pages = max(1, (len(named) + per_page - 1) // per_page)
-    if page >= total_pages:
-        page = 0
-    start = page * per_page
-    chunk = named[start:start + per_page]
+    if not named:
+        await query.message.edit_text(
+            "💎 У тебя пока нет именных блантов.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 В профиль", callback_data="profile")]
+            ])
+        )
+        return
 
-    text = f"<b>💍 ТВОИ ИМЕННЫЕ БЛАНТЫ</b> ({page+1}/{total_pages})\n\n"
-    for item in chunk:
-        color = {"legendary": "🟡", "epic": "🟣", "rare": "🔵"}.get(item.get("rarity"), "🟢")
-        text += f"{color} <b>{html.escape(item['name'])}</b> · #{item.get('rare_number', '?-????')}\n"
+    total_pages = (len(named) + BLUNTS_PER_PAGE - 1) // BLUNTS_PER_PAGE
+    start = page * BLUNTS_PER_PAGE
+    end = start + BLUNTS_PER_PAGE
+    page_blunts = named[start:end]
 
+    # Заголовок
+    text = f"<b>💎 ТВОИ ИМЕННЫЕ БЛАНТЫ ({page+1}/{total_pages})</b>\n\n"
+
+    # Строки с блантами
+    for i, item in enumerate(page_blunts, 1):
+        name = item["name"]
+        rarity = item.get("rarity", "common")
+        color = {"legendary": "🟡", "epic": "🟣", "rare": "🔵"}.get(rarity, "🟢")
+        rare_number = item.get("rare_number", "?-????")
+        hash_code = item.get("hash", "0x????...????")
+        text += f"<b>{i}) «{html.escape(name)}»</b> {color} · #{rare_number} · {hash_code}\n"
+
+    # Кнопки действий с каждым блантом
     kb_rows = []
-    for item in chunk:
-        kb_rows.append([InlineKeyboardButton(f"🔍 {item['name'][:20]}", callback_data=f"blunt_details_{item['id']}")])
-    nav = []
+    for i, item in enumerate(page_blunts, 1):
+        row = [
+            InlineKeyboardButton(f"💍 Детали ({i})", callback_data=f"blunt_details_{item['id']}"),
+            InlineKeyboardButton("🔗", callback_data=f"share_blunt_{item['id']}")
+        ]
+        kb_rows.append(row)
+
+    # Навигационные кнопки
+    nav_buttons = []
     if page > 0:
-        nav.append(InlineKeyboardButton("⬅️", callback_data=f"blunts_page_{page-1}"))
+        nav_buttons.append(InlineKeyboardButton("◀️ Назад", callback_data=f"blunts_page_{page-1}"))
     if page < total_pages - 1:
-        nav.append(InlineKeyboardButton("➡️", callback_data=f"blunts_page_{page+1}"))
-    if nav:
-        kb_rows.append(nav)
-    kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="profile")])
-    await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode='HTML')
+        nav_buttons.append(InlineKeyboardButton("▶️ Далее", callback_data=f"blunts_page_{page+1}"))
+    if nav_buttons:
+        kb_rows.append(nav_buttons)
+
+    kb_rows.append([InlineKeyboardButton("🔙 В профиль", callback_data="profile")])
+
+    await query.message.edit_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(kb_rows),
+        parse_mode='HTML'
+    )
 
 async def achievements_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, page=0):
     query = update.callback_query
