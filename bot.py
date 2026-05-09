@@ -1993,30 +1993,58 @@ async def guild_shrine_callback(update, context):
     ])
     await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
 
+@error_handler
 async def confess_callback(update, context):
-    query = update.callback_query
-    await query.answer()
-    uid = query.from_user.id
+    """Исповедь (для Светлой Гильдии) – работает и по кнопке, и по команде /repent."""
+    user, msg = get_user_and_msg(update)
+    uid = user.id
     p = await get_player_cached(uid)
-    if not p or p["guild"] != "WHITE":
-        await query.answer("Только для Светлой Гильдии.")
+
+    # Проверки
+    if not p:
+        await context.bot.send_message(chat_id=uid, text="Сначала активируйся: /start")
         return
-    if p["blunts"] < 1:
-        await query.answer("Нужен 1 блант.")
+    if p.get("guild") != "WHITE":
+        if update.callback_query:
+            await update.callback_query.answer("Только для Светлой Гильдии.", show_alert=True)
+        else:
+            await msg.reply_text("❌ Только для Светлой Гильдии.")
         return
-    await update_blunts(uid, p["username"], -1)
+    if p.get("blunts", 0) < 1:
+        if update.callback_query:
+            await update.callback_query.answer("Нужен 1 блант.", show_alert=True)
+        else:
+            await msg.reply_text("❌ Нужен 1 блант.")
+        return
+
+    # Списание бланта
+    await update_blunts(uid, p.get("username"), -1)
+    p = await get_player_cached(uid)
+
+    # Случайный результат
     r = random.random()
     if r < 0.70:
         reward = random.randint(100, 200)
-        await update_balance(uid, p["username"], reward)
+        await update_balance(uid, p.get("username"), reward)
         text = f"<b><i>⚜️ ИСПОВЕДЬ</i></b>\n\nБлагословение! +{reward} OAC."
     elif r < 0.95:
         await update_essence(uid, 1)
         text = "<b><i>⚜️ ИСПОВЕДЬ</i></b>\n\nТы получил 💠 Кристальную Пыль."
     else:
+        # Редкий случай – бесплатный легендарный блант
         name = random.choice(["Крик Бездны","Пепел Короля","Шёпот Склепа"])
+        await create_named_blunt(uid, name, rarity="legendary")
         text = f"<b><i>⚜️ ИСПОВЕДЬ</i></b>\n\n🌟 Чудо! Легендарный блант «{name}»!"
-    await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="guild_info")]]), parse_mode='HTML')
+
+    # Отправка результата
+    if update.callback_query:
+        await update.callback_query.message.edit_text(
+            text,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="guild_info")]]),
+            parse_mode='HTML'
+        )
+    else:
+        await msg.reply_text(text, parse_mode='HTML')
 
 async def rules_callback(update, context):
     user, msg = get_user_and_msg(update)
@@ -2050,6 +2078,7 @@ async def rules_callback(update, context):
     ])
     await msg.reply_text(text, parse_mode='HTML', reply_markup=kb)
 
+@error_handler
 async def privilege_callback(update, context):
     user, msg = get_user_and_msg(update)
     uid = user.id
