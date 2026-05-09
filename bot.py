@@ -2880,6 +2880,19 @@ if __name__ == "__main__":
     Thread(target=run_web_server, daemon=True).start()
     app = Application.builder().token(TOKEN).build()
 
+# === ИНИЦИАЛИЗАЦИЯ SENTRY ===
+    import sentry_sdk
+    SENTRY_DSN = os.getenv("SENTRY_DSN")
+    if SENTRY_DSN:
+        sentry_sdk.init(
+            dsn=SENTRY_DSN,
+            traces_sample_rate=1.0,
+            environment=os.getenv("ENV", "production"),
+        )
+        logger.info("Sentry активирован")
+    else:
+        logger.warning("SENTRY_DSN не задан, Sentry отключён")
+
     async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         command = update.message.text.split()[0].split('@')[0][1:].lower()
         mapping = {
