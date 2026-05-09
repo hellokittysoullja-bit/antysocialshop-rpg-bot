@@ -121,7 +121,7 @@ async def init_redis():
     else:
         logger.info("REDIS_URL не задан – используется in-memory кэш")
 
-async def get_player_cached(user_id):
+async def get_player_cached(user_id, fields=None):
     # Пробуем Redis
     if redis:
         key = f"player:{user_id}"
@@ -129,15 +129,25 @@ async def get_player_cached(user_id):
         if data:
             p = json.loads(data)
             if isinstance(p, dict):
+                # Если запрошены конкретные поля – возвращаем только их
+                if fields:
+                    return {k: p.get(k) for k in fields if k in p}
                 return p
 
     # Fallback – старый кэш в памяти
     if user_id in player_cache:
-        return player_cache[user_id]
+        p = player_cache[user_id]
+        if fields:
+            return {k: p.get(k) for k in fields if k in p}
+        return p
 
-    # Запрос к БД
+    # Запрос к БД (только нужные колонки)
+    if fields:
+        columns = ", ".join(fields)
+    else:
+        columns = "*"
     async with db_pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT * FROM players WHERE user_id=$1", user_id)
+        row = await conn.fetchrow(f"SELECT {columns} FROM players WHERE user_id=$1", user_id)
     if row:
         p = dict(row)
         # Нормализация числовых полей – ни одного None
@@ -148,16 +158,26 @@ async def get_player_cached(user_id):
             'passive_level', 'karma', 'inhaled', 'keys'
         ]
         for field in numeric_fields:
-            p[field] = p.get(field) or 0
-        # Инвентарь и скины
-        p["inventory"] = _json_safe_load(p.get("inventory"), [])
-        p["profile_skins"] = _json_safe_load(p.get("profile_skins"), {})
+            if p.get(field) is None:
+                p[field] = 0
+        # Инвентарь и скины загружаем только если нужно
+        if fields is None or "inventory" in fields:
+            p["inventory"] = _json_safe_load(p.get("inventory"), [])
+        else:
+            p["inventory"] = []   # пустой список, если не запросили
+        if fields is None or "profile_skins" in fields:
+            p["profile_skins"] = _json_safe_load(p.get("profile_skins"), {})
+        else:
+            p["profile_skins"] = {}
 
-        # Сохраняем в кэш
+        # Сохраняем в Redis (TTL 10 секунд) или в словарь
         if redis:
             await redis.setex(key, 10, json.dumps(p, default=str))
         else:
             player_cache[user_id] = p
+        # Возвращаем только запрошенные поля
+        if fields:
+            return {k: p.get(k) for k in fields if k in p}
         return p
     return None
 
@@ -1072,7 +1092,7 @@ async def farm_callback(update, context):
     user, msg = get_user_and_msg(update)
     uid = user.id; uname = user.username or user.first_name
     uname_escaped = html.escape(uname)
-    p = await get_player_cached(uid)
+    p = await get_player_cached(uid, fields=["balance", "last_farm", "farm_count", "smoke_count"])
 
     if p and p["last_farm"]:
         last = _to_datetime(p["last_farm"])
