@@ -448,6 +448,18 @@ async def init_db_pool():
     db_pool = await asyncpg.create_pool(database_url, min_size=5, max_size=20, command_timeout=15)
     async with db_pool.acquire() as conn:
         await create_tables(conn)
+# Гарантируем наличие столбца war_active в guild_weekly
+        await conn.execute("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name='guild_weekly' AND column_name='war_active'
+                ) THEN
+                    ALTER TABLE guild_weekly ADD COLUMN war_active BOOLEAN DEFAULT FALSE;
+                END IF;
+            END $$;
+        """)
         await init_redis()          # если добавили Redis
     logger.info("База данных Neon инициализирована (пул 2-10, таймаут 10с).")
     
@@ -727,11 +739,12 @@ def get_rank_progress(balance):
             )
     return ""
 
-async def add_war_score(user_id, points):
+async def add_war_score(user_id, points, conn=None):
     if not db_pool:
         return
     try:
-        async with db_pool.acquire() as conn:
+        if conn is not None:
+            # Используем переданное соединение
             war = await conn.fetchrow("SELECT war_active FROM guild_weekly WHERE war_active = TRUE LIMIT 1")
             if not war:
                 return
@@ -744,16 +757,11 @@ async def add_war_score(user_id, points):
                 VALUES ($1, CURRENT_DATE, $2)
                 ON CONFLICT (guild) DO UPDATE SET total_farmed = guild_weekly.total_farmed + $2
             """, guild, points)
+        else:
+            async with db_pool.acquire() as conn:
+                await add_war_score(user_id, points, conn=conn)
     except Exception as e:
         logger.error(f"add_war_score error: {e}")
-
-async def send_blunt_image(context, chat_id, rarity):
-    file_id = BLUNT_IMAGES.get(rarity)
-    if file_id:
-        try:
-            await context.bot.send_photo(chat_id=chat_id, photo=file_id)
-        except Exception as e:
-            logger.error(f"Blunt image error: {e}")
 
 async def get_main_menu_keyboard(user_id):
     whisper = random.choice(WHISPERS)
@@ -1648,9 +1656,9 @@ async def profile_callback(update, context):
     inv_data = p.get("inventory", [])
     badges = []
     if any(it.get("rarity")=="legendary" for it in inv_data): badges.append("🟡")
-    if p["referral_count"]>0: badges.append("🩸")
-    if p["login_streak"]>=7: badges.append("🔥")
-    if p["check_count"]>=10: badges.append("👁️")
+    if (p.get("referral_count") or 0) > 0: badges.append("🩸")
+    if (p.get("login_streak") or 0) >= 7: badges.append("🔥")
+    if (p.get("check_count") or 0) >= 10: badges.append("👁️")
     badge_str = ' '.join(badges) if badges else "—"
     try:
         photos = await context.bot.get_user_profile_photos(uid, limit=1)
