@@ -940,18 +940,29 @@ def error_handler(func):
 # ========== ОБРАБОТЧИКИ КОМАНД (полный, надёжный, с лабиринтом) ==========
 
 async def safe_edit(update: Update, context, text: str, reply_markup=None, parse_mode='HTML'):
-    """Редактирует сообщение, а при неудаче отправляет новое."""
+    """Безопасное редактирование: при невозможности отредактировать – отправляет новое сообщение."""
     try:
         if update.callback_query:
             await update.callback_query.message.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
         else:
             await update.message.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
     except BadRequest as e:
-        if "message is not modified" not in str(e).lower():
-            logger.warning(f"safe_edit fallback: {e}")
+        err_msg = str(e).lower()
+        if "message is not modified" in err_msg:
+            return
+        # Если нет текста для редактирования (фото, стикер и т.п.) – шлём новое
+        if "there is no text in the message to edit" in err_msg:
             await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=reply_markup, parse_mode=parse_mode)
+            return
+        # Остальные ошибки – логируем и отправляем новое сообщение как запасной вариант
+        logger.warning(f"safe_edit fallback due to: {e}")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=reply_markup, parse_mode=parse_mode)
     except Exception as e:
         logger.error(f"safe_edit unexpected: {e}", exc_info=True)
+        try:
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=reply_markup, parse_mode=parse_mode)
+        except Exception as send_error:
+            logger.error(f"safe_edit even send_message failed: {send_error}")
 
 async def send_reply(update: Update, context, text, reply_markup=None, parse_mode='HTML'):
     """Отправляет новое сообщение или редактирует существующее (для меню)."""
@@ -1953,11 +1964,7 @@ async def my_blunts_callback(update, context, page=0):
 
     kb_rows.append([InlineKeyboardButton("🔙 В профиль", callback_data="profile")])
 
-    await query.message.edit_text(
-        text,
-        reply_markup=InlineKeyboardMarkup(kb_rows),
-        parse_mode='HTML'
-    )
+    await safe_edit(update, context, text, reply_markup=InlineKeyboardMarkup(kb_rows))
 
 async def achievements_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, page=0):
     query = update.callback_query
