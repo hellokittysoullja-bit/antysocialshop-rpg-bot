@@ -2634,158 +2634,66 @@ async def setbluntpic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     names = {"common":"⚪ Обычный","rare":"🔵 Редкий","epic":"🟣 Эпический","legendary":"🟡 Легендарный"}
     await update.message.reply_text(f"✅ Изображение для {names[rarity]} обновлено!", parse_mode='HTML')
 
-# Обработчик кнопок
+# Обработчик кнопок + словарь колбэков
+# ========== СЛОВАРЬ КОЛБЭКОВ ==========
+CALLBACKS = {
+    "menu": "menu",
+    "farm": farm_callback,
+    "craft": craft_callback,
+    "smoke": smoke_callback,
+    "ritual": ritual_callback,
+    "collect": collect_callback,
+    "profile": profile_callback,
+    "top": top_callback,
+    "guild_info": guild_info_callback,
+    "rules": rules_callback,
+    "privilege": privilege_callback,
+    "catalog": catalog_callback,
+    "luck": luck_callback,
+    "craft_normal": handle_craft_normal,
+    "craft_named": handle_craft_named,
+    "cancel_named": cancel_named,
+    "do_smoke": do_smoke,
+    "use_dust": handle_use_dust,
+    "top_scout": top_scout_callback,
+    "achievements": achievements_callback,
+    "my_blunts": my_blunts_callback,
+    "lab_start": lab_enter,
+    "lab_enter_confirm": lab_enter_confirm,
+    "lab_escape": show_lab_final,
+    "guild_shrine": guild_shrine_callback,
+    "confess": confess_callback,
+    "pet_preview": pet_preview,
+    "bush_preview": "bush_preview",
+    "activate_menu": "activate_menu",
+    "skins_menu": "skins_menu",
+    "choose_title": "choose_title",
+    "choose_bg": "choose_bg",
+    "shop": shop_callback,
+}
+
+# ========== ОБРАБОТЧИК КНОПОК (СЕНЬОРСКИЙ) ==========
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     data = q.data
     uid = q.from_user.id
     try:
+        # 1. Обработка специальных кнопок со своими параметрами
         if data == "menu":
             await q.answer()
             kb, whisper = await get_main_menu_keyboard(uid)
             menu_text = f"<b>🎮 ГЛАВНОЕ МЕНЮ</b>\n\n<i>{whisper}</i>"
-            try: await q.message.edit_text(menu_text, reply_markup=kb, parse_mode='HTML')
-            except Exception: await q.message.reply_text(menu_text, reply_markup=kb, parse_mode='HTML')
-        elif data == "farm":
-            await q.answer()
             try:
-                await farm_callback(update, context)
-            except Exception as e:
-                import traceback
-                err = traceback.format_exc()
-                await context.bot.send_message(
-                    chat_id=q.message.chat_id,
-                    text=f"❌ Ошибка в farm:\n<code>{html.escape(err[:800])}</code>",
-                    parse_mode='HTML'
-                )
-        elif data == "craft": await q.answer(); await craft_callback(update, context)
-        elif data == "smoke": await q.answer(); await smoke_callback(update, context)
-        elif data == "ritual": await q.answer(); await ritual_callback(update, context)
-        elif data == "collect": await q.answer(); await collect_callback(update, context)
-        elif data == "profile": await q.answer(); await profile_callback(update, context)
-        elif data == "top": await q.answer(); await top_callback(update, context)
-        elif data == "guild_info": await q.answer(); await guild_info_callback(update, context)
-        elif data == "rules": await q.answer(); await rules_callback(update, context)
-        elif data == "privilege": await q.answer(); await privilege_callback(update, context)
-        elif data == "catalog": await q.answer(); await catalog_callback(update, context)
-        elif data == "luck":
-            await q.answer()
-            try:
-                await luck_callback(update, context)
-            except Exception as e:
-                logger.error(f"Luck callback error: {e}")
-                await q.message.edit_text("⚠️ Не удалось открыть Удачу. Попробуй позже.", reply_markup=get_back_to_menu_keyboard())
-        elif data in ("luck_wheel", "luck_berserk", "alchemy_start", "alchemy_confirm"): await q.answer(); await luck_callback(update, context, action=data)
-        elif data == "craft_normal":
-            await q.answer()
-            try:
-                await handle_craft_normal(update, context)
-            except Exception as e:
-                import traceback
-                err = traceback.format_exc()
-                await context.bot.send_message(
-                    chat_id=q.message.chat_id,
-                    text=f"❌ Ошибка в craft_normal:\n<code>{html.escape(err[:800])}</code>",
-                    parse_mode='HTML'
-                )
-        elif data == "craft_named": await q.answer(); await handle_craft_named(update, context)
-        elif data == "cancel_named": await q.answer(); await cancel_named(update, context)
-        elif data == "do_smoke": await q.answer(); await do_smoke(update, context)
-        elif data == "use_dust": await q.answer(); await handle_use_dust(update, context)
-        elif data == "top_scout": await q.answer(); await top_scout_callback(update, context)
-        elif data == "achievements": await q.answer(); await achievements_callback(update, context, page=0)
-        elif data.startswith("ach_page_"):
-            page = int(data.split("_")[-1])
-            await q.answer(); await achievements_callback(update, context, page=page)
-        elif data == "my_blunts":
-            await q.answer(); await my_blunts_callback(update, context, page=0)
-        elif data.startswith("blunts_page_"):
-            page = int(data.split("_")[-1])
-            await q.answer(); await my_blunts_callback(update, context, page=page)
-        elif data.startswith("share_blunt_"):
-            await q.answer()
-            blunt_id = data.replace("share_blunt_", "")
-            p = await get_player_cached(uid)
-            if not p: return
-            bot_username = (await context.bot.get_me()).username
-            ref_link = f"https://t.me/{bot_username}?start=blunt_{blunt_id}"
-            inv = p.get("inventory", [])
-            item = next((it for it in inv if it.get("id")==blunt_id), None)
-            username = html.escape(p["username"])
-            if item:
-                name = item["name"]; rarity = item.get("rarity","common")
-                color = {"legendary":"🟡","epic":"🟣","rare":"🔵"}.get(rarity,"🟢")
-                text = f"<b>{username}</b>\n\n{color} <b>Имя NFT бланта: «{name}»</b>\n🧬 <b>Редкость:</b> {rarity} {color}\n🩸 <b>Серийный номер:</b> #{item.get('rare_number','?-????')}\n📜 <b>Реакция:</b> <i>{item.get('reaction','')}</i>\n\n<i>Присоединяйся к Искажению:</i>\n{ref_link}"
-            else: text = f"Блант не найден.\n{ref_link}"
-            await send_whisper_dm(update, context, text)
-        elif data.startswith("blunt_details_"):
-            await q.answer()
-            blunt_id = data.replace("blunt_details_", "")
-            p = await get_player_cached(uid)
-            if not p: return
-            inv = p.get("inventory", [])
-            item = next((it for it in inv if it.get("id")==blunt_id), None)
-            if not item:
-                await q.answer("Блант не найден.")
-                return
-            name = item["name"]
-            rarity = item.get("rarity", "common")
-            color = {"legendary":"🟡","epic":"🟣","rare":"🔵"}.get(rarity,"🟢")
-            rare_number = item.get("rare_number","?-????")
-            hash_code = item.get("hash","0x????...????")
-            reaction = item.get("reaction","")
+                await q.message.edit_text(menu_text, reply_markup=kb, parse_mode='HTML')
+            except Exception:
+                await q.message.reply_text(menu_text, reply_markup=kb, parse_mode='HTML')
+            return
 
-            text = (
-                f"<b>💎 ДЕТАЛИ NFT БЛАНТА</b>\n\n"
-                f"{color} <b>«{name}»</b>\n"
-                f"<b>Редкость:</b> <i>{rarity}</i> {color}\n\n"
-                f"🩸 <b>Серийный номер:</b> <i>#{rare_number}</i>\n\n"
-                f"🔗 <b>Хеш:</b> <i>{hash_code}</i>\n\n"
-                f"📜 <b>Реакция:</b> <i>{reaction}</i>\n\n"
-            )
-            if "owner_history" in item:
-                text += "🕊️ <b>История владения:</b>\n"
-                for entry in item["owner_history"]:
-                    date_str = format_date(entry.get('since',''))
-                    text += f"   <b>@{entry.get('user_id','?')}</b> — {date_str}\n"
+        if data == "bush_preview" or data == "pet_preview":
+            await q.answer("❌ Доступно с ранга ⚔️ Ветеран (5000 OAC 🍬)", show_alert=True)
+            return
 
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔗 Поделиться", callback_data=f"share_blunt_{blunt_id}")],
-                [InlineKeyboardButton("🏆 К списку", callback_data="my_blunts")]
-            ])
-
-            file_id = BLUNT_IMAGES.get(rarity)
-            if file_id:
-                await q.message.delete()
-                await context.bot.send_photo(
-                    chat_id=q.message.chat.id,
-                    photo=file_id,
-                    caption=text,
-                    reply_markup=kb,
-                    parse_mode='HTML'
-                )
-            else:
-                await q.message.edit_text(text=text, reply_markup=kb, parse_mode='HTML')
-        elif data == "lab_start": await q.answer(); await lab_enter(update, context)
-        elif data == "lab_enter_confirm": await q.answer(); await lab_enter_confirm(update, context)
-        elif data.startswith("lab_option_"): await q.answer(); await handle_lab_option(update, context, int(data.split("_")[-1]))
-        elif data == "lab_escape": await q.answer(); await show_lab_final(update, context)
-        elif data == "guild_shrine": await q.answer(); await guild_shrine_callback(update, context)
-        elif data in ("shrine_donate_100", "shrine_donate_500"):
-            amount = 100 if data == "shrine_donate_100" else 500
-            p = await get_player_cached(uid)
-            if p["balance"] < amount:
-                await q.answer("Недостаточно OAC.")
-                return
-            await update_balance(uid, p["username"], -amount)
-            async with db_pool.acquire() as conn:
-                await conn.execute("UPDATE players SET donated = COALESCE(donated,0) + $1 WHERE user_id = $2", amount, uid)
-            invalidate_cache(uid)
-            await send_whisper_dm(update, context, f"💎 Ты внёс {amount} OAC в Храм. Спасибо, Странник!")
-        elif data == "confess": await q.answer(); await confess_callback(update, context)
-        elif data == "pet_preview": await q.answer("❌ Доступно с ранга ⚔️ Ветеран (5000 OAC 🍬)", show_alert=True)
-        elif data == "bush_preview": await q.answer("❌ Доступно с ранга ⚔️ Ветеран (5000 OAC 🍬)", show_alert=True)
-        elif data == "activate_menu":
+        if data == "activate_menu":
             await q.answer()
             user = q.from_user
             uname = user.username or user.first_name
@@ -2805,7 +2713,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                  InlineKeyboardButton("⚜️ Светлая Гильдия", callback_data="guild_join_WHITE")]
             ])
             await q.message.edit_text(bonus + welcome, reply_markup=guild_kb, parse_mode='HTML')
-        elif data == "skins_menu":
+            return
+
+        if data == "skins_menu":
             await q.answer()
             kb = InlineKeyboardMarkup([
                 [InlineKeyboardButton("💬 Выбрать титул", callback_data="choose_title")],
@@ -2813,10 +2723,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("🔙 Назад", callback_data="profile")]
             ])
             await q.message.edit_text("<b>🎨 СКИНЫ</b>\n\nВыбери, что хочешь изменить.", reply_markup=kb, parse_mode='HTML')
-        elif data == "choose_title":
+            return
+
+        if data == "choose_title":
             await q.answer()
             p = await get_player_cached(uid)
-            titles = (p["titles"] or "").split()
+            titles = (p.get("titles") or "").split()
             if not titles:
                 await send_whisper_dm(update, context, "У тебя пока нет титулов.")
                 return
@@ -2830,25 +2742,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 kb_rows.append([InlineKeyboardButton(f"{title}{mark}", callback_data=f"set_title_{title}")])
             kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="skins_menu")])
             await q.message.edit_text("<b>🎨 ВЫБОР ТИТУЛА</b>\n\nВыбери титул:", reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode='HTML')
-        elif data.startswith("set_title_"):
-            await q.answer()
-            title = data.replace("set_title_", "")
-            p = await get_player_cached(uid)
-            skins = p.get("profile_skins", {})
-            if not isinstance(skins, dict):
-                skins = {}
-            skins["active_title"] = title
-            async with db_pool.acquire() as conn:
-                await conn.execute("UPDATE players SET profile_skins=$1 WHERE user_id=$2", json.dumps(skins), uid)
-            invalidate_cache(uid)
-            await send_whisper_dm(update, context, f"✨ Титул «{title}» активирован!")
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("💬 Выбрать титул", callback_data="choose_title")],
-                [InlineKeyboardButton("🖼️ Выбрать фон", callback_data="choose_bg")],
-                [InlineKeyboardButton("🔙 Назад", callback_data="profile")]
-            ])
-            await q.message.edit_text("<b>🎨 СКИНЫ</b>\n\nВыбери, что хочешь изменить.", reply_markup=kb, parse_mode='HTML')
-        elif data == "choose_bg":
+            return
+
+        if data == "choose_bg":
             await q.answer()
             p = await get_player_cached(uid)
             skins = p.get("profile_skins", {})
@@ -2865,26 +2761,104 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 kb_rows.append([InlineKeyboardButton(f"{bg}{mark}", callback_data=f"set_bg_{bg}")])
             kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="skins_menu")])
             await q.message.edit_text("<b>🖼️ ВЫБОР ФОНА</b>\n\nВыбери фон:", reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode='HTML')
-        elif data.startswith("set_bg_"):
+            return
+
+        # 2. Обработчики с параметрами (пагинация, колбэки с префиксами)
+        if data.startswith("ach_page_"):
+            page = int(data.split("_")[-1])
+            await achievements_callback(update, context, page=page)
+            return
+
+        if data.startswith("blunts_page_"):
+            page = int(data.split("_")[-1])
+            await my_blunts_callback(update, context, page=page)
+            return
+
+        if data.startswith("share_blunt_"):
             await q.answer()
-            bg = data.replace("set_bg_", "")
+            blunt_id = data.replace("share_blunt_", "")
             p = await get_player_cached(uid)
-            skins = p.get("profile_skins", {})
-            if not isinstance(skins, dict):
-                skins = {}
-            skins["active_background"] = bg
-            async with db_pool.acquire() as conn:
-                await conn.execute("UPDATE players SET profile_skins=$1 WHERE user_id=$2", json.dumps(skins), uid)
-            invalidate_cache(uid)
-            await send_whisper_dm(update, context, f"✨ Фон «{bg}» активирован!")
+            if not p: return
+            bot_username = (await context.bot.get_me()).username
+            ref_link = f"https://t.me/{bot_username}?start=blunt_{blunt_id}"
+            inv = p.get("inventory", [])
+            item = next((it for it in inv if it.get("id")==blunt_id), None)
+            username = html.escape(p["username"])
+            if item:
+                name = item["name"]; rarity = item.get("rarity","common")
+                color = {"legendary":"🟡","epic":"🟣","rare":"🔵"}.get(rarity,"🟢")
+                text = f"<b>{username}</b>\n\n{color} <b>Имя NFT бланта: «{name}»</b>\n🧬 <b>Редкость:</b> {rarity} {color}\n🩸 <b>Серийный номер:</b> #{item.get('rare_number','?-????')}\n📜 <b>Реакция:</b> <i>{item.get('reaction','')}</i>\n\n<i>Присоединяйся к Искажению:</i>\n{ref_link}"
+            else: text = f"Блант не найден.\n{ref_link}"
+            await send_whisper_dm(update, context, text)
+            return
+
+        if data.startswith("blunt_details_"):
+            await q.answer()
+            blunt_id = data.replace("blunt_details_", "")
+            p = await get_player_cached(uid)
+            if not p: return
+            inv = p.get("inventory", [])
+            item = next((it for it in inv if it.get("id")==blunt_id), None)
+            if not item:
+                await q.answer("Блант не найден.")
+                return
+            name = item["name"]
+            rarity = item.get("rarity", "common")
+            color = {"legendary":"🟡","epic":"🟣","rare":"🔵"}.get(rarity,"🟢")
+            rare_number = item.get("rare_number","?-????")
+            hash_code = item.get("hash","0x????...????")
+            reaction = item.get("reaction","")
+            text = (
+                f"<b>💎 ДЕТАЛИ NFT БЛАНТА</b>\n\n"
+                f"{color} <b>«{name}»</b>\n"
+                f"<b>Редкость:</b> <i>{rarity}</i> {color}\n\n"
+                f"🩸 <b>Серийный номер:</b> <i>#{rare_number}</i>\n\n"
+                f"🔗 <b>Хеш:</b> <i>{hash_code}</i>\n\n"
+                f"📜 <b>Реакция:</b> <i>{reaction}</i>\n\n"
+            )
+            if "owner_history" in item:
+                text += "🕊️ <b>История владения:</b>\n"
+                for entry in item["owner_history"]:
+                    date_str = format_date(entry.get('since',''))
+                    text += f"   <b>@{entry.get('user_id','?')}</b> — {date_str}\n"
             kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("💬 Выбрать титул", callback_data="choose_title")],
-                [InlineKeyboardButton("🖼️ Выбрать фон", callback_data="choose_bg")],
-                [InlineKeyboardButton("🔙 Назад", callback_data="profile")]
+                [InlineKeyboardButton("🔗 Поделиться", callback_data=f"share_blunt_{blunt_id}")],
+                [InlineKeyboardButton("🏆 К списку", callback_data="my_blunts")]
             ])
-            await q.message.edit_text("<b>🎨 СКИНЫ</b>\n\nВыбери, что хочешь изменить.", reply_markup=kb, parse_mode='HTML')
-        elif data in ("guild_join_BLACK", "guild_join_WHITE"):
-            await q.answer(); guild = "BLACK" if data == "guild_join_BLACK" else "WHITE"
+            file_id = BLUNT_IMAGES.get(rarity)
+            if file_id:
+                await q.message.delete()
+                await context.bot.send_photo(
+                    chat_id=q.message.chat.id,
+                    photo=file_id,
+                    caption=text,
+                    reply_markup=kb,
+                    parse_mode='HTML'
+                )
+            else:
+                await q.message.edit_text(text=text, reply_markup=kb, parse_mode='HTML')
+            return
+
+        if data.startswith("lab_option_"):
+            await handle_lab_option(update, context, int(data.split("_")[-1]))
+            return
+
+        if data in ("shrine_donate_100", "shrine_donate_500"):
+            amount = 100 if data == "shrine_donate_100" else 500
+            p = await get_player_cached(uid)
+            if p["balance"] < amount:
+                await q.answer("Недостаточно OAC.")
+                return
+            await update_balance(uid, p["username"], -amount)
+            async with db_pool.acquire() as conn:
+                await conn.execute("UPDATE players SET donated = COALESCE(donated,0) + $1 WHERE user_id = $2", amount, uid)
+            invalidate_cache(uid)
+            await send_whisper_dm(update, context, f"💎 Ты внёс {amount} OAC в Храм. Спасибо, Странник!")
+            return
+
+        if data in ("guild_join_BLACK", "guild_join_WHITE"):
+            await q.answer()
+            guild = "BLACK" if data == "guild_join_BLACK" else "WHITE"
             await set_guild(uid, guild)
             g_emoji = "🕯️" if guild=="BLACK" else "⚜️"; g_name = "Тёмная" if guild=="BLACK" else "Светлая"
             uname = html.escape(q.from_user.username or q.from_user.first_name)
@@ -2895,9 +2869,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     text=f"<b><i>🩸 ЭХО ИСКАЖЕНИЯ</i></b>\n\n⚜️ <b>@{uname}</b> вплёл свою нить в {g_emoji} <b>{g_name} Гильдию</b>.\n<i>🕯️ Искажение приняло нового странника.</i>", parse_mode='HTML')
             except Exception as e:
                 logger.error(f"Ошибка отправки в канал: {e}")
-        elif data == "shop":
-            await shop_callback(update, context)
-        else: await q.answer("Неизвестная команда.")
+            return
+
+        # 3. Простые колбэки из словаря
+        handler = CALLBACKS.get(data)
+        if handler:
+            await q.answer()
+            await handler(update, context)
+        else:
+            await q.answer("Неизвестная команда.")
+
     except Exception as e:
         logger.error(f"Button error: {e}", exc_info=True)
         await q.answer(f"❌ Ошибка: {e}", show_alert=True)
