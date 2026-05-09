@@ -1198,11 +1198,13 @@ async def farm_callback(update, context):
         f"<b>{progress_bar_str}</b>\n\n"
         f"{rank_progress}"
     )
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
-
-    # Анимированный прогресс-бар (без падения при TimedOut)
-    await animate_progress_bar(update, context, title="🍬 Фармим...")
-    await safe_edit(update, context, text, reply_markup=kb)
+    # Анимация, затем редактируем её сообщение в результат (без кнопок)
+    anim_msg = await animate_progress_bar(update, context, title="🍬 Фармим...")
+    if anim_msg is not None:
+        await anim_msg.edit_text(text, parse_mode='HTML')
+    else:
+        # fallback – новое сообщение, не трогаем меню
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=text, parse_mode='HTML')
 
     await check_rank_up(context, uid, uname, old_bal, new_balance)
     await check_achievements(uid, context)
@@ -1271,14 +1273,12 @@ async def handle_craft_normal(update, context):
         f"<b>{progress_bar_str}</b>\n\n"
         f"<b>🍃 Блантов в свёртке:</b> <b>{p_new['blunts']}</b>"
     )
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🌿 Скрафтить ещё", callback_data="craft_normal")],
-        [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
-    ])
-
-    await animate_progress_bar(update, context, title="🌿 Скручиваем Блант...")
-    await safe_edit(update, context, text, reply_markup=kb)
-    await check_achievements(uid, context)
+    anim_msg = await animate_progress_bar(update, context, title="🌿 Скручиваем Блант...")
+    if anim_msg is not None:
+        await anim_msg.edit_text(text, parse_mode='HTML')
+    else:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=text, parse_mode='HTML')
+        await check_achievements(uid, context)
 
 @error_handler
 async def handle_craft_named(update, context):
@@ -1667,6 +1667,8 @@ async def ritual_callback(update, context):
     anim_msg = await animate_progress_bar(update, context, title="🕯️ Ритуал проводится...")
     if anim_msg is not None:
         await anim_msg.edit_text(text, parse_mode='HTML')
+    else:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=text, parse_mode='HTML')
     else:
         await send_whisper_dm(update, context, text)
     await check_rank_up(context, uid, uname, old_bal, new_balance)
