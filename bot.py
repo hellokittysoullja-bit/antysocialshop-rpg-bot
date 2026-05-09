@@ -1635,7 +1635,9 @@ async def profile_callback(update, context):
     uid = user.id; uname = html.escape(user.username or user.first_name)
     p = await get_player_cached(uid)
     if not p: await msg.reply_text("Сначала активируйся: /start"); return
-    bal, bl, guild = p["balance"], p["blunts"], p["guild"]
+    bal = p.get("balance", 0) or 0
+    bl = p.get("blunts", 0) or 0
+    guild = p.get("guild") or ""
     rank_emoji, rank_name = "🪓", "Рекрут"
     for emoji, threshold, _ in RANKS:
         if bal >= threshold:
