@@ -321,7 +321,44 @@ async def check_achievements(user_id, context):
                 condition_met = True
             elif ach_id == "craft_1" and p.get("craft_count", 0) >= 1:
                 condition_met = True
-            # ... все остальные условия (оставьте как в моём предыдущем полном коде)
+            elif ach_id == "smoke_1" and p.get("smoke_count", 0) >= 1:
+                condition_met = True
+            elif ach_id == "balance_1000" and balance >= 1000:
+                condition_met = True
+            elif ach_id == "smoke_10" and p.get("smoke_count", 0) >= 10:
+                condition_met = True
+            elif ach_id == "craft_15" and p.get("craft_count", 0) >= 15:
+                condition_met = True
+            elif ach_id == "ritual_5" and p.get("ritual_count", 0) >= 5:
+                condition_met = True
+            elif ach_id == "craft_50" and p.get("craft_count", 0) >= 50:
+                condition_met = True
+            elif ach_id == "smoke_25" and p.get("smoke_count", 0) >= 25:
+                condition_met = True
+            elif ach_id == "lab_first" and p.get("lab_chests", 0) >= 1:
+                condition_met = True
+            elif ach_id == "referral_1" and p.get("referral_count", 0) >= 1:
+                condition_met = True
+            elif ach_id == "streak_7" and p.get("login_streak", 0) >= 7:
+                condition_met = True
+            elif ach_id == "balance_20000" and balance >= 20000:
+                condition_met = True
+            elif ach_id == "lab_chest_3" and p.get("lab_chests", 0) >= 3:
+                condition_met = True
+            elif ach_id == "rank_phantom" and balance >= 20000:
+                condition_met = True
+            elif ach_id == "balance_50000" and balance >= 50000:
+                condition_met = True
+            elif ach_id == "check_10" and p.get("check_count", 0) >= 10:
+                condition_met = True
+            elif ach_id == "lab_death_5" and p.get("lab_deaths", 0) >= 5:
+                condition_met = True
+            elif ach_id == "lab_chest_10" and p.get("lab_chests", 0) >= 10:
+                condition_met = True
+            elif ach_id == "craft_250" and p.get("craft_count", 0) >= 250:
+                condition_met = True
+            elif ach_id == "alchemy_15" and p.get("alchemy_count", 0) >= 15:
+                condition_met = True
             if condition_met and ach_id not in awarded:
                 await conn.execute(
                     "INSERT INTO achievements_awarded(user_id, ach_id, awarded_at) VALUES($1, $2, NOW()) ON CONFLICT DO NOTHING",
