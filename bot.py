@@ -1770,7 +1770,7 @@ async def collect_callback(update, context):
             parse_mode='HTML'
         )
 
-# Профиль – сеньорская версия (защищена от # Профиль – финальная версия (NoneType исключён навсегда)
+# Профиль – премиум-карточка, сеньорская версия (аватарка + текст + кнопки)
 @error_handler
 @rate_limit(2)
 async def profile_callback(update, context):
@@ -1782,6 +1782,7 @@ async def profile_callback(update, context):
         await msg.reply_text("Сначала активируйся: /start")
         return
 
+    # Изоляция данных (защита от None)
     bal = p.get("balance", 0) or 0
     bl = p.get("blunts", 0) or 0
     guild = p.get("guild") or ""
@@ -1790,9 +1791,11 @@ async def profile_callback(update, context):
     rank_emoji, rank_name = "🪓", "Рекрут"
     for emoji, threshold, _ in RANKS:
         if bal >= threshold:
-            parts = emoji.split(' ', 1)
-            rank_emoji = parts[0]
-            rank_name = parts[1] if len(parts) > 1 else ""
+            rank_emoji = emoji
+            rank_name = emoji_to_name(emoji)
+
+    # Жирное название ранга для отображения
+    rank_name_bold = f"<b>{rank_name}</b>"
 
     # Гильдия
     g_emoji = ""
@@ -1822,15 +1825,8 @@ async def profile_callback(update, context):
         badges.append("👁️")
     badge_str = ' '.join(badges) if badges else "—"
 
-    try:
-        photos = await context.bot.get_user_profile_photos(uid, limit=1)
-        if photos.photos:
-            await context.bot.send_photo(chat_id=msg.chat.id, photo=photos.photos[0][0].file_id,
-                                         caption="📸 Аватарка странника")
-    except:
-        pass
-
     rank_progress = get_rank_progress(bal)
+
     text = (
         f"<b>⚜️ ПРОФИЛЬ</b>\n"
         f"👤 <b>{uname}</b>{g_emoji}\n"
@@ -1840,14 +1836,12 @@ async def profile_callback(update, context):
         f"🌿 <b>Блантов в свёртке:</b> <b>{bl}</b>\n"
         f"🪴 <b>Куст:</b> <b>+{30 * (3 if bal >= 20000 else 2 if bal >= 5000 else 0)} OAC/ч</b>\n"
         f"🧬 <b>Титул:</b> {active_title}\n"
-        f"🧠 <b>Нейро-статус:</b> {neuro}\n\n"
+        f"🧠 <b>Нейро-статус:</b> <i>{neuro}</i>\n\n"
         f"🎖️ <b>Заслуги:</b> {badge_str}"
     )
 
     named = [it for it in inv_data if it.get("type") == "named"]
     rarity_order = {"legendary": 0, "epic": 1, "rare": 2, "common": 3}
-
-    # ✅ ИСПРАВЛЕННАЯ СОРТИРОВКА – убрали NoneType
     named.sort(key=lambda x: (rarity_order.get(x.get("rarity") or "common", 3),
                                x.get("serial") or 999999))
 
@@ -1871,7 +1865,28 @@ async def profile_callback(update, context):
     kb_rows.append([InlineKeyboardButton("🎨 Кастомизация", callback_data="skins_menu"),
                     InlineKeyboardButton("🏆 Достижения", callback_data="achievements")])
     kb_rows.append([InlineKeyboardButton("🏰 В меню", callback_data="menu")])
-    await msg.reply_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb_rows))
+    kb = InlineKeyboardMarkup(kb_rows)
+
+    # Получаем аватарку
+    photo_id = None
+    try:
+        photos = await context.bot.get_user_profile_photos(uid, limit=1)
+        if photos.photos:
+            photo_id = photos.photos[0][0].file_id
+    except:
+        pass
+
+    # Отправка: одно сообщение с аватаркой, текстом и кнопками (или просто текст, если фото нет)
+    if photo_id:
+        await context.bot.send_photo(
+            chat_id=msg.chat.id,
+            photo=photo_id,
+            caption=text,
+            reply_markup=kb,
+            parse_mode='HTML'
+        )
+    else:
+        await msg.reply_text(text, reply_markup=kb, parse_mode='HTML')
 
 # Все бланты
 @error_handler
