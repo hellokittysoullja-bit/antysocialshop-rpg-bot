@@ -311,6 +311,47 @@ async def create_named_blunt(user_id, name, rarity=None, conn=None):
         invalidate_cache(user_id)
         return item
 
+async def _award_achievement_rewards(user_id, player, reward_text, context):
+    if not reward_text:
+        return
+    parts = [p.strip() for p in reward_text.split(",") if p.strip()]
+    for part in parts:
+        if part.startswith("+") and "OAC" in part:
+            clean = part.replace(" ", "")
+            m = re.search(r"\+(\d+)", clean)
+            if m:
+                amount = int(m.group(1))
+                await update_balance(user_id, player.get("username"), amount)
+                player["balance"] = (player.get("balance", 0) + amount)
+        elif part.startswith("Титул "):
+            await add_title(user_id, part.replace("Титул ", "").strip())
+        elif part.startswith("Фон "):
+            bg = part.replace("Фон ", "").strip()
+            skins = player.get("profile_skins", {})
+            if not isinstance(skins, dict):
+                skins = {}
+            unlocked = skins.get("unlocked_backgrounds", [])
+            if bg and bg not in unlocked:
+                unlocked.append(bg)
+            skins["unlocked_backgrounds"] = unlocked
+            async with db_pool.acquire() as conn:
+                await conn.execute("UPDATE players SET profile_skins=$1 WHERE user_id=$2", json.dumps(skins), user_id)
+            invalidate_cache(user_id)
+        elif part.startswith("Рамка "):
+            frame = part.replace("Рамка ", "").strip()
+            skins = player.get("profile_skins", {})
+            if not isinstance(skins, dict):
+                skins = {}
+            unlocked = skins.get("unlocked_frames", [])
+            if frame and frame not in unlocked:
+                unlocked.append(frame)
+            skins["unlocked_frames"] = unlocked
+            async with db_pool.acquire() as conn:
+                await conn.execute("UPDATE players SET profile_skins=$1 WHERE user_id=$2", json.dumps(skins), user_id)
+            invalidate_cache(user_id)
+        else:
+            logger.warning(f"Неизвестный формат награды: {part} для пользователя {user_id}")
+
 async def check_achievements(user_id, context):
     p = await get_player_cached(user_id)
     if not p:
