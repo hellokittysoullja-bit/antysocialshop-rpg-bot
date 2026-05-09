@@ -129,7 +129,6 @@ async def get_player_cached(user_id):
         if data:
             p = json.loads(data)
             if isinstance(p, dict):
-                # Возвращаем как есть, Redis хранит уже нормализованные данные
                 return p
 
     # Fallback – старый кэш в памяти
@@ -141,7 +140,7 @@ async def get_player_cached(user_id):
         row = await conn.fetchrow("SELECT * FROM players WHERE user_id=$1", user_id)
     if row:
         p = dict(row)
-        # Приводим все числовые поля к 0, убираем None
+        # Нормализация числовых полей – ни одного None
         numeric_fields = [
             'balance', 'blunts', 'farm_count', 'craft_count', 'smoke_count',
             'ritual_count', 'referral_count', 'check_count', 'lab_chests',
@@ -150,10 +149,11 @@ async def get_player_cached(user_id):
         ]
         for field in numeric_fields:
             p[field] = p.get(field) or 0
-        # Защита инвентаря и скинов
+        # Инвентарь и скины
         p["inventory"] = _json_safe_load(p.get("inventory"), [])
         p["profile_skins"] = _json_safe_load(p.get("profile_skins"), {})
-        # Сохраняем в Redis (TTL 10 секунд) или в словарь
+
+        # Сохраняем в кэш
         if redis:
             await redis.setex(key, 10, json.dumps(p, default=str))
         else:
