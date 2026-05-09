@@ -840,6 +840,21 @@ async def send_reply(update: Update, context, text, reply_markup=None, parse_mod
         await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=reply_markup, parse_mode=parse_mode)
     except Exception as e:
         logger.error(f"send_reply unexpected: {e}", exc_info=True)
+        
+async def animate_progress_bar(update, context, title="", duration=0.8, steps=10):
+    """Показывает анимированный прогресс-бар и возвращает сообщение для финального результата."""
+    chat_id = update.effective_chat.id
+    msg = await context.bot.send_message(chat_id=chat_id, text=f"{title}\n[░░░░░░░░░░] 0%")
+    for i in range(1, steps+1):
+        filled = "▓" * i
+        empty = "░" * (10 - i)
+        percent = i * 10
+        await asyncio.sleep(duration / steps)
+        try:
+            await msg.edit_text(f"{title}\n[{filled}{empty}] {percent}%", parse_mode='HTML')
+        except BadRequest:
+            pass
+    return msg
 
 def get_medal_target(count, medals_list):
     """Возвращает следующую цель (порог) для прогресса медалей."""
@@ -1014,7 +1029,7 @@ async def process_daily_login(user_id, context):
 async def grant_title(user_id, emoji, name, context):
     await add_title(user_id, emoji)
 
-# Продолжение # Фарм (исправлен)
+# Продолжение # Фарм + анимация
 @error_handler
 @rate_limit(3)
 async def farm_callback(update, context):
@@ -1084,7 +1099,11 @@ async def farm_callback(update, context):
         f"{rank_progress}"
     )
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
-    await safe_edit(update, context, text, reply_markup=kb)
+
+    # Анимированный прогресс-бар вместо мгновенного ответа
+    anim_msg = await animate_progress_bar(update, context, title="🍬 Фармим...")
+    await anim_msg.edit_text(text, reply_markup=kb, parse_mode='HTML')
+
     await check_rank_up(context, uid, uname, old_bal, new_balance)
     await check_achievements(uid, context)
     
@@ -1106,8 +1125,8 @@ async def craft_callback(update, context):
     kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="menu")])
     await send_reply(update, context, text, InlineKeyboardMarkup(kb_rows))
 
-@errror_handler
-@rate_limit(3)
+@error_handler
+@rate_limit(2)
 async def handle_craft_normal(update, context):
     query = update.callback_query
     await query.answer()
@@ -1156,7 +1175,9 @@ async def handle_craft_normal(update, context):
         [InlineKeyboardButton("🌿 Скрафтить ещё", callback_data="craft_normal")],
         [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
     ])
-    await safe_edit(update, context, text, reply_markup=kb)
+
+    anim_msg = await animate_progress_bar(update, context, title="🌿 Скручиваем...")
+    await anim_msg.edit_text(text, reply_markup=kb, parse_mode='HTML')
     await check_achievements(uid, context)
 
 @error_handler
@@ -1542,7 +1563,9 @@ async def ritual_callback(update, context):
         f"<b>🕯️ Ритуалы:</b> {new_count}/{target}\n"
         f"<b>{progress_bar_str}</b>"
     )
-    await send_whisper_dm(update, context, text)
+
+    anim_msg = await animate_progress_bar(update, context, title="🕯️ Проводим ритуал...")
+    await anim_msg.edit_text(text, parse_mode='HTML')
     await check_rank_up(context, uid, uname, old_bal, new_balance)
     await check_achievements(uid, context)
 
