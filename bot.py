@@ -1301,7 +1301,6 @@ async def handle_craft_normal(update, context):
             await add_war_score(uid, 10, conn=conn)
             if random.random() < 0.05:
                 await update_blunts(uid, uname, 1, conn=conn)
-                await send_whisper(context, "@guild_antysocial", f"⚡ @{html.escape(uname)} высек Искру Искажения из рутины. +1 🌿")
         p_new = await get_player_cached(uid)
 
     new_count = p_new["craft_count"]
