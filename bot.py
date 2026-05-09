@@ -1662,13 +1662,10 @@ async def ritual_callback(update, context):
         f"<b>{progress_bar_str}</b>"
     )
 
-    anim_msg = await animate_progress_bar(update, context, title="🕯️ Ритуал проводится...")
     if anim_msg is not None:
         await anim_msg.edit_text(text, parse_mode='HTML')
     else:
         await context.bot.send_message(chat_id=update.effective_chat.id, text=text, parse_mode='HTML')
-    else:
-        await send_whisper_dm(update, context, text)
     await check_rank_up(context, uid, uname, old_bal, new_balance)
     await check_achievements(uid, context)
 
