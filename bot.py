@@ -2838,6 +2838,23 @@ if __name__ == "__main__":
     job.run_repeating(weekly_guild_rating, interval=7*24*3600, first=max(1, (next_saturday - now).total_seconds()))
     job.run_repeating(keep_db_alive, interval=180, first=10)
 
+    # === GRACEFUL SHUTDOWN ===
+    async def shutdown():
+        logger.info("Завершение работы, закрываю соединения...")
+        if db_pool:
+            await db_pool.close()
+        if redis:
+            await redis.close()
+        logger.info("Бот остановлен.")
+
+    import signal
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, lambda: asyncio.ensure_future(shutdown()))
+        except NotImplementedError:
+            # На Windows сигналы могут не поддерживаться – ничего страшного
+            pass
+
     print("BOT READY")
     app.run_polling()
     loop.run_until_complete(close_db_pool())
