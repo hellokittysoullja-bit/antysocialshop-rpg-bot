@@ -1123,11 +1123,8 @@ async def farm_callback(update, context):
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
 
     # Анимированный прогресс-бар (без падения при TimedOut)
-    anim_msg = await animate_progress_bar(update, context, title="🍬 Фармим...")
-    if anim_msg is not None:
-        await anim_msg.edit_text(text, reply_markup=kb, parse_mode='HTML')
-    else:
-        await safe_edit(update, context, text, reply_markup=kb)
+    await animate_progress_bar(update, context, title="🍬 Фармим...")
+    await safe_edit(update, context, text, reply_markup=kb)
 
     await check_rank_up(context, uid, uname, old_bal, new_balance)
     await check_achievements(uid, context)
@@ -1201,11 +1198,8 @@ async def handle_craft_normal(update, context):
         [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
     ])
 
-    anim_msg = await animate_progress_bar(update, context, title="🌿 Скручиваем...")
-    if anim_msg is not None:
-        await anim_msg.edit_text(text, reply_markup=kb, parse_mode='HTML')
-    else:
-        await safe_edit(update, context, text, reply_markup=kb)
+    await animate_progress_bar(update, context, title="🌿 Скручиваем Блант...")
+    await safe_edit(update, context, text, reply_markup=kb)
     await check_achievements(uid, context)
 
 @error_handler
