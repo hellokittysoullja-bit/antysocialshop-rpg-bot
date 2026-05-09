@@ -854,23 +854,27 @@ async def send_reply(update: Update, context, text, reply_markup=None, parse_mod
     except Exception as e:
         logger.error(f"send_reply unexpected: {e}", exc_info=True)
         
-async def animate_progress_bar(update, context, title="", duration=0.8, steps=10):
-    """Создаёт анимированный прогресс-бар, устойчивый к ошибкам Telegram."""
+async def animate_progress_bar(update, context, title="", duration=0.4, steps=5):
+    """Быстрая и устойчивая анимация прогресс-бара."""
     chat_id = update.effective_chat.id
     try:
         msg = await context.bot.send_message(chat_id=chat_id, text=f"{title}\n[░░░░░░░░░░] 0%")
     except Exception:
-        return None   # если не можем отправить сообщение, просто пропускаем анимацию
+        return None
 
     for i in range(1, steps + 1):
-        filled = "▓" * i
-        empty = "░" * (10 - i)
-        percent = i * 10
+        filled = "▓" * (i * 2)          # 2 символа на шаг, всего 10
+        empty = "░" * (10 - len(filled))
+        percent = i * (100 // steps)
         await asyncio.sleep(duration / steps)
         try:
-            await msg.edit_text(f"{title}\n[{filled}{empty}] {percent}%", parse_mode='HTML')
-        except Exception:
-            # если редактирование не удалось, прекращаем анимацию, но не падаем
+            # asyncio.wait_for предотвращает зависание
+            await asyncio.wait_for(
+                msg.edit_text(f"{title}\n[{filled}{empty}] {percent}%", parse_mode='HTML'),
+                timeout=0.5
+            )
+        except (BadRequest, asyncio.TimeoutError, Exception):
+            # при любой ошибке прекращаем анимацию и возвращаем что есть
             return msg
     return msg
 
