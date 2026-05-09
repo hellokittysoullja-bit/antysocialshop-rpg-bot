@@ -1628,7 +1628,7 @@ async def collect_callback(update, context):
             parse_mode='HTML'
         )
 
-# Профиль – сеньорская версия (защищена от NoneType)
+# Профиль – сеньорская версия (защищена от # Профиль – финальная версия (NoneType исключён навсегда)
 @error_handler
 async def profile_callback(update, context):
     user, msg = get_user_and_msg(update)
@@ -1639,30 +1639,24 @@ async def profile_callback(update, context):
         await msg.reply_text("Сначала активируйся: /start")
         return
 
-    # === ИЗОЛИЦИЯ ДАННЫХ (защита от None) ===
-    bal   = max(0, p.get("balance", 0) or 0)
-    bl    = max(0, p.get("blunts", 0) or 0)
+    # Полная нормализация всех числовых полей – ни одного None
+    for field in ("balance","blunts","farm_count","craft_count","smoke_count",
+                  "ritual_count","referral_count","check_count","lab_chests",
+                  "lab_deaths","alchemy_count","login_streak","donated","m_essence",
+                  "passive_level","karma","inhaled","keys"):
+        p[field] = p.get(field) or 0
+
+    bal = p["balance"]
+    bl = p["blunts"]
     guild = p.get("guild") or ""
-    farm_c = max(0, p.get("farm_count", 0) or 0)
-    craft_c = max(0, p.get("craft_count", 0) or 0)
-    smoke_c = max(0, p.get("smoke_count", 0) or 0)
-    ritual_c = max(0, p.get("ritual_count", 0) or 0)
-    ref_cnt = max(0, p.get("referral_count", 0) or 0)
-    streak  = max(0, p.get("login_streak", 0) or 0)
-    check_cnt = max(0, p.get("check_count", 0) or 0)
-    lab_chests_cnt = max(0, p.get("lab_chests", 0) or 0)
-    lab_deaths_cnt = max(0, p.get("lab_deaths", 0) or 0)
-    alchemy_cnt = max(0, p.get("alchemy_count", 0) or 0)
-    inhaled = max(0, p.get("inhaled", 0) or 0)
-    donated = max(0, p.get("donated", 0) or 0)
-    m_ess = max(0, p.get("m_essence", 0) or 0)
 
     # === РАНГ ===
     rank_emoji, rank_name = "🪓", "Рекрут"
     for emoji, threshold, _ in RANKS:
         if bal >= threshold:
-            rank_emoji = emoji
-            rank_name = emoji_to_name(emoji)
+            parts = emoji.split(' ', 1)
+            rank_emoji = parts[0]
+            rank_name = parts[1] if len(parts) > 1 else ""
 
     # === ГИЛЬДИЯ ===
     g_emoji = ""
@@ -1671,10 +1665,7 @@ async def profile_callback(update, context):
     elif guild == "WHITE":
         g_emoji = " ⚜️ Светлая Гильдия"
 
-    # === НЕЙРО-СТАТУС ===
     neuro = random.choice(NEURO_STATUSES)
-
-    # === СКИНЫ ===
     skins = p.get("profile_skins", {})
     if isinstance(skins, dict):
         bg = skins.get("active_background", "")
@@ -1683,32 +1674,26 @@ async def profile_callback(update, context):
         bg = ""
         active_title = "—"
 
-    # === ЗАСЛУГИ ===
     inv_data = p.get("inventory", [])
     badges = []
     if any(it.get("rarity") == "legendary" for it in inv_data):
         badges.append("🟡")
-    if ref_cnt > 0:
+    if (p.get("referral_count") or 0) > 0:
         badges.append("🩸")
-    if streak >= 7:
+    if (p.get("login_streak") or 0) >= 7:
         badges.append("🔥")
-    if check_cnt >= 10:
+    if (p.get("check_count") or 0) >= 10:
         badges.append("👁️")
     badge_str = ' '.join(badges) if badges else "—"
 
-    # === АВАТАРКА ===
     try:
         photos = await context.bot.get_user_profile_photos(uid, limit=1)
         if photos.photos:
-            await context.bot.send_photo(chat_id=msg.chat.id,
-                                         photo=photos.photos[0][0].file_id)
+            await context.bot.send_photo(chat_id=msg.chat.id, photo=photos.photos[0][0].file_id)
     except:
         pass
 
-    # === ПРОГРЕСС РАНГА ===
     rank_progress = get_rank_progress(bal)
-
-    # === ОСНОВНОЙ ТЕКСТ ===
     text = (
         f"<b>⚜️ ПРОФИЛЬ</b>\n"
         f"👤 <b>{uname}</b>{g_emoji}\n"
@@ -1722,11 +1707,11 @@ async def profile_callback(update, context):
         f"🎖️ <b>Заслуги:</b> {badge_str}"
     )
 
-    # === ИМЕННЫЕ БЛАНТЫ ===
     named = [it for it in inv_data if it.get("type") == "named"]
     rarity_order = {"legendary": 0, "epic": 1, "rare": 2, "common": 3}
     named.sort(key=lambda x: (rarity_order.get(x.get("rarity", "common"), 3),
                                x.get("serial", 999999)))
+
     if named:
         text += "\n\n<b>💍 Именные бланты (NFT):</b>"
         for item in named[:2]:
@@ -1740,17 +1725,14 @@ async def profile_callback(update, context):
                 f"   🩸 Серийный номер: <b>#{rare_number}</b> · <i>{hash_code}</i>\n"
             )
 
-    # === КНОПКИ ===
     kb_rows = []
     if len(named) > 2:
-        kb_rows.append([InlineKeyboardButton(f"💍 Все именные бланты ({len(named)})",
-                                              callback_data="my_blunts")])
+        kb_rows.append([InlineKeyboardButton(f"💍 Все именные бланты ({len(named)})", callback_data="my_blunts")])
     kb_rows.append([InlineKeyboardButton("📜 Кодекс", callback_data="rules")])
     kb_rows.append([InlineKeyboardButton("🎨 Кастомизация", callback_data="skins_menu"),
                     InlineKeyboardButton("🏆 Достижения", callback_data="achievements")])
     kb_rows.append([InlineKeyboardButton("🏰 В меню", callback_data="menu")])
-    await msg.reply_text(text, parse_mode='HTML',
-                         reply_markup=InlineKeyboardMarkup(kb_rows))
+    await msg.reply_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb_rows))
 
 # Все бланты
 async def my_blunts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, page=0):
