@@ -2011,33 +2011,19 @@ async def guild_info_callback(update, context):
     black_perc = min(100, max(0, int(black_donated / target * 100)))
     white_perc = min(100, max(0, int(white_donated / target * 100)))
 
-    # Прогресс-бары (с защитой)
     def safe_progress_bar(perc):
         perc = max(0, min(100, perc))
         filled = perc // 10
         return "▓" * filled + "░" * (10 - filled)
 
+    # Прогресс-бары под названиями гильдий
     text = (
         f"<b>🕋 ГИЛЬДИИ</b>\n\n"
-        f"🕯️ <b>Тёмная: {black_cnt}</b> странников | <b>{safe_progress_bar(black_perc)} {black_perc}%</b>\n"
-        f"⚜️ <b>Светлая: {white_cnt}</b> странников | <b>{safe_progress_bar(white_perc)} {white_perc}%</b>\n\n"
+        f"🕯️ <b>Тёмная Гильдия: {black_cnt}</b> странников\n"
+        f"<b>{safe_progress_bar(black_perc)} {black_perc}%</b>\n\n"
+        f"⚜️ <b>Светлая Гильдия: {white_cnt}</b> странников\n"
+        f"<b>{safe_progress_bar(white_perc)} {white_perc}%</b>\n\n"
     )
-
-    # Война гильдий (с защитой)
-    async with db_pool.acquire() as conn:
-        war_row = await conn.fetchrow("SELECT war_active FROM guild_weekly WHERE war_active = TRUE LIMIT 1")
-        if war_row:
-            scores = await conn.fetch("SELECT guild, total_farmed FROM guild_weekly")
-            black_score = next((r["total_farmed"] for r in scores if r["guild"] == "BLACK"), 0)
-            white_score = next((r["total_farmed"] for r in scores if r["guild"] == "WHITE"), 0)
-            total_war = max(black_score + white_score, 1)
-            bp = int(black_score / total_war * 100)
-            wp = int(white_score / total_war * 100)
-            text += (
-                f"<b>⚔️ Война гильдий</b>\n\n"
-                f"🕯️ Тёмные: {black_score} очков\n<b>{safe_progress_bar(bp)} {bp}%</b>\n\n"
-                f"⚜️ Светлые: {white_score} очков\n<b>{safe_progress_bar(wp)} {wp}%</b>\n"
-            )
 
     kb_rows = []
     if guild:
@@ -2058,7 +2044,10 @@ async def guild_info_callback(update, context):
                 kb_rows.append([InlineKeyboardButton("🕯️ Ритуал", callback_data="ritual")])
         if guild == "WHITE" and p:
             kb_rows.append([InlineKeyboardButton("⚜️ Исповедь", callback_data="confess")])
-        kb_rows.append([InlineKeyboardButton("🏛️ Храм Гильдии", callback_data="guild_shrine")])
+        kb_rows.append([
+            InlineKeyboardButton("🏛️ Храм", callback_data="guild_shrine"),
+            InlineKeyboardButton("⚔️ Война", callback_data="guild_war")
+        ])
     else:
         text += "<i>Ты пока не в Гильдии.</i>\n"
         kb_rows.append([InlineKeyboardButton("🕯️ Вступить в Тёмную", callback_data="guild_join_BLACK"),
@@ -2092,6 +2081,67 @@ async def guild_shrine_callback(update, context):
         [InlineKeyboardButton("🔙 Назад", callback_data="guild_info")]
     ])
     await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
+    
+@error_handler
+async def guild_war_callback(update, context):
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+    p = await get_player_cached(uid)
+    if not p:
+        await safe_edit(update, context, "Профиль не найден.")
+        return
+
+    async with db_pool.acquire() as conn:
+        war = await conn.fetchrow("SELECT war_active FROM guild_weekly WHERE war_active = TRUE LIMIT 1")
+        if not war:
+            await safe_edit(update, context, "⚔️ Сейчас нет активной войны.", 
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="guild_info")]]))
+            return
+
+        scores = await conn.fetch("SELECT guild, total_farmed FROM guild_weekly")
+        black_score = next((r["total_farmed"] for r in scores if r["guild"] == "BLACK"), 0)
+        white_score = next((r["total_farmed"] for r in scores if r["guild"] == "WHITE"), 0)
+
+        # Топ-3 участников (по очкам)
+        top_black = await conn.fetch(
+            "SELECT username, donated FROM players WHERE guild='BLACK' ORDER BY donated DESC LIMIT 3"
+        )
+        top_white = await conn.fetch(
+            "SELECT username, donated FROM players WHERE guild='WHITE' ORDER BY donated DESC LIMIT 3"
+        )
+
+    total = max(black_score + white_score, 1)
+    bp = int(black_score / total * 100)
+    wp = int(white_score / total * 100)
+
+    def safe_bar(perc):
+        perc = max(0, min(100, perc))
+        filled = perc // 10
+        return "▓" * filled + "░" * (10 - filled)
+
+    text = (
+        f"<b>⚔️ ВОЙНА ГИЛЬДИЙ</b>\n\n"
+        f"🕯️ <b>Тёмная:</b> {black_score} очков\n"
+        f"<b>{safe_bar(bp)} {bp}%</b>\n\n"
+        f"⚜️ <b>Светлая:</b> {white_score} очков\n"
+        f"<b>{safe_bar(wp)} {wp}%</b>\n\n"
+    )
+
+    # Топы
+    if top_black:
+        text += "🕯️ <b>Топ-3 Тёмных:</b>\n"
+        for i, row in enumerate(top_black, 1):
+            text += f"  {i}. {html.escape(row['username'])} — {row['donated']} очков\n"
+    if top_white:
+        text += "⚜️ <b>Топ-3 Светлых:</b>\n"
+        for i, row in enumerate(top_white, 1):
+            text += f"  {i}. {html.escape(row['username'])} — {row['donated']} очков\n"
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔙 Назад", callback_data="guild_info")]
+    ])
+    await safe_edit(update, context, text, reply_markup=kb)
 
 @error_handler
 async def confess_callback(update, context):
@@ -2706,6 +2756,7 @@ CALLBACKS = {
     "lab_enter_confirm": lab_enter_confirm,
     "lab_escape": show_lab_final,
     "guild_shrine": guild_shrine_callback,
+    "guild_war": guild_war_callback,
     "confess": confess_callback,
     "pet_preview": pet_preview,
     "bush_preview": "bush_preview",
