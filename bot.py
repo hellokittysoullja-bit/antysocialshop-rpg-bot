@@ -182,9 +182,16 @@ async def get_player_cached(user_id, fields=None):
     return None
 
 def invalidate_cache(user_id):
-    """Сбрасывает кэш игрока (Redis + in-memory)."""
+    """Сбрасывает кэш игрока (Redis + in-memory). Безопасен для синхронных вызовов."""
     if redis:
-        asyncio.create_task(redis.delete(f"player:{user_id}"))
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.ensure_future(redis.delete(f"player:{user_id}"))
+            else:
+                logger.warning("Redis invalidation skipped – no running loop")
+        except RuntimeError:
+            logger.warning("Redis invalidation skipped – no event loop")
     else:
         player_cache.pop(user_id, None)
 
