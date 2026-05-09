@@ -1725,6 +1725,7 @@ async def collect_callback(update, context):
 
 # Профиль – сеньорская версия (защищена от # Профиль – финальная версия (NoneType исключён навсегда)
 @error_handler
+@rate_limit(2)
 async def profile_callback(update, context):
     user, msg = get_user_and_msg(update)
     uid = user.id
