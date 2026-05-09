@@ -2166,13 +2166,21 @@ async def catalog_callback(update, context):
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔗 Перейти", url="https://t.me/antysocialshop")]])
     await msg.reply_text("<b>🕯️ ANTYSOCIALSHOP · КАТАЛОГ</b>", parse_mode='HTML', reply_markup=kb)
 
-# Удача (с защитой от None)
+# Удача – сеньорская версия (ленивая загрузка, атомарность, safe_edit)
 @error_handler
+@rate_limit(2)
 async def luck_callback(update, context, action=None):
     user, msg = get_user_and_msg(update)
     uid = user.id; uname = html.escape(user.username or user.first_name)
-    p = await get_player_cached(uid)
-    if not p: await msg.reply_text("Сначала активируйся: /start"); return
+
+    # Ленивая загрузка только нужных полей
+    p = await get_player_cached(uid, fields=[
+        "balance", "blunts", "last_daily", "last_berserk", "m_essence"
+    ])
+    if not p:
+        await msg.reply_text("Сначала активируйся: /start")
+        return
+
     bal = p["balance"]; now = datetime.now()
     last_daily = p["last_daily"]
     last_daily_dt = _to_datetime(last_daily)
@@ -2181,6 +2189,8 @@ async def luck_callback(update, context, action=None):
     last_berserk_dt = _to_datetime(last_berserk)
     berserk_available = (bal >= 300 and (not last_berserk_dt or (now - last_berserk_dt) > timedelta(hours=24)))
     veteran_alchemy = (bal >= 5000)
+
+    # Меню
     text = f"<b><i>🎲 ИСПЫТАНИЕ СУДЬБЫ</i></b>\n\n🛡️ <i>у тебя:</i> <code>{bal}</code> 🍬\n\n"
     kb_rows = []
     if wheel_available:
@@ -2203,13 +2213,17 @@ async def luck_callback(update, context, action=None):
         kb_rows.append([InlineKeyboardButton("🔮 Алхимия (⚔️ Ветеран)", callback_data="alchemy_start")])
     kb_rows.append([InlineKeyboardButton("🏰 В меню", callback_data="menu")])
     kb = InlineKeyboardMarkup(kb_rows)
+
+    # === ОБРАБОТЧИКИ ДЕЙСТВИЙ ===
+
+    # 🎡 Колесо
     if action == "luck_wheel":
         if not wheel_available:
             remain = timedelta(hours=24) - (now - last_daily_dt)
             hrs = int(remain.total_seconds()//3600); mins = int((remain.total_seconds()%3600)//60)
             await send_whisper_dm(update, context, f"<b><i>🎡 Колесо не готово</i></b>\n\n💎 Испытаешь через <b>{hrs} ч {mins} мин</b>.")
             return
-        await update_last_daily(uid)
+
         r = random.random()
         if r <= 0.4: prize = 30; prize_type = "oac"
         elif r <= 0.65: prize = 75; prize_type = "oac"
@@ -2221,27 +2235,42 @@ async def luck_callback(update, context, action=None):
             prize = 1000
             double = random.random() < 0.5
             if double: prize *= 2
+
         final_prize = prize
         if context.bot_data.get("happy_hour") and prize_type in ("oac","jackpot"):
             final_prize = prize * HAPPY_HOUR_MULTIPLIER
+
+        # Атомарная транзакция
+        async with db_pool.acquire() as conn:
+            async with conn.transaction():
+                if prize_type == "jackpot":
+                    await update_balance(uid, uname, final_prize, conn=conn)
+                elif prize_type == "oac":
+                    await update_balance(uid, uname, final_prize, conn=conn)
+                    await add_war_score(uid, final_prize, conn=conn)
+                else:
+                    await update_blunts(uid, uname, prize, conn=conn)
+                # Обновляем last_daily атомарно
+                await update_last_daily(uid, conn=conn)
+            # Получаем свежий баланс
+            new_p = await get_player_cached(uid, fields=["balance"])
+            new_bal = new_p["balance"] if new_p else bal
+
+        # Формируем ответ
         if prize_type == "jackpot":
-            await update_balance(uid, uname, final_prize)
             await grant_title(uid, "🧛🏻‍♀️", "Призрачный Гончий", context)
             try:
-                await context.bot.send_message(chat_id="@guild_antysocial", text=f"🌟 @{uname} сорвал Джекпот! +{final_prize} OAC", parse_mode='HTML')
+                await context.bot.send_message(chat_id="@guild_antysocial",
+                    text=f"🌟 @{uname} сорвал Джекпот! +{final_prize} OAC", parse_mode='HTML')
             except Exception as e:
                 logger.error(f"Ошибка отправки в канал: {e}")
+            text = f"<b>🎰 ДЖЕКПОТ!</b>\n\nТы выиграл <b>{final_prize} OAC</b> 🍬!\n\n<b>⚜️ У тебя:</b> <i>{new_bal} OAC</i>"
         elif prize_type == "oac":
-            await update_balance(uid, uname, final_prize)
-            await add_war_score(uid, final_prize)
-            new_p = await get_player_cached(uid)
-            new_bal = new_p["balance"]
-            next_rank_name = ""
-            next_threshold = 0
+            # Прогресс ранга
+            next_rank_name, next_threshold = "", 0
             for emoji, threshold, _ in RANKS:
                 if new_bal < threshold:
-                    next_rank_name = emoji
-                    next_threshold = threshold
+                    next_rank_name = emoji; next_threshold = threshold
                     break
             if next_threshold == 0:
                 progress_text = "<b>🏆 Максимальный ранг!</b>"
@@ -2254,65 +2283,62 @@ async def luck_callback(update, context, action=None):
                 f"⚜️ <b>У тебя:</b> <i>{new_bal} OAC</i>\n\n"
                 f"{progress_text}"
             )
-            try:
-                await msg.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]), parse_mode='HTML')
-            except BadRequest as e:
-                if "message is not modified" not in str(e).lower():
-                    raise
-            return
         else:
-            await update_blunts(uid, uname, prize)
-            txt = f"+{prize} 🌿 Блант"
-        new_bal = (await get_player_cached(uid))["balance"]
-        text = f"<b><i>🎲 КОЛЕСО СМОТРИТЕЛЯ</i></b>\n\n{txt} → 💰 <b>{new_bal} OAC</b> 🍬"
-        try:
-            await msg.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]), parse_mode='HTML')
-        except BadRequest as e:
-            if "message is not modified" not in str(e).lower():
-                raise
+            text = f"<b><i>🎲 КОЛЕСО СМОТРИТЕЛЯ</i></b>\n\n+{prize} 🌿 Блант → 💰 <b>{new_bal} OAC</b> 🍬"
+
+        await safe_edit(update, context, text,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]))
         return
+
+    # 🎲 Рискнуть
     if action == "luck_berserk":
         if not berserk_available:
-            if bal < 300: await send_whisper_dm(update, context, f"<b><i>🎲 Бездна требует жертву</i></b>\n\n⚠️ Недостаточно OAC (нужно ещё <b>{300-bal}</b>).")
+            if bal < 300:
+                await send_whisper_dm(update, context,
+                    f"<b><i>🎲 Бездна требует жертву</i></b>\n\n⚠️ Недостаточно OAC (нужно ещё <b>{300-bal}</b>).")
             else:
                 diff = timedelta(hours=24) - (now - last_berserk_dt)
                 hrs = int(diff.total_seconds()//3600); mins = int((diff.total_seconds()%3600)//60)
-                await send_whisper_dm(update, context, f"<b><i>🎲 Бездна молчит</i></b>\n\n🕳️ Примет тебя через <b>{hrs} ч {mins} мин</b>.")
+                await send_whisper_dm(update, context,
+                    f"<b><i>🎲 Бездна молчит</i></b>\n\n🕳️ Примет тебя через <b>{hrs} ч {mins} мин</b>.")
             return
-        await update_last_berserk(uid)
-        if random.random() < 0.6: await update_balance(uid, uname, 200); res_text = f"<b><i>🎲 БЕЗДНА ОТВЕТИЛА</i></b>\n\nИскажение благосклонно! +<b>200 OAC</b> 🍬."
-        else: await update_balance(uid, uname, -300); res_text = f"<b><i>🕳️ БЕЗДНА МОЛЧИТ</i></b>\n\nИскажение промолчало. –<b>300 OAC</b>."
-        await add_war_score(uid, 200 if "200" in res_text else -300)
-        try:
-            await msg.edit_text(res_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]), parse_mode='HTML')
-        except BadRequest as e:
-            if "message is not modified" not in str(e).lower():
-                raise
+
+        async with db_pool.acquire() as conn:
+            async with conn.transaction():
+                if random.random() < 0.6:
+                    await update_balance(uid, uname, 200, conn=conn)
+                    res_text = f"<b><i>🎲 БЕЗДНА ОТВЕТИЛА</i></b>\n\nИскажение благосклонно! +<b>200 OAC</b> 🍬."
+                else:
+                    await update_balance(uid, uname, -300, conn=conn)
+                    res_text = f"<b><i>🕳️ БЕЗДНА МОЛЧИТ</i></b>\n\nИскажение промолчало. –<b>300 OAC</b>."
+                await update_last_berserk(uid, conn=conn)
+                await add_war_score(uid, 200 if "200" in res_text else -300, conn=conn)
+
+        await safe_edit(update, context, res_text,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]))
         return
+
+    # 🧪 Алхимия
     if action == "alchemy_start":
         query = update.callback_query
         if not veteran_alchemy:
-            await query.answer("🔮 Доступ к магии откроется на ранге ⚔️ Ветеран (5000 OAC).", show_alert=True)
+            await query.answer("🔮 Доступ с ранга ⚔️ Ветеран (5000 OAC).", show_alert=True)
             return
         if p["blunts"] < 5 or bal < 50:
-            await send_whisper_dm(update, context, "🔮 Нужно 5 блантов и 50 OAC для запуска Котла.")
+            await send_whisper_dm(update, context, "🔮 Нужно 5 блантов и 50 OAC.")
             return
         text = (
             f"<b><i>🔮 АЛХИМИЧЕСКИЙ КОТЁЛ</i></b>\n\n"
-            f"У тебя есть <b>5 блантов</b> и <b>50 OAC</b>.\n"
-            f"Бросить их в Котёл?\n\n"
-            f"🌀 <i>Искажение шепчет: «Только тот, кто стал <b>ветераном</b> и не боится потерь – обретёт право использовать магию и истинную силу»</i> 🔮"
+            f"<b>5 блантов</b> и <b>50 OAC</b> – бросишь?\n\n"
+            f"🌀 <i>Искажение шепчет: «Лишь ветеран познает магию»</i>"
         )
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🧪 Запустить реакцию", callback_data="alchemy_confirm")],
+            [InlineKeyboardButton("🧪 Запустить", callback_data="alchemy_confirm")],
             [InlineKeyboardButton("🔙 Назад", callback_data="luck")]
         ])
-        try:
-            await msg.edit_text(text, reply_markup=kb, parse_mode='HTML')
-        except BadRequest as e:
-            if "message is not modified" not in str(e).lower():
-                raise
+        await safe_edit(update, context, text, reply_markup=kb)
         return
+
     if action == "alchemy_confirm":
         if p["blunts"] < 5 or bal < 50:
             await send_whisper_dm(update, context, "🔮 Недостаточно ресурсов.")
@@ -2324,28 +2350,27 @@ async def luck_callback(update, context, action=None):
                 r = random.random()
                 if r < 0.40:
                     await update_essence(uid, 1, conn=conn)
-                    result_text = "<b><i>🔮 РЕЗУЛЬТАТ АЛХИМИИ</i></b>\n\n💠 <b>Чистая Пыльца!</b>\nТы получаешь 1 дозу Кристальной Пыли.\n\n🌀 <i>Искажение принимает твою жертву</i>"
+                    result_text = "<b>💠 Чистая Пыльца!</b>\n\n+1 Кристальная Пыль"
                 elif r < 0.75:
-                    result_text = "<b><i>🔮 РЕЗУЛЬТАТ АЛХИМИИ</i></b>\n\n🌫️ <b>Грязный Выхлоп...</b>\nБланты сгорели без следа.\n\n🌀 <i>Искажение осталось голодным</i>"
+                    result_text = "<b>🌫️ Грязный Выхлоп...</b>\nБланты сгорели без следа."
                 elif r < 0.90:
                     await update_essence(uid, 2, conn=conn)
-                    result_text = "<b><i>🔮 РЕЗУЛЬТАТ АЛХИМИИ</i></b>\n\n✨ <b>Мерцающая Пыльца!</b>\nТы получаешь 2 дозы Кристальной Пыли.\n\n🌀 <i>Искажение щедро сегодня</i>"
+                    result_text = "<b>✨ Мерцающая Пыльца!</b>\n\n+2 Кристальной Пыли"
                 else:
                     name = random.choice(["Крик Бездны","Пепел Короля","Шёпот Склепа","Коготь Хаоса","Вздох Пожирателя"])
                     item = await create_named_blunt(uid, name, rarity="legendary", conn=conn)
-                    result_text = f"<b><i>🔮 РЕЗУЛЬТАТ АЛХИМИИ</i></b>\n\n🌟 <b>Философский Камень!</b>\nТы получаешь легендарный блант <b><i>«{name}»</i></b>!\n\n🌀 <i>Искажение дарует тебе силу</i>"
+                    result_text = f"<b>🌟 Философский Камень!</b>\n\nЛегендарный блант «{name}»!"
                     try:
                         await context.bot.send_message(chat_id="@guild_antysocial",
-                            text=f"🌟 @{uname} провёл Алхимический Ритуал и получил легендарный блант <b><i>«{name}»</i></b>!", parse_mode='HTML')
+                            text=f"🌟 @{uname} провёл Алхимический Ритуал и получил легендарный блант «{name}»!", parse_mode='HTML')
                     except Exception as e:
                         logger.error(f"Ошибка отправки в канал: {e}")
                 await add_war_score(uid, 30, conn=conn)
-        try:
-            await msg.edit_text(result_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]), parse_mode='HTML')
-        except BadRequest as e:
-            if "message is not modified" not in str(e).lower():
-                raise
-        return
+        await safe_edit(update, context, result_text,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]))
+
+    # Если action не указан – показываем общее меню
+    await safe_edit(update, context, text, reply_markup=kb)
 
 # /check
 async def check_blunt(update, context):
