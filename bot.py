@@ -1658,18 +1658,11 @@ async def profile_callback(update, context):
         await msg.reply_text("Сначала активируйся: /start")
         return
 
-    # Полная нормализация всех числовых полей – ни одного None
-    for field in ("balance","blunts","farm_count","craft_count","smoke_count",
-                  "ritual_count","referral_count","check_count","lab_chests",
-                  "lab_deaths","alchemy_count","login_streak","donated","m_essence",
-                  "passive_level","karma","inhaled","keys"):
-        p[field] = p.get(field) or 0
-
-    bal = p["balance"]
-    bl = p["blunts"]
+    bal = p.get("balance", 0) or 0
+    bl = p.get("blunts", 0) or 0
     guild = p.get("guild") or ""
 
-    # === РАНГ ===
+    # Ранг
     rank_emoji, rank_name = "🪓", "Рекрут"
     for emoji, threshold, _ in RANKS:
         if bal >= threshold:
@@ -1677,7 +1670,7 @@ async def profile_callback(update, context):
             rank_emoji = parts[0]
             rank_name = parts[1] if len(parts) > 1 else ""
 
-    # === ГИЛЬДИЯ ===
+    # Гильдия
     g_emoji = ""
     if guild == "BLACK":
         g_emoji = " 🕯️ Тёмная Гильдия"
@@ -1726,6 +1719,10 @@ async def profile_callback(update, context):
         f"🎖️ <b>Заслуги:</b> {badge_str}"
     )
 
+    named = [it for it in inv_data if it.get("type") == "named"]
+    rarity_order = {"legendary": 0, "epic": 1, "rare": 2, "common": 3}
+
+    # ✅ ИСПРАВЛЕННАЯ СОРТИРОВКА – убрали NoneType
     named.sort(key=lambda x: (rarity_order.get(x.get("rarity") or "common", 3),
                                x.get("serial") or 999999))
 
@@ -1765,6 +1762,11 @@ async def my_blunts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await query.answer("У тебя нет именных блантов.", show_alert=True)
         return
 
+    rarity_order = {"legendary": 0, "epic": 1, "rare": 2, "common": 3}
+    # ✅ Исправленная сортировка
+    named.sort(key=lambda x: (rarity_order.get(x.get("rarity") or "common", 3),
+                               x.get("serial") or 999999))
+
     per_page = BLUNTS_PER_PAGE
     total_pages = max(1, (len(named) + per_page - 1) // per_page)
     if page >= total_pages:
@@ -1789,7 +1791,6 @@ async def my_blunts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE,
         kb_rows.append(nav)
     kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="profile")])
     await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode='HTML')
-
 
 async def achievements_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, page=0):
     query = update.callback_query
@@ -2974,5 +2975,4 @@ if __name__ == "__main__":
 
     print("BOT READY")
     app.run_polling()
-    loop.run_until_complete(close_db_pool())
-    loop.close()
+    
