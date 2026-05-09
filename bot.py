@@ -1712,10 +1712,8 @@ async def profile_callback(update, context):
         f"🎖️ <b>Заслуги:</b> {badge_str}"
     )
 
-    named = [it for it in inv_data if it.get("type") == "named"]
-    rarity_order = {"legendary": 0, "epic": 1, "rare": 2, "common": 3}
-    named.sort(key=lambda x: (rarity_order.get(x.get("rarity", "common"), 3),
-                               x.get("serial", 999999)))
+    named.sort(key=lambda x: (rarity_order.get(x.get("rarity") or "common", 3),
+                               x.get("serial") or 999999))
 
     if named:
         text += "\n\n<b>💍 Именные бланты (NFT):</b>"
