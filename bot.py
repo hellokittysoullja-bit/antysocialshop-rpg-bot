@@ -2402,9 +2402,9 @@ async def luck_callback(update, context, action=None):
             hrs = int(diff.seconds // 3600); mins = int((diff.seconds % 3600) // 60)
             kb_rows.append([InlineKeyboardButton(f"🎲 Бездна шепчет всё громче. Жди {hrs} ч {mins} мин", callback_data="luck_berserk")])
     if veteran_alchemy:
-        kb_rows.append([InlineKeyboardButton("🧪 Запустить реакцию", callback_data="alchemy_start")])
-    else:
-        kb_rows.append([InlineKeyboardButton("🔮 Алхимия (⚔️ Ветеран)", callback_data="alchemy_start")])
+    kb_rows.append([InlineKeyboardButton("🔮 Алхимия", callback_data="alchemy_start")])
+else:
+    kb_rows.append([InlineKeyboardButton("🔮 Алхимия🔒", callback_data="alchemy_start")])
     kb_rows.append([InlineKeyboardButton("🏰 В меню", callback_data="menu")])
     kb = InlineKeyboardMarkup(kb_rows)
 
@@ -2512,11 +2512,15 @@ async def luck_callback(update, context, action=None):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]))
         return
 
-    # 🧪 Алхимия
+    # 🔮 Алхимия
     if action == "alchemy_start":
         query = update.callback_query
         if not veteran_alchemy:
-            await query.answer("🔮 Доступ с ранга ⚔️ Ветеран (5000 OAC).", show_alert=True)
+            await query.answer(
+                "🔮 <b>Магия неподвластна тебе.</b> ⚔️\n\n"
+                "Только тот, кто достиг ⚔️ Ветерана (5000 OAC) — обретёт право использовать алхимию 🗝️.",
+                show_alert=True
+            )
             return
         if p["blunts"] < 5 or bal < 50:
             await send_whisper_dm(update, context, "🔮 Нужно 5 блантов и 50 OAC.")
