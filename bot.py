@@ -1228,7 +1228,6 @@ async def craft_callback(update, context):
     await send_reply(update, context, text, InlineKeyboardMarkup(kb_rows))
 
 @error_handler
-@rate_limit(2)
 async def handle_craft_normal(update, context):
     query = update.callback_query
     await query.answer()
@@ -1487,7 +1486,6 @@ async def smoke_callback(update, context):
         await msg.reply_text(main_text, reply_markup=main_kb, parse_mode='HTML')
 
 @error_handler
-@rate_limit(2)
 async def do_smoke(update, context):
     query = update.callback_query
     await query.answer()
