@@ -2045,20 +2045,8 @@ async def top_callback(update, context):
         if row["username"] == (await context.bot.get_chat(uid)).username:
             my_position = i
 
-    # Блок позиции
-    if my_position is None:
-        async with db_pool.acquire() as conn:
-            cnt_row = await conn.fetchrow("SELECT COUNT(*) as cnt FROM players WHERE balance > $1", my_balance)
-        pos = cnt_row["cnt"] + 1 if cnt_row else 1
-        async with db_pool.acquire() as conn:
-            tenth_row = await conn.fetchrow("SELECT balance FROM players ORDER BY balance DESC LIMIT 1 OFFSET 9")
-        tenth_balance = tenth_row["balance"] if tenth_row else 0
-        gap = tenth_balance - my_balance
-        if gap > 0:
-            text += f"📊 Твоя позиция: {pos}\n🎯 До топ-10: {gap} оас\n"
-        else:
-            text += f"📊 Твоя позиция: {pos} (ты в топе!)\n"
-    elif my_position == 1:
+    # Блок позиции – исправлены все ветки (убрана старая заглушка)
+    if my_position == 1:
         text += (
             "✦ 📊 Твоя позиция: 1 — ТЫ ДЕРЖИШЬ ТРОН 💎 ✦\n\n"
             "🏆 УДЕРЖИ трон до 14.05 — получишь:\n"
@@ -2079,12 +2067,26 @@ async def top_callback(update, context):
             "   🎁 Скин «Золотой Венец» — фон профиля\n"
             "   ⚜️ Титул «Хранитель Топа»\n"
         )
-    else:
+    elif my_position is not None:
+        # Позиция 4-10
         gap_to_third = top[2]["balance"] - my_balance if len(top) >= 3 else 0
         if gap_to_third > 0:
             text += f"✦ 📊 Твоя позиция: {my_position} — осталось 🎯 {gap_to_third} оас 🍬 до ТРОЙКИ ЛИДЕРОВ 💎🏆 ✦\n"
         else:
             text += f"✦ 📊 Твоя позиция: {my_position} ✦\n"
+    else:
+        # Игрок не в топ-10
+        async with db_pool.acquire() as conn:
+            cnt_row = await conn.fetchrow("SELECT COUNT(*) as cnt FROM players WHERE balance > $1", my_balance)
+        pos = cnt_row["cnt"] + 1 if cnt_row else 1
+        async with db_pool.acquire() as conn:
+            tenth_row = await conn.fetchrow("SELECT balance FROM players ORDER BY balance DESC LIMIT 1 OFFSET 9")
+        tenth_balance = tenth_row["balance"] if tenth_row else 0
+        gap = tenth_balance - my_balance
+        if gap > 0:
+            text += f"✦ 📊 Твоя позиция: {pos} — осталось 🎯 {gap} оас 🍬 до ТОП-10 💎🏆 ✦\n"
+        else:
+            text += f"✦ 📊 Твоя позиция: {pos} — ты уже в топе! 💎 ✦\n"
 
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔍 Разведка", callback_data="top_scout")],
@@ -2094,6 +2096,14 @@ async def top_callback(update, context):
         await safe_edit(update, context, text, reply_markup=kb)
     else:
         await msg.reply_text(text, parse_mode='HTML', reply_markup=kb)
+
+
+def get_rank_info(balance):
+    """Возвращает эмодзи и название ранга."""
+    if balance >= 50000: return "🪬", "Некромант"
+    elif balance >= 20000: return "🪦", "Призрак"
+    elif balance >= 5000: return "⚔️", "Ветеран"
+    return "🪓", "Рекрут"
 
 
 def get_rank_info(balance):
