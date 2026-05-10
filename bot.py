@@ -2009,37 +2009,118 @@ async def top_callback(update, context):
     user, msg = get_user_and_msg(update)
     uid = user.id
     top = await get_top(10)
-    if not top: await msg.reply_text("🏆 Топ-10 пока пуст."); return
-    text = "<b>🏆 ТОП-10 ИГРОКОВ</b>\n\n"
+    if not top:
+        await safe_edit(update, context, "🏆 Топ-10 пока пуст.")
+        return
+
+    # Определяем лидера (первое место)
+    first_balance = top[0]["balance"] if top else 1
+    # Получаем профиль текущего игрока
+    p = await get_player_cached(uid, fields=["balance", "guild"])
+    my_balance = p["balance"] if p else 0
+    my_guild = p.get("guild") if p else None
+
+    # Собираем текст топа
+    text = "<b>💎 ТОП-10 ИГРОКОВ 🏆</b>\n\n"
+    my_position = None
     for i, row in enumerate(top, 1):
-        name = html.escape(row["username"]); bal = row["balance"]; guild = row["guild"]
-        medal = "🥇" if i==1 else "🥈" if i==2 else "🥉" if i==3 else f"{i}."
-        g = "🕯️" if guild=="BLACK" else "⚜️" if guild=="WHITE" else ""
-        text += f"{medal} <b>{name}</b> {g} — <b>{bal} OAC</b> 🍬\n"
-    async with db_pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT COUNT(*) as cnt FROM players WHERE balance > (SELECT balance FROM players WHERE user_id=$1)", uid)
-    pos = row["cnt"] + 1 if row else 1
-    if pos > 10:
+        bal = row["balance"]
+        # Прогресс-бар относительно первого места
+        percent = int(bal / first_balance * 100) if first_balance != 0 else 100
+        filled = percent // 10
+        bar = "▓" * filled + "░" * (10 - filled)
+
+        # Эмодзи медали
+        if i == 1: medal = "🥇"
+        elif i == 2: medal = "🥈"
+        elif i == 3: medal = "🥉"
+        else: medal = f"{i}."
+
+        # Гильдия
+        guild = row.get("guild", "")
+        if guild == "BLACK": g_emoji = "🩸"
+        elif guild == "WHITE": g_emoji = "⚜️"
+        else: g_emoji = ""
+
+        # Ранг игрока (запрашиваем его отдельно)
+        rank_emoji, _ = get_rank_info(bal)
+
+        text += (
+            f"{medal} <b>{html.escape(row['username'])}</b> {g_emoji} — {bal} оас 🍬\n"
+            f"   {bar} {percent}%\n"
+            f"   {g_emoji} {guild if guild else 'Без гильдии'} | {rank_emoji}\n\n"
+        )
+
+        # Запоминаем позицию пользователя
+        if row["username"] == (await context.bot.get_chat(uid)).username:
+            my_position = i
+
+    # Блок «Твоя позиция»
+    if my_position is None:
+        # Игрок не в топ-10
+        async with db_pool.acquire() as conn:
+            cnt_row = await conn.fetchrow(
+                "SELECT COUNT(*) as cnt FROM players WHERE balance > $1", my_balance
+            )
+        pos = cnt_row["cnt"] + 1 if cnt_row else 1
         async with db_pool.acquire() as conn:
             tenth_row = await conn.fetchrow("SELECT balance FROM players ORDER BY balance DESC LIMIT 1 OFFSET 9")
         tenth_balance = tenth_row["balance"] if tenth_row else 0
-        gap = tenth_balance - (await get_player_cached(uid))["balance"]
+        gap = tenth_balance - my_balance
         if gap > 0:
-            if tenth_balance == 0:
-                perc = 100
-            else:
-                perc = int((1 - gap / tenth_balance) * 100)
-            bar = progress_bar(perc)
-            text += f"\n📊 <b>Твоя позиция:</b> {pos}\n🎯 <b>До Топ-10:</b> {gap} OAC\n{bar} <b>{perc}%</b>"
+            text += f"📊 Твоя позиция: {pos}\n🎯 До топ-10: {gap} оас\n"
         else:
-            text += f"\n📊 <b>Твоя позиция:</b> {pos}\n🎯 <b>До Топ-10:</b> 0 OAC\n{progress_bar(100)} <b>100%</b>"
+            text += f"📊 Твоя позиция: {pos} (ты в топе!)\n"
+    elif my_position == 1:
+        text += (
+            "✦ 📊 Твоя позиция: 1 — ТЫ ДЕРЖИШЬ ТРОН 💎 ✦\n\n"
+            "🏆 УДЕРЖИ трон до 14.05 — получишь:\n"
+            "   🎁 Скин «Корона Бездны» — уникальная рамка профиля\n"
+            "   ⚜️ Титул «Властелин Рейтинга»\n"
+        )
+    elif my_position == 2:
+        text += (
+            "✦ 📊 Твоя позиция: 2 — В ШАГЕ ОТ ТРОНА 💎 ✨ ✦\n\n"
+            "🏆 УДЕРЖИСЬ в топ-3 до 14.05 — получишь:\n"
+            "   🎁 Скин «Золотой Венец» — фон профиля\n"
+            "   ⚜️ Титул «Хранитель Топа»\n"
+        )
+    elif my_position == 3:
+        text += (
+            "✦ 📊 Твоя позиция: 3 — ТЫ В ТРОЙКЕ ЛИДЕРОВ 💎 ✨ ✦\n\n"
+            "🏆 УДЕРЖИСЬ в топ-3 до 14.05 — получишь:\n"
+            "   🎁 Скин «Золотой Венец» — фон профиля\n"
+            "   ⚜️ Титул «Хранитель Топа»\n"
+        )
     else:
-        text += f"\n📊 <b>Твоя позиция:</b> {pos} (ты в топе!)"
+        # Позиция 4-10
+        gap_to_third = top[2]["balance"] - my_balance if len(top) >= 3 else 0
+        if gap_to_third > 0:
+            text += f"✦ 📊 Твоя позиция: {my_position} — осталось 🎯 {gap_to_third} оас 🍬 до ТРОЙКИ ЛИДЕРОВ 💎🏆 ✦\n"
+        else:
+            text += f"✦ 📊 Твоя позиция: {my_position} ✦\n"
+
+    # Кнопки
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔍 Разведка", callback_data="top_scout")],
         [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
     ])
-    await msg.reply_text(text, parse_mode='HTML', reply_markup=kb)
+    if update.callback_query:
+        await safe_edit(update, context, text, reply_markup=kb)
+    else:
+        await msg.reply_text(text, parse_mode='HTML', reply_markup=kb)
+
+
+def get_rank_info(balance):
+    """Возвращает эмодзи и название ранга по балансу."""
+    if balance >= 50000:
+        return "🪬", "Некромант"
+    elif balance >= 20000:
+        return "🪦", "Призрак"
+    elif balance >= 5000:
+        return "⚔️", "Ветеран"
+    else:
+        return "🪓", "Рекрут"
 
 async def top_scout_callback(update, context):
     query = update.callback_query
