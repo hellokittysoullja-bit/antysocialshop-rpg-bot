@@ -2630,162 +2630,506 @@ async def check_blunt(update, context):
     await update.message.reply_text(details, parse_mode='HTML')
     await increment_counter(update.effective_user.id, "check_count")
 
-# Лабиринт (с защитой от None)
-@error_handler
+# ============================================================
+# ЛАБИРИНТ ИСКАЖЕНИЯ — ИТОГОВАЯ СЕНЬОР-ВЕРСИЯ (ПОЛНАЯ ЗАМЕНА)
+# ============================================================
+
+import copy
+
+LABYRINTH_ROOMS = [
+    # === БАЗОВЫЕ КОМНАТЫ ===
+    {
+        "name": "👁️ Зал Наблюдателя",
+        "desc": "Тебе кажется, что глаза на потолке — это отражения твоих собственных сомнений. Но они моргают",
+        "actions": {
+            "attack": {"costs": [10, 25, 50], "risks": [0.20, 0.60, 0.85], "rewards": [(10,30), (40,80), (80,160)]},
+            "special": {"name": "🕯️ Зажечь свечу", "cost": 5, "risk": 0.70, "effect": "focus", "value": 1}
+        }
+    },
+    {
+        "name": "⚗️ Алтарь Теней",
+        "desc": "Густая кровь капает с алтаря. Тени шепчут о силе",
+        "actions": {
+            "attack": {"costs": [10, 25, 50], "risks": [0.20, 0.60, 0.85], "rewards": [(15,35), (45,85), (85,170)]},
+            "special": {"name": "📜 Прочесть руны", "cost": 5, "risk": 0.60, "effect": "amulet"}
+        }
+    },
+    {
+        "name": "🌀 Водоворот Хаоса",
+        "desc": "Воздух дрожит, затягивая в воронку. Прямо в центре — мерцающий сгусток",
+        "actions": {
+            "attack": {"costs": [10, 25, 50], "risks": [0.20, 0.60, 0.85], "rewards": [(20,40), (50,90), (90,180)]},
+            "special": {"name": "🌀 Схватить сгусток", "cost": 5, "risk": 0.50, "effect": "next_boost", "value": 0.5}
+        }
+    },
+    {
+        "name": "☠️ Склеп Короля",
+        "desc": "Груды костей, трон из черепов. С них свисают драгоценные камни",
+        "actions": {
+            "attack": {"costs": [10, 25, 50], "risks": [0.20, 0.60, 0.85], "rewards": [(25,50), (60,120), (120,250)]},
+            "special": {"name": "💎 Сорвать камень", "cost": 5, "risk": 0.80, "effect": "oac", "value": (20,50)}
+        }
+    },
+    # === ГЛУБОКИЕ ЭТАЖИ ===
+    {
+        "name": "🩸 Чертог Крови",
+        "desc": "Стены сочатся тёмной кровью. Воздух тяжёлый от древних жертв",
+        "actions": {
+            "attack": {"costs": [15, 30, 55], "risks": [0.25, 0.65, 0.90], "rewards": [(30,60), (70,130), (130,280)]},
+            "special": {"name": "💉 Испить из чаши", "cost": 5, "risk": 0.60, "effect": "heal", "value": 30}
+        }
+    },
+    {
+        "name": "🔮 Зал Пророчеств",
+        "desc": "Тысячи свечей озаряют карты судьбы. Грядущее можно увидеть, если осмелишься заглянуть",
+        "actions": {
+            "attack": {"costs": [10, 25, 50], "risks": [0.20, 0.60, 0.85], "rewards": [(20,40), (50,90), (90,200)]},
+            "special": {"name": "🔮 Заглянуть в будущее", "cost": 5, "risk": 1.0, "effect": "reveal"}
+        }
+    },
+    {
+        "name": "🗝️ Сокровищница Теней",
+        "desc": "Призрачные сундуки парят в воздухе. Они манят блеском, но стража не дремлет",
+        "actions": {
+            "attack": {"costs": [10, 25, 50], "risks": [0.20, 0.60, 0.85], "rewards": [(25,50), (60,120), (120,250)]},
+            "special": {"name": "💎 Взять самоцвет", "cost": 5, "risk": 0.80, "effect": "oac", "value": (20,50)}
+        }
+    },
+    {
+        "name": "🪞 Галерея Отражений",
+        "desc": "В зеркалах движутся не твои копии. Они живут своей жизнью и зовут тебя",
+        "actions": {
+            "attack": {"costs": [10, 25, 50], "risks": [0.20, 0.60, 0.85], "rewards": [(15,35), (45,85), (85,170)]},
+            "special": {"name": "🪞 Коснуться отражения", "cost": 5, "risk": 0.50, "effect": "mirror_hp"}
+        }
+    },
+    # === ДВЕ НОВЫЕ КОМНАТЫ ===
+    {
+        "name": "🔥 Жертвенный Костер",
+        "desc": "Языки пламени пляшут на костях. Брось в огонь часть себя — и получишь силу",
+        "actions": {
+            "attack": {"costs": [10, 25, 50], "risks": [0.20, 0.60, 0.85], "rewards": [(20,40), (50,90), (90,180)]},
+            "special": {"name": "🔥 Бросить в огонь 20 HP", "cost": 20, "risk": 0.90, "effect": "sacrifice_boost", "value": 0.8}
+        }
+    },
+    {
+        "name": "👻 Шепчущий Коридор",
+        "desc": "Голоса нашёптывают тебе удачу и погибель. Что выберешь?",
+        "actions": {
+            "attack": {"costs": [10, 25, 50], "risks": [0.20, 0.60, 0.85], "rewards": [(15,35), (45,85), (85,170)]},
+            "special": {"name": "👂 Прислушаться", "cost": 5, "risk": 0.50, "effect": "gamble"}
+        }
+    }
+]
+
+
+# ─── ВХОД В ЛАБИРИНТ ────────────────────────────────────────
 async def lab_enter(update, context):
     user, msg = get_user_and_msg(update)
     uid = user.id
-    p = await get_player_cached(uid)
-    if not p: return
+    p = await get_player_cached(uid, fields=["last_lab_attempt", "lab_depth"])
+    if not p:
+        return
+    depth = p.get("lab_depth", 1) or 1
     now = datetime.now()
     last = p.get("last_lab_attempt")
     if last:
         last = _to_datetime(last)
-        if last and (now - last).total_seconds() < 12*3600:
-            remain = 12*3600 - (now - last).total_seconds()
+        if last and (now - last).total_seconds() < 12 * 3600:
+            remain = 12 * 3600 - (now - last).total_seconds()
             hrs = int(remain // 3600)
             mins = int((remain % 3600) // 60)
             text = (
-                f"<b>🏛️ ЛАБИРИНТ ИСКАЖЕНИЯ 🔮</b>\n\n"
-                f"🎚️ Сегодня осталось <b>0 попыток</b>.\n"
-                f"⛓️‍💥 Жизни: <b>2</b>\n\n"
+                f"<b>🏛️ ЛАБИРИНТ ИСКАЖЕНИЯ — ЭТАЖ {depth}</b>\n\n"
                 f"<i>– Портал откроется через <b>{hrs} ч {mins} мин</b>.</i>"
             )
             kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="menu")]])
-            await msg.edit_text(text, reply_markup=kb, parse_mode='HTML')
+            await safe_edit(update, context, text, reply_markup=kb)
             return
+
+    total_rooms = 4 + depth
     text = (
-        f"<b>🏛️ ЛАБИРИНТ ИСКАЖЕНИЯ 🔮</b>\n\n"
-        f"🎚️ Сегодня осталась <b>1 попытка</b>.\n"
-        f"⛓️‍💥 Жизни: <b>2</b>\n\n"
-        f"<i>– Ты стоишь у входа. Портал отвечает.</i>\n\n"
-        f"Выбери действие:"
+        f"<b>🏛️ ЛАБИРИНТ ИСКАЖЕНИЯ — ЭТАЖ {depth}</b>\n\n"
+        f"🔮 <i>\"Ты стоишь у входа. Древние построили его, чтобы испытывать души. "
+        f"Лишь достойные достигают сердца лабиринта. "
+        f"В конце лабиринта всех ждет сундук с наградой\"</i> 🎁\n\n"
+        f"<b>💎 1 попытка</b>\n"
+        f"<b>⛓️‍💥 2 жизни</b>\n"
+        f"<b>🗝️ Комнат: {total_rooms}</b>"
     )
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🚪 Войти в Лабиринт", callback_data="lab_enter_confirm")],
+        [InlineKeyboardButton("🍃 Войти в лабиринт", callback_data="lab_enter_confirm")],
         [InlineKeyboardButton("🔙 Назад", callback_data="menu")]
     ])
-    await msg.edit_text(text, reply_markup=kb, parse_mode='HTML')
+    await safe_edit(update, context, text, reply_markup=kb)
 
+
+# ─── ПОДГОТОВКА К ЗАБЕГУ ────────────────────────────────────
 async def lab_enter_confirm(update, context):
     query = update.callback_query
     await query.answer()
     uid = query.from_user.id
+    p = await get_player_cached(uid, fields=["lab_depth"])
+    depth = p.get("lab_depth", 1) or 1 if p else 1
+    total_rooms = 4 + depth
     now = datetime.now()
     async with db_pool.acquire() as conn:
         await conn.execute("UPDATE players SET last_lab_attempt=$1 WHERE user_id=$2", now, uid)
     invalidate_cache(uid)
-    context.user_data["lab_room"] = 0
-    context.user_data["lab_lives"] = 2
+
+    context.user_data["lab_room"] = 1
+    context.user_data["lab_hp"] = 100
+    context.user_data["lab_max_hp"] = 100
+    context.user_data["lab_focus"] = 3
     context.user_data["lab_rewards"] = []
-    await send_whisper_dm(update, context, "⚰️ Ты вошёл в Лабиринт...")
+    context.user_data["lab_depth"] = depth
+    context.user_data["lab_total_rooms"] = total_rooms
+    context.user_data["lab_attack_bonus"] = 0.0
+    context.user_data["lab_focused_attack"] = False
+    context.user_data["lab_curse_rooms"] = 0
+
     room = random.choice(LABYRINTH_ROOMS)
     context.user_data["lab_current_room"] = room
-    lives = context.user_data.get("lab_lives", 2)
-    text = f"<b><i>{room['name']}</i></b>\n\n{room['desc']}\n\n⛓️‍💥 <b>Жизни: {lives}</b>"
-    kb_rows = [[InlineKeyboardButton(opt["text"], callback_data=f"lab_option_{i}")] for i, opt in enumerate(room["options"])]
-    kb_rows.append([InlineKeyboardButton("🏃 Бежать", callback_data="lab_escape")])
-    lab_msg = await query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode='HTML')
-    context.user_data["lab_msg_id"] = lab_msg.message_id
-    context.user_data["lab_chat_id"] = lab_msg.chat.id
-
-async def show_lab_room(update, context):
-    room_index = context.user_data.get("lab_room", 0)
-    lives = context.user_data.get("lab_lives", 2)
-    if room_index >= 5:
-        await show_lab_final(update, context)
-        return
-    room = random.choice(LABYRINTH_ROOMS)
-    context.user_data["lab_current_room"] = room
-    text = f"<b><i>{room['name']}</i></b>\n\n{room['desc']}\n\n⛓️‍💥 <b>Жизни: {lives}</b>"
-    kb_rows = [[InlineKeyboardButton(opt["text"], callback_data=f"lab_option_{i}")] for i, opt in enumerate(room["options"])]
-    kb_rows.append([InlineKeyboardButton("🏃 Бежать", callback_data="lab_escape")])
-    chat_id = context.user_data.get("lab_chat_id")
-    msg_id = context.user_data.get("lab_msg_id")
-    try:
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=text, reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode='HTML')
-    except Exception:
-        try:
-            query = update.callback_query
-            await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode='HTML')
-        except:
-            pass
-
-async def handle_lab_option(update, context, option_index):
-    query = update.callback_query
-    await query.answer()
-    uid = query.from_user.id
-    room = context.user_data.get("lab_current_room")
-    if not room: return
-    opt = room["options"][option_index]
-    p = await get_player_cached(uid)
-    if not p: return
-    if "cost_oac" in opt and p["balance"] < opt["cost_oac"]:
-        await query.answer("Недостаточно OAC."); return
-    if "cost_blunt" in opt and p["blunts"] < opt["cost_blunt"]:
-        await query.answer("Недостаточно блантов."); return
-    if "cost_oac" in opt: await update_balance(uid, p["username"], -opt["cost_oac"])
-    elif "cost_blunt" in opt: await update_blunts(uid, p["username"], -opt["cost_blunt"])
-    success = random.random() < opt["risk"]
-    if success:
-        if "reward_oac" in opt:
-            earned = random.randint(*opt["reward_oac"])
-            await update_balance(uid, p["username"], earned)
-            await add_war_score(uid, earned)
-            context.user_data.setdefault("lab_rewards", []).append(f"+{earned} OAC")
-            await query.message.edit_text(f"Успех! +{earned} OAC.")
-        elif "reward_fragment" in opt:
-            context.user_data.setdefault("lab_rewards", []).append("💠 Кристальная Пыль")
-            await query.message.edit_text("Ты нашёл 💠 Кристальную Пыль!")
-        elif "reward_title" in opt:
-            await add_title(uid, opt["reward_title"])
-            context.user_data.setdefault("lab_rewards", []).append(f"Титул: {opt['reward_title']}")
-            await query.message.edit_text(f"Получен редкий титул: {opt['reward_title']}!")
-        elif "reward_dust" in opt:
-            context.user_data.setdefault("lab_rewards", []).append("💠 Кристальная Пыль")
-            await query.message.edit_text("Ты нашёл 💠 Кристальную Пыль!")
-        elif "reward_escape" in opt:
-            await show_lab_final(update, context); return
-    else:
-        if opt["fail"] == "life": context.user_data["lab_lives"] -= 1; await query.message.edit_text("Провал! Потеряна 1 жизнь.")
-        elif opt["fail"] == "life_big": context.user_data["lab_lives"] -= 2; await query.message.edit_text("Катастрофа! Потеряно 2 жизни.")
-        else: await query.message.edit_text("Ничего не изменилось.")
-    if context.user_data.get("lab_lives", 2) <= 0:
-        await increment_counter(uid, "lab_deaths")
-        await show_lab_death(update, context); return
-    context.user_data["lab_room"] += 1
-    await asyncio.sleep(1.5)
     await show_lab_room(update, context)
 
+
+# ─── ОТОБРАЖЕНИЕ КОМНАТЫ ─────────────────────────────────────
+async def show_lab_room(update, context):
+    room_index = context.user_data.get("lab_room", 1)
+    hp = context.user_data.get("lab_hp", 100)
+    max_hp = context.user_data.get("lab_max_hp", 100)
+    focus = context.user_data.get("lab_focus", 3)
+    total_rooms = context.user_data.get("lab_total_rooms", 5)
+    depth = context.user_data.get("lab_depth", 1)
+    attack_bonus = context.user_data.get("lab_attack_bonus", 0.0)
+    focused = context.user_data.get("lab_focused_attack", False)
+    curse = context.user_data.get("lab_curse_rooms", 0)
+
+    if room_index > total_rooms:
+        await show_lab_final(update, context)
+        return
+
+    # масштабирование комнаты под глубину
+    base_room = random.choice(LABYRINTH_ROOMS)
+    room = copy.deepcopy(base_room)
+    risk_mult = 1.0 + (depth - 1) * 0.05
+    reward_mult = 1.0 + (depth - 1) * 0.10
+    atk = room["actions"]["attack"]
+    atk["risks"] = [min(0.95, r * risk_mult) for r in atk["risks"]]
+    atk["rewards"] = [(int(lo * reward_mult), int(hi * reward_mult)) for lo, hi in atk["rewards"]]
+    context.user_data["lab_current_room"] = room
+
+    # прогресс-бар здоровья
+    hp_percent = int(hp / max_hp * 10)
+    hp_bar = "▓" * hp_percent + "░" * (10 - hp_percent)
+
+    # прогресс-бар комнат
+    filled = "▓" * room_index
+    empty = "░" * (total_rooms - room_index)
+    room_bar = f"🚪{filled}{empty}🎁 {room_index}/{total_rooms}"
+
+    text = (
+        f"<b>🗝️ {room['name']}</b>\n\n"
+        f"<i>\"{room['desc']}\"</i>\n\n"
+        f"<b>❤️ HP: [{hp_bar}] {hp}/{max_hp}</b>\n"
+        f"<b>⚡ Фокус: {focus}/3</b>\n"
+        f"<b>Пройдено: {room_bar}</b>"
+    )
+    if attack_bonus > 0:
+        text += f"\n<b>⚔️ Бонус атаки: +{int(attack_bonus*100)}%</b>"
+    if focused:
+        text += "\n🌀 <b>Концентрация активна</b> (следующая атака гарантирована)"
+    if curse > 0:
+        text += f"\n🌑 <b>Порча:</b> риск повышен (ещё {curse} комн.)"
+    if hp < 30:
+        text += "\n⚠️ <b>Вы тяжело ранены! Действия опаснее</b>"
+
+    # кнопки
+    kb_rows = []
+    atk = room["actions"]["attack"]
+    kb_rows.append([
+        InlineKeyboardButton(f"⚔️ 🟢 (-{atk['costs'][0]} hp)", callback_data="lab_attack_0"),
+        InlineKeyboardButton(f"⚔️ 🟡 (-{atk['costs'][1]} hp)", callback_data="lab_attack_1"),
+        InlineKeyboardButton(f"⚔️ 🔴 (-{atk['costs'][2]} hp)", callback_data="lab_attack_2")
+    ])
+    sp = room["actions"]["special"]
+    kb_rows.append([InlineKeyboardButton(f"{sp['name']} (-{sp['cost']} hp)", callback_data="lab_special")])
+
+    if focus > 0 and not focused:
+        kb_rows.append([InlineKeyboardButton("🌀 Сконцентрироваться (1⚡)", callback_data="lab_focus_use")])
+
+    kb_rows.append([InlineKeyboardButton("🏃 Бежать (бесплатно)", callback_data="lab_escape")])
+
+    chat_id = context.user_data.get("lab_chat_id")
+    msg_id = context.user_data.get("lab_msg_id")
+    kb = InlineKeyboardMarkup(kb_rows)
+    if msg_id:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id, message_id=msg_id,
+                text=text, reply_markup=kb, parse_mode='HTML'
+            )
+        except BadRequest:
+            query = update.callback_query
+            if query:
+                await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
+    else:
+        query = update.callback_query
+        lab_msg = await query.message.reply_text(text, reply_markup=kb, parse_mode='HTML')
+        context.user_data["lab_msg_id"] = lab_msg.message_id
+        context.user_data["lab_chat_id"] = lab_msg.chat.id
+
+
+# ─── ОБРАБОТКА ДЕЙСТВИЙ ──────────────────────────────────────
+async def handle_lab_option(update, context):
+    query = update.callback_query
+    data = query.data
+    await query.answer()
+
+    hp = context.user_data.get("lab_hp", 100)
+    focus = context.user_data.get("lab_focus", 3)
+    max_hp = context.user_data.get("lab_max_hp", 100)
+    room = context.user_data.get("lab_current_room")
+    if not room:
+        return
+
+    # ─── КОНЦЕНТРАЦИЯ ───
+    if data == "lab_focus_use":
+        if focus <= 0:
+            await query.answer("Нет фокуса.", show_alert=True)
+            return
+        if context.user_data.get("lab_focused_attack", False):
+            await query.answer("Уже сконцентрированы.", show_alert=True)
+            return
+        context.user_data["lab_focus"] = focus - 1
+        context.user_data["lab_focused_attack"] = True
+        await query.answer("Концентрация! Следующая атака будет успешной.")
+        await show_lab_room(update, context)
+        return
+
+    # ─── АТАКА ───
+    if data.startswith("lab_attack_"):
+        level = int(data.split("_")[-1])
+        atk = room["actions"]["attack"]
+        cost = atk["costs"][level]
+        risk = atk["risks"][level]
+        reward_range = atk["rewards"][level]
+
+        if hp < cost:
+            await query.answer("Недостаточно HP.", show_alert=True)
+            return
+
+        hp -= cost
+        context.user_data["lab_hp"] = hp
+
+        # штраф за низкое HP
+        if hp < 30:
+            risk += 0.15
+        elif hp < 60:
+            risk += 0.05
+        # учёт порчи
+        curse = context.user_data.get("lab_curse_rooms", 0)
+        if curse > 0:
+            risk += 0.10
+            context.user_data["lab_curse_rooms"] = curse - 1
+        risk = min(0.98, risk)
+
+        focused = context.user_data.get("lab_focused_attack", False)
+        if focused:
+            success = True
+            context.user_data["lab_focused_attack"] = False
+        else:
+            success = random.random() < risk
+
+        if success:
+            base_earned = random.randint(*reward_range)
+            bonus = context.user_data.get("lab_attack_bonus", 0.0)
+            if bonus > 0:
+                base_earned = int(base_earned * (1 + bonus))
+                context.user_data["lab_attack_bonus"] = 0.0
+            # амулет не расходуется при успехе
+            context.user_data.setdefault("lab_rewards", []).append(base_earned)
+            await query.answer(f"Успех! +{base_earned} OAC")
+        else:
+            # проверка амулета
+            if context.user_data.get("lab_amulet"):
+                context.user_data["lab_amulet"] = False
+                await query.answer("Амулет защитил тебя! Урон не получен.")
+            else:
+                extra_dmg = random.randint(5, 15)
+                hp -= extra_dmg
+                context.user_data["lab_hp"] = hp
+                await query.answer(f"Провал! -{cost+extra_dmg} HP")
+
+        if hp <= 0:
+            context.user_data["lab_hp"] = 0
+            await show_lab_death(update, context)
+            return
+
+        context.user_data["lab_room"] += 1
+        await show_lab_room(update, context)
+        return
+
+    # ─── УНИКАЛЬНОЕ ДЕЙСТВИЕ ───
+    elif data == "lab_special":
+        sp = room["actions"]["special"]
+        cost = sp["cost"]
+        if hp < cost:
+            await query.answer("Недостаточно HP.", show_alert=True)
+            return
+
+        hp -= cost
+        context.user_data["lab_hp"] = hp
+
+        effect = sp["effect"]
+        success = random.random() < sp["risk"]
+
+        if effect == "focus":
+            if success:
+                context.user_data["lab_focus"] = min(3, focus + sp.get("value", 1))
+                await query.answer("+1 Фокус!")
+            else:
+                await query.answer("Ничего не произошло.")
+        elif effect == "heal":
+            if success:
+                heal = sp.get("value", 30)
+                context.user_data["lab_hp"] = min(max_hp, hp + heal)
+                await query.answer(f"+{heal} HP!")
+            else:
+                context.user_data["lab_hp"] = max(0, hp - 10)
+                await query.answer("Проклятая кровь! -10 HP")
+        elif effect == "oac":
+            if success:
+                oac = random.randint(*sp["value"])
+                context.user_data.setdefault("lab_rewards", []).append(oac)
+                await query.answer(f"+{oac} OAC!")
+            else:
+                await query.answer("Тени отобрали твою находку.")
+        elif effect == "next_boost":
+            if success:
+                context.user_data["lab_attack_bonus"] = sp.get("value", 0.5)
+                await query.answer("Следующая атака будет мощнее!")
+            else:
+                await query.answer("Сгусток рассеялся.")
+        elif effect == "reveal":
+            await query.answer(f"Осталось комнат: {context.user_data.get('lab_total_rooms', 5) - context.user_data.get('lab_room', 1)}")
+        elif effect == "mirror_hp":
+            if success:
+                new_hp = random.randint(20, 80)
+                context.user_data["lab_hp"] = new_hp
+                await query.answer(f"Отражение изменило тебя! HP = {new_hp}")
+            else:
+                await query.answer("Зеркало разбилось.")
+        elif effect == "amulet":
+            if success:
+                context.user_data["lab_amulet"] = True
+                await query.answer("Руны создали защитный амулет!")
+            else:
+                await query.answer("Руны погасли.")
+        elif effect == "sacrifice_boost":
+            if success:
+                context.user_data["lab_attack_bonus"] = sp.get("value", 0.8)
+                await query.answer("Пламя принимает жертву! +80% к атаке.")
+            else:
+                extra_dmg = random.randint(10, 20)
+                context.user_data["lab_hp"] = max(0, hp - extra_dmg)
+                await query.answer(f"Огонь отверг тебя! -{extra_dmg} HP")
+        elif effect == "gamble":
+            outcomes = [
+                ("heal", 20),
+                ("focus_gain", 1),
+                ("oac_win", random.randint(30, 60)),
+                ("damage", -15),
+                ("curse", None)
+            ]
+            outcome = random.choice(outcomes)
+            if outcome[0] == "heal":
+                context.user_data["lab_hp"] = min(max_hp, hp + outcome[1])
+                await query.answer(f"Голос исцелил тебя! +{outcome[1]} HP")
+            elif outcome[0] == "focus_gain":
+                context.user_data["lab_focus"] = min(3, focus + 1)
+                await query.answer("Голос дарует озарение! +1 Фокус")
+            elif outcome[0] == "oac_win":
+                context.user_data.setdefault("lab_rewards", []).append(outcome[1])
+                await query.answer(f"Награда из темноты! +{outcome[1]} OAC")
+            elif outcome[0] == "damage":
+                context.user_data["lab_hp"] = max(0, hp + outcome[1])
+                await query.answer(f"Проклятие! {outcome[1]} HP")
+            elif outcome[0] == "curse":
+                context.user_data["lab_curse_rooms"] = 2
+                await query.answer("Голос наслал порчу... Риск повышен на 2 комнаты.")
+
+        await show_lab_room(update, context)
+        return
+
+    # ─── БЕГСТВО ───
+    elif data == "lab_escape":
+        hp = min(max_hp, hp + random.randint(15, 25))
+        context.user_data["lab_hp"] = hp
+        await query.answer("Ты сбежал, восстановив немного HP.")
+        await show_lab_room(update, context)
+        return
+
+    await query.answer("Действие не реализовано")
+
+
+# ─── ФИНАЛЬНЫЙ СУНДУК ────────────────────────────────────────
 async def show_lab_final(update, context):
     query = update.callback_query
     uid = query.from_user.id
-    p = await get_player_cached(uid)
+    p = await get_player_cached(uid, fields=["lab_depth"])
     if not p: return
+    depth = p.get("lab_depth", 1) or 1
     rewards = context.user_data.get("lab_rewards", [])
-    text = "<b><i>🎁 СУНДУК ИСКАЖЕНИЯ</i></b>\n\n<b>Ты достиг сердца Лабиринта. Сундук открывается... 💎</b>"
-    if rewards: text += "\n\nСобрано: " + ", ".join(rewards)
-    text += "\n+50 OAC 🍬\n💠 Кристальная Пыль: 1 доза"
-    await update_balance(uid, p["username"], 50)
+    total_oac = sum(rewards) + 50
+    await update_balance(uid, p.get("username"), total_oac)
     await update_essence(uid, 1)
     await increment_counter(uid, "lab_chests")
     await add_war_score(uid, 80)
-    context.user_data.pop("lab_room", None); context.user_data.pop("lab_lives", None); context.user_data.pop("lab_rewards", None)
-    context.user_data.pop("lab_msg_id", None); context.user_data.pop("lab_chat_id", None)
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 К Лабиринту", callback_data="lab_start")], [InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
-    await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
+
+    async with db_pool.acquire() as conn:
+        await conn.execute("UPDATE players SET lab_depth = lab_depth + 1 WHERE user_id=$1", uid)
+    invalidate_cache(uid)
+
+    context.user_data.pop("lab_hp", None)
+    context.user_data.pop("lab_focus", None)
+    context.user_data.pop("lab_room", None)
+
+    text = (
+        f"<b>🎁 СУНДУК ИСКАЖЕНИЯ</b>\n\n"
+        f"<i>Ты достиг цели! Древние награждают достойных.</i>\n\n"
+        f"<b>+{total_oac} OAC</b>\n"
+        f"<b>💠 Кристальная Пыль: 1</b>\n"
+        f"<b>🏆 Глубина увеличена! (Этаж {depth+1})</b>"
+    )
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 К Лабиринту", callback_data="lab_start")],
+                               [InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
+    await safe_edit(update, context, text, reply_markup=kb)
     await check_achievements(uid, context)
 
+
+# ─── СМЕРТЬ В ЛАБИРИНТЕ ──────────────────────────────────────
 async def show_lab_death(update, context):
     query = update.callback_query
     uid = query.from_user.id
-    p = await get_player_cached(uid)
+    p = await get_player_cached(uid, fields=["lab_depth"])
     if not p: return
-    await update_balance(uid, p["username"], 50)
-    context.user_data.pop("lab_room", None); context.user_data.pop("lab_lives", None); context.user_data.pop("lab_rewards", None)
-    context.user_data.pop("lab_msg_id", None); context.user_data.pop("lab_chat_id", None)
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 К Лабиринту", callback_data="lab_start")], [InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
-    await query.message.edit_text("<b><i>🪦 ЛАБИРИНТ ПОГЛОТИЛ ТЕБЯ</i></b>\n\n<i>Твои жизни иссякли. Искажение выбросило тебя обратно.</i>\n\n+50 OAC 🍬", reply_markup=kb, parse_mode='HTML')
+    depth = p.get("lab_depth", 1) or 1
+    await update_balance(uid, p.get("username"), 50)
+
+    context.user_data.pop("lab_hp", None)
+    context.user_data.pop("lab_focus", None)
+    context.user_data.pop("lab_room", None)
+
+    text = (
+        f"<b>🪦 БЕЗДНА ПОГЛОТИЛА ТЕБЯ</b>\n\n"
+        f"<i>Твоё здоровье иссякло</i>\n\n"
+        f"<b>+50 OAC</b> (утешительный приз)\n"
+        f"<b>Глубина: {depth}</b>"
+    )
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 К Лабиринту", callback_data="lab_start")],
+                               [InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
+    await safe_edit(update, context, text, reply_markup=kb)
 
 async def welcome_new_member(update, context):
     for member in update.message.new_chat_members:
