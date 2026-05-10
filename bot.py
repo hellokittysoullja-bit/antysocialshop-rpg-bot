@@ -2003,11 +2003,10 @@ async def achievements_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
 # Топ
 @error_handler
-@error_handler
 async def top_callback(update, context):
     user, msg = get_user_and_msg(update)
     uid = user.id
-    top = await get_top(10)
+    top = await get_top(10)                     # теперь здесь есть user_id
     if not top:
         await safe_edit(update, context, "🏆 Топ-10 пока пуст.")
         return
@@ -2063,7 +2062,7 @@ async def top_callback(update, context):
             f"   {g_emoji} {g_name} | {rank_emoji} <b>{rank_name}</b>\n\n"
         )
 
-        # Определяем позицию текущего игрока (теперь работает!)
+        # Вот здесь теперь сравнение работает!
         if row.get("user_id") == uid:
             my_position = i
 
