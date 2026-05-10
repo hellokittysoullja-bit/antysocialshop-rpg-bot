@@ -939,6 +939,8 @@ def error_handler(func):
 # ========== ОБРАБОТЧИКИ КОМАНД ==========
 # ========== ОБРАБОТЧИКИ КОМАНД (полный, надёжный, с лабиринтом) ==========
 
+# Финальный безопасный редактор сообщений
+# Финальный безопасный редактор сообщений
 async def safe_edit(update: Update, context, text: str, reply_markup=None, parse_mode='HTML'):
     """Безопасное редактирование: при невозможности отредактировать – отправляет новое сообщение."""
     try:
@@ -2338,7 +2340,6 @@ async def rules_callback(update, context):
     else:
         await msg.reply_text(text, parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("💍 Создать именной блант", callback_data="craft_named")],
                 [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
             ]))
 
