@@ -754,14 +754,12 @@ async def set_guild(user_id, guild):
 
 @db_retry()
 async def get_top(limit=10):
-    now = datetime.now().timestamp()
-    if top_cache["data"] and (now - top_cache["timestamp"]) < top_cache["ttl"]:
-        return top_cache["data"]
     async with db_pool.acquire() as conn:
-        rows = await conn.fetch("SELECT username, balance, guild FROM players ORDER BY balance DESC LIMIT $1", limit)
-    top_cache["data"] = rows
-    top_cache["timestamp"] = now
-    return rows
+        rows = await conn.fetch(
+            "SELECT user_id, username, balance, guild FROM players ORDER BY balance DESC LIMIT $1",
+            limit
+        )
+    return [dict(row) for row in rows]
 
 @db_retry()
 async def count_guilds():
@@ -2005,10 +2003,11 @@ async def achievements_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
 # Топ
 @error_handler
+@error_handler
 async def top_callback(update, context):
     user, msg = get_user_and_msg(update)
     uid = user.id
-    top = await get_top(10)                     # список словарей с полями: user_id, balance, username, guild
+    top = await get_top(10)
     if not top:
         await safe_edit(update, context, "🏆 Топ-10 пока пуст.")
         return
@@ -2027,7 +2026,7 @@ async def top_callback(update, context):
         filled = percent // 10
         bar = "▓" * filled + "░" * (10 - filled)
 
-        # Префикс с эмодзи и номером для каждой позиции
+        # Префикс с эмодзи и номером
         if i == 1:
             prefix = "🥇 1. "
         elif i == 2:
@@ -2041,7 +2040,7 @@ async def top_callback(update, context):
         elif i == 6:
             prefix = "🫧 6. "
         else:
-            prefix = f"{i}. "   # 7. 8. 9. 10.
+            prefix = f"{i}. "
 
         # Гильдия
         guild = row.get("guild", "")
@@ -2052,11 +2051,11 @@ async def top_callback(update, context):
         else:
             g_emoji, g_name = "", "Без гильдии"
 
-        # Ранг (должна быть твоя функция get_rank_info)
+        # Ранг
         rank_emoji, rank_name = get_rank_info(bal)
 
-        # Никнейм: берём из базы, он уже синхронизирован с Telegram
-        username = html.escape(row['username'])
+        # Никнейм
+        username = html.escape(row["username"])
 
         text += (
             f"{prefix}<b>{username}</b> {g_emoji} — {bal} оас 🍬\n"
@@ -2064,7 +2063,7 @@ async def top_callback(update, context):
             f"   {g_emoji} {g_name} | {rank_emoji} <b>{rank_name}</b>\n\n"
         )
 
-        # Определяем позицию текущего игрока по user_id
+        # Определяем позицию текущего игрока (теперь работает!)
         if row.get("user_id") == uid:
             my_position = i
 
@@ -2090,7 +2089,7 @@ async def top_callback(update, context):
             "   🎁 Скин «Золотой Венец» — фон профиля\n"
             "   ⚜️ Титул «Хранитель Топа»\n"
         )
-    elif my_position is not None:                # 4-10 место
+    elif my_position is not None:
         third_balance = top[2]["balance"] if len(top) >= 3 else 0
         gap = third_balance - my_balance
         if gap > 0:
@@ -2100,15 +2099,14 @@ async def top_callback(update, context):
             )
         else:
             text += f"✦ 📊 Твоя позиция: {my_position} ✦\n"
-    else:                                        # игрок вне топ-10
-        # Определяем позицию игрока и отставание от 10-го места
+    else:
+        # Игрок вне топ-10
         async with db_pool.acquire() as conn:
             cnt_row = await conn.fetchrow(
                 "SELECT COUNT(*) as cnt FROM players WHERE balance > $1",
                 my_balance
             )
         pos = cnt_row["cnt"] + 1 if cnt_row else 1
-
         async with db_pool.acquire() as conn:
             tenth_row = await conn.fetchrow(
                 "SELECT balance FROM players ORDER BY balance DESC LIMIT 1 OFFSET 9"
@@ -2123,7 +2121,6 @@ async def top_callback(update, context):
         else:
             text += f"✦ 📊 Твоя позиция: {pos} — ты уже в топе! 💎 ✦\n"
 
-    # --- Кнопки ---
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔍 Разведка", callback_data="top_scout")],
         [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
