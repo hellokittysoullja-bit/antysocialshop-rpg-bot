@@ -2002,11 +2002,27 @@ async def achievements_callback(update: Update, context: ContextTypes.DEFAULT_TY
     await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode='HTML')
 
 # Топ
+from datetime import datetime, timedelta
+from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+import html
+
+# --- Вспомогательная функция: ближайшее воскресенье 00:00 ---
+def next_sunday_str() -> str:
+    """Возвращает дату ближайшего воскресенья в формате ДД.ММ.
+    Если сегодня воскресенье, берём следующее."""
+    now = datetime.now()                    # при необходимости добавьте часовой пояс
+    days_until_sunday = (6 - now.weekday()) % 7
+    if days_until_sunday == 0:
+        days_until_sunday = 7               # следующее воскресенье, а не сегодня
+    next_sunday = now + timedelta(days=days_until_sunday)
+    return next_sunday.strftime("%d.%m")
+
+
 @error_handler
 async def top_callback(update, context):
     user, msg = get_user_and_msg(update)
     uid = user.id
-    top = await get_top(10)                     # теперь здесь есть user_id
+    top = await get_top(10)                 # должен возвращать поле user_id
     if not top:
         await safe_edit(update, context, "🏆 Топ-10 пока пуст.")
         return
@@ -2015,7 +2031,7 @@ async def top_callback(update, context):
     p = await get_player_cached(uid, fields=["balance", "guild"])
     my_balance = p["balance"] if p else 0
 
-    # --- Шапка ---
+    # Шапка
     text = "<b>💎 ТОП-10 ИГРОКОВ 🏆</b>\n\n"
 
     my_position = None
@@ -2053,7 +2069,7 @@ async def top_callback(update, context):
         # Ранг
         rank_emoji, rank_name = get_rank_info(bal)
 
-        # Никнейм
+        # Никнейм (экранирование HTML)
         username = html.escape(row["username"])
 
         text += (
@@ -2062,33 +2078,35 @@ async def top_callback(update, context):
             f"   {g_emoji} {g_name} | {rank_emoji} <b>{rank_name}</b>\n\n"
         )
 
-        # Вот здесь теперь сравнение работает!
+        # Определяем позицию текущего игрока
         if row.get("user_id") == uid:
             my_position = i
 
-    # --- Блок текущей позиции ---
+    # --- Блок позиции игрока (динамическая дата) ---
+    deadline = next_sunday_str()
+
     if my_position == 1:
-        text += (
-            "✦ 📊 Твоя позиция: 1 — ТЫ ДЕРЖИШЬ ТРОН 💎🎉 ✦\n\n"
-            "🏆 УДЕРЖИ трон до 14.05 и получишь:\n"
-            "   🎁 Скин «Корона Бездны» — уникальная рамка профиля\n"
-            "   ⚜️ Титул «Властелин Рейтинга»\n"
-        )
+    text += (
+        f"<b>✦ 📊 Твоя позиция: 1 — ТЫ ДЕРЖИШЬ ТРОН 💎🫧 ✦</b>\n\n"
+        f"<b>🏆 УДЕРЖИ трон до {deadline} — получишь:</b>\n\n"
+        "<b>   🎁 Скин: «Корона Бездны» — уникальная рамка профиля</b>\n"
+        "<b>   ⚜️ Титул: «Властелин Рейтинга»</b>\n"
+    )
     elif my_position == 2:
         text += (
-            "✦ 📊 Твоя позиция: 2 — ТЫ В ШАГЕ ОТ ТРОНА 💎 ✨ ✦\n\n"
-            "🏆 УДЕРЖИСЬ в топ-3 до 14.05 — получишь:\n"
-            "   🎁 Скин «Золотой Венец» — фон профиля\n"
-            "   ⚜️ Титул «Хранитель Топа»\n"
+            f"✦ 📊 Твоя позиция: 2 — ТЫ В ШАГЕ ОТ ТРОНА 💎 ✨ ✦\n\n"
+            f"🏆 УДЕРЖИСЬ в топ-3 до {deadline} и получишь:\n\n"
+            "   🎁 Скин: «Золотой Венец» — фон профиля\n"
+            "   ⚜️ Титул: «Хранитель Топа»\n"
         )
     elif my_position == 3:
         text += (
-            "✦ 📊 Твоя позиция: 3 — ТЫ В ТРОЙКЕ ЛИДЕРОВ 💎 ✨ ✦\n\n"
-            "🏆 УДЕРЖИСЬ в топ-3 до 14.05 — получишь:\n"
-            "   🎁 Скин «Золотой Венец» — фон профиля\n"
-            "   ⚜️ Титул «Хранитель Топа»\n"
+            f"✦ 📊 Твоя позиция: 3 — ТЫ В ТРОЙКЕ ЛИДЕРОВ 💎 ✨ ✦\n\n"
+            f"🏆 УДЕРЖИСЬ в топ-3 до {deadline} — получишь:\n\n"
+            "   🎁 Скин: «Золотой Венец» — фон профиля\n"
+            "   ⚜️ Титул: «Хранитель Топа»\n"
         )
-    elif my_position is not None:
+    elif my_position is not None:            # 4-10 места
         third_balance = top[2]["balance"] if len(top) >= 3 else 0
         gap = third_balance - my_balance
         if gap > 0:
@@ -2098,8 +2116,7 @@ async def top_callback(update, context):
             )
         else:
             text += f"✦ 📊 Твоя позиция: {my_position} ✦\n"
-    else:
-        # Игрок вне топ-10
+    else:                                    # вне топа
         async with db_pool.acquire() as conn:
             cnt_row = await conn.fetchrow(
                 "SELECT COUNT(*) as cnt FROM players WHERE balance > $1",
@@ -2120,6 +2137,7 @@ async def top_callback(update, context):
         else:
             text += f"✦ 📊 Твоя позиция: {pos} — ты уже в топе! 💎 ✦\n"
 
+    # --- Кнопки ---
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔍 Разведка", callback_data="top_scout")],
         [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
