@@ -2303,11 +2303,12 @@ async def confess_callback(update, context):
     else:
         await msg.reply_text(text, parse_mode='HTML')
 
+@error_handler
 async def rules_callback(update, context):
     user, msg = get_user_and_msg(update)
     text = (
         "<b>📜 КОДЕКС ГИЛЬДИИ</b>\n\n"
-        "<b>«Фарми ОАС, Дуй, Расти, Повышай Ранги»<b>\n\n"
+        "<i>«Странник, познай законы этого мира…»</i>\n\n"
         "<b>⚙️ ОСНОВНЫЕ ДЕЙСТВИЯ</b>\n"
         "🍬 <code>/farm</code> — <i>добыча OAC</i>\n"
         "🌿 <code>/craft</code> — <i>создать блант</i>\n"
@@ -2331,14 +2332,12 @@ async def rules_callback(update, context):
     )
 
     if update.callback_query:
-        # Вызов из профиля – редактируем текущее сообщение, предлагаем создать блант или вернуться в профиль
         await safe_edit(update, context, text,
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("💍 Создать именной блант", callback_data="craft_named")],
                 [InlineKeyboardButton("🔙 Назад", callback_data="profile")]
             ]))
     else:
-        # Вызов по команде /rules – новое сообщение с кнопками
         await msg.reply_text(text, parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("💍 Создать именной блант", callback_data="craft_named")],
