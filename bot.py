@@ -950,11 +950,9 @@ async def safe_edit(update: Update, context, text: str, reply_markup=None, parse
         err_msg = str(e).lower()
         if "message is not modified" in err_msg:
             return
-        # Если нет текста для редактирования (фото, стикер и т.п.) – шлём новое
         if "there is no text in the message to edit" in err_msg:
             await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=reply_markup, parse_mode=parse_mode)
             return
-        # Остальные ошибки – логируем и отправляем новое сообщение как запасной вариант
         logger.warning(f"safe_edit fallback due to: {e}")
         await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=reply_markup, parse_mode=parse_mode)
     except Exception as e:
