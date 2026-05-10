@@ -2329,11 +2329,19 @@ async def rules_callback(update, context):
         "<code>/catalog</code> — ссылка на каталог\n\n"
         "<i>🏆 Ранг даёт власть. Гильдия даёт путь. Искажение награждает верных.</i> 🩸"
     )
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("💍 Создать именной блант", callback_data="craft_named")],
-        [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
-    ])
-    await msg.reply_text(text, parse_mode='HTML', reply_markup=kb)
+
+    if update.callback_query:
+        # Вызов из профиля – редактируем текущее сообщение, кнопка «🔙 Назад» ведёт в профиль
+        await safe_edit(update, context, text,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Назад", callback_data="profile")]
+            ]))
+    else:
+        # Вызов по команде /rules – отправляем новое сообщение с кнопкой «🏰 В меню»
+        await msg.reply_text(text, parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
+            ]))
 
 @error_handler
 async def privilege_callback(update, context):
