@@ -3441,6 +3441,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await luck_callback(update, context, action=data)
             return
 
+        if data in ("luck_wheel", "luck_berserk", "alchemy_start", "alchemy_confirm"):
+            await q.answer()
+            await luck_callback(update, context, action=data)
+            return
+
         handler = CALLBACKS.get(data)
         if handler:
             await q.answer()
