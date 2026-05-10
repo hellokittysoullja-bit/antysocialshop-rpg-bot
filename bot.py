@@ -2086,12 +2086,12 @@ async def top_callback(update, context):
     deadline = next_sunday_str()
 
     if my_position == 1:
-    text += (
-        f"<b>✦ 📊 Твоя позиция: 1 — ТЫ ДЕРЖИШЬ ТРОН 💎🫧 ✦</b>\n\n"
-        f"<b>🏆 УДЕРЖИ трон до {deadline} — получишь:</b>\n\n"
-        "<b>   🎁 Скин: «Корона Бездны» — уникальная рамка профиля</b>\n"
-        "<b>   ⚜️ Титул: «Властелин Рейтинга»</b>\n"
-    )
+        text += (
+            f"<b>✦ 📊 Твоя позиция: 1 — ТЫ ДЕРЖИШЬ ТРОН 💎🫧 ✦</b>\n\n"
+            f"<b>🏆 УДЕРЖИ трон до {deadline} — получишь:</b>\n\n"
+            "<b>   🎁 Скин: «Корона Бездны» — уникальная рамка профиля</b>\n"
+            "<b>   ⚜️ Титул: «Властелин Рейтинга»</b>\n"
+        )
     elif my_position == 2:
         text += (
             f"<b>✦ 📊 Твоя позиция: 2 — ТЫ В ШАГЕ ОТ ТРОНА 💎 ✨ ✦</b>\n\n"
@@ -2106,6 +2106,7 @@ async def top_callback(update, context):
             "<b>   🎁 Скин: «Золотой Венец» — фон профиля</b>\n"
             "<b>   ⚜️ Титул: «Хранитель Топа»</b>\n"
         )
+    # ... остальные elif / else
     elif my_position is not None:            # 4-10 места
         third_balance = top[2]["balance"] if len(top) >= 3 else 0
         gap = third_balance - my_balance
