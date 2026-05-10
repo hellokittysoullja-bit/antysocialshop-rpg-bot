@@ -2026,13 +2026,8 @@ async def top_callback(update, context):
         filled = percent // 10
         bar = "▓" * filled + "░" * (10 - filled)
 
-        if i == 1: medal = "🥇"
-        elif i == 2: medal = "🥈"
-        elif i == 3: medal = "🥉"
-        elif i == 4: medal = "⚜️"
-        elif i == 5: medal = "🌿"
-        elif i == 6: medal = "🫧"
-        else: medal = f"{i}."
+        # Только номер места (1., 2., 3., 4., 5., 6., 7., 8., 9., 10.)
+        num = f"{i}."
 
         guild = row.get("guild", "")
         if guild == "BLACK": g_emoji, g_name = "🩸", "Тёмная Гильдия"
@@ -2042,7 +2037,7 @@ async def top_callback(update, context):
         rank_emoji, rank_name = get_rank_info(bal)
 
         text += (
-            f"{medal} <b>{html.escape(row['username'])}</b> {g_emoji} — {bal} оас 🍬\n"
+            f"{num} <b>{html.escape(row['username'])}</b> {g_emoji} — {bal} оас 🍬\n"
             f"   <i>{bar} {percent}%</i>\n"
             f"   {g_emoji} {g_name} | {rank_emoji} <b>{rank_name}</b>\n\n"
         )
@@ -2050,6 +2045,7 @@ async def top_callback(update, context):
         if row["username"] == (await context.bot.get_chat(uid)).username:
             my_position = i
 
+    # Блок позиции
     if my_position is None:
         async with db_pool.acquire() as conn:
             cnt_row = await conn.fetchrow("SELECT COUNT(*) as cnt FROM players WHERE balance > $1", my_balance)
@@ -2099,6 +2095,13 @@ async def top_callback(update, context):
     else:
         await msg.reply_text(text, parse_mode='HTML', reply_markup=kb)
 
+
+def get_rank_info(balance):
+    """Возвращает эмодзи и название ранга."""
+    if balance >= 50000: return "🪬", "Некромант"
+    elif balance >= 20000: return "🪦", "Призрак"
+    elif balance >= 5000: return "⚔️", "Ветеран"
+    return "🪓", "Рекрут"
 
 def get_rank_info(balance):
     """Возвращает эмодзи и название ранга."""
