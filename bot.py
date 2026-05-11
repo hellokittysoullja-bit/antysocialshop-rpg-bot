@@ -108,6 +108,26 @@ web_app = Flask(__name__)
 def home():
     return "Antysocialshop RPG Bot is alive!"
 
+@web_app.route("/healthz")
+def healthz():
+    """Проверяет, жив ли бот и подключена ли БД."""
+    import asyncio
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_closed():
+            return "Event loop closed", 500
+        # Проверяем БД (если пул не создан или запрос не проходит – 503)
+        if db_pool is None:
+            return "No DB pool", 503
+        loop.run_until_complete(_check_db())
+        return "OK", 200
+    except Exception as e:
+        return str(e), 500
+
+async def _check_db():
+    async with db_pool.acquire() as conn:
+        await conn.execute("SELECT 1")
+
 def run_web_server():
     port = int(os.getenv("PORT", 10000))
     web_app.run(host="0.0.0.0", port=port)
