@@ -271,10 +271,10 @@ async def create_named_blunt(user_id, name, rarity=None, conn=None):
     """Создаёт именной блант и добавляет его ТОЛЬКО в инвентарь."""
     if rarity not in ("common", "rare", "epic", "legendary"):
         r = random.random()
-        if r < 0.01: rarity = "legendary"
-        elif r < 0.05: rarity = "epic"
-        elif r < 0.20: rarity = "rare"
-        else: rarity = "common"
+        if r < 0.02: rarity = "legendary"    # 2%
+        elif r < 0.15: rarity = "epic"       # 13% (0.02–0.15)
+        elif r < 0.45: rarity = "rare"       # 30% (0.15–0.45)
+        else: rarity = "common"              # 55% (0.45–1.00)
 
     clean_name = str(name or "").strip()[:25] or "Безымянный"
     reaction = random.choice(FUNNY_REACTIONS)
@@ -287,7 +287,7 @@ async def create_named_blunt(user_id, name, rarity=None, conn=None):
         "type": "named",
         "name": clean_name,
         "rarity": rarity,
-        "serial": None,                # без реестра serial не хранится
+        "serial": None,
         "rare_number": rare_number,
         "hash": hash_code,
         "reaction": reaction,
@@ -1362,7 +1362,33 @@ async def craft_callback(update, context):
     uid = user.id; uname = html.escape(user.username or user.first_name)
     p = await get_player_cached(uid)
     bal = p["balance"] if p else 0
-    text = f"<b>🌿 КРАФТ БЛАНТА</b>\n\n🛡️ <i>у тебя:</i> <code>{bal}</code> 🍬"
+    blunts = p.get("blunts", 0) or 0
+    craft_count = p.get("craft_count", 0) or 0
+
+    # Определяем текущую медаль крафта и следующий порог
+    medal_name = CRAFT_MEDALS[0][1]
+    target = CRAFT_MEDALS[0][0]
+    for threshold, name, _ in CRAFT_MEDALS:
+        if craft_count >= threshold:
+            medal_name = name
+        else:
+            target = threshold
+            break
+    else:
+        target = craft_count  # максимум
+
+    text = (
+        f"<b>🌿 КРАФТ БЛАНТА</b>\n\n"
+        f"<b>💎 у тебя: {bal} оас 🍬</b>\n\n"
+        f"<b>🌿 Блантов в свёртке: {blunts}</b>\n"
+        f"<b>🎯 Крафтинг: {craft_count}/{target} | {medal_name}</b>\n\n"
+        f"<b>🕯️ Обычный блант — 15 оас</b>\n"
+        f"<b>💍 Именной блант — 50 оас</b>\n"
+        f"   <i>🟢 55% | 🔵 30% | 🟣 13% | 🟡 2%</i>"
+    )
+    if p and p.get("m_essence", 0) > 0:
+        text += f"\n\n<b>💠 у тебя есть Кристальная Пыль</b> (<i>{p['m_essence']} доза</i>)"
+
     kb_rows = [
         [InlineKeyboardButton("🌿 Обычный блант (15 🍬)", callback_data="craft_normal")],
         [InlineKeyboardButton("💍 Именной блант (50 🍬)", callback_data="craft_named")],
