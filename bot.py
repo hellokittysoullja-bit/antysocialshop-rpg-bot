@@ -288,73 +288,52 @@ async def ensure_player_exists(user_id, username=None, conn=None):
 
 @db_retry()
 async def update_last_farm(user_id, conn=None):
-    if conn is None:
-        async with db_pool.acquire() as conn:
-            await update_last_farm(user_id, conn=conn)
-        return
-    await ensure_player_exists(user_id, conn=conn)
-    await conn.execute("UPDATE players SET last_farm = NOW(), last_farm_date = CURRENT_DATE WHERE user_id = $1", user_id)
-    invalidate_cache(user_id)
+    player = await PlayerRepository.get_by_id(user_id)
+    player.last_farm = datetime.now()
+    player.last_farm_date = date.today()
+    await PlayerRepository.save(player)
 
 @db_retry()
 async def update_last_daily(user_id, conn=None):
-    if conn is None:
-        async with db_pool.acquire() as conn:
-            await update_last_daily(user_id, conn=conn)
-        return
-    await ensure_player_exists(user_id, conn=conn)
-    await conn.execute("UPDATE players SET last_daily = NOW() WHERE user_id = $1", user_id)
-    invalidate_cache(user_id)
+    player = await PlayerRepository.get_by_id(user_id)
+    player.last_daily = datetime.now()
+    await PlayerRepository.save(player)
 
 @db_retry()
 async def update_last_ritual(user_id, conn=None):
-    if conn is None:
-        async with db_pool.acquire() as conn:
-            await update_last_ritual(user_id, conn=conn)
-        return
-    await ensure_player_exists(user_id, conn=conn)
-    await conn.execute("UPDATE players SET last_ritual = NOW() WHERE user_id = $1", user_id)
-    invalidate_cache(user_id)
+    player = await PlayerRepository.get_by_id(user_id)
+    player.last_ritual = datetime.now()
+    await PlayerRepository.save(player)
 
 @db_retry()
 async def update_last_berserk(user_id, conn=None):
-    if conn is None:
-        async with db_pool.acquire() as conn:
-            await update_last_berserk(user_id, conn=conn)
-        return
-    await ensure_player_exists(user_id, conn=conn)
-    await conn.execute("UPDATE players SET last_berserk = NOW() WHERE user_id = $1", user_id)
-    invalidate_cache(user_id)
+    player = await PlayerRepository.get_by_id(user_id)
+    player.last_berserk = datetime.now()
+    await PlayerRepository.save(player)
 
 async def get_guild(user_id):
-    player = await PlayerRepository.get_by_id(uid)
-    return p.get("guild") if p else None
+    player = await PlayerRepository.get_by_id(user_id)
+    return player.guild
 
 async def add_title(user_id, emoji, conn=None):
     title = str(emoji or "").strip()
     if not title:
         return
-    if conn is None:
-        async with db_pool.acquire() as conn:
-            await add_title(user_id, title, conn=conn)
-        return
-    await ensure_player_exists(user_id, conn=conn)
-    row = await conn.fetchrow("SELECT titles FROM players WHERE user_id = $1", user_id)
-    titles = (row["titles"] if row and row["titles"] else "").split()
+    player = await PlayerRepository.get_by_id(user_id)
+    titles = (player.titles or "").split()
     if title not in titles:
         titles.append(title)
-        await conn.execute("UPDATE players SET titles = $1 WHERE user_id = $2", " ".join(titles).strip(), user_id)
-    invalidate_cache(user_id)
+        player.titles = " ".join(titles).strip()
+        await PlayerRepository.save(player)
 
 @db_retry()
 async def create_named_blunt(user_id, name, rarity=None, conn=None):
-    """Создаёт именной блант и добавляет его ТОЛЬКО в инвентарь."""
     if rarity not in ("common", "rare", "epic", "legendary"):
         r = random.random()
-        if r < 0.02: rarity = "legendary"    # 2%
-        elif r < 0.15: rarity = "epic"       # 13% (0.02–0.15)
-        elif r < 0.45: rarity = "rare"       # 30% (0.15–0.45)
-        else: rarity = "common"              # 55% (0.45–1.00)
+        if r < 0.02: rarity = "legendary"
+        elif r < 0.15: rarity = "epic"
+        elif r < 0.45: rarity = "rare"
+        else: rarity = "common"
 
     clean_name = str(name or "").strip()[:25] or "Безымянный"
     reaction = random.choice(FUNNY_REACTIONS)
@@ -375,21 +354,11 @@ async def create_named_blunt(user_id, name, rarity=None, conn=None):
         "owner_history": [{"user_id": str(user_id), "since": datetime.utcnow().isoformat()}],
     }
 
-    if conn is None:
-        async with db_pool.acquire() as new_conn:
-            row = await new_conn.fetchrow("SELECT inventory FROM players WHERE user_id = $1", user_id)
-            inventory = _json_safe_load(row["inventory"] if row else None, [])
-            inventory.append(item)
-            await new_conn.execute("UPDATE players SET inventory = $1 WHERE user_id = $2", json.dumps(inventory), user_id)
-            invalidate_cache(user_id)
-            return item
-    else:
-        row = await conn.fetchrow("SELECT inventory FROM players WHERE user_id = $1", user_id)
-        inventory = _json_safe_load(row["inventory"] if row else None, [])
-        inventory.append(item)
-        await conn.execute("UPDATE players SET inventory = $1 WHERE user_id = $2", json.dumps(inventory), user_id)
-        invalidate_cache(user_id)
-        return item
+    player = await PlayerRepository.get_by_id(user_id)
+    player.inventory = _json_safe_load(player.inventory, [])
+    player.inventory.append(item)
+    await PlayerRepository.save(player)
+    return item
 
 async def _award_achievement_rewards(user_id, player, reward_text, context):
     if not reward_text:
@@ -768,86 +737,37 @@ async def create_tables(conn):
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 @db_retry()
 async def update_balance(user_id, username, amount, conn=None):
-    owns_conn = conn is None
-    if owns_conn:
-        async with db_pool.acquire() as conn:
-            async with conn.transaction():
-                if username:
-                    await conn.execute("""
-                        INSERT INTO players(user_id, username, balance, blunts)
-                        VALUES($1, $2, 0, 0)
-                        ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username
-                    """, user_id, username)
-                await conn.execute("UPDATE players SET balance = balance + $1 WHERE user_id = $2", amount, user_id)
-    else:
-        if username:
-            await conn.execute("""
-                INSERT INTO players(user_id, username, balance, blunts)
-                VALUES($1, $2, 0, 0)
-                ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username
-            """, user_id, username)
-        await conn.execute("UPDATE players SET balance = balance + $1 WHERE user_id = $2", amount, user_id)
-    invalidate_cache(user_id)
+    player = await PlayerRepository.get_by_id(user_id)
+    player.username = username or player.username
+    player.balance += amount
+    await PlayerRepository.save(player)
 
 @db_retry()
 async def update_blunts(user_id, username, amount, conn=None):
-    owns_conn = conn is None
-    if owns_conn:
-        async with db_pool.acquire() as conn:
-            async with conn.transaction():
-                if username:
-                    await conn.execute("""
-                        INSERT INTO players(user_id, username, balance, blunts)
-                        VALUES($1, $2, 0, 0)
-                        ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username
-                    """, user_id, username)
-                await conn.execute("UPDATE players SET blunts = blunts + $1 WHERE user_id = $2", amount, user_id)
-    else:
-        if username:
-            await conn.execute("""
-                INSERT INTO players(user_id, username, balance, blunts)
-                VALUES($1, $2, 0, 0)
-                ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username
-            """, user_id, username)
-        await conn.execute("UPDATE players SET blunts = blunts + $1 WHERE user_id = $2", amount, user_id)
-    invalidate_cache(user_id)
+    player = await PlayerRepository.get_by_id(user_id)
+    player.username = username or player.username
+    player.blunts += amount
+    await PlayerRepository.save(player)
 
 async def update_essence(user_id, amount, conn=None):
-    owns_conn = conn is None
-    if owns_conn:
-        async with db_pool.acquire() as conn:
-            async with conn.transaction():
-                await conn.execute("""
-                    INSERT INTO players(user_id, username, balance, blunts)
-                    VALUES($1, '', 0, 0)
-                    ON CONFLICT (user_id) DO NOTHING
-                """, user_id)
-                await conn.execute("UPDATE players SET m_essence = m_essence + $1 WHERE user_id = $2", amount, user_id)
-    else:
-        await conn.execute("""
-            INSERT INTO players(user_id, username, balance, blunts)
-            VALUES($1, '', 0, 0)
-            ON CONFLICT (user_id) DO NOTHING
-        """, user_id)
-        await conn.execute("UPDATE players SET m_essence = m_essence + $1 WHERE user_id = $2", amount, user_id)
-    invalidate_cache(user_id)
+    player = await PlayerRepository.get_by_id(user_id)
+    player.m_essence += amount
+    await PlayerRepository.save(player)
 
 ALLOWED_COUNTERS = {"farm_count","craft_count","smoke_count","ritual_count","referral_count","check_count","lab_chests","lab_deaths","alchemy_count"}
+
 async def increment_counter(user_id, field, conn=None):
     if field not in ALLOWED_COUNTERS:
         return
-    if conn is None:
-        async with db_pool.acquire() as conn:
-            await conn.execute(f"UPDATE players SET {field} = COALESCE({field}, 0) + 1 WHERE user_id = $1", user_id)
-    else:
-        await conn.execute(f"UPDATE players SET {field} = COALESCE({field}, 0) + 1 WHERE user_id = $1", user_id)
-    invalidate_cache(user_id)
+    player = await PlayerRepository.get_by_id(user_id)
+    setattr(player, field, getattr(player, field, 0) + 1)
+    await PlayerRepository.save(player)
 
 @db_retry()
 async def set_guild(user_id, guild):
-    async with db_pool.acquire() as conn:
-        await conn.execute("UPDATE players SET guild=$1 WHERE user_id=$2", guild, user_id)
-    invalidate_cache(user_id)
+    player = await PlayerRepository.get_by_id(user_id)
+    player.guild = guild
+    await PlayerRepository.save(player)
 
 @db_retry()
 async def get_top(limit=10):
