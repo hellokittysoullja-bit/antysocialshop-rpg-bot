@@ -1670,6 +1670,7 @@ async def do_smoke(update, context):
     await check_achievements(uid, context)
 
 # Ритуал (с защитой от None)
+# Ритуал (с защитой от None)
 @error_handler
 @rate_limit(3)
 async def ritual_callback(update, context):
@@ -1712,7 +1713,7 @@ async def ritual_callback(update, context):
     progress_bar_str = get_medal_progress(new_count, RITUAL_MEDALS)
 
     text = (
-        f"<b>🕯️ РИТУАЛ ЗАВЕРШЁН</b>\n\n"
+        f"<b>🕯️ РИТУАЛ ЗАВЕРШЁН 🎉</b>\n\n"
         f"Ритуал принёс тебе <b>{reward} OAC</b> 🍬\n"
         f"<b>⚜️ У тебя:</b> <b>{new_balance} OAC</b>\n\n"
         f"{medal_text}"
@@ -1720,10 +1721,13 @@ async def ritual_callback(update, context):
         f"<b>{progress_bar_str}</b>"
     )
 
+    # Анимация с проверкой переменной
+    anim_msg = await animate_progress_bar(update, context, title="🕯️ Ритуал проводится...")
     if anim_msg is not None:
         await anim_msg.edit_text(text, parse_mode='HTML')
     else:
         await context.bot.send_message(chat_id=update.effective_chat.id, text=text, parse_mode='HTML')
+
     await check_rank_up(context, uid, uname, old_bal, new_balance)
     await check_achievements(uid, context)
 
