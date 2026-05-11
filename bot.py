@@ -1359,24 +1359,22 @@ async def farm_callback(update, context):
     uname_escaped = html.escape(uname)
     player = await PlayerRepository.get_by_id(uid)
 
-    if p and p["last_farm"]:
-        last = _to_datetime(p["last_farm"])
-        if datetime.now() - last < timedelta(hours=FARM_COOLDOWN_HOURS):
-            remain = int((timedelta(hours=FARM_COOLDOWN_HOURS) - (datetime.now()-last)).seconds/60)
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=f"<b>🍬 OAC копятся 🌱</b>\n\n<b>🍃 Подожди {remain} мин</b>",
-                parse_mode='HTML',
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
-            )
-            if update.callback_query:
-                await update.callback_query.answer()
-            return
+    if player.last_farm and (datetime.now() - player.last_farm) < timedelta(hours=FARM_COOLDOWN_HOURS):
+        remain = int((timedelta(hours=FARM_COOLDOWN_HOURS) - (datetime.now()-player.last_farm)).seconds/60)
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=f"<b>🍬 OAC копятся 🌱</b>\n\n<b>🍃 Подожди {remain} мин</b>",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
+        )
+        if update.callback_query:
+            await update.callback_query.answer()
+        return
 
     earned = random.randint(FARM_MIN, FARM_MAX)
     crit = False
-    if p and (p.get("smoke_count") or 0) > 0:
-        earned += int(earned*0.05)
+    if player.smoke_count > 0:
+        earned += int(earned * 0.05)
     if context.user_data.get("last_smoke_time") and datetime.now() - context.user_data["last_smoke_time"] < timedelta(minutes=5):
         earned += random.randint(3,5)
     happy = context.bot_data.get("happy_hour", False)
@@ -1387,24 +1385,25 @@ async def farm_callback(update, context):
         crit = True
         await send_whisper(context, "@guild_antysocial", f"🌟 @{uname_escaped} наткнулся на <i>Золотую жилу</i>! +{earned} 🍬")
 
-    old_bal = p["balance"] if p else 0
-    old_count = p["farm_count"] if p else 0
+    old_bal = player.balance
+    old_count = player.farm_count
 
-    # Единая транзакция через один conn
-    async with db_pool.acquire() as conn:
-        async with conn.transaction():
-            await update_balance(uid, uname, earned, conn=conn)
-            await update_last_farm(uid, conn=conn)
-            await increment_counter(uid, "farm_count", conn=conn)
-            await add_war_score(uid, earned, conn=conn)
-        p_new = await get_player_cached(uid)
+    # Обновляем модель
+    player.balance += earned
+    player.farm_count += 1
+    player.last_farm = datetime.now()
+    player.last_farm_date = date.today()
+    await PlayerRepository.save(player)
 
-    new_count = p_new["farm_count"]
+    await add_war_score(uid, earned)
+
+    new_count = player.farm_count
     medal_text, medal_bonus = get_medal_text_and_reward(old_count, new_count, FARM_MEDALS)
     if medal_bonus:
-        await update_balance(uid, uname, medal_bonus)
-        p_new = await get_player_cached(uid)
-    new_balance = p_new["balance"]
+        player.balance += medal_bonus
+        await PlayerRepository.save(player)
+
+    new_balance = player.balance
     target = get_medal_target(new_count, FARM_MEDALS)
     progress_bar_str = get_medal_progress(new_count, FARM_MEDALS)
     rank_progress = get_rank_progress(new_balance)
@@ -1424,7 +1423,6 @@ async def farm_callback(update, context):
     if anim_msg is not None:
         await anim_msg.edit_text(text, parse_mode='HTML')
     else:
-        # fallback – новое сообщение, не трогаем меню
         await context.bot.send_message(chat_id=update.effective_chat.id, text=text, parse_mode='HTML')
 
     await check_rank_up(context, uid, uname, old_bal, new_balance)
