@@ -2808,7 +2808,7 @@ async def catalog_callback(update, context):
 async def luck_callback(update, context, action=None):
     user, msg = get_user_and_msg(update)
     uid = user.id; uname = html.escape(user.username or user.first_name)
-    p = await get_player_cached(uid)
+    p = await get_player_cached(uid, fields=["balance", "blunts", "last_daily", "last_berserk", "m_essence"])
     if not p: await msg.reply_text("Сначала активируйся: /start"); return
     bal = p["balance"]; now = datetime.now()
     last_daily = p["last_daily"]
