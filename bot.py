@@ -12,6 +12,51 @@ from telegram.ext import (
 )
 from telegram.error import BadRequest
 
+from pydantic import BaseModel, Field
+from typing import Optional, List, Any
+
+class Player(BaseModel):
+    user_id: int
+    username: str = ""
+    balance: int = 0
+    blunts: int = 0
+    guild: Optional[str] = None
+    last_farm: Optional[datetime] = None
+    last_ritual: Optional[datetime] = None
+    last_daily: Optional[datetime] = None
+    titles: str = ""
+    last_farm_date: Optional[date] = None
+    passive_level: int = 0
+    passive_collected: Optional[datetime] = None
+    karma: int = 0
+    inhaled: int = 0
+    smoke_count: int = 0
+    farm_count: int = 0
+    craft_count: int = 0
+    ritual_count: int = 0
+    referral_count: int = 0
+    last_berserk: Optional[datetime] = None
+    inventory: List[Any] = Field(default_factory=list)
+    invited_by: Optional[int] = None
+    profile_skins: dict = Field(default_factory=dict)
+    login_streak: int = 0
+    last_login_date: Optional[date] = None
+    oath: str = ""
+    keys: int = 0
+    check_count: int = 0
+    m_essence: int = 0
+    lab_chests: int = 0
+    lab_deaths: int = 0
+    alchemy_count: int = 0
+    last_lab_attempt: Optional[datetime] = None
+    donated: int = 0
+    pending_transfer: Optional[dict] = None
+    lab_depth: int = 1
+
+    class Config:
+        # разрешаем присваивать значения по старым именам, если понадобится
+        populate_by_name = True
+
 import functools
 import asyncio
 
@@ -120,80 +165,115 @@ async def init_redis():
         logger.info("Redis подключён – кэш активирован")
     else:
         logger.info("REDIS_URL не задан – используется in-memory кэш")
-
-async def get_player_cached(user_id, fields=None):
-    # Пробуем Redis
-    if redis:
-        key = f"player:{user_id}"
-        data = await redis.get(key)
-        if data:
-            p = json.loads(data)
-            if isinstance(p, dict):
-                # Если запрошены конкретные поля – возвращаем только их
-                if fields:
-                    return {k: p.get(k) for k in fields if k in p}
-                return p
-
-    # Fallback – старый кэш в памяти
-    if user_id in player_cache:
-        p = player_cache[user_id]
-        if fields:
-            return {k: p.get(k) for k in fields if k in p}
-        return p
-
-    # Запрос к БД (только нужные колонки)
-    if fields:
-        columns = ", ".join(fields)
-    else:
-        columns = "*"
-    async with db_pool.acquire() as conn:
-        row = await conn.fetchrow(f"SELECT {columns} FROM players WHERE user_id=$1", user_id)
-    if row:
-        p = dict(row)
-        # Нормализация числовых полей – ни одного None
-        numeric_fields = [
-            'balance', 'blunts', 'farm_count', 'craft_count', 'smoke_count',
-            'ritual_count', 'referral_count', 'check_count', 'lab_chests',
-            'lab_deaths', 'alchemy_count', 'login_streak', 'donated', 'm_essence',
-            'passive_level', 'karma', 'inhaled', 'keys'
-        ]
-        for field in numeric_fields:
-            if p.get(field) is None:
-                p[field] = 0
-        # Инвентарь и скины загружаем только если нужно
-        if fields is None or "inventory" in fields:
-            p["inventory"] = _json_safe_load(p.get("inventory"), [])
-        else:
-            p["inventory"] = []   # пустой список, если не запросили
-        if fields is None or "profile_skins" in fields:
-            p["profile_skins"] = _json_safe_load(p.get("profile_skins"), {})
-        else:
-            p["profile_skins"] = {}
-
-        # Сохраняем в Redis (TTL 10 секунд) или в словарь
+        
+class PlayerRepository:
+    @staticmethod
+    async def get_by_id(user_id: int) -> Player:
+        # Пробуем Redis
         if redis:
-            await redis.setex(key, 10, json.dumps(p, default=str))
-        else:
-            player_cache[user_id] = p
-        # Возвращаем только запрошенные поля
-        if fields:
-            return {k: p.get(k) for k in fields if k in p}
-        return p
-    return None
+            key = f"player:{user_id}"
+            data = await redis.get(key)
+            if data:
+                return Player.parse_raw(data)
 
-def invalidate_cache(user_id):
-    """Сбрасывает кэш игрока (Redis + in-memory). Безопасен для синхронных вызовов."""
-    if redis:
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                asyncio.ensure_future(redis.delete(f"player:{user_id}"))
+        # Fallback – in‑memory кэш (словарь)
+        if user_id in player_cache:
+            p = player_cache[user_id]
+            return Player(**p)
+
+        # Запрос к БД
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT * FROM players WHERE user_id = $1", user_id)
+        if row:
+            p = dict(row)
+            p["inventory"] = _json_safe_load(p.get("inventory"), [])
+            p["profile_skins"] = _json_safe_load(p.get("profile_skins"), {})
+            player = Player(**p)
+
+            # Кэшируем
+            if redis:
+                await redis.setex(f"player:{user_id}", 10, player.json())
             else:
-                logger.warning("Redis invalidation skipped – no running loop")
-        except RuntimeError:
-            logger.warning("Redis invalidation skipped – no event loop")
-    else:
-        player_cache.pop(user_id, None)
+                player_cache[user_id] = player.dict()
+            return player
+
+        # Игрок не найден – возвращаем новый объект (он создастся в БД при первом save)
+        return Player(user_id=user_id)
+
+    @staticmethod
+    async def save(player: Player):
+        inv_json = json.dumps(player.inventory, default=str)
+        skins_json = json.dumps(player.profile_skins, default=str)
+
+        async with db_pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO players (user_id, username, balance, blunts, guild, last_farm,
+                    last_ritual, last_daily, titles, last_farm_date, passive_level,
+                    passive_collected, karma, inhaled, smoke_count, farm_count,
+                    craft_count, ritual_count, referral_count, last_berserk,
+                    inventory, invited_by, profile_skins, login_streak,
+                    last_login_date, oath, keys, check_count, m_essence,
+                    lab_chests, lab_deaths, alchemy_count, last_lab_attempt,
+                    donated, pending_transfer, lab_depth)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
+                        $17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,
+                        $30,$31,$32,$33,$34,$35,$36,$37)
+                ON CONFLICT (user_id) DO UPDATE SET
+                    username = EXCLUDED.username,
+                    balance = EXCLUDED.balance,
+                    blunts = EXCLUDED.blunts,
+                    guild = EXCLUDED.guild,
+                    last_farm = EXCLUDED.last_farm,
+                    last_ritual = EXCLUDED.last_ritual,
+                    last_daily = EXCLUDED.last_daily,
+                    titles = EXCLUDED.titles,
+                    last_farm_date = EXCLUDED.last_farm_date,
+                    passive_level = EXCLUDED.passive_level,
+                    passive_collected = EXCLUDED.passive_collected,
+                    karma = EXCLUDED.karma,
+                    inhaled = EXCLUDED.inhaled,
+                    smoke_count = EXCLUDED.smoke_count,
+                    farm_count = EXCLUDED.farm_count,
+                    craft_count = EXCLUDED.craft_count,
+                    ritual_count = EXCLUDED.ritual_count,
+                    referral_count = EXCLUDED.referral_count,
+                    last_berserk = EXCLUDED.last_berserk,
+                    inventory = EXCLUDED.inventory,
+                    invited_by = EXCLUDED.invited_by,
+                    profile_skins = EXCLUDED.profile_skins,
+                    login_streak = EXCLUDED.login_streak,
+                    last_login_date = EXCLUDED.last_login_date,
+                    oath = EXCLUDED.oath,
+                    keys = EXCLUDED.keys,
+                    check_count = EXCLUDED.check_count,
+                    m_essence = EXCLUDED.m_essence,
+                    lab_chests = EXCLUDED.lab_chests,
+                    lab_deaths = EXCLUDED.lab_deaths,
+                    alchemy_count = EXCLUDED.alchemy_count,
+                    last_lab_attempt = EXCLUDED.last_lab_attempt,
+                    donated = EXCLUDED.donated,
+                    pending_transfer = EXCLUDED.pending_transfer,
+                    lab_depth = EXCLUDED.lab_depth
+            """,
+                player.user_id, player.username, player.balance, player.blunts,
+                player.guild, player.last_farm, player.last_ritual, player.last_daily,
+                player.titles, player.last_farm_date, player.passive_level,
+                player.passive_collected, player.karma, player.inhaled,
+                player.smoke_count, player.farm_count, player.craft_count,
+                player.ritual_count, player.referral_count, player.last_berserk,
+                inv_json, player.invited_by, skins_json,
+                player.login_streak, player.last_login_date, player.oath,
+                player.keys, player.check_count, player.m_essence,
+                player.lab_chests, player.lab_deaths, player.alchemy_count,
+                player.last_lab_attempt, player.donated, player.pending_transfer,
+                player.lab_depth
+            )
+
+        # Инвалидируем кэш
+        if redis:
+            await redis.delete(f"player:{player.user_id}")
+        else:
+            player_cache.pop(player.user_id, None)
 
 async def ensure_player_exists(user_id, username=None, conn=None):
     if conn is None:
@@ -247,7 +327,7 @@ async def update_last_berserk(user_id, conn=None):
     invalidate_cache(user_id)
 
 async def get_guild(user_id):
-    p = await get_player_cached(user_id)
+    player = await PlayerRepository.get_by_id(uid)
     return p.get("guild") if p else None
 
 async def add_title(user_id, emoji, conn=None):
@@ -1328,7 +1408,7 @@ async def farm_callback(update, context):
     user, msg = get_user_and_msg(update)
     uid = user.id; uname = user.username or user.first_name
     uname_escaped = html.escape(uname)
-    p = await get_player_cached(uid, fields=["balance", "last_farm", "farm_count", "smoke_count"])
+    player = await PlayerRepository.get_by_id(uid)
 
     if p and p["last_farm"]:
         last = _to_datetime(p["last_farm"])
@@ -1407,7 +1487,7 @@ async def farm_callback(update, context):
 async def craft_callback(update, context):
     user, msg = get_user_and_msg(update)
     uid = user.id; uname = html.escape(user.username or user.first_name)
-    p = await get_player_cached(uid)
+    player = await PlayerRepository.get_by_id(uid)
     bal = p["balance"] if p else 0
     blunts = p.get("blunts", 0) or 0
     craft_count = p.get("craft_count", 0) or 0
@@ -1450,7 +1530,7 @@ async def handle_craft_normal(update, context):
     query = update.callback_query
     await query.answer()
     uid = query.from_user.id; uname = query.from_user.username or query.from_user.first_name
-    p = await get_player_cached(uid)
+    player = await PlayerRepository.get_by_id(uid)
     if not p or p["balance"] < 15:
         await context.bot.send_message(
             chat_id=query.message.chat.id,
@@ -1501,7 +1581,7 @@ async def handle_craft_named(update, context):
     query = update.callback_query
     await query.answer()
     uid = query.from_user.id
-    p = await get_player_cached(uid)
+    player = await PlayerRepository.get_by_id(uid)
     if not p or p["balance"] < 50:
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
@@ -1797,7 +1877,7 @@ async def handle_gift_username(update: Update, context: ContextTypes.DEFAULT_TYP
 async def smoke_callback(update, context):
     user, msg = get_user_and_msg(update)
     uid = user.id; uname = html.escape(user.username or user.first_name)
-    p = await get_player_cached(uid)
+    player = await PlayerRepository.get_by_id(uid)
     if not p or p["blunts"] < 1:
         empty_text = (
             "<b>💨 ДУНУТЬ</b>\n\n"
@@ -1830,7 +1910,7 @@ async def do_smoke(update, context):
     query = update.callback_query
     await query.answer()
     uid = query.from_user.id; uname = html.escape(query.from_user.username or query.from_user.first_name)
-    p = await get_player_cached(uid)
+    player = await PlayerRepository.get_by_id(uid)
     if not p or p["blunts"] < 1:
         await query.answer("Свёрток пуст.")
         return
@@ -1958,7 +2038,7 @@ async def do_smoke(update, context):
 async def ritual_callback(update, context):
     user, msg = get_user_and_msg(update)
     uid = user.id; uname = html.escape(user.username or user.first_name)
-    p = await get_player_cached(uid)
+    player = await PlayerRepository.get_by_id(uid)
     if not p: await send_whisper_dm(update, context, "🕳️ Ты ещё не активирован. /start"); return
     if p["guild"] != "BLACK": await send_whisper_dm(update, context, "❌ Только Тёмная Гильдия."); return
     if p["last_ritual"]:
@@ -2018,7 +2098,7 @@ async def ritual_callback(update, context):
 async def collect_callback(update, context):
     user, msg = get_user_and_msg(update)
     uid = user.id; uname = html.escape(user.username or user.first_name)
-    p = await get_player_cached(uid)
+    player = await PlayerRepository.get_by_id(uid)
     if not p: await send_whisper_dm(update, context, "🕳️ Ты ещё не активирован. /start"); return
     bal = p["balance"]
     if bal < 5000:
@@ -2071,7 +2151,7 @@ async def profile_callback(update, context):
     user, msg = get_user_and_msg(update)
     uid = user.id
     uname = html.escape(user.username or user.first_name)
-    p = await get_player_cached(uid)
+    player = await PlayerRepository.get_by_id(uid)
     if not p:
         await msg.reply_text("Сначала активируйся: /start")
         return
@@ -2490,7 +2570,7 @@ async def guild_info_callback(update, context):
     user, msg = get_user_and_msg(update)
     uid = user.id
     guild = await get_guild(uid)
-    p = await get_player_cached(uid)
+    player = await PlayerRepository.get_by_id(uid)
     if not p:
         await safe_edit(update, context, "Профиль не найден. Напиши /start")
         return
@@ -2682,7 +2762,7 @@ async def confess_callback(update, context):
     """Исповедь (для Светлой Гильдии) – работает и по кнопке, и по команде /repent."""
     user, msg = get_user_and_msg(update)
     uid = user.id
-    p = await get_player_cached(uid)
+    player = await PlayerRepository.get_by_id(uid)
 
     # Проверки
     if not p:
@@ -2808,7 +2888,7 @@ async def catalog_callback(update, context):
 async def luck_callback(update, context, action=None):
     user, msg = get_user_and_msg(update)
     uid = user.id; uname = html.escape(user.username or user.first_name)
-    p = await get_player_cached(uid, fields=["balance", "blunts", "last_daily", "last_berserk", "m_essence"])
+    player = await PlayerRepository.get_by_id(uid)
     if not p: await msg.reply_text("Сначала активируйся: /start"); return
     bal = p["balance"]; now = datetime.now()
     last_daily = p["last_daily"]
