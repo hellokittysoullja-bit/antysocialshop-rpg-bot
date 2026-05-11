@@ -433,7 +433,7 @@ async def _award_achievement_rewards(user_id, player, reward_text, context):
             logger.warning(f"Неизвестный формат награды: {part} для пользователя {user_id}")
 
 async def check_achievements(user_id, context):
-    p = await get_player_cached(user_id)
+    player = await PlayerRepository.get_by_id(uid)
     if not p:
         return
     async with db_pool.acquire() as conn:
@@ -974,7 +974,7 @@ async def add_war_score(user_id, points, conn=None):
 
 async def get_main_menu_keyboard(user_id):
     whisper = random.choice(WHISPERS)
-    p = await get_player_cached(user_id)
+    player = await PlayerRepository.get_by_id(uid)
     balance = p["balance"] if p else 0
 
     bush_btn = InlineKeyboardButton("🪴 Куст", callback_data="collect") if balance >= 5000 else InlineKeyboardButton("🔒 Куст (⚔️ Ветеран)", callback_data="bush_preview")
@@ -2333,7 +2333,7 @@ async def my_blunts_callback(update, context, page=0):
 async def achievements_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, page=0):
     query = update.callback_query
     uid = query.from_user.id
-    p = await get_player_cached(uid)
+    player = await PlayerRepository.get_by_id(uid)
     if not p:
         await query.answer("Профиль не найден.", show_alert=True)
         return
