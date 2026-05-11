@@ -1146,25 +1146,60 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     p = await get_player_cached(user_id)
     bal = p["balance"] if p else 0
     rank_emoji, rank_name = "🪓", "Рекрут"
-    for emoji, threshold, _ in RANKS:
+    next_rank_emoji, next_rank_name, next_threshold = "", "", 0
+    for i, (emoji, threshold, _) in enumerate(RANKS):
         if bal >= threshold:
-            parts = emoji.split(' ', 1)
-            rank_emoji = parts[0]
-            rank_name = parts[1] if len(parts) > 1 else ""
+            rank_emoji = emoji.split(' ', 1)[0]
+            rank_name = emoji.split(' ', 1)[1] if ' ' in emoji else emoji
+            if i + 1 < len(RANKS):
+                next_rank_emoji = RANKS[i+1][0].split(' ', 1)[0]
+                next_rank_name = RANKS[i+1][0].split(' ', 1)[1] if ' ' in RANKS[i+1][0] else RANKS[i+1][0]
+                next_threshold = RANKS[i+1][1]
+        else:
+            next_rank_emoji = emoji.split(' ', 1)[0]
+            next_rank_name = emoji.split(' ', 1)[1] if ' ' in emoji else emoji
+            next_threshold = threshold
             break
+
     display_name = user.first_name or user.username or "Странник"
     rank_display = f"{rank_emoji} {rank_name}" if rank_name else rank_emoji
 
     whisper = random.choice(WHISPERS)
-    back = f"⚔️ С возвращением в Гильдию, <b>{rank_display} {html.escape(display_name)}</b>.\n\n"
-    if guild == "BLACK":
-        back += "🔮 <b>Ты — часть Тёмной Гильдии. 🕯️Ритуалы ждут тебя</b>\n"
-    elif guild == "WHITE":
-        back += "🔮 <b>Ты — часть Светлой Гильдии. ⚜️ Исповедь очищает душу и ждёт тебя</b>\n"
-    else:
-        back += "🔮 <b>Ты пока не в Гильдии. Нажми /guild чтобы вступить</b>\n"
 
-    menu_text = f"<b>🎮 ГЛАВНОЕ МЕНЮ</b>\n\n<i>{whisper}</i>\n\n" + back
+    # Приветствие гильдии
+    back = f"<b>⚔️ С возвращением в Гильдию, {rank_display} {html.escape(display_name)}.</b>\n\n"
+    if guild == "BLACK":
+        back += "<b>🔮 Ты — часть Тёмной Гильдии. 🕯️Ритуалы ждут тебя</b>\n"
+    elif guild == "WHITE":
+        back += "<b>🔮 Ты — часть Светлой Гильдии. ⚜️ Исповедь очищает душу и ждёт тебя</b>\n"
+    else:
+        back += "<b>🔮 Ты пока не в Гильдии. Нажми /guild чтобы вступить</b>\n"
+
+    # Мотивационная строка (прогресс до следующего ранга)
+    if next_threshold > 0:
+        gap = next_threshold - bal
+        back += f"\n<b>⚡ Ещё {gap} OAC до ранга {next_rank_emoji} {next_rank_name} — вперёд!</b>"
+    else:
+        back += f"\n<b>⚡ Ты достиг вершины! Твой ранг — {rank_emoji} {rank_name}.</b>"
+
+    # Онбординг-подсказка (меняется по мере прогресса)
+    farm_count = p.get("farm_count", 0) or 0
+    guild_joined = p.get("guild") is not None
+    craft_count = p.get("craft_count", 0) or 0
+    is_veteran = bal >= 5000
+
+    if farm_count == 0:
+        hint = "<b>💡 Твой первый шаг: нажми 🍬 Фармить и получи OAC!</b>"
+    elif not guild_joined:
+        hint = "<b>💡 Отлично! Теперь вступи в 🕋 Гильдию — это откроет ритуалы и войну.</b>"
+    elif craft_count == 0:
+        hint = "<b>💡 Попробуй 🌿 Крафт, чтобы создать свой первый блант.</b>"
+    elif is_veteran:
+        hint = "<b>💡 Исследуй 🔮 Алхимию и корми своего 🐾 питомца!</b>"
+    else:
+        hint = "<b>💡 Исследуй 🏛️ Лабиринт! Он полон опасностей и наград.</b>"
+
+    menu_text = f"<b>🎮 ГЛАВНОЕ МЕНЮ</b>\n\n<i>{whisper}</i>\n\n" + back + "\n\n" + hint
 
     kb, _ = await get_main_menu_keyboard(user_id)
     await msg.reply_text(menu_text, reply_markup=kb, parse_mode='HTML')
