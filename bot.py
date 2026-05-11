@@ -1379,11 +1379,11 @@ async def craft_callback(update, context):
 
     text = (
         f"<b>🌿 КРАФТ БЛАНТА</b>\n\n"
-        f"<b>💎 У тебя: {bal} оас 🍬</b>\n\n"
+        f"<b>💎 у тебя: {bal} оас 🍬</b>\n\n"
         f"<b>🌿 Блантов в свёртке: {blunts}</b>\n"
         f"<b>🎯 Крафтинг: {craft_count}/{target} | {medal_name}</b>\n\n"
-        f"<b>🕯️ Обычный Блант — 15 оас 🍬</b>\n\n"
-        f"<b>💍 Именной Блант — 50 оас 🍬</b>\n"
+        f"<b>🕯️ Обычный блант — 15 оас</b>\n"
+        f"<b>💍 Именной блант — 50 оас</b>\n"
         f"   <i>🟢 55% | 🔵 30% | 🟣 13% | 🟡 2%</i>"
     )
     if p and p.get("m_essence", 0) > 0:
@@ -2170,17 +2170,23 @@ async def top_callback(update, context):
             prefix = "🌿 5. "
         elif i == 6:
             prefix = "🫧 6. "
-        else:
-            prefix = f"{i}. "
+        elif i == 7:
+            prefix = "🪄 7. "
+        elif i == 8:
+            prefix = "🎈 8. "
+        elif i == 9:
+            prefix = "🍀 9. "
+        else:  # i == 10
+            prefix = "🌱 10. "
 
         # Гильдия
         guild = row.get("guild", "")
         if guild == "BLACK":
-            g_emoji, g_name = "🩸", "Тёмная Гильдия"
+            g_emoji, g_name = "🕯️", "<b>Тёмная Гильдия</b>"
         elif guild == "WHITE":
-            g_emoji, g_name = "⚜️", "Светлая Гильдия"
+            g_emoji, g_name = "⚜️", "<b>Светлая Гильдия</b>"
         else:
-            g_emoji, g_name = "", "Без гильдии"
+            g_emoji, g_name = "🩸", "<b>Без гильдии</b>"
 
         # Ранг
         rank_emoji, rank_name = get_rank_info(bal)
