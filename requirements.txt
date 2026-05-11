@@ -6,3 +6,4 @@ cachetools==5.3.3
 asyncpg
 redis==5.0.1
 sentry-sdk[flask]
+pydantic>=2.0
