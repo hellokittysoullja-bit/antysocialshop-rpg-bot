@@ -433,66 +433,71 @@ async def _award_achievement_rewards(user_id, player, reward_text, context):
             logger.warning(f"Неизвестный формат награды: {part} для пользователя {user_id}")
 
 async def check_achievements(user_id, context):
-    player = await PlayerRepository.get_by_id(uid)
-    if not p:
+    player = await PlayerRepository.get_by_id(user_id)
+    if not player or not player.user_id:
         return
+
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("SELECT ach_id FROM achievements_awarded WHERE user_id=$1", user_id)
         awarded = {r["ach_id"] for r in rows}
+
         for ach in ACHIEVEMENTS:
             ach_id = ach["id"]
             if ach_id == "lunar_lord":
                 continue
+
             condition_met = False
-            balance = p.get("balance", 0)
-            if ach_id == "farm_1" and p.get("farm_count", 0) >= 1:
+            # Используем поля модели Player
+            if ach_id == "farm_1" and player.farm_count >= 1:
                 condition_met = True
-            elif ach_id == "craft_1" and p.get("craft_count", 0) >= 1:
+            elif ach_id == "craft_1" and player.craft_count >= 1:
                 condition_met = True
-            elif ach_id == "smoke_1" and p.get("smoke_count", 0) >= 1:
+            elif ach_id == "smoke_1" and player.smoke_count >= 1:
                 condition_met = True
-            elif ach_id == "balance_1000" and balance >= 1000:
+            elif ach_id == "balance_1000" and player.balance >= 1000:
                 condition_met = True
-            elif ach_id == "smoke_10" and p.get("smoke_count", 0) >= 10:
+            elif ach_id == "smoke_10" and player.smoke_count >= 10:
                 condition_met = True
-            elif ach_id == "craft_15" and p.get("craft_count", 0) >= 15:
+            elif ach_id == "craft_15" and player.craft_count >= 15:
                 condition_met = True
-            elif ach_id == "ritual_5" and p.get("ritual_count", 0) >= 5:
+            elif ach_id == "ritual_5" and player.ritual_count >= 5:
                 condition_met = True
-            elif ach_id == "craft_50" and p.get("craft_count", 0) >= 50:
+            elif ach_id == "craft_50" and player.craft_count >= 50:
                 condition_met = True
-            elif ach_id == "smoke_25" and p.get("smoke_count", 0) >= 25:
+            elif ach_id == "smoke_25" and player.smoke_count >= 25:
                 condition_met = True
-            elif ach_id == "lab_first" and p.get("lab_chests", 0) >= 1:
+            elif ach_id == "lab_first" and player.lab_chests >= 1:
                 condition_met = True
-            elif ach_id == "referral_1" and p.get("referral_count", 0) >= 1:
+            elif ach_id == "referral_1" and player.referral_count >= 1:
                 condition_met = True
-            elif ach_id == "streak_7" and p.get("login_streak", 0) >= 7:
+            elif ach_id == "streak_7" and player.login_streak >= 7:
                 condition_met = True
-            elif ach_id == "balance_20000" and balance >= 20000:
+            elif ach_id == "balance_20000" and player.balance >= 20000:
                 condition_met = True
-            elif ach_id == "lab_chest_3" and p.get("lab_chests", 0) >= 3:
+            elif ach_id == "lab_chest_3" and player.lab_chests >= 3:
                 condition_met = True
-            elif ach_id == "rank_phantom" and balance >= 20000:
+            elif ach_id == "rank_phantom" and player.balance >= 20000:
                 condition_met = True
-            elif ach_id == "balance_50000" and balance >= 50000:
+            elif ach_id == "balance_50000" and player.balance >= 50000:
                 condition_met = True
-            elif ach_id == "check_10" and p.get("check_count", 0) >= 10:
+            elif ach_id == "check_10" and player.check_count >= 10:
                 condition_met = True
-            elif ach_id == "lab_death_5" and p.get("lab_deaths", 0) >= 5:
+            elif ach_id == "lab_death_5" and player.lab_deaths >= 5:
                 condition_met = True
-            elif ach_id == "lab_chest_10" and p.get("lab_chests", 0) >= 10:
+            elif ach_id == "lab_chest_10" and player.lab_chests >= 10:
                 condition_met = True
-            elif ach_id == "craft_250" and p.get("craft_count", 0) >= 250:
+            elif ach_id == "craft_250" and player.craft_count >= 250:
                 condition_met = True
-            elif ach_id == "alchemy_15" and p.get("alchemy_count", 0) >= 15:
+            elif ach_id == "alchemy_15" and player.alchemy_count >= 15:
                 condition_met = True
+
             if condition_met and ach_id not in awarded:
                 await conn.execute(
                     "INSERT INTO achievements_awarded(user_id, ach_id, awarded_at) VALUES($1, $2, NOW()) ON CONFLICT DO NOTHING",
                     user_id, ach_id
                 )
-                await _award_achievement_rewards(user_id, p, ach.get("reward", ""), context)
+                # Награду адаптируем – используем player.username из модели
+                await _award_achievement_rewards(user_id, {"username": player.username, "profile_skins": player.profile_skins, "balance": player.balance}, ach.get("reward", ""), context)
                 try:
                     text = (
                         f"<b>🕊️ СВИТОК ДОСТИЖЕНИЙ 🏆</b>\n\n"
@@ -514,7 +519,7 @@ async def check_achievements(user_id, context):
                 "INSERT INTO achievements_awarded(user_id, ach_id, awarded_at) VALUES($1, $2, NOW()) ON CONFLICT DO NOTHING",
                 user_id, "lunar_lord"
             )
-            await _award_achievement_rewards(user_id, p, lunar.get("reward", ""), context)
+            await _award_achievement_rewards(user_id, {"username": player.username, "profile_skins": player.profile_skins, "balance": player.balance}, lunar.get("reward", ""), context)
             try:
                 text = (
                     f"<b>🕊️ СВИТОК ДОСТИЖЕНИЙ 🏆</b>\n\n"
@@ -1164,7 +1169,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = user.id
     username = user.username or user.first_name
     username_escaped = html.escape(username)
-    player = await get_player_cached(user_id)
+
+    # Получаем игрока через репозиторий
+    player = await PlayerRepository.get_by_id(user_id)
 
     if context.args and context.args[0].startswith("blunt_"):
         ref_blunt_id = context.args[0].replace("blunt_", "")
@@ -1202,12 +1209,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     except Exception as e:
                         logger.error(f"Ошибка отправки в канал: {e}")
 
-    if not player:
+    if not player or not player.user_id:
+        # Создаём профиль через репозиторий
         await update_balance(user_id, username, 0)
         await update_blunts(user_id, username, 0)
         await update_balance(user_id, username, 800)
         new_name = random.choice(["Крик Бездны","Пепел Короля","Шёпот Склепа"])
         await create_named_blunt(user_id, new_name)
+        player = await PlayerRepository.get_by_id(user_id)
         bonus = "🎁 Смотритель дарует тебе <code>800</code> 🍬 и твой первый именной блант!\n\n"
         welcome = ("<b><i>🎉 Добро пожаловать в Гильдию Antysocialshop!</i></b>\n\n"
                    "🕯️ <b>Тёмная Гильдия</b> — стабильность, ритуалы, тёмное благословение.\n"
@@ -1221,10 +1230,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await process_daily_login(user_id, context)
-    guild = await get_guild(user_id)
+    guild = player.guild
 
-    p = await get_player_cached(user_id)
-    bal = p["balance"] if p else 0
+    # Определение ранга (используем player.balance)
+    bal = player.balance
     rank_emoji, rank_name = "🪓", "Рекрут"
     next_rank_emoji, next_rank_name, next_threshold = "", "", 0
     for i, (emoji, threshold, _) in enumerate(RANKS):
@@ -1263,9 +1272,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         back += f"\n<b>⚡ Ты достиг вершины! Твой ранг — {rank_emoji} {rank_name}.</b>"
 
     # Онбординг-подсказка (меняется по мере прогресса)
-    farm_count = p.get("farm_count", 0) or 0
-    guild_joined = p.get("guild") is not None
-    craft_count = p.get("craft_count", 0) or 0
+    farm_count = player.farm_count
+    guild_joined = guild is not None
+    craft_count = player.craft_count
     is_veteran = bal >= 5000
 
     if farm_count == 0:
