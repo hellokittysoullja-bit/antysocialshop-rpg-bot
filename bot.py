@@ -667,6 +667,18 @@ async def create_tables(conn):
             completed INTEGER DEFAULT 0
         )
     """)
+    
+    await conn.execute("""
+    DO $$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name='players' AND column_name='pending_transfer'
+        ) THEN
+            ALTER TABLE players ADD COLUMN pending_transfer JSONB DEFAULT NULL;
+        END IF;
+    END $$;
+""")
 
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 @db_retry()
@@ -1621,6 +1633,129 @@ async def cancel_named(update, context):
         except:
             pass
     await craft_callback(update, context)
+    
+#===== ФУНКЦИЯ ПЕРЕДАЧИ БЛАНТА =====
+async def transfer_blunt(sender_id: int, receiver_id: int, blunt_id: str):
+    """Передаёт именной блант от отправителя получателю."""
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            # Захватываем инвентарь отправителя
+            row = await conn.fetchrow(
+                "SELECT inventory FROM players WHERE user_id = $1 FOR UPDATE", sender_id
+            )
+            if not row:
+                raise ValueError("Отправитель не найден")
+            inv = _json_safe_load(row["inventory"], [])
+            
+            item = None
+            for it in inv:
+                if it.get("id") == blunt_id and it.get("type") == "named":
+                    item = it
+                    break
+            if not item:
+                raise ValueError("Блант не найден или не является именным")
+            
+            # Удаляем у отправителя
+            inv.remove(item)
+            await conn.execute(
+                "UPDATE players SET inventory = $1 WHERE user_id = $2",
+                json.dumps(inv, default=str), sender_id
+            )
+            
+            # Обновляем историю владения
+            if "owner_history" not in item:
+                item["owner_history"] = []
+            item["owner_history"].append({
+                "user_id": str(receiver_id),
+                "since": datetime.utcnow().isoformat()
+            })
+            
+            # Добавляем получателю
+            row_rec = await conn.fetchrow(
+                "SELECT inventory FROM players WHERE user_id = $1 FOR UPDATE", receiver_id
+            )
+            rec_inv = _json_safe_load(row_rec["inventory"], []) if row_rec else []
+            rec_inv.append(item)
+            await conn.execute(
+                "UPDATE players SET inventory = $1 WHERE user_id = $2",
+                json.dumps(rec_inv, default=str), receiver_id
+            )
+    
+    invalidate_cache(sender_id)
+    invalidate_cache(receiver_id)
+
+# ===== НОВЫЕ ФУНКЦИИ ДЛЯ ОБМЕНА БЛАНТАМИ =====
+async def gift_blunt_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Начало процесса дарения – запрос получателя."""
+    query = update.callback_query
+    await query.answer()
+    blunt_id = query.data.replace("gift_blunt_", "")
+    context.user_data["gifting_blunt_id"] = blunt_id
+    await query.message.edit_text(
+        "🎁 <b>ПОДАРИТЬ БЛАНТ</b>\n\n"
+        "Введи <b>@username</b> или <b>числовой ID</b> игрока, которому хочешь передать блант.\n"
+        "Для отмены нажми кнопку ниже.",
+        parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("❌ Отмена", callback_data="cancel_gift")
+        ]])
+    )
+
+async def cancel_gift(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отмена дарения."""
+    query = update.callback_query
+    await query.answer()
+    context.user_data.pop("gifting_blunt_id", None)
+    # Вернёмся в меню или в список блантов – здесь просто в профиль
+    await profile_callback(update, context)
+
+async def handle_gift_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает текст с именем получателя, вызывает transfer_blunt."""
+    if "gifting_blunt_id" not in context.user_data:
+        return  # не в процессе дарения
+    
+    text = update.message.text.strip()
+    receiver_id = None
+    
+    # Пытаемся распарсить как числовой ID
+    if text.isdigit():
+        receiver_id = int(text)
+    # Или как @username
+    elif text.startswith("@"):
+        # Нужно найти user_id по username. В текущей БД username хранится в players.
+        # Простой способ – поискать в БД
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT user_id FROM players WHERE LOWER(username) = LOWER($1)", text.lstrip("@")
+            )
+            if row:
+                receiver_id = row["user_id"]
+    
+    if not receiver_id:
+        await update.message.reply_text("❌ Игрок не найден. Попробуй ещё раз или отмени.")
+        return
+    
+    if receiver_id == update.effective_user.id:
+        await update.message.reply_text("❌ Нельзя подарить блант самому себе.")
+        return
+    
+    blunt_id = context.user_data.pop("gifting_blunt_id")
+    try:
+        await transfer_blunt(update.effective_user.id, receiver_id, blunt_id)
+        await update.message.reply_text("✅ Блант успешно подарен! 🎁")
+        # Уведомим получателя
+        try:
+            await context.bot.send_message(
+                chat_id=receiver_id,
+                text="🎁 Вам подарили именной блант! Проверьте инвентарь."
+            )
+        except Exception:
+            pass
+    except ValueError as e:
+        await update.message.reply_text(f"❌ Ошибка: {e}")
+    except Exception as e:
+        logger.error(f"Gift error: {e}")
+        await update.message.reply_text("⚠️ Внутренняя ошибка. Попробуй позже.")
 
 # Дунуть
 @error_handler
@@ -3409,6 +3544,9 @@ async def handle_chat_shortcut(update, context):
     if context.user_data.get('awaiting_named_blunt'):
         await handle_named_name(update, context)
         return
+    if context.user_data.get('gifting_blunt_id'):
+        await handle_gift_username(update, context)
+        return
 
     text = update.message.text.strip().lower()
     mapping = {
@@ -3619,6 +3757,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else: text = f"Блант не найден.\n{ref_link}"
             await send_whisper_dm(update, context, text)
             return
+            
+        if data.startswith("gift_blunt_"):
+            await gift_blunt_start(update, context)
+            return
+
+        if data == "cancel_gift":
+            await cancel_gift(update, context)
+            return
 
         if data.startswith("blunt_details_"):
             await q.answer()
@@ -3650,9 +3796,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     date_str = format_date(entry.get('since',''))
                     text += f"   <b>@{entry.get('user_id','?')}</b> — {date_str}\n"
             kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔗 Поделиться", callback_data=f"share_blunt_{blunt_id}")],
-                [InlineKeyboardButton("🏆 К списку", callback_data="my_blunts")]
-            ])
+    [InlineKeyboardButton("🔗 Поделиться", callback_data=f"share_blunt_{blunt_id}"),
+     InlineKeyboardButton("🎁 Подарить", callback_data=f"gift_blunt_{blunt_id}")],
+    [InlineKeyboardButton("🏆 К списку", callback_data="my_blunts")]
+])
             file_id = BLUNT_IMAGES.get(rarity)
             if file_id:
                 await q.message.delete()
