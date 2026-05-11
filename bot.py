@@ -2790,45 +2790,68 @@ async def luck_callback(update, context, action=None):
 
     # 🔮 Алхимия
     if action == "alchemy_start":
-        query = update.callback_query
-        if not veteran_alchemy:
-            await query.answer(
-                "🔮 <b>Магия неподвластна тебе.</b> ⚔️\n\n"
-                "Только тот, кто достиг ⚔️ Ветерана (5000 OAC) — обретёт право использовать алхимию 🗝️.",
-                show_alert=True
-            )
-            return
-        if p["blunts"] < 5 or bal < 50:
-            await send_whisper_dm(update, context, "🔮 Нужно 5 блантов и 50 OAC.")
-            return
+    query = update.callback_query
+    if not veteran_alchemy:
+        await query.answer(
+            "🔮 <b>Магия неподвластна тебе.</b> ⚔️\n\n"
+            "Только тот, кто достиг ⚔️ Ветерана (5000 OAC) — обретёт право использовать алхимию 🗝️.",
+            show_alert=True
+        )
+        return
+
+    # Проверка ресурсов
+    if p["blunts"] < 10 or bal < 250:
         text = (
             "<b>🔮 АЛХИМИЧЕСКИЙ КОТЁЛ</b>\n\n"
-            "<i>«Только тот, кто достиг <b>ветерана</b> и не боится потерь — "
-            "обретёт право использовать магию и истинную силу🗝️»</i>\n\n"
-            "У тебя есть <b>5 блантов</b> и <b>50 OAC</b>.\n"
-            "Бросить их в Котёл?"
+            f"<b>💎 У тебя: {bal} OAC 🍬</b>\n"
+            f"<b>🌿 Блантов в свёртке: {p['blunts']}</b>\n\n"
+            "<b>❌ Недостаточно ресурсов:</b>\n"
+            f"   🕯️ Нужно 10 блантов (у вас {p['blunts']})\n"
+            f"   🍬 Нужно 250 OAC (у вас {bal})"
         )
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🧪 Запустить реакцию", callback_data="alchemy_confirm")],
             [InlineKeyboardButton("🔙 Назад", callback_data="luck")]
         ])
         await safe_edit(update, context, text, reply_markup=kb)
         return
 
+    # Меню запуска
+    text = (
+        "<b>🔮 АЛХИМИЧЕСКИЙ КОТЁЛ</b>\n\n"
+        f"<b>💎 У тебя: {bal} OAC 🍬</b>\n"
+        f"<b>🌿 Блантов в свёртке: {p['blunts']}</b>\n\n"
+        "<b>⚗️ Стоимость запуска:</b>\n"
+        "   🕯️ 10 Блантов\n"
+        "   🍬 250 OAC\n\n"
+        "<b>🍀 Шансы реакции:</b>\n"
+        "   💠 Чистая Пыльца (1 доза) — 40%\n"
+        "   🌫️ Грязный Выхлоп (ничего) — 35%\n"
+        "   ✨ Мерцающая Пыльца (2 дозы) — 15%\n"
+        "   🌟 Философский Камень (легендарный блант) — 10%\n\n"
+        "<i>«Только тот, кто достиг <b>ветерана</b> и не боится потерь — "
+        "обретёт право 🗝️ использовать магию и истинную силу»</i> 🔮"
+    )
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🧪 Запустить реакцию ⚗️", callback_data="alchemy_confirm")],
+        [InlineKeyboardButton("🔙 Назад", callback_data="luck")]
+    ])
+    await safe_edit(update, context, text, reply_markup=kb)
+    return
+
     if action == "alchemy_confirm":
-        if p["blunts"] < 5 or bal < 50:
+        if p["blunts"] < 10 or bal < 250:
             await send_whisper_dm(update, context, "🔮 Недостаточно ресурсов.")
             return
         async with db_pool.acquire() as conn:
             async with conn.transaction():
-                await update_blunts(uid, uname, -5, conn=conn)
-                await update_balance(uid, uname, -50, conn=conn)
+                await update_blunts(uid, uname, -10, conn=conn)
+                await update_balance(uid, uname, -250, conn=conn)
                 r = random.random()
                 if r < 0.40:
                     await update_essence(uid, 1, conn=conn)
                     result_text = "<b>💠 Чистая Пыльца!</b>\n\n+1 Кристальная Пыль"
                 elif r < 0.75:
-                    result_text = "<b>🌫️ Грязный Выхлоп...</b>\nБланты сгорели без следа."
+                    result_text = "<b>🌫️ Грязный Выхлоп...</b>\n\nБланты сгорели без следа."
                 elif r < 0.90:
                     await update_essence(uid, 2, conn=conn)
                     result_text = "<b>✨ Мерцающая Пыльца!</b>\n\n+2 Кристальной Пыли"
@@ -2844,9 +2867,7 @@ async def luck_callback(update, context, action=None):
                 await add_war_score(uid, 30, conn=conn)
         await safe_edit(update, context, result_text,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]))
-
-    # Если action не указан – показываем общее меню
-    await safe_edit(update, context, text, reply_markup=kb)
+        return
 
 # /check
 async def check_blunt(update, context):
