@@ -1379,11 +1379,11 @@ async def craft_callback(update, context):
 
     text = (
         f"<b>🌿 КРАФТ БЛАНТА</b>\n\n"
-        f"<b>💎 у тебя: {bal} оас 🍬</b>\n\n"
+        f"<b>💎 У тебя: {bal} оас 🍬</b>\n\n"
         f"<b>🌿 Блантов в свёртке: {blunts}</b>\n"
         f"<b>🎯 Крафтинг: {craft_count}/{target} | {medal_name}</b>\n\n"
-        f"<b>🕯️ Обычный блант — 15 оас</b>\n"
-        f"<b>💍 Именной блант — 50 оас</b>\n"
+        f"<b>🕯️ Обычный Блант — 15 оас 🍬</b>\n\n"
+        f"<b>💍 Именной Блант — 50 оас 🍬</b>\n"
         f"   <i>🟢 55% | 🔵 30% | 🟣 13% | 🟡 2%</i>"
     )
     if p and p.get("m_essence", 0) > 0:
