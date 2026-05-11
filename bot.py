@@ -2638,15 +2638,8 @@ async def catalog_callback(update, context):
 async def luck_callback(update, context, action=None):
     user, msg = get_user_and_msg(update)
     uid = user.id; uname = html.escape(user.username or user.first_name)
-
-    # Ленивая загрузка только нужных полей
-    p = await get_player_cached(uid, fields=[
-        "balance", "blunts", "last_daily", "last_berserk", "m_essence"
-    ])
-    if not p:
-        await msg.reply_text("Сначала активируйся: /start")
-        return
-
+    p = await get_player_cached(uid)
+    if not p: await msg.reply_text("Сначала активируйся: /start"); return
     bal = p["balance"]; now = datetime.now()
     last_daily = p["last_daily"]
     last_daily_dt = _to_datetime(last_daily)
@@ -2656,9 +2649,17 @@ async def luck_callback(update, context, action=None):
     berserk_available = (bal >= 300 and (not last_berserk_dt or (now - last_berserk_dt) > timedelta(hours=24)))
     veteran_alchemy = (bal >= 5000)
 
-    # Меню
-    text = f"<b><i>🎲 ИСПЫТАНИЕ СУДЬБЫ</i></b>\n\n🛡️ <i>у тебя:</i> <code>{bal}</code> 🍬\n\n"
+    # ── ГЛАВНОЕ МЕНЮ (обновлённый дизайн) ──
+    text = (
+        "<b>🍀 УДАЧА</b>\n\n"
+        "<i>🌀 «Испытай свою удачу и выиграй OAC 🍬 и редкие эксклюзивные вещи!» 🪽</i>\n\n"
+        "🎡 <b>Крутить Колесо</b> — ежедневный выигрыш 🎉\n"
+        "🍀 <b>Рискнуть</b> — бросить вызов и отдать 300 оас ради джекпота 💫\n"
+        "⚗️ <b>Алхимия</b> — древнее искусство, магия для достойных 🔮"
+    )
+
     kb_rows = []
+
     if wheel_available:
         kb_rows.append([InlineKeyboardButton("🎡 Крутить", callback_data="luck_wheel")])
     else:
@@ -2667,24 +2668,21 @@ async def luck_callback(update, context, action=None):
         kb_rows.append([InlineKeyboardButton(f"🎡 Колесо набирает силу. Ещё {hrs} ч {mins} мин", callback_data="luck_wheel")])
 
     if berserk_available:
-        kb_rows.append([InlineKeyboardButton("🎲 Рискнуть", callback_data="luck_berserk")])
+        kb_rows.append([InlineKeyboardButton("🍀 Рискнуть", callback_data="luck_berserk")])
     else:
-        if bal < 300:
-            kb_rows.append([InlineKeyboardButton(f"🎲 нужно ещё {300 - bal} 🍬", callback_data="luck_berserk")])
+        if bal < 300: kb_rows.append([InlineKeyboardButton(f"🍀 нужно ещё {300 - bal} 🍬", callback_data="luck_berserk")])
         else:
             diff = timedelta(hours=24) - (now - last_berserk_dt)
             hrs = int(diff.seconds // 3600); mins = int((diff.seconds % 3600) // 60)
-            kb_rows.append([InlineKeyboardButton(f"🎲 Бездна шепчет всё громче. Жди {hrs} ч {mins} мин", callback_data="luck_berserk")])
+            kb_rows.append([InlineKeyboardButton(f"🍀 Бездна шепчет всё громче. Жди {hrs} ч {mins} мин", callback_data="luck_berserk")])
 
     if veteran_alchemy:
-        kb_rows.append([InlineKeyboardButton("🔮 Алхимия", callback_data="alchemy_start")])
+        kb_rows.append([InlineKeyboardButton("⚗️ Алхимия", callback_data="alchemy_start")])
     else:
-        kb_rows.append([InlineKeyboardButton("🔒 Алхимия (⚔️ Ветеран)", callback_data="alchemy_start")])
+        kb_rows.append([InlineKeyboardButton("🔮 Алхимия 🔒", callback_data="alchemy_start")])
 
     kb_rows.append([InlineKeyboardButton("🏰 В меню", callback_data="menu")])
     kb = InlineKeyboardMarkup(kb_rows)
-
-    # === ОБРАБОТЧИКИ ДЕЙСТВИЙ ===
 
     # 🎡 Колесо
     if action == "luck_wheel":
@@ -2710,7 +2708,6 @@ async def luck_callback(update, context, action=None):
         if context.bot_data.get("happy_hour") and prize_type in ("oac","jackpot"):
             final_prize = prize * HAPPY_HOUR_MULTIPLIER
 
-        # Атомарная транзакция
         async with db_pool.acquire() as conn:
             async with conn.transaction():
                 if prize_type == "jackpot":
@@ -2720,13 +2717,10 @@ async def luck_callback(update, context, action=None):
                     await add_war_score(uid, final_prize, conn=conn)
                 else:
                     await update_blunts(uid, uname, prize, conn=conn)
-                # Обновляем last_daily атомарно
                 await update_last_daily(uid, conn=conn)
-            # Получаем свежий баланс
             new_p = await get_player_cached(uid, fields=["balance"])
             new_bal = new_p["balance"] if new_p else bal
 
-        # Формируем ответ
         if prize_type == "jackpot":
             await grant_title(uid, "🧛🏻‍♀️", "Призрачный Гончий", context)
             try:
@@ -2736,7 +2730,6 @@ async def luck_callback(update, context, action=None):
                 logger.error(f"Ошибка отправки в канал: {e}")
             text = f"<b>🎰 ДЖЕКПОТ!</b>\n\nТы выиграл <b>{final_prize} OAC</b> 🍬!\n\n<b>⚜️ У тебя:</b> <i>{new_bal} OAC</i>"
         elif prize_type == "oac":
-            # Прогресс ранга
             next_rank_name, next_threshold = "", 0
             for emoji, threshold, _ in RANKS:
                 if new_bal < threshold:
@@ -2754,23 +2747,21 @@ async def luck_callback(update, context, action=None):
                 f"{progress_text}"
             )
         else:
-            text = f"<b><i>🎲 КОЛЕСО СМОТРИТЕЛЯ</i></b>\n\n+{prize} 🌿 Блант → 💰 <b>{new_bal} OAC</b> 🍬"
+            text = f"<b><i>🌱 КОЛЕСО СМОТРИТЕЛЯ</i></b>\n\n+{prize} 🌿 Блант → 💰 <b>{new_bal} OAC</b> 🍬"
 
         await safe_edit(update, context, text,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]))
         return
 
-    # 🎲 Рискнуть
+    # 🎲 Берсерк
     if action == "luck_berserk":
         if not berserk_available:
             if bal < 300:
-                await send_whisper_dm(update, context,
-                    f"<b><i>🎲 Бездна требует жертву</i></b>\n\n⚠️ Недостаточно OAC (нужно ещё <b>{300-bal}</b>).")
+                await send_whisper_dm(update, context, f"<b><i>🎲 Бездна требует жертву</i></b>\n\n⚠️ Недостаточно OAC (нужно ещё <b>{300-bal}</b>).")
             else:
                 diff = timedelta(hours=24) - (now - last_berserk_dt)
                 hrs = int(diff.total_seconds()//3600); mins = int((diff.total_seconds()%3600)//60)
-                await send_whisper_dm(update, context,
-                    f"<b><i>🎲 Бездна молчит</i></b>\n\n🕳️ Примет тебя через <b>{hrs} ч {mins} мин</b>.")
+                await send_whisper_dm(update, context, f"<b><i>🎲 Бездна молчит</i></b>\n\n🕳️ Примет тебя через <b>{hrs} ч {mins} мин</b>.")
             return
 
         async with db_pool.acquire() as conn:
@@ -2780,7 +2771,7 @@ async def luck_callback(update, context, action=None):
                     res_text = f"<b><i>🎲 БЕЗДНА ОТВЕТИЛА</i></b>\n\nИскажение благосклонно! +<b>200 OAC</b> 🍬."
                 else:
                     await update_balance(uid, uname, -300, conn=conn)
-                    res_text = f"<b><i>🕳️ БЕЗДНА МОЛЧИТ</i></b>\n\nИскажение промолчало. –<b>300 OAC</b>."
+                    res_text = f"<b><i>🕯️ БЕЗДНА МОЛЧИТ</i></b>\n\nИскажение промолчало. –<b>300 OAC</b>."
                 await update_last_berserk(uid, conn=conn)
                 await add_war_score(uid, 200 if "200" in res_text else -300, conn=conn)
 
@@ -2788,7 +2779,7 @@ async def luck_callback(update, context, action=None):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]))
         return
 
-    # 🔮 Алхимия
+    # 🔮 Алхимия (меню)
     if action == "alchemy_start":
         query = update.callback_query
         if not veteran_alchemy:
@@ -2799,7 +2790,7 @@ async def luck_callback(update, context, action=None):
             )
             return
 
-        # Проверка ресурсов (для ветеранов показываем меню в любом случае)
+        # Всегда показываем меню алхимии (даже если ресурсов не хватает)
         text = (
             "<b>🔮 АЛХИМИЧЕСКИЙ КОТЁЛ</b>\n\n"
             f"<b>💎 У тебя: {bal} OAC 🍬</b>\n"
@@ -2822,8 +2813,8 @@ async def luck_callback(update, context, action=None):
         await safe_edit(update, context, text, reply_markup=kb)
         return
 
+    # 🔮 Алхимия (запуск реакции)
     if action == "alchemy_confirm":
-        # Если ресурсов не хватает – показываем всплывашку
         if p["blunts"] < 10 or bal < 250:
             await update.callback_query.answer(
                 "<b>❌ Недостаточно ресурсов</b>\n\n"
@@ -2856,9 +2847,13 @@ async def luck_callback(update, context, action=None):
                     except Exception as e:
                         logger.error(f"Ошибка отправки в канал: {e}")
                 await add_war_score(uid, 30, conn=conn)
+
         await safe_edit(update, context, result_text,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]))
         return
+
+    # Если ни одно действие не указано — показываем главное меню удачи
+    await safe_edit(update, context, text, reply_markup=kb)
 
 # /check
 async def check_blunt(update, context):
