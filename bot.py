@@ -638,23 +638,64 @@ async def init_db_pool():
     database_url = os.getenv("NEON_DATABASE_URL")
     if not database_url:
         raise Exception("NEON_DATABASE_URL не установлена!")
-    db_pool = await asyncpg.create_pool(database_url, min_size=5, max_size=20, command_timeout=15)
-    async with db_pool.acquire() as conn:
-        await create_tables(conn)
-# Гарантируем наличие столбца war_active в guild_weekly
-        await conn.execute("""
-            DO $$
-            BEGIN
-                IF NOT EXISTS (
-                    SELECT 1 FROM information_schema.columns
-                    WHERE table_name='guild_weekly' AND column_name='war_active'
-                ) THEN
-                    ALTER TABLE guild_weekly ADD COLUMN war_active BOOLEAN DEFAULT FALSE;
-                END IF;
-            END $$;
-        """)
-        await init_redis()          # если добавили Redis
-    logger.info("База данных Neon инициализирована (пул 2-10, таймаут 10с).")
+
+    # Шаг 1: Выполняем все миграции через временное соединение,
+    # чтобы гарантировать актуальность схемы перед созданием пула.
+    async with asyncpg.create_pool(database_url, min_size=1, max_size=1, command_timeout=15) as migration_pool:
+        async with migration_pool.acquire() as conn:
+            await create_tables(conn)
+            await _run_migrations(conn)
+            await init_redis()
+
+    # Шаг 2: Создаём основной пул, который будет использоваться всем ботом.
+    # Кэш подготовленных запросов будет чистым и соответствующим новой схеме.
+    db_pool = await asyncpg.create_pool(
+        database_url,
+        min_size=5,
+        max_size=20,
+        command_timeout=15
+    )
+    logger.info("База данных Neon инициализирована (пул 5-20, таймаут 10с).")
+
+async def _run_migrations(conn):
+    """Все миграции, которые необходимо применить перед запуском."""
+    # Добавление столбца war_active в guild_weekly
+    await conn.execute("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='guild_weekly' AND column_name='war_active'
+            ) THEN
+                ALTER TABLE guild_weekly ADD COLUMN war_active BOOLEAN DEFAULT FALSE;
+            END IF;
+        END $$;
+    """)
+    # Добавление pending_transfer в players
+    await conn.execute("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='players' AND column_name='pending_transfer'
+            ) THEN
+                ALTER TABLE players ADD COLUMN pending_transfer JSONB DEFAULT NULL;
+            END IF;
+        END $$;
+    """)
+    # Добавление lab_depth в players
+    await conn.execute("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='players' AND column_name='lab_depth'
+            ) THEN
+                ALTER TABLE players ADD COLUMN lab_depth INTEGER DEFAULT 1;
+            END IF;
+        END $$;
+    """)
+    # Здесь можно добавлять будущие миграции...
     
 async def close_db_pool():
     global db_pool
