@@ -2799,21 +2799,7 @@ async def luck_callback(update, context, action=None):
             )
             return
 
-        if p["blunts"] < 10 or bal < 250:
-            text = (
-                "<b>🔮 АЛХИМИЧЕСКИЙ КОТЁЛ</b>\n\n"
-                f"<b>💎 У тебя: {bal} OAC 🍬</b>\n"
-                f"<b>🌿 Блантов в свёртке: {p['blunts']}</b>\n\n"
-                "<b>❌ Недостаточно ресурсов:</b>\n"
-                f"   🕯️ Нужно 10 блантов (у вас {p['blunts']})\n"
-                f"   🍬 Нужно 250 OAC (у вас {bal})"
-            )
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 Назад", callback_data="luck")]
-            ])
-            await safe_edit(update, context, text, reply_markup=kb)
-            return
-
+        # Проверка ресурсов (для ветеранов показываем меню в любом случае)
         text = (
             "<b>🔮 АЛХИМИЧЕСКИЙ КОТЁЛ</b>\n\n"
             f"<b>💎 У тебя: {bal} OAC 🍬</b>\n"
@@ -2837,9 +2823,16 @@ async def luck_callback(update, context, action=None):
         return
 
     if action == "alchemy_confirm":
+        # Если ресурсов не хватает – показываем всплывашку
         if p["blunts"] < 10 or bal < 250:
-            await send_whisper_dm(update, context, "🔮 Недостаточно ресурсов.")
+            await update.callback_query.answer(
+                "<b>❌ Недостаточно ресурсов</b>\n\n"
+                f"🕯️ Нужно 10 блантов (у вас {p['blunts']})\n"
+                f"🍬 Нужно 250 OAC (у вас {bal})",
+                show_alert=True
+            )
             return
+
         async with db_pool.acquire() as conn:
             async with conn.transaction():
                 await update_blunts(uid, uname, -10, conn=conn)
