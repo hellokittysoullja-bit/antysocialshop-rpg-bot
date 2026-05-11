@@ -741,18 +741,33 @@ async def create_tables(conn):
             completed INTEGER DEFAULT 0
         )
     """)
-    
+
+    # Гарантируем наличие столбца pending_transfer
     await conn.execute("""
-    DO $$
-    BEGIN
-        IF NOT EXISTS (
-            SELECT 1 FROM information_schema.columns
-            WHERE table_name='players' AND column_name='pending_transfer'
-        ) THEN
-            ALTER TABLE players ADD COLUMN pending_transfer JSONB DEFAULT NULL;
-        END IF;
-    END $$;
-""")
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='players' AND column_name='pending_transfer'
+            ) THEN
+                ALTER TABLE players ADD COLUMN pending_transfer JSONB DEFAULT NULL;
+            END IF;
+        END $$;
+    """)
+
+    # Гарантируем наличие столбца lab_depth
+    await conn.execute("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='players' AND column_name='lab_depth'
+            ) THEN
+                ALTER TABLE players ADD COLUMN lab_depth INTEGER DEFAULT 1;
+            END IF;
+        END $$;
+    """)
+
 
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 @db_retry()
