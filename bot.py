@@ -3275,11 +3275,11 @@ async def welcome_new_member(update, context):
 
 # Текстовые сокращения
 async def handle_chat_shortcut(update, context):
-    # === ЭТОТ БЛОК ДОБАВЛЕН ===
+    if not update.message or not update.message.text:
+        return
     if context.user_data.get('awaiting_named_blunt'):
         await handle_named_name(update, context)
         return
-    # =========================
 
     text = update.message.text.strip().lower()
     mapping = {
