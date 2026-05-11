@@ -1700,53 +1700,33 @@ async def cancel_named(update, context):
     
 #===== ФУНКЦИЯ ПЕРЕДАЧИ БЛАНТА =====
 async def transfer_blunt(sender_id: int, receiver_id: int, blunt_id: str):
-    """Передаёт именной блант от отправителя получателю."""
-    async with db_pool.acquire() as conn:
-        async with conn.transaction():
-            # Захватываем инвентарь отправителя
-            row = await conn.fetchrow(
-                "SELECT inventory FROM players WHERE user_id = $1 FOR UPDATE", sender_id
-            )
-            if not row:
-                raise ValueError("Отправитель не найден")
-            inv = _json_safe_load(row["inventory"], [])
-            
-            item = None
-            for it in inv:
-                if it.get("id") == blunt_id and it.get("type") == "named":
-                    item = it
-                    break
-            if not item:
-                raise ValueError("Блант не найден или не является именным")
-            
-            # Удаляем у отправителя
-            inv.remove(item)
-            await conn.execute(
-                "UPDATE players SET inventory = $1 WHERE user_id = $2",
-                json.dumps(inv, default=str), sender_id
-            )
-            
-            # Обновляем историю владения
-            if "owner_history" not in item:
-                item["owner_history"] = []
-            item["owner_history"].append({
-                "user_id": str(receiver_id),
-                "since": datetime.utcnow().isoformat()
-            })
-            
-            # Добавляем получателю
-            row_rec = await conn.fetchrow(
-                "SELECT inventory FROM players WHERE user_id = $1 FOR UPDATE", receiver_id
-            )
-            rec_inv = _json_safe_load(row_rec["inventory"], []) if row_rec else []
-            rec_inv.append(item)
-            await conn.execute(
-                "UPDATE players SET inventory = $1 WHERE user_id = $2",
-                json.dumps(rec_inv, default=str), receiver_id
-            )
-    
-    invalidate_cache(sender_id)
-    invalidate_cache(receiver_id)
+    sender = await PlayerRepository.get_by_id(sender_id)
+    receiver = await PlayerRepository.get_by_id(receiver_id)
+
+    if not sender.inventory:
+        raise ValueError("У отправителя пустой инвентарь")
+
+    item = None
+    for it in sender.inventory:
+        if it.get("id") == blunt_id and it.get("type") == "named":
+            item = it
+            break
+    if not item:
+        raise ValueError("Блант не найден или не является именным")
+
+    # Удаляем у отправителя
+    sender.inventory.remove(item)
+    await PlayerRepository.save(sender)
+
+    # Добавляем получателю
+    if "owner_history" not in item:
+        item["owner_history"] = []
+    item["owner_history"].append({
+        "user_id": str(receiver_id),
+        "since": datetime.utcnow().isoformat()
+    })
+    receiver.inventory.append(item)
+    await PlayerRepository.save(receiver)
 
 # ===== НОВЫЕ ФУНКЦИИ ДЛЯ ОБМЕНА БЛАНТАМИ =====
 async def gift_blunt_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
