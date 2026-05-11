@@ -2790,53 +2790,51 @@ async def luck_callback(update, context, action=None):
 
     # 🔮 Алхимия
     if action == "alchemy_start":
-    query = update.callback_query
-    if not veteran_alchemy:
-        await query.answer(
-            "🔮 <b>Магия неподвластна тебе.</b> ⚔️\n\n"
-            "Только тот, кто достиг ⚔️ Ветерана (5000 OAC) — обретёт право использовать алхимию 🗝️.",
-            show_alert=True
-        )
-        return
+        query = update.callback_query
+        if not veteran_alchemy:
+            await query.answer(
+                "🔮 <b>Магия неподвластна тебе.</b> ⚔️\n\n"
+                "Только тот, кто достиг ⚔️ Ветерана (5000 OAC) — обретёт право использовать алхимию 🗝️.",
+                show_alert=True
+            )
+            return
 
-    # Проверка ресурсов
-    if p["blunts"] < 10 or bal < 250:
+        if p["blunts"] < 10 or bal < 250:
+            text = (
+                "<b>🔮 АЛХИМИЧЕСКИЙ КОТЁЛ</b>\n\n"
+                f"<b>💎 У тебя: {bal} OAC 🍬</b>\n"
+                f"<b>🌿 Блантов в свёртке: {p['blunts']}</b>\n\n"
+                "<b>❌ Недостаточно ресурсов:</b>\n"
+                f"   🕯️ Нужно 10 блантов (у вас {p['blunts']})\n"
+                f"   🍬 Нужно 250 OAC (у вас {bal})"
+            )
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Назад", callback_data="luck")]
+            ])
+            await safe_edit(update, context, text, reply_markup=kb)
+            return
+
         text = (
             "<b>🔮 АЛХИМИЧЕСКИЙ КОТЁЛ</b>\n\n"
             f"<b>💎 У тебя: {bal} OAC 🍬</b>\n"
             f"<b>🌿 Блантов в свёртке: {p['blunts']}</b>\n\n"
-            "<b>❌ Недостаточно ресурсов:</b>\n"
-            f"   🕯️ Нужно 10 блантов (у вас {p['blunts']})\n"
-            f"   🍬 Нужно 250 OAC (у вас {bal})"
+            "<b>⚗️ Стоимость запуска:</b>\n"
+            "   🕯️ 10 Блантов\n"
+            "   🍬 250 OAC\n\n"
+            "<b>🍀 Шансы реакции:</b>\n"
+            "   💠 Чистая Пыльца (1 доза) — 40%\n"
+            "   🌫️ Грязный Выхлоп (ничего) — 35%\n"
+            "   ✨ Мерцающая Пыльца (2 дозы) — 15%\n"
+            "   🌟 Философский Камень (легендарный блант) — 10%\n\n"
+            "<i>«Только тот, кто достиг <b>ветерана</b> и не боится потерь — "
+            "обретёт право 🗝️ использовать магию и истинную силу»</i> 🔮"
         )
         kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🧪 Запустить реакцию ⚗️", callback_data="alchemy_confirm")],
             [InlineKeyboardButton("🔙 Назад", callback_data="luck")]
         ])
         await safe_edit(update, context, text, reply_markup=kb)
         return
-
-    # Меню запуска
-    text = (
-        "<b>🔮 АЛХИМИЧЕСКИЙ КОТЁЛ</b>\n\n"
-        f"<b>💎 У тебя: {bal} OAC 🍬</b>\n"
-        f"<b>🌿 Блантов в свёртке: {p['blunts']}</b>\n\n"
-        "<b>⚗️ Стоимость запуска:</b>\n"
-        "   🕯️ 10 Блантов\n"
-        "   🍬 250 OAC\n\n"
-        "<b>🍀 Шансы реакции:</b>\n"
-        "   💠 Чистая Пыльца (1 доза) — 40%\n"
-        "   🌫️ Грязный Выхлоп (ничего) — 35%\n"
-        "   ✨ Мерцающая Пыльца (2 дозы) — 15%\n"
-        "   🌟 Философский Камень (легендарный блант) — 10%\n\n"
-        "<i>«Только тот, кто достиг <b>ветерана</b> и не боится потерь — "
-        "обретёт право 🗝️ использовать магию и истинную силу»</i> 🔮"
-    )
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🧪 Запустить реакцию ⚗️", callback_data="alchemy_confirm")],
-        [InlineKeyboardButton("🔙 Назад", callback_data="luck")]
-    ])
-    await safe_edit(update, context, text, reply_markup=kb)
-    return
 
     if action == "alchemy_confirm":
         if p["blunts"] < 10 or bal < 250:
