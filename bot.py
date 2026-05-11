@@ -2677,7 +2677,7 @@ async def luck_callback(update, context, action=None):
             kb_rows.append([InlineKeyboardButton(f"🍀 Бездна шепчет всё громче. Жди {hrs} ч {mins} мин", callback_data="luck_berserk")])
 
     if veteran_alchemy:
-        kb_rows.append([InlineKeyboardButton("⚗️ Алхимия", callback_data="alchemy_start")])
+        kb_rows.append([InlineKeyboardButton("🔮 Алхимия", callback_data="alchemy_start")])
     else:
         kb_rows.append([InlineKeyboardButton("🔮 Алхимия 🔒", callback_data="alchemy_start")])
 
