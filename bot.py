@@ -1,4 +1,4 @@
-# bot.py — ANTY SOCIAL SHOP RPG v7.14 FINAL FIXED (complete, 2710 lines)
+# bot.py — ANTY SOCIAL SHOP RPG v7.6.6.6 FINAL FIXED 
 import asyncio, logging, os, random, re, json, hashlib, html
 from datetime import datetime, timedelta, date, time
 from threading import Thread
@@ -16,6 +16,9 @@ from telegram.ext import AIORateLimiter
 
 from pydantic import BaseModel, Field
 from typing import Optional, List, Any
+
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from telegram.error import RetryAfter
 
 class Player(BaseModel):
     user_id: int
@@ -61,6 +64,7 @@ class Player(BaseModel):
 
 import functools
 import asyncio
+import uvloop
 
 def db_retry(max_retries=3, delay=0.2):
     """Автоматически повторяет запрос к БД при временных сбоях соединения."""
@@ -1034,58 +1038,58 @@ def error_handler(func):
 
 # Финальный безопасный редактор сообщений
 # Финальный безопасный редактор сообщений
-logger = logging.getLogger(__name__)   # ← если у тебя ещё нет logger в этом файле
+logger = logging.getLogger(__name__)   # ← 
 
-async def edit_or_reply(
-    update: Update,
-    context,
-    text: str,
-    reply_markup: Optional[InlineKeyboardMarkup] = None,
-    parse_mode: str = 'HTML',
-    disable_web_page_preview: bool = True,
-) -> None:
-    """
-    Безопасно редактирует сообщение. Если редактирование невозможно — отправляет новое.
-    """
+# --- Retry-обёртки для Telegram API (обработка 429) ---
+@retry(
+    retry=retry_if_exception_type(RetryAfter),
+    wait=wait_exponential(multiplier=1, min=1, max=10),
+    stop=stop_after_attempt(3),
+    reraise=True
+)
+async def safe_send(context, chat_id, text, **kwargs):
+    """Отправка сообщения с автоматическим повтором при 429."""
+    return await context.bot.send_message(chat_id=chat_id, text=text, **kwargs)
+
+@retry(
+    retry=retry_if_exception_type(RetryAfter),
+    wait=wait_exponential(multiplier=1, min=1, max=10),
+    stop=stop_after_attempt(3),
+    reraise=True
+)
+async def safe_edit(message, text, **kwargs):
+    """Редактирование сообщения с автоматическим повтором при 429."""
+    return await message.edit_text(text, **kwargs)
+    
+#короче тут у нас этот ёбаный эдит
+
+async def edit_or_reply(update, context, text, reply_markup=None, parse_mode='HTML', disable_web_page_preview=True):
     safe_text = html.escape(text, quote=False) if parse_mode == 'HTML' else text
-
     chat_id = update.effective_chat.id
     message = update.callback_query.message if update.callback_query else update.message
 
     try:
         if message and message.text:
-            await message.edit_text(
-                safe_text,
-                reply_markup=reply_markup,
-                parse_mode=parse_mode,
-                disable_web_page_preview=disable_web_page_preview,
-            )
+            await safe_edit(message, safe_text, reply_markup=reply_markup,
+                            parse_mode=parse_mode, disable_web_page_preview=disable_web_page_preview)
         else:
             raise BadRequest("no text to edit")
     except (BadRequest, Forbidden) as e:
         err_msg = str(e).lower()
         if "message is not modified" in err_msg:
             return
-        logger.warning("edit_or_reply fallback to send_message: %s", e, extra={"chat_id": chat_id})
+        logger.warning("edit_or_reply fallback to safe_send: %s", e, extra={"chat_id": chat_id})
         try:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=safe_text,
-                reply_markup=reply_markup,
-                parse_mode=parse_mode,
-                disable_web_page_preview=disable_web_page_preview,
-            )
+            await safe_send(context, chat_id, safe_text, reply_markup=reply_markup,
+                            parse_mode=parse_mode, disable_web_page_preview=disable_web_page_preview)
         except Exception as send_error:
-            logger.error("send_message also failed: %s", send_error, exc_info=True)
+            logger.error("safe_send also failed: %s", send_error, exc_info=True)
     except Exception as e:
         logger.exception("Unexpected error in edit_or_reply")
         try:
-            await context.bot.send_message(chat_id=chat_id, text=safe_text)
+            await safe_send(context, chat_id, safe_text)
         except Exception:
             pass
-        
-import asyncio
-from telegram.error import BadRequest
 
 async def animate_progress_bar(update, context, title="", duration=0.6, steps=4):
     """
@@ -4271,6 +4275,8 @@ async def keep_db_alive(context):
 
 # ========== ЗАПУСК ==========
 if __name__ == "__main__":
+    import uvloop
+    uvloop.install()
     if not TOKEN:
         raise RuntimeError("TOKEN не установлен")
     if not os.getenv("NEON_DATABASE_URL"):
