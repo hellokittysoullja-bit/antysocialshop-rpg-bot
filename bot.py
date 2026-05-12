@@ -12,6 +12,8 @@ from telegram.ext import (
 )
 from telegram.error import BadRequest
 
+from telegram.ext import AIORateLimiter
+
 from pydantic import BaseModel, Field
 from typing import Optional, List, Any
 
@@ -4069,9 +4071,14 @@ if __name__ == "__main__":
     asyncio.set_event_loop(loop)
     loop.run_until_complete(init_db_pool())
     Thread(target=run_web_server, daemon=True).start()
-    app = Application.builder().token(TOKEN).build()
 
-# === ИНИЦИАЛИЗАЦИЯ SENTRY ===
+    # ===== СОЗДАНИЕ ПРИЛОЖЕНИЯ С ЛИМИТЕРОМ =====
+    app = (Application.builder()
+           .token(TOKEN)
+           .rate_limiter(AIORateLimiter())
+           .build())
+
+    # ===== ИНИЦИАЛИЗАЦИЯ SENTRY =====
     import sentry_sdk
     SENTRY_DSN = os.getenv("SENTRY_DSN")
     if SENTRY_DSN:
@@ -4150,6 +4157,19 @@ if __name__ == "__main__":
         except NotImplementedError:
             # На Windows сигналы могут не поддерживаться – ничего страшного
             pass
+
+    # ===== ГЛОБАЛЬНЫЙ ОБРАБОТЧИК RetryAfter =====
+    from telegram.error import RetryAfter
+
+    async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        error = context.error
+        if isinstance(error, RetryAfter):
+            logger.warning(f"Telegram попросил подождать {error.retry_after} сек.")
+            await asyncio.sleep(error.retry_after)
+            return
+        logger.error(f"Глобальная ошибка: {error}", exc_info=True)
+
+    app.add_error_handler(global_error_handler)
 
     print("BOT READY")
     app.run_polling()
