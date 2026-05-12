@@ -3292,8 +3292,8 @@ async def luck_callback(update, context, action=None):
                         logger.error(f"Ошибка отправки в канал: {e}")
                 await add_war_score(uid, 30, conn=conn)
 
-        await safe_edit(update, context, result_text,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]))
+        await edit_or_reply(update, context, result_text,
+    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]))
         return
 
     # Если ни одно действие не указано — показываем главное меню удачи
