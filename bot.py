@@ -1754,35 +1754,86 @@ async def cancel_named(update, context):
             pass
     await craft_callback(update, context)
     
-#===== ФУНКЦИЯ ПЕРЕДАЧИ БЛАНТА =====
-async def transfer_blunt(sender_id: int, receiver_id: int, blunt_id: str):
-    sender = await PlayerRepository.get_by_id(sender_id)
-    receiver = await PlayerRepository.get_by_id(receiver_id)
+# ===== ФУНКЦИЯ ПЕРЕДАЧИ БЛАНТА (АТОМАРНАЯ, БЕЗОПАСНАЯ) =====
+class TransferError(Exception):
+    """Общая ошибка передачи."""
+    pass
 
-    if not sender.inventory:
-        raise ValueError("У отправителя пустой инвентарь")
+class BluntNotFound(TransferError):
+    """Блант не найден в инвентаре отправителя."""
+    pass
 
-    item = None
-    for it in sender.inventory:
-        if it.get("id") == blunt_id and it.get("type") == "named":
-            item = it
-            break
-    if not item:
-        raise ValueError("Блант не найден или не является именным")
+class SameUserError(TransferError):
+    """Попытка передать блант самому себе."""
+    pass
 
-    # Удаляем у отправителя
-    sender.inventory.remove(item)
-    await PlayerRepository.save(sender)
+async def transfer_blunt(sender_id: int, receiver_id: int, blunt_id: str) -> None:
+    """
+    Атомарная передача именного бланта с блокировкой строк.
+    Гарантирует, что блант либо полностью переместится, либо останется у отправителя.
+    """
+    if sender_id == receiver_id:
+        raise SameUserError("Нельзя передать блант самому себе")
 
-    # Добавляем получателю
-    if "owner_history" not in item:
-        item["owner_history"] = []
-    item["owner_history"].append({
-        "user_id": str(receiver_id),
-        "since": datetime.utcnow().isoformat()
-    })
-    receiver.inventory.append(item)
-    await PlayerRepository.save(receiver)
+    try:
+        async with db_pool.acquire() as conn:
+            async with conn.transaction():
+                # Блокируем строки обоих игроков на время транзакции
+                sender = await PlayerRepository.get_by_id(sender_id, conn=conn)
+                receiver = await PlayerRepository.get_by_id(receiver_id, conn=conn)
+
+                if sender is None:
+                    raise TransferError("Отправитель не найден")
+                if receiver is None:
+                    raise TransferError("Получатель не найден")
+
+                # Нормализуем инвентари
+                if not isinstance(sender.inventory, list):
+                    raise TransferError("Инвентарь отправителя повреждён или отсутствует")
+                if not isinstance(receiver.inventory, list):
+                    receiver.inventory = []
+
+                # Ищем блант
+                item = None
+                for it in sender.inventory:
+                    if it.get("id") == blunt_id and it.get("type") == "named":
+                        item = it
+                        break
+                if not item:
+                    raise BluntNotFound("Блант не найден или не является именным блантом")
+
+                # Удаляем у отправителя и проверяем удаление
+                initial_len = len(sender.inventory)
+                sender.inventory.remove(item)
+                if len(sender.inventory) == initial_len:
+                    raise TransferError("Не удалось удалить предмет из инвентаря отправителя")
+
+                # Гарантируем отсутствие дубликата (на случай битых данных)
+                if any(it.get("id") == blunt_id for it in sender.inventory):
+                    raise TransferError("Обнаружен дубликат бланта в инвентаре (данные повреждены)")
+
+                # Обновляем историю владения
+                if "owner_history" not in item:
+                    item["owner_history"] = []
+                item["owner_history"].append({
+                    "user_id": str(receiver_id),
+                    "since": datetime.now(timezone.utc).isoformat()
+                })
+
+                # Добавляем получателю
+                receiver.inventory.append(item)
+
+                # Сохраняем обоих игроков в рамках одной транзакции
+                await PlayerRepository.save(sender, conn=conn)
+                await PlayerRepository.save(receiver, conn=conn)
+
+                logger.info(f"Blunt {blunt_id} передан от {sender_id} к {receiver_id}")
+
+    except TransferError:
+        raise  # пробрасываем наши ошибки как есть
+    except Exception as e:
+        logger.exception("Неожиданная ошибка при передаче бланта")
+        raise TransferError("Внутренняя ошибка передачи") from e)
 
 # ===== НОВЫЕ ФУНКЦИИ ДЛЯ ОБМЕНА БЛАНТАМИ =====
 async def gift_blunt_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
