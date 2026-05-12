@@ -2522,7 +2522,7 @@ async def my_blunts_callback(update, context, page=0):
 
     kb_rows.append([InlineKeyboardButton("🔙 В профиль", callback_data="profile")])
 
-    await safe_edit(update, context, text, reply_markup=InlineKeyboardMarkup(kb_rows))
+    await edit_or_reply(update, context, text, reply_markup=InlineKeyboardMarkup(kb_rows))
 
 async def achievements_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, page=0):
     query = update.callback_query
@@ -2766,7 +2766,7 @@ async def guild_info_callback(update, context):
     guild = await get_guild(uid)
     player = await PlayerRepository.get_by_id(uid)
     if not p:
-        await safe_edit(update, context, "Профиль не найден. Напиши /start")
+        await edit_or_reply(update, context, "Профиль не найден. Напиши /start")
         return
 
     # Безопасный подсчёт гильдий
@@ -2826,7 +2826,7 @@ async def guild_info_callback(update, context):
     kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="menu")])
     kb = InlineKeyboardMarkup(kb_rows)
 
-    await safe_edit(update, context, text, reply_markup=kb)
+    await edit_or_reply(update, context, text, reply_markup=kb)
 
 async def guild_shrine_callback(update, context):
     query = update.callback_query
@@ -2899,14 +2899,14 @@ async def guild_war_callback(update, context):
     uid = query.from_user.id
     p = await get_player_cached(uid)
     if not p:
-        await safe_edit(update, context, "Профиль не найден.")
+        await edit_or_reply(update, context, "Профиль не найден.")
         return
 
     async with db_pool.acquire() as conn:
         war = await conn.fetchrow("SELECT war_active FROM guild_weekly WHERE war_active = TRUE LIMIT 1")
         if not war:
-            await safe_edit(update, context, "🕊️ Сейчас мирное время.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="guild_info")]]))
+            await edit_or_reply(update, context, "🕊️ Сейчас мирное время.",
+    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="guild_info")]]))
             return
 
         scores = await conn.fetch("SELECT guild, total_farmed FROM guild_weekly")
@@ -2949,7 +2949,7 @@ async def guild_war_callback(update, context):
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔙 Назад", callback_data="guild_info")]
     ])
-    await safe_edit(update, context, text, reply_markup=kb)
+    await edit_or_reply(update, context, text, reply_markup=kb)
 
 @error_handler
 async def confess_callback(update, context):
@@ -3033,11 +3033,11 @@ async def rules_callback(update, context):
     )
 
     if update.callback_query:
-        await safe_edit(update, context, text,
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("💍 Создать именной блант", callback_data="craft_named")],
-                [InlineKeyboardButton("🔙 Назад", callback_data="profile")]
-            ]))
+        await edit_or_reply(update, context, text,
+    reply_markup=InlineKeyboardMarkup([
+        [InlineKeyboardButton("💍 Создать именной блант", callback_data="craft_named")],
+        [InlineKeyboardButton("🔙 Назад", callback_data="profile")]
+    ]))
     else:
         await msg.reply_text(text, parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup([
@@ -3193,8 +3193,8 @@ async def luck_callback(update, context, action=None):
         else:
             text = f"<b><i>🌱 КОЛЕСО СМОТРИТЕЛЯ</i></b>\n\n+{prize} 🌿 Блант → 💰 <b>{new_bal} OAC</b> 🍬"
 
-        await safe_edit(update, context, text,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]))
+        await edit_or_reply(update, context, text,
+    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]))
         return
 
     # 🎲 Берсерк
@@ -3219,8 +3219,8 @@ async def luck_callback(update, context, action=None):
                 await update_last_berserk(uid, conn=conn)
                 await add_war_score(uid, 200 if "200" in res_text else -300, conn=conn)
 
-        await safe_edit(update, context, res_text,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]))
+        await edit_or_reply(update, context, text,
+    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]))
         return
 
     # 🔮 Алхимия (меню)
@@ -3254,7 +3254,7 @@ async def luck_callback(update, context, action=None):
             [InlineKeyboardButton("🧪 Запустить реакцию ⚗️", callback_data="alchemy_confirm")],
             [InlineKeyboardButton("🔙 Назад", callback_data="luck")]
         ])
-        await safe_edit(update, context, text, reply_markup=kb)
+        await edit_or_reply(update, context, text, reply_markup=kb)
         return
 
     # 🔮 Алхимия (запуск реакции)
@@ -3297,7 +3297,7 @@ async def luck_callback(update, context, action=None):
         return
 
     # Если ни одно действие не указано — показываем главное меню удачи
-    await safe_edit(update, context, text, reply_markup=kb)
+    await edit_or_reply(update, context, text, reply_markup=kb)
 
 # /check
 async def check_blunt(update, context):
@@ -3452,7 +3452,7 @@ async def lab_enter(update, context):
                 f"<i>– Портал откроется через <b>{hrs} ч {mins} мин</b>.</i>"
             )
             kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="menu")]])
-            await safe_edit(update, context, text, reply_markup=kb)
+            await edit_or_reply(update, context, text, reply_markup=kb)
             return
 
     total_rooms = 4 + depth
@@ -3469,7 +3469,7 @@ async def lab_enter(update, context):
         [InlineKeyboardButton("🍃 Войти в лабиринт", callback_data="lab_enter_confirm")],
         [InlineKeyboardButton("🔙 Назад", callback_data="menu")]
     ])
-    await safe_edit(update, context, text, reply_markup=kb)
+    await edit_or_reply(update, context, text, reply_markup=kb)
 
 
 # ─── ПОДГОТОВКА К ЗАБЕГУ ────────────────────────────────────
@@ -3812,7 +3812,7 @@ async def show_lab_final(update, context):
     )
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 К Лабиринту", callback_data="lab_start")],
                                [InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
-    await safe_edit(update, context, text, reply_markup=kb)
+    await edit_or_reply(update, context, text, reply_markup=kb)
     await check_achievements(uid, context)
 
 
@@ -3837,7 +3837,7 @@ async def show_lab_death(update, context):
     )
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 К Лабиринту", callback_data="lab_start")],
                                [InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
-    await safe_edit(update, context, text, reply_markup=kb)
+    await edit_or_reply(update, context, text, reply_markup=kb)
 
 async def welcome_new_member(update, context):
     for member in update.message.new_chat_members:
