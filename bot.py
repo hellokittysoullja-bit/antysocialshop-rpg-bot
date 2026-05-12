@@ -3976,17 +3976,22 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer()
             user = q.from_user
             uname = user.username or user.first_name
-            p = await get_player_cached(uid)
-            if not p:
-                await update_balance(uid, uname, 0)
-                await update_blunts(uid, uname, 0)
-                await update_balance(uid, uname, 800)
+            player = await PlayerRepository.get_by_id(uid)
+            if not player or not player.user_id:
+                # создаём нового через репозиторий
+                player = Player(user_id=uid, username=uname, balance=800)
                 new_name = random.choice(["Крик Бездны","Пепел Короля","Шёпот Склепа"])
                 await create_named_blunt(uid, new_name)
+                await PlayerRepository.save(player)
                 bonus = "🎁 Смотритель дарует тебе <code>800</code> 🍬 и твой первый именной блант!\n\n"
             else:
                 bonus = ""
-            welcome = "<b><i>🎉 Добро пожаловать в Гильдию Antysocialshop!</i></b>\n\n🕯️ <b>Тёмная Гильдия</b> — стабильность, ритуалы, тёмное благословение.\n⚜️ <b>Светлая Гильдия</b> — азарт, удача, танец на лезвии.\n\n▸ <i>Выбери свой путь:</i>"
+            welcome = (
+                "<b><i>🎉 Добро пожаловать в Гильдию Antysocialshop!</i></b>\n\n"
+                "🕯️ <b>Тёмная Гильдия</b> — стабильность, ритуалы, тёмное благословение.\n"
+                "⚜️ <b>Светлая Гильдия</b> — азарт, удача, танец на лезвии.\n\n"
+                "▸ <i>Выбери свой путь:</i>"
+            )
             guild_kb = InlineKeyboardMarkup([
                 [InlineKeyboardButton("🕯️ Тёмная Гильдия", callback_data="guild_join_BLACK"),
                  InlineKeyboardButton("⚜️ Светлая Гильдия", callback_data="guild_join_WHITE")]
@@ -4006,29 +4011,29 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if data == "choose_title":
             await q.answer()
-            p = await get_player_cached(uid)
-            titles = (p.get("titles") or "").split()
+            player = await PlayerRepository.get_by_id(uid)
+            titles = (player.titles or "").split()
             if not titles:
                 await send_whisper_dm(update, context, "У тебя пока нет титулов.")
                 return
-            skins = p.get("profile_skins", {})
-            if not isinstance(skins, dict):
-                skins = {}
+            skins = player.profile_skins or {}
             active_title = skins.get("active_title", "")
             kb_rows = []
             for title in titles:
                 mark = " ✅" if title == active_title else ""
                 kb_rows.append([InlineKeyboardButton(f"{title}{mark}", callback_data=f"set_title_{title}")])
             kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="skins_menu")])
-            await q.message.edit_text("<b>🎨 ВЫБОР ТИТУЛА</b>\n\nВыбери титул:", reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode='HTML')
+            await q.message.edit_text(
+                "<b>🎨 ВЫБОР ТИТУЛА</b>\n\nВыбери титул:",
+                reply_markup=InlineKeyboardMarkup(kb_rows),
+                parse_mode='HTML'
+            )
             return
 
         if data == "choose_bg":
             await q.answer()
-            p = await get_player_cached(uid)
-            skins = p.get("profile_skins", {})
-            if not isinstance(skins, dict):
-                skins = {}
+            player = await PlayerRepository.get_by_id(uid)
+            skins = player.profile_skins or {}
             unlocked = skins.get("unlocked_backgrounds", [])
             if not unlocked:
                 await send_whisper_dm(update, context, "У тебя пока нет разблокированных фонов.")
@@ -4039,7 +4044,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 mark = " ✅" if bg == active_bg else ""
                 kb_rows.append([InlineKeyboardButton(f"{bg}{mark}", callback_data=f"set_bg_{bg}")])
             kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="skins_menu")])
-            await q.message.edit_text("<b>🖼️ ВЫБОР ФОНА</b>\n\nВыбери фон:", reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode='HTML')
+            await q.message.edit_text(
+                "<b>🖼️ ВЫБОР ФОНА</b>\n\nВыбери фон:",
+                reply_markup=InlineKeyboardMarkup(kb_rows),
+                parse_mode='HTML'
+            )
             return
 
         # 2. Обработчики с параметрами (пагинация, колбэки с префиксами)
@@ -4056,18 +4065,28 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if data.startswith("share_blunt_"):
             await q.answer()
             blunt_id = data.replace("share_blunt_", "")
-            p = await get_player_cached(uid)
-            if not p: return
+            player = await PlayerRepository.get_by_id(uid)
+            if not player:
+                return
             bot_username = (await context.bot.get_me()).username
             ref_link = f"https://t.me/{bot_username}?start=blunt_{blunt_id}"
-            inv = p.get("inventory", [])
-            item = next((it for it in inv if it.get("id")==blunt_id), None)
-            username = html.escape(p["username"])
+            inv = player.inventory or []
+            item = next((it for it in inv if it.get("id") == blunt_id), None)
+            username = html.escape(player.username)
             if item:
-                name = item["name"]; rarity = item.get("rarity","common")
-                color = {"legendary":"🟡","epic":"🟣","rare":"🔵"}.get(rarity,"🟢")
-                text = f"<b>{username}</b>\n\n{color} <b>Имя NFT бланта: «{name}»</b>\n🧬 <b>Редкость:</b> {rarity} {color}\n🩸 <b>Серийный номер:</b> #{item.get('rare_number','?-????')}\n📜 <b>Реакция:</b> <i>{item.get('reaction','')}</i>\n\n<i>Присоединяйся к Искажению:</i>\n{ref_link}"
-            else: text = f"Блант не найден.\n{ref_link}"
+                name = item["name"]
+                rarity = item.get("rarity", "common")
+                color = {"legendary": "🟡", "epic": "🟣", "rare": "🔵"}.get(rarity, "🟢")
+                text = (
+                    f"<b>{username}</b>\n\n"
+                    f"{color} <b>Имя NFT бланта: «{name}»</b>\n"
+                    f"🧬 <b>Редкость:</b> {rarity} {color}\n"
+                    f"🩸 <b>Серийный номер:</b> #{item.get('rare_number', '?-????')}\n"
+                    f"📜 <b>Реакция:</b> <i>{item.get('reaction', '')}</i>\n\n"
+                    f"<i>Присоединяйся к Искажению:</i>\n{ref_link}"
+                )
+            else:
+                text = f"Блант не найден.\n{ref_link}"
             await send_whisper_dm(update, context, text)
             return
             
@@ -4082,19 +4101,20 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if data.startswith("blunt_details_"):
             await q.answer()
             blunt_id = data.replace("blunt_details_", "")
-            p = await get_player_cached(uid)
-            if not p: return
-            inv = p.get("inventory", [])
-            item = next((it for it in inv if it.get("id")==blunt_id), None)
+            player = await PlayerRepository.get_by_id(uid)
+            if not player:
+                return
+            inv = player.inventory or []
+            item = next((it for it in inv if it.get("id") == blunt_id), None)
             if not item:
                 await q.answer("Блант не найден.")
                 return
             name = item["name"]
             rarity = item.get("rarity", "common")
-            color = {"legendary":"🟡","epic":"🟣","rare":"🔵"}.get(rarity,"🟢")
-            rare_number = item.get("rare_number","?-????")
-            hash_code = item.get("hash","0x????...????")
-            reaction = item.get("reaction","")
+            color = {"legendary": "🟡", "epic": "🟣", "rare": "🔵"}.get(rarity, "🟢")
+            rare_number = item.get("rare_number", "?-????")
+            hash_code = item.get("hash", "0x????...????")
+            reaction = item.get("reaction", "")
             text = (
                 f"<b>💎 ДЕТАЛИ NFT БЛАНТА</b>\n\n"
                 f"{color} <b>«{name}»</b>\n"
@@ -4106,13 +4126,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if "owner_history" in item:
                 text += "🕊️ <b>История владения:</b>\n"
                 for entry in item["owner_history"]:
-                    date_str = format_date(entry.get('since',''))
-                    text += f"   <b>@{entry.get('user_id','?')}</b> — {date_str}\n"
+                    date_str = format_date(entry.get('since', ''))
+                    text += f"   <b>@{entry.get('user_id', '?')}</b> — {date_str}\n"
             kb = InlineKeyboardMarkup([
-    [InlineKeyboardButton("🔗 Поделиться", callback_data=f"share_blunt_{blunt_id}"),
-     InlineKeyboardButton("🎁 Подарить", callback_data=f"gift_blunt_{blunt_id}")],
-    [InlineKeyboardButton("🏆 К списку", callback_data="my_blunts")]
-])
+                [InlineKeyboardButton("🔗 Поделиться", callback_data=f"share_blunt_{blunt_id}"),
+                 InlineKeyboardButton("🎁 Подарить", callback_data=f"gift_blunt_{blunt_id}")],
+                [InlineKeyboardButton("🏆 К списку", callback_data="my_blunts")]
+            ])
             file_id = BLUNT_IMAGES.get(rarity)
             if file_id:
                 await q.message.delete()
@@ -4133,14 +4153,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if data in ("shrine_donate_100", "shrine_donate_500"):
             amount = 100 if data == "shrine_donate_100" else 500
-            p = await get_player_cached(uid)
-            if p["balance"] < amount:
+            player = await PlayerRepository.get_by_id(uid)
+            if player.balance < amount:
                 await q.answer("Недостаточно OAC.")
                 return
-            await update_balance(uid, p["username"], -amount)
-            async with db_pool.acquire() as conn:
-                await conn.execute("UPDATE players SET donated = COALESCE(donated,0) + $1 WHERE user_id = $2", amount, uid)
-            invalidate_cache(uid)
+            player.balance -= amount
+            player.donated = (player.donated or 0) + amount
+            await PlayerRepository.save(player)
             await send_whisper_dm(update, context, f"💎 Ты внёс {amount} OAC в Храм. Спасибо, Странник!")
             return
 
