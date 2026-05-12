@@ -1686,7 +1686,7 @@ async def craft_callback(update, context):
     if p and p.get("m_essence", 0) > 0:
         kb_rows.append([InlineKeyboardButton(f"💠 Использовать Пыль (1 доза)", callback_data="use_dust")])
     kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="menu")])
-    await send_reply(update, context, text, InlineKeyboardMarkup(kb_rows))
+    await edit_or_reply(update, context, text, reply_markup=InlineKeyboardMarkup(kb_rows))
 
 @error_handler
 async def handle_craft_normal(update, context):
@@ -2584,7 +2584,7 @@ async def top_callback(update, context):
     uid = user.id
     top = await get_top(10)                 # должен возвращать поле user_id
     if not top:
-        await safe_edit(update, context, "🏆 Топ-10 пока пуст.")
+        await edit_or_reply(update, context, "🏆 Топ-10 пока пуст.")
         return
 
     first_balance = top[0]["balance"]
@@ -2711,7 +2711,7 @@ async def top_callback(update, context):
     ])
 
     if update.callback_query:
-        await safe_edit(update, context, text, reply_markup=kb, parse_mode="HTML")
+        await edit_or_reply(update, context, text, reply_markup=kb, parse_mode="HTML")
     else:
         await msg.reply_text(text, reply_markup=kb, parse_mode="HTML")
 
