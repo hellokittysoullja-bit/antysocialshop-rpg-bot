@@ -1034,43 +1034,55 @@ def error_handler(func):
 
 # Финальный безопасный редактор сообщений
 # Финальный безопасный редактор сообщений
-async def safe_edit(update: Update, context, text: str, reply_markup=None, parse_mode='HTML'):
-    """Безопасное редактирование: при невозможности отредактировать – отправляет новое сообщение."""
+logger = logging.getLogger(__name__)   # ← если у тебя ещё нет logger в этом файле
+
+async def edit_or_reply(
+    update: Update,
+    context,
+    text: str,
+    reply_markup: Optional[InlineKeyboardMarkup] = None,
+    parse_mode: str = 'HTML',
+    disable_web_page_preview: bool = True,
+) -> None:
+    """
+    Безопасно редактирует сообщение. Если редактирование невозможно — отправляет новое.
+    """
+    safe_text = html.escape(text, quote=False) if parse_mode == 'HTML' else text
+
+    chat_id = update.effective_chat.id
+    message = update.callback_query.message if update.callback_query else update.message
+
     try:
-        if update.callback_query:
-            await update.callback_query.message.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+        if message and message.text:
+            await message.edit_text(
+                safe_text,
+                reply_markup=reply_markup,
+                parse_mode=parse_mode,
+                disable_web_page_preview=disable_web_page_preview,
+            )
         else:
-            await update.message.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
-    except BadRequest as e:
+            raise BadRequest("no text to edit")
+    except (BadRequest, Forbidden) as e:
         err_msg = str(e).lower()
         if "message is not modified" in err_msg:
             return
-        if "there is no text in the message to edit" in err_msg:
-            await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=reply_markup, parse_mode=parse_mode)
-            return
-        logger.warning(f"safe_edit fallback due to: {e}")
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=reply_markup, parse_mode=parse_mode)
-    except Exception as e:
-        logger.error(f"safe_edit unexpected: {e}", exc_info=True)
+        logger.warning("edit_or_reply fallback to send_message: %s", e, extra={"chat_id": chat_id})
         try:
-            await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=reply_markup, parse_mode=parse_mode)
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=safe_text,
+                reply_markup=reply_markup,
+                parse_mode=parse_mode,
+                disable_web_page_preview=disable_web_page_preview,
+            )
         except Exception as send_error:
-            logger.error(f"safe_edit even send_message failed: {send_error}")
-
-async def send_reply(update: Update, context, text, reply_markup=None, parse_mode='HTML'):
-    """Отправляет новое сообщение или редактирует существующее (для меню)."""
-    try:
-        if update.callback_query:
-            await update.callback_query.message.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
-        else:
-            await update.message.reply_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
-    except BadRequest as e:
-        if "message is not modified" in str(e).lower():
-            return
-        logger.warning(f"send_reply fallback: {e}")
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=reply_markup, parse_mode=parse_mode)
+            logger.error("send_message also failed: %s", send_error, exc_info=True)
     except Exception as e:
-        logger.error(f"send_reply unexpected: {e}", exc_info=True)
+        logger.exception("Unexpected error in edit_or_reply")
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=safe_text)
+        except Exception:
+            pass
         
 import asyncio
 from telegram.error import BadRequest
