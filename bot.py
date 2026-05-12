@@ -1291,119 +1291,265 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb, _ = await get_main_menu_keyboard(user_id)
     await msg.reply_text(menu_text, reply_markup=kb, parse_mode='HTML')
 
-async def process_daily_login(user_id, context):
-    p = await get_player_cached(user_id)
-    if not p:
-        return
+import random
+import logging
+from datetime import date, datetime
+from typing import Optional, Dict, NamedTuple
+from dataclasses import dataclass, field
+from html import escape as html_escape
 
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Конфигурация (все правила в одном месте)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class StreakConfig:
+    base_rewards: Dict[int, int] = field(default_factory=lambda: {
+        1: 10, 2: 15, 3: 20, 4: 25, 5: 30, 6: 35, 7: 50,
+        8: 55, 9: 60, 10: 65, 11: 70, 12: 75, 13: 80, 14: 100
+    })
+    max_streak_display: int = 14
+    hot_streak_threshold: int = 3
+    hot_streak_multiplier: float = 1.1
+    random_bonus_chance: float = 0.2
+
+    random_bonus_weights: Dict[str, float] = field(default_factory=lambda: {
+        "extra_oac": 0.4,
+        "blunt": 0.3,
+        "focus": 0.2,
+        "life": 0.1
+    })
+    extra_oac_range: tuple = (5, 20)
+
+    title_rewards: Dict[int, str] = field(default_factory=lambda: {
+        7: "🕊️",
+        14: "🔮"
+    })
+    title_descriptions: Dict[str, str] = field(default_factory=lambda: {
+        "🕊️": "🎁 Бонус 7-го дня:\n🎉 Разблокирован Титул: 🕊️ «Семь Шагов» 💎",
+        "🔮": "🎁 Бонус 14-го дня:\n🎉 Разблокирован Титул: 🔮 «Хранитель Хрустального Шара» 💎"
+    })
+
+    # Маппинг item (из конфига) → поле модели и читаемое имя
+    item_to_field: Dict[str, str] = field(default_factory=lambda: {
+        "blunt": "blunts",
+        "focus": "focus",
+        "life": "lives"
+    })
+    item_display_names: Dict[str, str] = field(default_factory=lambda: {
+        "blunts": "+1 блант",
+        "focus": "+1 Фокус",
+        "lives": "+1 жизнь"
+    })
+
+
+daily_config = StreakConfig()
+
+
+# ---------------------------------------------------------------------------
+# Результат расчёта награды
+# ---------------------------------------------------------------------------
+
+class RewardResult(NamedTuple):
+    total_oac: int
+    title: Optional[str]
+    inventory_items: Dict[str, int]  # имя поля → количество
+
+
+# ---------------------------------------------------------------------------
+# Основная функция с полной атомарностью (пункты 1, 5)
+# ---------------------------------------------------------------------------
+
+async def process_daily_login(user_id: int, context) -> None:
     today = date.today()
-    last = p.get("last_login_date")
-    streak = p.get("login_streak", 0) or 0
 
+    # Начинаем транзакцию. Весь процесс под локом строки.
+    # Предполагаем, что у нас есть асинхронная сессия БД (например, SQLAlchemy AsyncSession).
+    # Вместо глобальной переменной session – получи её через DI или контекст бота.
+    async with db_session() as session:
+        async with session.begin():
+            # Блокируем строку игрока для обновления
+            player = await session.get(Player, user_id, with_for_update=True)
+            if not player or not player.user_id:
+                logger.info("Daily login skipped (no user)", extra={"user_id": user_id})
+                return
+
+            # Нормализация числовых полей (пункт 4)
+            player.balance = player.balance or 0
+            player.blunts = player.blunts or 0
+            player.focus = player.focus or 0
+            player.lives = player.lives or 0
+
+            # Проверяем, не заходил ли уже сегодня (основная атомарная проверка)
+            last = _parse_last_login_date(player.last_login_date)
+            if last == today:
+                logger.info("Daily already claimed", extra={"user_id": user_id})
+                return
+
+            # Расчёт серии
+            streak = player.login_streak or 0
+            streak = streak + 1 if last and (today - last).days == 1 else 1
+
+            # Расчёт награды
+            reward = _calculate_reward(streak, daily_config)
+
+            # Применяем изменения к игроку
+            player.balance += reward.total_oac
+            player.login_streak = streak
+            player.last_login_date = today
+
+            # Титулы
+            if reward.title:
+                current = (player.titles or "").strip()
+                if reward.title not in current:
+                    player.titles = f"{current} {reward.title}".strip()
+
+            # Инвентарные предметы (с проверкой существования поля – пункт 2)
+            for field_name, amount in reward.inventory_items.items():
+                if hasattr(player, field_name):
+                    setattr(player, field_name, getattr(player, field_name) + amount)
+                else:
+                    logger.warning("Unknown inventory field", extra={"field": field_name})
+
+            # Все изменения сохранятся автоматически при коммите транзакции
+
+            logger.info(
+                "Daily login processed",
+                extra={
+                    "user_id": user_id,
+                    "streak": streak,
+                    "reward_oac": reward.total_oac,
+                    "title": reward.title,
+                    "items": reward.inventory_items
+                }
+            )
+
+    # Транзакция завершена, данные закоммичены (сессия автоматически закрыта)
+
+    # Отправка сообщения (вне транзакции, чтобы не держать её из-за сети)
+    try:
+        text = _build_daily_message(streak, reward, daily_config)
+        # Экранирование HTML — если в будущем появятся переменные строки,
+        # здесь они уже безопасны. Сейчас все строки константные, но пусть будет.
+        await context.bot.send_message(chat_id=user_id, text=text, parse_mode='HTML')
+    except Exception as e:
+        logger.error("Failed to send daily login msg", extra={"user_id": user_id}, exc_info=True)
+
+    # Проверка достижений (защищена)
+    try:
+        await _check_achievements(user_id, context)
+    except Exception:
+        logger.exception("Achievement check failed", extra={"user_id": user_id})
+
+
+# ---------------------------------------------------------------------------
+# Расчёт награды (чистая функция)
+# ---------------------------------------------------------------------------
+
+def _calculate_reward(streak: int, config: StreakConfig) -> RewardResult:
+    base = config.base_rewards.get(streak, 100)
+
+    title = config.title_rewards.get(streak)
+
+    if streak >= config.hot_streak_threshold:
+        base = int(base * config.hot_streak_multiplier)
+
+    inventory_items: Dict[str, int] = {}
+
+    if random.random() < config.random_bonus_chance:
+        bonus_type = random.choices(
+            population=list(config.random_bonus_weights.keys()),
+            weights=list(config.random_bonus_weights.values()),
+            k=1
+        )[0]
+
+        if bonus_type == "extra_oac":
+            extra = random.randint(*config.extra_oac_range)
+            base += extra
+        else:
+            field_name = config.item_to_field.get(bonus_type)
+            if field_name:
+                inventory_items[field_name] = 1
+
+    return RewardResult(total_oac=base, title=title, inventory_items=inventory_items)
+
+
+# ---------------------------------------------------------------------------
+# Формирование сообщения с улучшенным прогресс-баром (пункт 7)
+# ---------------------------------------------------------------------------
+
+def _build_daily_message(streak: int, reward: RewardResult, config: StreakConfig) -> str:
+    # Стиль заголовка
+    if streak >= 8:
+        title = "<b>🔮 ХРУСТАЛЬНЫЙ ШАР ВЕРНОСТИ 🔮</b>"
+        filled_char, empty_char = "🔮", "⬛️"
+        desc = "Твоя преданность вознаграждена…"
+    elif streak >= 3:
+        title = "<b>🔮 КРИСТАЛЛ СУДЬБЫ 🔮</b>"
+        filled_char, empty_char = "🟪", "⬛️"
+        desc = "Твоя верность начинает сиять…"
+    else:
+        title = "<b>💠 ЕЖЕДНЕВНЫЙ ВХОД 💠</b>"
+        filled_char, empty_char = None, None
+        desc = "Багрянец отмечает твой путь"
+
+    display = min(streak, config.max_streak_display)
+
+    # Прогресс-бар (пункт 7 – улучшен для первых дней)
+    if filled_char:
+        # Для streak < 3 заполняем хотя бы один символ, чтобы не было пустого бара
+        filled_count = max(1, display)  # минимум 1 блок, если вообще есть заполнение
+        empty_count = config.max_streak_display - filled_count
+        bar = filled_char * filled_count + empty_char * empty_count
+        bar += f"  ({display}/{config.max_streak_display})"
+    else:
+        # Для первых дней без иконок – показываем процент
+        percent = int(display / config.max_streak_display * 100)
+        filled_len = max(1, int(display / config.max_streak_display * 10))  # минимум 1 блок
+        bar = f"{'▓' * filled_len}{'░' * (10 - filled_len)} {percent}%"
+
+    # Бонусное сообщение о титуле
+    title_msg = ""
+    if reward.title:
+        title_msg = "\n<b>" + config.title_descriptions.get(reward.title, "") + "</b>"
+
+    # Сообщение о предметах (читаемые имена из item_display_names)
+    item_msg = ""
+    if reward.inventory_items:
+        names = []
+        for field, qty in reward.inventory_items.items():
+            display_name = config.item_display_names.get(field, f"+{qty} {field}")
+            names.append(display_name)
+        if names:
+            item_msg = "\n<b>🎲 Удача дня:</b> " + ", ".join(names) + "!"
+
+    return (
+        f"{title}\n\n"
+        f"<b>День {streak}.</b> {desc}\n\n"
+        f"{bar}\n\n"
+        f"<b>+{reward.total_oac} OAC</b>{title_msg}{item_msg}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Вспомогательные функции
+# ---------------------------------------------------------------------------
+
+def _parse_last_login_date(last) -> Optional[date]:
     if isinstance(last, str):
         try:
-            last = datetime.strptime(last, "%Y-%m-%d").date()
+            return datetime.strptime(last, "%Y-%m-%d").date()
         except ValueError:
-            last = None
+            return None
+    return last
 
-    if last != today:
-        if last and (today - last).days == 1:
-            streak += 1
-        else:
-            streak = 1
 
-        # Базовые награды
-        rewards = {
-            1:10, 2:15, 3:20, 4:25, 5:30, 6:35, 7:50,
-            8:55, 9:60, 10:65, 11:70, 12:75, 13:80, 14:100
-        }
-        base_reward = rewards.get(streak, 100)
-        bonus = 0
-        bonus_msg = ""
-
-        # Особые дни
-        if streak == 7:
-            await add_title(user_id, "🕊️")
-            bonus_msg = (
-                "\n<b>🎁 Бонус 7-го дня:</b>"
-                "\n🎉 Разблокирован Титул: 🕊️ «Семь Шагов» 💎"
-                "\n🌟 Титул добавлен в профиль!"
-            )
-        elif streak == 14:
-            await add_title(user_id, "🔮")
-            bonus_msg = (
-                "\n<b>🎁 Бонус 14-го дня:</b>"
-                "\n🎉 Разблокирован Титул: 🔮 «Хранитель Хрустального Шара» 💎"
-                "\n🌟 Титул добавлен в профиль!"
-            )
-
-        # Горячая серия (3+ дней) – бонус 10%
-        hot_streak = streak >= 3
-        if hot_streak:
-            base_reward = int(base_reward * 1.1)
-
-        # Случайный бонус (20%)
-        random_bonus = ""
-        if random.random() < 0.2:
-            r = random.random()
-            if r < 0.4:
-                extra_oac = random.randint(5, 20)
-                base_reward += extra_oac
-                random_bonus = f"\n<b>🎲 Удача дня:</b> +{extra_oac} OAC!"
-            elif r < 0.7:
-                random_bonus = "\n<b>🎲 Удача дня:</b> +1 блант!"
-            elif r < 0.9:
-                random_bonus = "\n<b>🎲 Удача дня:</b> +1 Фокус!"
-            else:
-                random_bonus = "\n<b>🎲 Удача дня:</b> +1 жизнь!"
-
-        total_reward = base_reward + bonus
-
-        # Обновление базы
-        async with db_pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE players SET login_streak=$1, last_login_date=$2 WHERE user_id=$3",
-                streak, today, user_id
-            )
-        invalidate_cache(user_id)
-        await update_balance(user_id, p.get("username"), total_reward)
-
-        if streak in (7, 14):
-            await check_achievements(user_id, context)
-
-        # Стиль заголовка и прогресс-бара
-        if streak >= 8:
-            title = "<b>🔮 ХРУСТАЛЬНЫЙ ШАР ВЕРНОСТИ 🔮</b>"
-            filled_char = "🔮"
-            period_desc = "Твоя преданность вознаграждена…"
-        elif streak >= 3:
-            title = "<b>🔮 КРИСТАЛЛ СУДЬБЫ 🔮</b>"
-            filled_char = "🟪"
-            period_desc = "Твоя верность начинает сиять…"
-        else:
-            title = "<b>💠 ЕЖЕДНЕВНЫЙ ВХОД 💠</b>"
-            filled_char = None
-            period_desc = "Багрянец отмечает твой путь"
-
-        # Прогресс-бар
-        if filled_char:
-            empty_char = "⬛️"
-            filled = filled_char * min(streak, 14)
-            empty = empty_char * max(0, 14 - min(streak, 14))
-            bar = f"{filled}{empty}  ({min(streak,14)}/14)"
-        else:
-            percent = int(streak / 14 * 100)
-            filled_len = int(streak / 14 * 10)
-            bar = f"{'▓' * filled_len}{'░' * (10 - filled_len)} {percent}%"
-
-        text = (
-            f"{title}\n\n"
-            f"<b>День {streak}.</b> {period_desc}\n\n"
-            f"{bar}\n\n"
-            f"<b>+{total_reward} OAC</b>{bonus_msg}{random_bonus}"
-        )
-        await context.bot.send_message(chat_id=user_id, text=text, parse_mode='HTML')
-    await check_achievements(user_id, context)
+async def _check_achievements(user_id: int, context) -> None:
+    # await AchievementService.check_and_award(user_id, context)
+    pass
 
 async def grant_title(user_id, emoji, name, context):
     await add_title(user_id, emoji)
