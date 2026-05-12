@@ -4166,14 +4166,26 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if data in ("guild_join_BLACK", "guild_join_WHITE"):
             await q.answer()
             guild = "BLACK" if data == "guild_join_BLACK" else "WHITE"
-            await set_guild(uid, guild)
-            g_emoji = "🕯️" if guild=="BLACK" else "⚜️"; g_name = "Тёмная" if guild=="BLACK" else "Светлая"
+            player = await PlayerRepository.get_by_id(uid)
+            player.guild = guild
+            await PlayerRepository.save(player)
+            g_emoji = "🕯️" if guild == "BLACK" else "⚜️"
+            g_name = "Тёмная" if guild == "BLACK" else "Светлая"
             uname = html.escape(q.from_user.username or q.from_user.first_name)
             await q.message.edit_text(
-                f"<b><i>🕋 ГИЛЬДИЯ ТЕБЯ ПРИНЯЛА</i></b>\n\n✅ Теперь <b>ты</b> — {g_emoji} <b>{g_name} Гильдия</b> ·\n\n<i>🩸 Искажение стало плотнее...</i>", parse_mode='HTML')
+                f"<b><i>🕋 ГИЛЬДИЯ ТЕБЯ ПРИНЯЛА</i></b>\n\n"
+                f"✅ Теперь <b>ты</b> — {g_emoji} <b>{g_name} Гильдия</b> ·\n\n"
+                f"<i>🩸 Искажение стало плотнее...</i>",
+                parse_mode='HTML'
+            )
             try:
-                await context.bot.send_message(chat_id="@guild_antysocial",
-                    text=f"<b><i>🩸 ЭХО ИСКАЖЕНИЯ</i></b>\n\n⚜️ <b>@{uname}</b> вплёл свою нить в {g_emoji} <b>{g_name} Гильдию</b>.\n<i>🕯️ Искажение приняло нового странника.</i>", parse_mode='HTML')
+                await context.bot.send_message(
+                    chat_id="@guild_antysocial",
+                    text=f"<b><i>🩸 ЭХО ИСКАЖЕНИЯ</i></b>\n\n"
+                         f"⚜️ <b>@{uname}</b> вплёл свою нить в {g_emoji} <b>{g_name} Гильдию</b>.\n"
+                         f"<i>🕯️ Искажение приняло нового странника.</i>",
+                    parse_mode='HTML'
+                )
             except Exception as e:
                 logger.error(f"Ошибка отправки в канал: {e}")
             return
