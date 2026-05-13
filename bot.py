@@ -227,12 +227,12 @@ class PlayerRepository:
         return Player(user_id=user_id)
 
     @staticmethod
-    async def save(player: Player):
+    async def save(player: Player, conn=None):
         inv_json = json.dumps(player.inventory, default=str)
         skins_json = json.dumps(player.profile_skins, default=str)
 
-        async with db_pool.acquire() as conn:
-            await conn.execute("""
+        async def _write(c):
+            await c.execute("""
                 INSERT INTO players (user_id, username, balance, blunts, guild, last_farm,
                     last_ritual, last_daily, titles, last_farm_date, passive_level,
                     passive_collected, karma, inhaled, smoke_count, farm_count,
@@ -295,6 +295,12 @@ class PlayerRepository:
                 player.lab_depth
             )
 
+        if conn is not None:
+            await _write(conn)
+        else:
+            async with db_pool.acquire() as new_conn:
+                await _write(new_conn)
+
         # Инвалидируем кэш
         if redis:
             await redis.delete(f"player:{player.user_id}")
@@ -312,45 +318,37 @@ async def ensure_player_exists(user_id, username=None, conn=None):
         username or "",
     )
 
-@db_retry()
-async def update_last_farm(user_id, conn=None):
-    player = await PlayerRepository.get_by_id(user_id)
-    player.last_farm = datetime.now()
-    player.last_farm_date = date.today()
-    await PlayerRepository.save(player)
+@staticmethod
+    async def atomic_update(user_id: int, update_func):
+        """
+        Атомарно блокирует игрока (SELECT ... FOR UPDATE),
+        выполняет переданную функцию update_func(player, conn),
+        сохраняет модель и возвращает результат update_func.
+        Если игрок не найден, возвращает None.
+        """
+        async with db_pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    "SELECT * FROM players WHERE user_id = $1 FOR UPDATE",
+                    user_id
+                )
+                if not row:
+                    return None
 
-@db_retry()
-async def update_last_daily(user_id, conn=None):
-    player = await PlayerRepository.get_by_id(user_id)
-    player.last_daily = datetime.now()
-    await PlayerRepository.save(player)
+                # Строим модель из строки БД
+                p = dict(row)
+                p["inventory"] = _json_safe_load(p.get("inventory"), [])
+                p["profile_skins"] = _json_safe_load(p.get("profile_skins"), {})
+                player = Player(**p)
 
-@db_retry()
-async def update_last_ritual(user_id, conn=None):
-    player = await PlayerRepository.get_by_id(user_id)
-    player.last_ritual = datetime.now()
-    await PlayerRepository.save(player)
+                # Вызываем игровую логику
+                result = await update_func(player, conn)
 
-@db_retry()
-async def update_last_berserk(user_id, conn=None):
-    player = await PlayerRepository.get_by_id(user_id)
-    player.last_berserk = datetime.now()
-    await PlayerRepository.save(player)
+                # Сохраняем модель (передаём соединение, чтобы остаться в транзакции)
+                await PlayerRepository.save(player, conn=conn)
 
-async def get_guild(user_id):
-    player = await PlayerRepository.get_by_id(user_id)
-    return player.guild
-
-async def add_title(user_id, emoji, conn=None):
-    title = str(emoji or "").strip()
-    if not title:
-        return
-    player = await PlayerRepository.get_by_id(user_id)
-    titles = (player.titles or "").split()
-    if title not in titles:
-        titles.append(title)
-        player.titles = " ".join(titles).strip()
-        await PlayerRepository.save(player)
+                # Возвращаем результат (например, данные для сообщения)
+                return result
 
 @db_retry()
 async def create_named_blunt(user_id, name, rarity=None, conn=None):
@@ -818,40 +816,6 @@ async def create_tables(conn):
 
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 @db_retry()
-async def update_balance(user_id, username, amount, conn=None):
-    player = await PlayerRepository.get_by_id(user_id)
-    player.username = username or player.username
-    player.balance += amount
-    await PlayerRepository.save(player)
-
-@db_retry()
-async def update_blunts(user_id, username, amount, conn=None):
-    player = await PlayerRepository.get_by_id(user_id)
-    player.username = username or player.username
-    player.blunts += amount
-    await PlayerRepository.save(player)
-
-async def update_essence(user_id, amount, conn=None):
-    player = await PlayerRepository.get_by_id(user_id)
-    player.m_essence += amount
-    await PlayerRepository.save(player)
-
-ALLOWED_COUNTERS = {"farm_count","craft_count","smoke_count","ritual_count","referral_count","check_count","lab_chests","lab_deaths","alchemy_count"}
-
-async def increment_counter(user_id, field, conn=None):
-    if field not in ALLOWED_COUNTERS:
-        return
-    player = await PlayerRepository.get_by_id(user_id)
-    setattr(player, field, getattr(player, field, 0) + 1)
-    await PlayerRepository.save(player)
-
-@db_retry()
-async def set_guild(user_id, guild):
-    player = await PlayerRepository.get_by_id(user_id)
-    player.guild = guild
-    await PlayerRepository.save(player)
-
-@db_retry()
 async def get_top(limit=10):
     async with db_pool.acquire() as conn:
         rows = await conn.fetch(
@@ -981,8 +945,8 @@ async def add_war_score(user_id, points, conn=None):
 
 async def get_main_menu_keyboard(user_id):
     whisper = random.choice(WHISPERS)
-    player = await PlayerRepository.get_by_id(uid)
-    balance = p["balance"] if p else 0
+    player = await PlayerRepository.get_by_id(user_id)
+    balance = player.balance if player else 0
 
     bush_btn = InlineKeyboardButton("🪴 Куст", callback_data="collect") if balance >= 5000 else InlineKeyboardButton("🔒 Куст (⚔️ Ветеран)", callback_data="bush_preview")
     pet_btn = InlineKeyboardButton("🐾 Питомец", callback_data="pet_preview") if balance >= 5000 else InlineKeyboardButton("🔒 Питомец (⚔️ Ветеран)", callback_data="pet_preview")
