@@ -2099,9 +2099,13 @@ async def handle_gift_username(update: Update, context: ContextTypes.DEFAULT_TYP
 @error_handler
 async def smoke_callback(update, context):
     user, msg = get_user_and_msg(update)
-    uid = user.id; uname = html.escape(user.username or user.first_name)
+    uid = user.id
     player = await PlayerRepository.get_by_id(uid)
-    if not p or p["blunts"] < 1:
+    if not player or not player.user_id:
+        await msg.reply_text("Сначала активируйся: /start")
+        return
+
+    if player.blunts < 1:
         empty_text = (
             "<b>💨 ДУНУТЬ</b>\n\n"
             "<b>🌿 Твой свёрток пуст</b>\n"
@@ -2118,7 +2122,7 @@ async def smoke_callback(update, context):
             await msg.reply_text(empty_text, reply_markup=empty_kb, parse_mode='HTML')
         return
 
-    main_text = f"<b>💨 ДУНУТЬ</b>\n\n🌿 <i>блантов в свёртке:</i> <b>{p['blunts']}</b>"
+    main_text = f"<b>💨 ДУНУТЬ</b>\n\n🌿 <i>блантов в свёртке:</i> <b>{player.blunts}</b>"
     main_kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("💨 Дунуть", callback_data="do_smoke")],
         [InlineKeyboardButton("🔙 Назад", callback_data="menu")]
