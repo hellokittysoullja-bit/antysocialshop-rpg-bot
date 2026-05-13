@@ -309,6 +309,7 @@ class PlayerRepository:
             player_cache.pop(player.user_id, None)
 
     @staticmethod
+    @db_retry()
     async def atomic_update(user_id: int, update_func):
         """
         Атомарно блокирует игрока (SELECT ... FOR UPDATE),
@@ -441,59 +442,57 @@ async def check_achievements(user_id, context):
     if not player or not player.user_id:
         return
 
-    async with db_pool.acquire() as conn:
-        rows = await conn.fetch("SELECT ach_id FROM achievements_awarded WHERE user_id=$1", user_id)
-        awarded = {r["ach_id"] for r in rows}
+    # Кэш полученных ачивок
+    awarded_key = f"ach:{user_id}"
+    awarded = set()
+    if redis:
+        cached = await redis.get(awarded_key)
+        if cached:
+            awarded = set(json.loads(cached))
 
+    if not awarded:
+        async with db_pool.acquire() as conn:
+            rows = await conn.fetch("SELECT ach_id FROM achievements_awarded WHERE user_id=$1", user_id)
+            awarded = {r["ach_id"] for r in rows}
+            if redis:
+                await redis.setex(awarded_key, 60, json.dumps(list(awarded)))
+
+    # Словарь условий: ach_id -> (поле_модели, порог)
+    ACHIEVEMENT_CONDITIONS = {
+        "farm_1": ("farm_count", 1),
+        "craft_1": ("craft_count", 1),
+        "smoke_1": ("smoke_count", 1),
+        "balance_1000": ("balance", 1000),
+        "smoke_10": ("smoke_count", 10),
+        "craft_15": ("craft_count", 15),
+        "ritual_5": ("ritual_count", 5),
+        "craft_50": ("craft_count", 50),
+        "smoke_25": ("smoke_count", 25),
+        "lab_first": ("lab_chests", 1),
+        "referral_1": ("referral_count", 1),
+        "streak_7": ("login_streak", 7),
+        "balance_20000": ("balance", 20000),
+        "lab_chest_3": ("lab_chests", 3),
+        "rank_phantom": ("balance", 20000),
+        "balance_50000": ("balance", 50000),
+        "check_10": ("check_count", 10),
+        "lab_death_5": ("lab_deaths", 5),
+        "lab_chest_10": ("lab_chests", 10),
+        "craft_250": ("craft_count", 250),
+        "alchemy_15": ("alchemy_count", 15),
+    }
+
+    async with db_pool.acquire() as conn:
         for ach in ACHIEVEMENTS:
             ach_id = ach["id"]
             if ach_id == "lunar_lord":
                 continue
 
             condition_met = False
-            # Используем поля модели Player
-            if ach_id == "farm_1" and player.farm_count >= 1:
-                condition_met = True
-            elif ach_id == "craft_1" and player.craft_count >= 1:
-                condition_met = True
-            elif ach_id == "smoke_1" and player.smoke_count >= 1:
-                condition_met = True
-            elif ach_id == "balance_1000" and player.balance >= 1000:
-                condition_met = True
-            elif ach_id == "smoke_10" and player.smoke_count >= 10:
-                condition_met = True
-            elif ach_id == "craft_15" and player.craft_count >= 15:
-                condition_met = True
-            elif ach_id == "ritual_5" and player.ritual_count >= 5:
-                condition_met = True
-            elif ach_id == "craft_50" and player.craft_count >= 50:
-                condition_met = True
-            elif ach_id == "smoke_25" and player.smoke_count >= 25:
-                condition_met = True
-            elif ach_id == "lab_first" and player.lab_chests >= 1:
-                condition_met = True
-            elif ach_id == "referral_1" and player.referral_count >= 1:
-                condition_met = True
-            elif ach_id == "streak_7" and player.login_streak >= 7:
-                condition_met = True
-            elif ach_id == "balance_20000" and player.balance >= 20000:
-                condition_met = True
-            elif ach_id == "lab_chest_3" and player.lab_chests >= 3:
-                condition_met = True
-            elif ach_id == "rank_phantom" and player.balance >= 20000:
-                condition_met = True
-            elif ach_id == "balance_50000" and player.balance >= 50000:
-                condition_met = True
-            elif ach_id == "check_10" and player.check_count >= 10:
-                condition_met = True
-            elif ach_id == "lab_death_5" and player.lab_deaths >= 5:
-                condition_met = True
-            elif ach_id == "lab_chest_10" and player.lab_chests >= 10:
-                condition_met = True
-            elif ach_id == "craft_250" and player.craft_count >= 250:
-                condition_met = True
-            elif ach_id == "alchemy_15" and player.alchemy_count >= 15:
-                condition_met = True
+            if ach_id in ACHIEVEMENT_CONDITIONS:
+                field, threshold = ACHIEVEMENT_CONDITIONS[ach_id]
+                if getattr(player, field, 0) >= threshold:
+                    condition_met = True
 
             if condition_met and ach_id not in awarded:
                 await conn.execute(
@@ -512,6 +511,11 @@ async def check_achievements(user_id, context):
                     await context.bot.send_message(chat_id=user_id, text=text, parse_mode='HTML')
                 except Exception as e:
                     logger.error(f"Achievement notify error: {e}")
+
+                # Сбрасываем кэш, потому что список изменился
+                if redis:
+                    await redis.delete(awarded_key)
+                awarded.add(ach_id)
 
         # lunar_lord отдельно
         rows2 = await conn.fetch("SELECT ach_id FROM achievements_awarded WHERE user_id=$1", user_id)
@@ -534,6 +538,8 @@ async def check_achievements(user_id, context):
                 await context.bot.send_message(chat_id=user_id, text=text, parse_mode='HTML')
             except Exception as e:
                 logger.error(f"Achievement notify error (lunar): {e}")
+            if redis:
+                await redis.delete(awarded_key)
                 
 async def check_rank_up(context, user_id, username, old_balance, new_balance):
     old_idx = 0
@@ -1005,7 +1011,6 @@ def error_handler(func):
     return wrapper
 
 # ========== ОБРАБОТЧИКИ КОМАНД (полный, надёжный, с лабиринтом) ==========
-# Финальный безопасный редактор сообщений
 logger = logging.getLogger(__name__)   # ← 
 
 # --- Retry-обёртки для Telegram API (обработка 429) ---
@@ -1146,86 +1151,90 @@ def get_rank_progress(balance):
             )
     return ""
     
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user, msg = get_user_and_msg(update)
-    user_id = user.id
-    username = user.username or user.first_name
-    username_escaped = html.escape(username)
+#---------------------------------------------------------------------------
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ /start
 
-    # 1. Получаем игрока (или пустышку, если нет)
-    player = await PlayerRepository.get_by_id(user_id)
-
-    # 2. Обработка реферальной ссылки
-    if context.args and context.args[0].startswith("blunt_"):
-        ref_blunt_id = context.args[0].replace("blunt_", "")
-        creator_id = None
-        async with db_pool.acquire() as conn:
-            rows = await conn.fetch("SELECT user_id, inventory FROM players")
-        for row in rows:
-            try:
-                inv = _json_safe_load(row["inventory"], [])
-                for item in inv:
-                    if item.get("id") == ref_blunt_id:
-                        creator_id = row["user_id"]
-                        break
-            except:
-                continue
-            if creator_id:
-                break
-
-        if creator_id and creator_id != user_id:
-            creator = await PlayerRepository.get_by_id(creator_id)
-            # Проверяем, что реферал ещё не засчитан
-            if creator and not player.invited_by:
-                async def _referral(p, conn):
-                    p.balance = (p.balance or 0) + 50
-                    p.referral_count = (p.referral_count or 0) + 1
-                    name = random.choice(["Крик Бездны","Пепел Короля","Шёпот Склепа"])
-                    await create_named_blunt(creator_id, name, rarity="legendary", conn=conn)
-                    if "🩸" not in (p.titles or ""):
-                        p.titles = f"{p.titles or ''} 🩸".strip()
-                    # Отмечаем, что текущий игрок пришёл по этой ссылке
-                    player.invited_by = creator_id
-                    await PlayerRepository.save(player, conn=conn)
-
-                await PlayerRepository.atomic_update(creator_id, _referral)
-                # Оповещение в канал
-                try:
-                    await context.bot.send_message(
-                        chat_id="@guild_antysocial",
-                        text=f"<b><i>🩸 ЭХО ИСКАЖЕНИЯ</i></b>\n\n⚜️ <b>@{username_escaped}</b> был призван нитью @{html.escape(creator.username)}.\n🕸️ Искажение становится плотнее...",
-                        parse_mode='HTML'
-                    )
-                except Exception as e:
-                    logger.error(f"Ошибка отправки в канал: {e}")
-
-    # 3. Создание нового игрока (если записи нет)
-    if not player or not player.user_id:
-        player = Player(user_id=user_id, username=username, balance=800)
-        new_name = random.choice(["Крик Бездны","Пепел Короля","Шёпот Склепа"])
-        await create_named_blunt(user_id, new_name)
-        await PlayerRepository.save(player)
-
-        bonus = "🎁 Смотритель дарует тебе <code>800</code> 🍬 и твой первый именной блант!\n\n"
-        welcome = (
-            "<b><i>🎉 Добро пожаловать в Гильдию Antysocialshop!</i></b>\n\n"
-            "🕯️ <b>Тёмная Гильдия</b> — стабильность, ритуалы, тёмное благословение.\n"
-            "⚜️ <b>Светлая Гильдия</b> — азарт, удача, танец на лезвии.\n\n"
-            "▸ <i>Выбери свой путь:</i>"
-        )
-        guild_kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🕯️ Тёмная Гильдия", callback_data="guild_join_BLACK"),
-             InlineKeyboardButton("⚜️ Светлая Гильдия", callback_data="guild_join_WHITE")]
-        ])
-        await msg.reply_text(bonus + welcome, reply_markup=guild_kb, parse_mode='HTML')
+async def _handle_referral(update, context, uid, player):
+    """Атомарно обрабатывает реферальную ссылку blunt_..."""
+    if not context.args or not context.args[0].startswith("blunt_"):
         return
 
-    # 4. Ежедневный вход и главное меню
-    await process_daily_login(user_id, context)
+    ref_blunt_id = context.args[0].replace("blunt_", "")
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("SELECT user_id, inventory FROM players")
+    creator_id = None
+    for row in rows:
+        try:
+            inv = _json_safe_load(row["inventory"], [])
+            for item in inv:
+                if item.get("id") == ref_blunt_id:
+                    creator_id = row["user_id"]
+                    break
+        except:
+            continue
+        if creator_id:
+            break
 
-    # --- Сборка главного меню (твоя актуальная логика) ---
-    guild = player.guild
+    if not creator_id or creator_id == uid:
+        return
+
+    creator = await PlayerRepository.get_by_id(creator_id)
+    if not creator or player.invited_by:
+        return
+
+    # Атомарно начисляем рефереру бонусы и связываем игроков
+    async def _ref(p, conn):
+        p.balance = (p.balance or 0) + 50
+        p.referral_count = (p.referral_count or 0) + 1
+        name = random.choice(["Крик Бездны","Пепел Короля","Шёпот Склепа"])
+        await create_named_blunt(creator_id, name, rarity="legendary", conn=conn)
+        if "🩸" not in (p.titles or ""):
+            p.titles = f"{p.titles or ''} 🩸".strip()
+        # Связываем реферала с создателем
+        player.invited_by = creator_id
+        await PlayerRepository.save(player, conn=conn)
+
+    await PlayerRepository.atomic_update(creator_id, _ref)
+
+    # Оповещение в канал (можно закомментировать для нового бота)
+    try:
+        uname = html.escape(update.effective_user.username or update.effective_user.first_name or "Странник")
+        await context.bot.send_message(
+            chat_id="@guild_antysocial",
+            text=f"<b><i>🩸 ЭХО ИСКАЖЕНИЯ</i></b>\n\n⚜️ <b>@{uname}</b> был призван нитью @{html.escape(creator.username)}.\n🕸️ Искажение становится плотнее...",
+            parse_mode='HTML'
+        )
+    except Exception as e:
+        logger.error(f"Ошибка отправки в канал: {e}")
+
+
+async def _create_new_player(update, context, uid, username):
+    """Создаёт нового игрока и отправляет приветствие с выбором гильдии."""
+    player = Player(user_id=uid, username=username, balance=800)
+    new_name = random.choice(["Крик Бездны","Пепел Короля","Шёпот Склепа"])
+    await create_named_blunt(uid, new_name)
+    await PlayerRepository.save(player)
+
+    bonus = "🎁 Смотритель дарует тебе <code>800</code> 🍬 и твой первый именной блант!\n\n"
+    welcome = (
+        "<b><i>🎉 Добро пожаловать в Гильдию Antysocialshop!</i></b>\n\n"
+        "🕯️ <b>Тёмная Гильдия</b> — стабильность, ритуалы, тёмное благословение.\n"
+        "⚜️ <b>Светлая Гильдия</b> — азарт, удача, танец на лезвии.\n\n"
+        "▸ <i>Выбери свой путь:</i>"
+    )
+    guild_kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🕯️ Тёмная Гильдия", callback_data="guild_join_BLACK"),
+         InlineKeyboardButton("⚜️ Светлая Гильдия", callback_data="guild_join_WHITE")]
+    ])
+    await update.effective_message.reply_text(bonus + welcome, reply_markup=guild_kb, parse_mode='HTML')
+
+
+async def _show_main_menu(update, context, player, user):
+    """Формирует и отправляет главное меню."""
     bal = player.balance
+    guild = player.guild
+
+    # Определение текущего и следующего ранга
     rank_emoji, rank_name = "🪓", "Рекрут"
     next_rank_emoji, next_rank_name, next_threshold = "", "", 0
     for i, (emoji, threshold, _) in enumerate(RANKS):
@@ -1246,6 +1255,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rank_display = f"{rank_emoji} {rank_name}" if rank_name else rank_emoji
     whisper = random.choice(WHISPERS)
 
+    # Приветствие и гильдия
     back = f"<b>⚔️ С возвращением в Гильдию, {rank_display} {html.escape(display_name)}.</b>\n\n"
     if guild == "BLACK":
         back += "<b>🔮 Ты — часть Тёмной Гильдии. 🕯️Ритуалы ждут тебя</b>\n"
@@ -1254,12 +1264,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         back += "<b>🔮 Ты пока не в Гильдии. Нажми /guild чтобы вступить</b>\n"
 
+    # Мотивационная строка
     if next_threshold > 0:
         gap = next_threshold - bal
         back += f"\n<b>⚡ Ещё {gap} OAC до ранга {next_rank_emoji} {next_rank_name} — вперёд!</b>"
     else:
         back += f"\n<b>⚡ Ты достиг вершины! Твой ранг — {rank_emoji} {rank_name}.</b>"
 
+    # Подсказка для новичков
     farm_count = player.farm_count
     guild_joined = guild is not None
     craft_count = player.craft_count
@@ -1277,16 +1289,36 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         hint = "<b>💡 Исследуй 🏛️ Лабиринт! Он полон опасностей и наград.</b>"
 
     menu_text = f"<b>🎮 ГЛАВНОЕ МЕНЮ</b>\n\n<i>{whisper}</i>\n\n" + back + "\n\n" + hint
-    kb, _ = await get_main_menu_keyboard(user_id)
-    await msg.reply_text(menu_text, reply_markup=kb, parse_mode='HTML')
+    kb, _ = await get_main_menu_keyboard(player.user_id)
+    await update.effective_message.reply_text(menu_text, reply_markup=kb, parse_mode='HTML')
 
-    kb, _ = await get_main_menu_keyboard(user_id)
-    await msg.reply_text(menu_text, reply_markup=kb, parse_mode='HTML')
+# САМА ФУНКЦИЯ START — ТОНКИЙ ОРКЕСТРАТОР
+# ---------------------------------------------------------------------------
 
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user, msg = get_user_and_msg(update)
+    uid = user.id
+    username = user.username or user.first_name
+
+    # 1. Получаем игрока (или пустышку)
+    player = await PlayerRepository.get_by_id(uid)
+
+    # 2. Обрабатываем реферала (если есть аргумент)
+    await _handle_referral(update, context, uid, player)
+
+    # 3. Если игрока нет – создаём новичка и выходим
+    if not player or not player.user_id:
+        await _create_new_player(update, context, uid, username)
+        return
+
+    # 4. Ежедневный вход
+    await process_daily_login(uid, context)
+
+    # 5. Показываем главное меню
+    await _show_main_menu(update, context, player, user)
+    
 # ---------------------------------------------------------------------------
 # Конфигурация (все правила в одном месте)
-# ---------------------------------------------------------------------------
-
 @dataclass(frozen=True)
 class StreakConfig:
     base_rewards: Dict[int, int] = field(default_factory=lambda: {
@@ -1330,10 +1362,8 @@ class StreakConfig:
 
 daily_config = StreakConfig()
 
-
 # ---------------------------------------------------------------------------
 # Результат расчёта награды
-# ---------------------------------------------------------------------------
 
 class RewardResult(NamedTuple):
     total_oac: int
@@ -1341,7 +1371,6 @@ class RewardResult(NamedTuple):
     inventory_items: Dict[str, int]  # имя поля → количество
 
 
-# ---------------------------------------------------------------------------
 # Основная функция с полной атомарностью (пункты 1, 5)
 # ---------------------------------------------------------------------------
 
@@ -1417,7 +1446,6 @@ async def process_daily_login(user_id: int, context) -> None:
     except Exception:
         logger.exception("Achievement check failed", extra={"user_id": user_id})
 
-# ---------------------------------------------------------------------------
 # Расчёт награды (чистая функция)
 # ---------------------------------------------------------------------------
 
@@ -1448,8 +1476,6 @@ def _calculate_reward(streak: int, config: StreakConfig) -> RewardResult:
 
     return RewardResult(total_oac=base, title=title, inventory_items=inventory_items)
 
-
-# ---------------------------------------------------------------------------
 # Формирование сообщения с улучшенным прогресс-баром (пункт 7)
 # ---------------------------------------------------------------------------
 
@@ -1504,7 +1530,6 @@ def _build_daily_message(streak: int, reward: RewardResult, config: StreakConfig
         f"{bar}\n\n"
         f"<b>+{reward.total_oac} OAC</b>{title_msg}{item_msg}"
     )
-
 # ---------------------------------------------------------------------------
 # Вспомогательные функции
 # ---------------------------------------------------------------------------
@@ -3553,9 +3578,8 @@ async def lab_enter_confirm(update, context):
     total_rooms = 4 + depth
     now = datetime.now()
     async with db_pool.acquire() as conn:
-        player.last_lab_attempt = now
-  await PlayerRepository.save(player)
-    # Остальное без изменений (контекстные переменные)
+        await conn.execute("UPDATE players SET last_lab_attempt=$1 WHERE user_id=$2", now, uid)
+
     context.user_data["lab_room"] = 1
     context.user_data["lab_hp"] = 100
     context.user_data["lab_max_hp"] = 100
@@ -3566,6 +3590,15 @@ async def lab_enter_confirm(update, context):
     context.user_data["lab_attack_bonus"] = 0.0
     context.user_data["lab_focused_attack"] = False
     context.user_data["lab_curse_rooms"] = 0
+
+    if redis:
+        state = {k: context.user_data[k] for k in (
+            "lab_room","lab_hp","lab_max_hp","lab_focus","lab_rewards",
+            "lab_depth","lab_total_rooms","lab_attack_bonus",
+            "lab_focused_attack","lab_curse_rooms"
+        )}
+        await redis.setex(f"lab_state:{uid}", 3600, json.dumps(state, default=str))
+
     room = random.choice(LABYRINTH_ROOMS)
     context.user_data["lab_current_room"] = room
     await show_lab_room(update, context)
