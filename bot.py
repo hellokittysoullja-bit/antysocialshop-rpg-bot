@@ -1784,7 +1784,6 @@ async def handle_named_name(update, context):
 
         uname = user.username or user.first_name
 
-        # Атомарно списываем 50 OAC, увеличиваем счётчик крафта и создаём блант
         async def _named(player, conn):
             if player.balance < 50:
                 return ("no_money",)
@@ -1797,12 +1796,12 @@ async def handle_named_name(update, context):
         if result is None:
             await update.message.reply_text("Сначала активируйся: /start")
             return
-        status, *data = result
+        status, data = result[0], result[1] if len(result) > 1 else None
         if status == "no_money":
             await update.message.reply_text("<b>🕳️ ИСКАЖЕНИЕ МОЛЧИТ</b>\n\n<i>🛡️ Недостаточно OAC.</i>")
             return
 
-        item = data[0]
+        item = data
         await add_war_score(uid, 25)
 
         blunt_id = item["id"]
@@ -1868,13 +1867,10 @@ async def handle_use_dust(update, context):
         await query.answer("Нет Кристальной Пыли.")
         return
 
-    # Атомарно тратим пыль, создаём легендарный блант и добавляем военный счёт
     async def _use_dust(p, conn):
         p.m_essence -= 1
         name = random.choice(["Крик Бездны","Пепел Короля","Шёпот Склепа","Коготь Хаоса","Вздох Пожирателя"])
         item = await create_named_blunt(uid, name, rarity="legendary", conn=conn)
-
-        # Военный счёт
         try:
             war = await conn.fetchrow("SELECT war_active FROM guild_weekly WHERE war_active = TRUE LIMIT 1")
             if war:
@@ -1889,7 +1885,6 @@ async def handle_use_dust(update, context):
                     )
         except Exception:
             pass
-
         return item, name
 
     result = await PlayerRepository.atomic_update(uid, _use_dust)
@@ -1908,13 +1903,10 @@ async def handle_use_dust(update, context):
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
     await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
 
-    # Оповещение в канал
     try:
-        await context.bot.send_message(
-            chat_id="@guild_antysocial",
+        await context.bot.send_message(chat_id="@guild_antysocial",
             text=f"<b><i>🩸 ЭХО ИСКАЖЕНИЯ</i></b>\n\n⚜️ <b>@{html.escape(player.username)}</b> использовал 💠 Пыль и получил легендарный блант <b><i>«{name}»</i></b>!",
-            parse_mode='HTML'
-        )
+            parse_mode='HTML')
     except Exception as e:
         logger.error(f"Ошибка отправки в канал: {e}")
 
@@ -1965,22 +1957,32 @@ async def transfer_blunt(sender_id: int, receiver_id: int, blunt_id: str) -> Non
     try:
         async with db_pool.acquire() as conn:
             async with conn.transaction():
-                # Блокируем строки обоих игроков на время транзакции
-                sender = await PlayerRepository.get_by_id(sender_id, conn=conn)
-                receiver = await PlayerRepository.get_by_id(receiver_id, conn=conn)
+                # Блокируем строки обоих игроков в этой же транзакции
+                sender_row = await conn.fetchrow(
+                    "SELECT * FROM players WHERE user_id = $1 FOR UPDATE", sender_id
+                )
+                receiver_row = await conn.fetchrow(
+                    "SELECT * FROM players WHERE user_id = $1 FOR UPDATE", receiver_id
+                )
 
-                if sender is None:
-                    raise TransferError("Отправитель не найден")
-                if receiver is None:
-                    raise TransferError("Получатель не найден")
+                if not sender_row or not receiver_row:
+                    raise TransferError("Игрок не найден")
 
-                # Нормализуем инвентари
+                # Строим модели
+                sender = Player(**dict(sender_row))
+                receiver = Player(**dict(receiver_row))
+
+                # Парсим инвентари (JSONB)
+                sender.inventory = _json_safe_load(sender.inventory, [])
+                receiver.inventory = _json_safe_load(receiver.inventory, [])
+
+                # Проверки на повреждённые данные
                 if not isinstance(sender.inventory, list):
                     raise TransferError("Инвентарь отправителя повреждён или отсутствует")
                 if not isinstance(receiver.inventory, list):
                     receiver.inventory = []
 
-                # Ищем блант
+                # Ищем блант у отправителя
                 item = None
                 for it in sender.inventory:
                     if it.get("id") == blunt_id and it.get("type") == "named":
@@ -1989,13 +1991,13 @@ async def transfer_blunt(sender_id: int, receiver_id: int, blunt_id: str) -> Non
                 if not item:
                     raise BluntNotFound("Блант не найден или не является именным блантом")
 
-                # Удаляем у отправителя и проверяем удаление
+                # Удаляем у отправителя
                 initial_len = len(sender.inventory)
                 sender.inventory.remove(item)
                 if len(sender.inventory) == initial_len:
                     raise TransferError("Не удалось удалить предмет из инвентаря отправителя")
 
-                # Гарантируем отсутствие дубликата (на случай битых данных)
+                # Проверка на дубликат (на всякий случай)
                 if any(it.get("id") == blunt_id for it in sender.inventory):
                     raise TransferError("Обнаружен дубликат бланта в инвентаре (данные повреждены)")
 
@@ -2010,17 +2012,17 @@ async def transfer_blunt(sender_id: int, receiver_id: int, blunt_id: str) -> Non
                 # Добавляем получателю
                 receiver.inventory.append(item)
 
-                # Сохраняем обоих игроков в рамках одной транзакции
+                # Сохраняем обоих (передаём conn, чтобы остаться в транзакции)
                 await PlayerRepository.save(sender, conn=conn)
                 await PlayerRepository.save(receiver, conn=conn)
 
                 logger.info(f"Blunt {blunt_id} передан от {sender_id} к {receiver_id}")
 
     except TransferError:
-        raise  # пробрасываем наши ошибки как есть
+        raise  # пробрасываем наши специфичные ошибки
     except Exception as e:
         logger.exception("Неожиданная ошибка при передаче бланта")
-        raise TransferError("Внутренняя ошибка передачи") from e)
+        raise TransferError("Внутренняя ошибка передачи") from e
 
 # ===== НОВЫЕ ФУНКЦИИ ДЛЯ ОБМЕНА БЛАНТАМИ =====
 async def gift_blunt_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
