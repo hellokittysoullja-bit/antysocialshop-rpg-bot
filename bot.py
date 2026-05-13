@@ -2584,12 +2584,13 @@ async def achievements_callback(update: Update, context: ContextTypes.DEFAULT_TY
     query = update.callback_query
     uid = query.from_user.id
     player = await PlayerRepository.get_by_id(uid)
-    if not p:
+    if not player or not player.user_id:
         await query.answer("Профиль не найден.", show_alert=True)
         return
 
+    # Получаем список выданных достижений (можно вынести в PlayerRepository, но для простоты оставим так)
     async with db_pool.acquire() as conn:
-        awarded = await conn.fetch("SELECT ach_id FROM achievements_awarded WHERE user_id=$1", uid)
+        awarded = await conn.fetch("SELECT ach_id FROM achievements_awarded WHERE user_id = $1", uid)
     awarded_ids = {r["ach_id"] for r in awarded}
 
     all_ach = list(ACHIEVEMENTS_DICT.values())
@@ -2615,23 +2616,7 @@ async def achievements_callback(update: Update, context: ContextTypes.DEFAULT_TY
     if nav:
         kb_rows.append(nav)
     kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="profile")])
-    await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode='HTML')
-
-# Топ
-from datetime import datetime, timedelta
-from telegram import InlineKeyboardMarkup, InlineKeyboardButton
-import html
-
-# --- Вспомогательная функция: ближайшее воскресенье 00:00 ---
-def next_sunday_str() -> str:
-    """Возвращает дату ближайшего воскресенья в формате ДД.ММ.
-    Если сегодня воскресенье, берём следующее."""
-    now = datetime.now()                    # при необходимости добавьте часовой пояс
-    days_until_sunday = (6 - now.weekday()) % 7
-    if days_until_sunday == 0:
-        days_until_sunday = 7               # следующее воскресенье, а не сегодня
-    next_sunday = now + timedelta(days=days_until_sunday)
-    return next_sunday.strftime("%d.%m")
+    await edit_or_reply(update, context, text, reply_markup=InlineKeyboardMarkup(kb_rows))
 
 
 @error_handler
