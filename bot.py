@@ -1196,16 +1196,16 @@ async def _handle_referral(update, context, uid, player):
 
     await PlayerRepository.atomic_update(creator_id, _ref)
 
-    # Оповещение в канал (можно закомментировать для нового бота)
-    try:
-        uname = html.escape(update.effective_user.username or update.effective_user.first_name or "Странник")
-        await context.bot.send_message(
-            chat_id="@guild_antysocial",
-            text=f"<b><i>🩸 ЭХО ИСКАЖЕНИЯ</i></b>\n\n⚜️ <b>@{uname}</b> был призван нитью @{html.escape(creator.username)}.\n🕸️ Искажение становится плотнее...",
-            parse_mode='HTML'
-        )
-    except Exception as e:
-        logger.error(f"Ошибка отправки в канал: {e}")
+  # Оповещение в канал (закомментировано для безопасного старта)
+    # try:
+    #     uname = html.escape(update.effective_user.username or update.effective_user.first_name or "Странник")
+    #     await context.bot.send_message(
+    #         chat_id="@guild_antysocial",
+    #         text=f"<b><i>🩸 ЭХО ИСКАЖЕНИЯ</i></b>\n\n⚜️ <b>@{uname}</b> был призван нитью @{html.escape(creator.username)}.\n🕸️ Искажение становится плотнее...",
+    #         parse_mode='HTML'
+    #     )
+    # except Exception as e:
+    #     logger.error(f"Ошибка отправки в канал: {e}")
 
 
 async def _create_new_player(update, context, uid, username):
@@ -1612,7 +1612,7 @@ async def farm_callback(update, context):
 
     if crit:
         uname_escaped = html.escape(uname)
-        await send_whisper(context, "@guild_antysocial", f"🌟 @{uname_escaped} наткнулся на <i>Золотую жилу</i>! +{earned} 🍬")
+        # await send_whisper(context, "@guild_antysocial", f"🌟 @{uname_escaped} наткнулся на <i>Золотую жилу</i>! +{earned} OAC 🍬")
 
     target = get_medal_target(new_count, FARM_MEDALS)
     progress_bar_str = get_medal_progress(new_count, FARM_MEDALS)
@@ -1841,15 +1841,16 @@ async def handle_named_name(update, context):
         else:
             await update.message.reply_text(caption, reply_markup=kb, parse_mode='HTML')
 
-        try:
-            await context.bot.send_message(
-                chat_id="@guild_antysocial",
-                text=f"<b><i>🩸 ЭХО ИСКАЖЕНИЯ</i></b>\n\n⚜️ <b>@{html.escape(uname)}</b> создал свой блант {color} "
-                     f"<b><i>«{name_escaped}»</i></b> 🌿\n<i>Редкость: {item['rarity']}</i>\n🩸 <i>{reaction}</i>",
-                parse_mode='HTML'
-            )
-        except Exception as e:
-            logger.error(f"Ошибка отправки в канал: {e}")
+        # Оповещение в канал (закомментировано для безопасного старта)
+        # try:
+        #     await context.bot.send_message(
+        #         chat_id="@guild_antysocial",
+        #         text=f"<b><i>🩸 ЭХО ИСКАЖЕНИЯ</i></b>\n\n⚜️ <b>@{html.escape(uname)}</b> создал свой именной Блант {color} "
+        #              f"<b><i>«{name_escaped}»</i></b> 🌿\n<i>Редкость: {item['rarity']}</i>\n🩸 <i>{reaction}</i>",
+        #         parse_mode='HTML'
+        #     )
+        # except Exception as e:
+        #     logger.error(f"Ошибка отправки в канал: {e}")
 
         await check_achievements(uid, context)
 
@@ -1910,12 +1911,13 @@ async def handle_use_dust(update, context):
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
     await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
 
-    try:
-        await context.bot.send_message(chat_id="@guild_antysocial",
-            text=f"<b><i>🩸 ЭХО ИСКАЖЕНИЯ</i></b>\n\n⚜️ <b>@{html.escape(player.username)}</b> использовал 💠 Пыль и получил легендарный блант <b><i>«{name}»</i></b>!",
-            parse_mode='HTML')
-    except Exception as e:
-        logger.error(f"Ошибка отправки в канал: {e}")
+    # Оповещение в канал (закомментировано для безопасного старта)
+    # try:
+    #     await context.bot.send_message(chat_id="@guild_antysocial",
+    #         text=f"<b><i>⚜️ ЭХО ИСКАЖЕНИЯ 🩸</i></b>\n\n🎉 <b>@{html.escape(player.username)}</b> использовал 💠 Пыль и получил легендарный Блант <b><i>«{name}»💍</i></b>!",
+    #         parse_mode='HTML')
+    # except Exception as e:
+    #     logger.error(f"Ошибка отправки в канал: {e}")
 
     await check_achievements(uid, context)
 
@@ -3280,15 +3282,15 @@ async def _process_wheel(update, context, uid, player, cfg):
     # Формируем сообщение
     uname = html.escape(update.effective_user.username or update.effective_user.first_name)
     if ptype == "jackpot":
-        try:
-            await context.bot.send_message(chat_id="@guild_antysocial", text=f"🌟 @{uname} сорвал Джекпот! +{prize} OAC", parse_mode='HTML')
-        except Exception as e:
-            logger.error(f"Канал джепот: {e}")
+        # try:
+        #     await context.bot.send_message(chat_id="@guild_antysocial", text=f"🌟 @{uname} сорвал Джекпот! +{prize} OAC", parse_mode='HTML')
+        # except Exception as e:
+        #     logger.error(f"Канал джепот: {e}")
         msg_text = f"<b>🎰 ДЖЕКПОТ!</b>\n\nТы выиграл <b>{prize} OAC</b> 🍬!\n\n<b>⚜️ У тебя:</b> <i>{new_balance} OAC</i>"
     elif ptype == "oac":
         msg_text = f"<b>🩸 ДАР ИСКАЖЕНИЯ</b>\n\n<b>💎 Ты нафармил +{prize} OAC 🍬!</b>\n⚜️ <b>У тебя:</b> <i>{new_balance} OAC</i>"
     else:
-        msg_text = f"<b><i>🌱 КОЛЕСО СМОТРИТЕЛЯ</i></b>\n\n+{prize} 🌿 Блант → 💰 <b>{new_balance} OAC</b> 🍬"
+        msg_text = f"<b><i>🌱 КОЛЕСО СМОТРИТЕЛЯ</i></b>\n\n+{prize} 🌿 Блант → 🍬 <b>{new_balance} OAC</b> 🍬"
 
     await edit_or_reply(update, context, msg_text,
                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]))
@@ -3320,7 +3322,7 @@ async def _process_berserk(update, context, uid, player, cfg):
         return
     status, *data = result
     if status == "no_money":
-        await _notify_user(update, context, f"❌ Недостаточно OAC. Текущий баланс: {data[0]}")
+        await _notify_user(update, context, f"❌ Недостаточно OAC 🍬. Текущий баланс: {data[0]}")
         return
     res_text, _ = data
     await edit_or_reply(update, context, res_text,
@@ -3373,11 +3375,11 @@ async def _process_alchemy_confirm(update, context, uid, player, cfg, bal):
                     name = random.choice(["Крик Бездны","Пепел Короля","Шёпот Склепа","Коготь Хаоса","Вздох Пожирателя"])
                     await create_named_blunt(uid, name, rarity="legendary", conn=conn)
                     res = f"<b>🌟 Философский Камень!</b>\n\nЛегендарный блант «{name}»!"
-                    try:
-                        await context.bot.send_message(chat_id="@guild_antysocial",
-                            text=f"🌟 @{html.escape(update.effective_user.username or update.effective_user.first_name)} провёл Алхимический Ритуал и получил легендарный блант «{name}»!", parse_mode='HTML')
-                    except Exception as e:
-                        logger.error(f"Ошибка отправки в канал: {e}")
+                    # try:
+                    #     await context.bot.send_message(chat_id="@guild_antysocial",
+                    #         text=f"🌟 @{html.escape(update.effective_user.username or update.effective_user.first_name)} провёл Алхимический Ритуал 🔮 и получил легендарный блант «{name}»!" 💍, parse_mode='HTML')
+                    # except Exception as e:
+                    #     logger.error(f"Ошибка отправки в канал: {e}")
                 else:
                     res = "<b>🌫️ Грязный Выхлоп...</b>\n\nБланты сгорели без следа."
                 break
@@ -3403,7 +3405,7 @@ async def check_blunt(update, context):
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("SELECT blunt_id, created_by, serial, rare_number FROM nft_registry WHERE rare_number = $1", nft_id)
         if not rows:
-            await update.message.reply_text("🕳️ Блант с таким серийным номером не найден.")
+            await update.message.reply_text("❌ Блант с таким серийным номером не найден. 🌿")
             return
         if len(rows) > 1:
             await update.message.reply_text("⚠️ Найдено несколько блантов с таким номером, обратитесь к администратору.")
@@ -4295,16 +4297,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"<i>🩸 Искажение стало плотнее...</i>",
                 parse_mode='HTML'
             )
-            try:
-                await context.bot.send_message(
-                    chat_id="@guild_antysocial",
-                    text=f"<b><i>🩸 ЭХО ИСКАЖЕНИЯ</i></b>\n\n"
-                         f"⚜️ <b>@{uname}</b> вплёл свою нить в {g_emoji} <b>{g_name} Гильдию</b>.\n"
-                         f"<i>🕯️ Искажение приняло нового странника.</i>",
-                    parse_mode='HTML'
-                )
-            except Exception as e:
-                logger.error(f"Ошибка отправки в канал: {e}")
+            # try:
+            #     await context.bot.send_message(
+            #         chat_id="@guild_antysocial",
+            #         text=f"<b><i>🩸 ЭХО ИСКАЖЕНИЯ</i></b>\n\n"
+            #              f"⚜️ <b>@{uname}</b> вплёл свою нить в {g_emoji} <b>{g_name} Гильдию</b>💎\n"
+            #              f"<i>🕯️ Искажение приняло нового странника. 🌿</i>",
+            #         parse_mode='HTML'
+            #     )
+            # except Exception as e:
+            #     logger.error(f"Ошибка отправки в канал: {e}")
             return
 
         # 3. Простые колбэки из словаря
@@ -4331,24 +4333,24 @@ async def update_pulse(context):
         white = await conn.fetchval("SELECT COUNT(*) FROM players WHERE guild='WHITE'")
         online = await conn.fetchval("SELECT COUNT(DISTINCT user_id) FROM players WHERE last_farm > $1", datetime.now()-timedelta(hours=1))
     desc = f"🕯️{black} ▰▱⚜️{white} | 👥{online}"
-    try: await context.bot.set_chat_description(chat_id="@guild_antysocial", description=desc)
-    except: pass
+    # try: await context.bot.set_chat_description(chat_id="@guild_antysocial", description=desc)
+    # except: pass
 
 async def happy_hour_trigger(context):
     context.bot_data["happy_hour"] = True
     context.bot_data["happy_hour_end"] = datetime.now() + timedelta(minutes=HAPPY_HOUR_DURATION_MIN)
-    try:
-        await context.bot.send_message(chat_id="@guild_antysocial", text="🌟 <b>ЧАС УДАЧИ!</b> Все действия приносят x2 🍬 30 минут!", parse_mode='HTML')
-    except Exception as e:
-        logger.error(f"Happy hour announce error: {e}")
+    # try:
+    #     await context.bot.send_message(chat_id="@guild_antysocial", text="🎉 <b>ЧАС УДАЧИ!</b> 🌠 Все действия приносят x2 OAC 🍬 (30 минут)!", parse_mode='HTML')
+    # except Exception as e:
+    #     logger.error(f"Happy hour announce error: {e}")
     context.job_queue.run_once(reset_happy_hour, HAPPY_HOUR_DURATION_MIN*60)
 
 async def reset_happy_hour(context):
     context.bot_data["happy_hour"] = False
-    try:
-        await context.bot.send_message(chat_id="@guild_antysocial", text="⏳ Час Удачи завершён.")
-    except Exception as e:
-        logger.error(f"Happy hour reset error: {e}")
+    # try:
+    #     await context.bot.send_message(chat_id="@guild_antysocial", text="⏳ Час Удачи завершён.")
+    # except Exception as e:
+    #     logger.error(f"Happy hour reset error: {e}")
 
 async def echo_of_distortion(context):
     async with db_pool.acquire() as conn:
@@ -4369,21 +4371,21 @@ async def echo_of_distortion(context):
         reaction = item.get("reaction","")
         text += f"⚜️ <b>@{html.escape(uname)}</b> создал свой блант {color} <b><i>«{html.escape(name)}»</i></b> 🌿\n<i>Редкость: {rarity}</i>\n🩸 <i>{reaction}</i>\n\n"
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("💍 Создать свой блант", callback_data="craft_named")]])
-    try:
-        await context.bot.send_message(chat_id="@guild_antysocial", text=text, parse_mode='HTML', reply_markup=kb)
-    except Exception as e:
-        logger.error(f"Echo of distortion error: {e}")
+    # try:
+    #     await context.bot.send_message(chat_id="@guild_antysocial", text=text, parse_mode='HTML', reply_markup=kb)
+    # except Exception as e:
+    #     logger.error(f"Echo of distortion error: {e}")
 
 async def weekly_guild_rating(context):
     async with db_pool.acquire() as conn:
         war = await conn.fetchrow("SELECT war_active FROM guild_weekly WHERE war_active = TRUE LIMIT 1")
         if not war:
             await conn.execute("UPDATE guild_weekly SET total_farmed = 0, war_active = TRUE")
-            try:
-                await context.bot.send_message(chat_id="@guild_antysocial",
-                    text="⚔️ <b>ВОЙНА ГИЛЬДИЙ НАЧАЛАСЬ!</b>\n🕯️ Тёмные vs ⚜️ Светлые\nЗарабатывай OAC, крафти, проходи лабиринт — всё идёт в зачёт гильдии!\nПобедители получат сундук с ресурсами! 🎁", parse_mode='HTML')
-            except Exception as e:
-                logger.error(f"War start announce error: {e}")
+            # try:
+            #     await context.bot.send_message(chat_id="@guild_antysocial",
+            #         text="⚔️ <b>ВОЙНА ГИЛЬДИЙ НАЧАЛАСЬ! 🎉</b>...", parse_mode='HTML')
+            # except Exception as e:
+            #     logger.error(f"War start announce error: {e}")
         else:
             await conn.execute("UPDATE guild_weekly SET war_active = FALSE")
             rows = await conn.fetch("SELECT guild, total_farmed FROM guild_weekly")
@@ -4402,11 +4404,11 @@ async def weekly_guild_rating(context):
                             m_essence = m_essence + $3
                         WHERE guild = $4
                     """, oac, blunts, dust, winner)
-                try:
-                    await context.bot.send_message(chat_id="@guild_antysocial",
-                        text=f"🎉 <b>ВОЙНА ГИЛЬДИЙ ЗАВЕРШЕНА!</b>\n{('🕯️' if winner == 'BLACK' else '⚜️')} <b>Победитель: {winner} гильдия</b> ({black if winner == 'BLACK' else white} очков)\nКаждый участник получает сундук с ресурсами!", parse_mode='HTML')
-                except Exception as e:
-                    logger.error(f"War end announce error: {e}")
+                # try:
+                #     await context.bot.send_message(chat_id="@guild_antysocial",
+                #         text=f"🎉 <b>ВОЙНА ГИЛЬДИЙ ЗАВЕРШЕНА!</b>...", parse_mode='HTML')
+                # except Exception as e:
+                #     logger.error(f"War end announce error: {e}")
 
 async def keep_db_alive(context):
     if db_pool:
