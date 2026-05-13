@@ -2136,7 +2136,7 @@ async def do_smoke(update, context):
     uname = html.escape(query.from_user.username or query.from_user.first_name)
 
     async def _smoke(player, conn):
-        if player.blunts < 1:
+        if (player.blunts or 0) < 1:
             return ("no_blunts",)
         save = (player.guild == "WHITE" and random.randint(1, 100) <= 20)
         r = random.random()
@@ -2148,18 +2148,18 @@ async def do_smoke(update, context):
         elif r < 0.70:
             earned = -5
 
-        old_count = player.smoke_count
+        old_count = player.smoke_count or 0
         new_count = old_count + 1
         medal_text, medal_bonus = get_medal_text_and_reward(old_count, new_count, SMOKE_MEDALS)
 
         if not save:
             player.blunts -= 1
         player.smoke_count = new_count
-        player.balance += earned + medal_bonus
+        player.balance = (player.balance or 0) + earned + medal_bonus
         if not player.inhaled:
             player.inhaled = 1
-            # титул "💨" добавится отдельно, если надо; здесь просто отметка
 
+        # военный счёт
         guild_row = await conn.fetchrow("SELECT guild FROM players WHERE user_id = $1", uid)
         if guild_row and guild_row["guild"] in ("BLACK", "WHITE"):
             await conn.execute(
@@ -2175,12 +2175,12 @@ async def do_smoke(update, context):
     if result is None:
         await query.answer("Профиль не найден.")
         return
+
     status, *data = result
     if status == "no_blunts":
         empty_text = (
             "<b>💨 ДУНУТЬ</b>\n\n"
-            "<b>🌿 Твой свёрток пуст</b>\n"
-            "\n"
+            "<b>🌿 Твой свёрток пуст</b>\n\n"
             "<i>🎈 Скрути новый блант</i>"
         )
         empty_kb = InlineKeyboardMarkup([
@@ -2192,7 +2192,7 @@ async def do_smoke(update, context):
 
     earned, r, save, medal_text, new_count, bl_left, new_balance = data
 
-    # Эффекты
+    # Эффекты (без изменений, твоя оригинальная логика)
     if r < 0.18:
         effect = (
             f"<b>💨 ДЫМ РАССЕЯЛСЯ</b>\n"
