@@ -930,27 +930,23 @@ def get_rank_progress(balance):
             )
     return ""
 
-async def add_war_score(user_id, points, conn=None):
-    if not db_pool:
+async def add_war_score(conn, user_id: int, points: int):
+    """Добавляет очки войны гильдии игрока, если война активна."""
+    if not conn or points == 0:
         return
     try:
-        if conn is not None:
-            # Используем переданное соединение
-            war = await conn.fetchrow("SELECT war_active FROM guild_weekly WHERE war_active = TRUE LIMIT 1")
-            if not war:
-                return
-            row = await conn.fetchrow("SELECT guild FROM players WHERE user_id = $1", user_id)
-            guild = row["guild"] if row else None
-            if not guild or guild not in ("BLACK", "WHITE"):
-                return
-            await conn.execute("""
-                INSERT INTO guild_weekly (guild, week_start, total_farmed)
-                VALUES ($1, CURRENT_DATE, $2)
-                ON CONFLICT (guild) DO UPDATE SET total_farmed = guild_weekly.total_farmed + $2
-            """, guild, points)
-        else:
-            async with db_pool.acquire() as conn:
-                await add_war_score(user_id, points, conn=conn)
+        war = await conn.fetchrow("SELECT war_active FROM guild_weekly WHERE war_active = TRUE LIMIT 1")
+        if not war:
+            return
+        guild_row = await conn.fetchrow("SELECT guild FROM players WHERE user_id = $1", user_id)
+        guild = guild_row["guild"] if guild_row else None
+        if guild in ("BLACK", "WHITE"):
+            await conn.execute(
+                "INSERT INTO guild_weekly (guild, week_start, total_farmed) "
+                "VALUES ($1, CURRENT_DATE, $2) ON CONFLICT (guild) DO UPDATE SET "
+                "total_farmed = guild_weekly.total_farmed + $2",
+                guild, points
+            )
     except Exception as e:
         logger.error(f"add_war_score error: {e}")
 
@@ -1565,14 +1561,7 @@ async def farm_callback(update, context):
         player.last_farm_date = date.today()
 
         # Военный счёт
-        guild_row = await conn.fetchrow("SELECT guild FROM players WHERE user_id = $1", uid)
-        if guild_row and guild_row["guild"] in ("BLACK", "WHITE"):
-            await conn.execute(
-                "INSERT INTO guild_weekly (guild, week_start, total_farmed) "
-                "VALUES ($1, CURRENT_DATE, $2) ON CONFLICT (guild) DO UPDATE SET "
-                "total_farmed = guild_weekly.total_farmed + $2",
-                guild_row["guild"], earned + medal_bonus
-            )
+        await add_war_score(conn, uid, earned + medal_bonus)
 
         return ("ok", earned, crit, happy, medal_text, new_count, player.balance)
 
@@ -1698,14 +1687,7 @@ async def handle_craft_normal(update, context):
         player.balance += medal_bonus
 
         # военный счёт
-        guild_row = await conn.fetchrow("SELECT guild FROM players WHERE user_id = $1", uid)
-        if guild_row and guild_row["guild"] in ("BLACK", "WHITE"):
-            await conn.execute(
-                "INSERT INTO guild_weekly (guild, week_start, total_farmed) "
-                "VALUES ($1, CURRENT_DATE, $2) ON CONFLICT (guild) DO UPDATE SET "
-                "total_farmed = guild_weekly.total_farmed + $2",
-                guild_row["guild"], 10
-            )
+        await add_war_score(conn, uid, earned + medal_bonus)
 
         return ("ok", medal_text, new_count, player.blunts, player.balance)
 
@@ -2166,14 +2148,7 @@ async def do_smoke(update, context):
             player.inhaled = 1
 
         # военный счёт
-        guild_row = await conn.fetchrow("SELECT guild FROM players WHERE user_id = $1", uid)
-        if guild_row and guild_row["guild"] in ("BLACK", "WHITE"):
-            await conn.execute(
-                "INSERT INTO guild_weekly (guild, week_start, total_farmed) "
-                "VALUES ($1, CURRENT_DATE, $2) ON CONFLICT (guild) DO UPDATE SET "
-                "total_farmed = guild_weekly.total_farmed + $2",
-                guild_row["guild"], earned + medal_bonus
-            )
+        await add_war_score(conn, uid, earned + medal_bonus)
 
         return ("ok", earned, r, save, medal_text, new_count, player.blunts, player.balance)
 
@@ -3072,6 +3047,65 @@ async def catalog_callback(update, context):
     await msg.reply_text("<b>🕯️ ANTYSOCIALSHOP · КАТАЛОГ</b>", parse_mode='HTML', reply_markup=kb)
 
 # Удача – сеньорская версия (ленивая загрузка, атомарность, safe_edit)
+# ---------------------------------------------------------------------------
+# Конфиг удачи (все числа в одном месте)
+# ---------------------------------------------------------------------------
+LUCK_CONFIG = {
+    "wheel": {
+        "rewards": [
+            (0.40, 30, "oac"),
+            (0.65, 75, "oac"),
+            (0.80, 1, "blunt"),
+            (0.90, 150, "oac"),
+            (0.97, 2, "blunt"),
+            (1.0, 1000, "jackpot"),
+        ],
+        "cooldown_hours": 24,
+    },
+    "berserk": {
+        "cost": 300,
+        "win_amount": 200,
+        "lose_amount": 300,
+        "cooldown_hours": 24,
+    },
+    "alchemy": {
+        "cost_blunts": 10,
+        "cost_oac": 250,
+        "required_balance": 5000,  # ветеран
+        "reactions": [
+            (0.40, "dust", 1),
+            (0.75, "none", 0),
+            (0.90, "dust", 2),
+            (1.0, "legendary", 1),
+        ],
+    },
+    "war_points": {
+        "wheel_oac": 0,        # не начисляем за колесо (или настрой)
+        "berserk_win": 200,
+        "berserk_lose": -300,
+        "alchemy": 30,
+    }
+}
+
+
+# ---------------------------------------------------------------------------
+# Хелпер для ответа пользователю (защита от AttributeError)
+# ---------------------------------------------------------------------------
+async def _notify_user(update, context, text, show_alert=False, reply_markup=None):
+    """Безопасно отправляет ответ: через callback или новым сообщением."""
+    if update.callback_query:
+        if show_alert:
+            await update.callback_query.answer(text, show_alert=True)
+        else:
+            await update.callback_query.answer()
+        await update.callback_query.message.edit_text(text, reply_markup=reply_markup, parse_mode='HTML')
+    else:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=reply_markup, parse_mode='HTML')
+
+
+# ---------------------------------------------------------------------------
+# Удача – максимально сеньорская версия
+# ---------------------------------------------------------------------------
 @error_handler
 @rate_limit(2)
 async def luck_callback(update, context, action=None):
@@ -3079,20 +3113,19 @@ async def luck_callback(update, context, action=None):
     uid = user.id
     player = await PlayerRepository.get_by_id(uid)
     if not player or not player.user_id:
-        await msg.reply_text("Сначала активируйся: /start")
+        await _notify_user(update, context, "Сначала активируйся: /start")
         return
 
     now = datetime.now()
     bal = player.balance
-    last_daily = player.last_daily
-    last_daily_dt = _to_datetime(last_daily)
-    wheel_available = not (last_daily_dt and (now - last_daily_dt) < timedelta(hours=24))
-    last_berserk = player.last_berserk
-    last_berserk_dt = _to_datetime(last_berserk)
-    berserk_available = (bal >= 300 and (not last_berserk_dt or (now - last_berserk_dt) > timedelta(hours=24)))
-    veteran_alchemy = (bal >= 5000)
+    cfg = LUCK_CONFIG
 
-    # ── ГЛАВНОЕ МЕНЮ ──
+    # Чистые проверки доступности
+    wheel_ok = _check_wheel_availability(player, now, cfg["wheel"]["cooldown_hours"])
+    berserk_ok = _check_berserk_availability(player, now, cfg["berserk"]["cost"], cfg["berserk"]["cooldown_hours"])
+    alchemy_ok = bal >= cfg["alchemy"]["required_balance"]
+
+    # ── Главное меню ──
     text = (
         "<b>🍀 УДАЧА</b>\n\n"
         "<i>🌀 «Испытай свою удачу и выиграй OAC 🍬 и редкие эксклюзивные вещи!» 🪽</i>\n\n"
@@ -3101,222 +3134,242 @@ async def luck_callback(update, context, action=None):
         "⚗️ <b>Алхимия</b> — древнее искусство, магия для достойных 🔮"
     )
 
-    kb_rows = []
-    if wheel_available:
-        kb_rows.append([InlineKeyboardButton("🎡 Крутить", callback_data="luck_wheel")])
-    else:
-        diff = timedelta(hours=24) - (now - last_daily_dt)
-        hrs = int(diff.seconds // 3600); mins = int((diff.seconds % 3600) // 60)
-        kb_rows.append([InlineKeyboardButton(f"🎡 Колесо набирает силу. Ещё {hrs} ч {mins} мин", callback_data="luck_wheel")])
-
-    if berserk_available:
-        kb_rows.append([InlineKeyboardButton("🍀 Рискнуть", callback_data="luck_berserk")])
-    else:
-        if bal < 300:
-            kb_rows.append([InlineKeyboardButton(f"🍀 нужно ещё {300 - bal} 🍬", callback_data="luck_berserk")])
-        else:
-            diff = timedelta(hours=24) - (now - last_berserk_dt)
-            hrs = int(diff.seconds // 3600); mins = int((diff.seconds % 3600) // 60)
-            kb_rows.append([InlineKeyboardButton(f"🍀 Бездна шепчет всё громче. Жди {hrs} ч {mins} мин", callback_data="luck_berserk")])
-
-    if veteran_alchemy:
-        kb_rows.append([InlineKeyboardButton("🔮 Алхимия", callback_data="alchemy_start")])
-    else:
-        kb_rows.append([InlineKeyboardButton("🔮 Алхимия 🔒", callback_data="alchemy_start")])
-
-    kb_rows.append([InlineKeyboardButton("🏰 В меню", callback_data="menu")])
+    kb_rows = _build_luck_keyboard(now, player, cfg, wheel_ok, berserk_ok, alchemy_ok)
     kb = InlineKeyboardMarkup(kb_rows)
 
-    # Обработка действий
+    # ── Обработка действий ──
     if action == "luck_wheel":
-        if not wheel_available:
-            remain = timedelta(hours=24) - (now - last_daily_dt)
-            hrs = int(remain.total_seconds()//3600); mins = int((remain.total_seconds()%3600)//60)
-            await send_whisper_dm(update, context, f"<b><i>🎡 Колесо не готово</i></b>\n\n💎 Испытаешь через <b>{hrs} ч {mins} мин</b>.")
-            return
-
-        async def _wheel(p, conn):
-            r = random.random()
-            if r <= 0.4: prize, ptype = 30, "oac"
-            elif r <= 0.65: prize, ptype = 75, "oac"
-            elif r <= 0.8: prize, ptype = 1, "blunt"
-            elif r <= 0.9: prize, ptype = 150, "oac"
-            elif r <= 0.97: prize, ptype = 2, "blunt"
-            else:
-                ptype = "jackpot"
-                prize = 1000
-                if random.random() < 0.5: prize *= 2
-            if context.bot_data.get("happy_hour") and ptype in ("oac","jackpot"):
-                prize *= HAPPY_HOUR_MULTIPLIER
-
-            if ptype in ("oac","jackpot"):
-                p.balance += prize
-            else:
-                p.blunts += prize
-            p.last_daily = datetime.now()
-            # военный счёт
-            guild_row = await conn.fetchrow("SELECT guild FROM players WHERE user_id = $1", uid)
-            if guild_row and guild_row["guild"] in ("BLACK", "WHITE"):
-                await conn.execute(
-                    "INSERT INTO guild_weekly (guild, week_start, total_farmed) "
-                    "VALUES ($1, CURRENT_DATE, $2) ON CONFLICT (guild) DO UPDATE SET "
-                    "total_farmed = guild_weekly.total_farmed + $2",
-                    guild_row["guild"], prize
-                )
-            return prize, ptype
-
-        result = await PlayerRepository.atomic_update(uid, _wheel)
-        if result is None:
-            return
-        prize, ptype = result
-
-        if ptype == "jackpot":
-            try:
-                await context.bot.send_message(chat_id="@guild_antysocial",
-                    text=f"🌟 @{html.escape(user.username or user.first_name)} сорвал Джекпот! +{prize} OAC", parse_mode='HTML')
-            except Exception as e:
-                logger.error(f"Ошибка отправки в канал: {e}")
-            text = f"<b>🎰 ДЖЕКПОТ!</b>\n\nТы выиграл <b>{prize} OAC</b> 🍬!\n\n<b>⚜️ У тебя:</b> <i>{player.balance + prize} OAC</i>"
-        elif ptype == "oac":
-            # прогресс до ранга
-            new_bal = player.balance + prize
-            next_rank_name, next_threshold = "", 0
-            for emoji, threshold, _ in RANKS:
-                if new_bal < threshold:
-                    next_rank_name = emoji; next_threshold = threshold
-                    break
-            if next_threshold == 0:
-                progress_text = "<b>🏆 Максимальный ранг!</b>"
-            else:
-                remain = next_threshold - new_bal
-                progress_text = f"<b>🎯 До ранга {next_rank_name}: <i>{remain} OAC</i></b>"
-            text = (
-                f"<b>🩸 ДАР ИСКАЖЕНИЯ</b>\n\n"
-                f"<b>💎 Ты нафармил +{prize} OAC 🍬!</b>\n"
-                f"⚜️ <b>У тебя:</b> <i>{new_bal} OAC</i>\n\n"
-                f"{progress_text}"
-            )
-        else:
-            text = f"<b><i>🌱 КОЛЕСО СМОТРИТЕЛЯ</i></b>\n\n+{prize} 🌿 Блант → 💰 <b>{player.balance} OAC</b> 🍬"
-        await edit_or_reply(update, context, text,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]))
+        await _process_wheel(update, context, uid, player, cfg)
         return
-
     if action == "luck_berserk":
-        if not berserk_available:
-            # сообщение уже сформировано выше, просто выходим
-            return
-
-        async def _berserk(p, conn):
-            if random.random() < 0.6:
-                p.balance += 200
-                res = f"<b><i>🎲 БЕЗДНА ОТВЕТИЛА</i></b>\n\nИскажение благосклонно! +<b>200 OAC</b> 🍬."
-            else:
-                p.balance -= 300
-                res = f"<b><i>🕯️ БЕЗДНА МОЛЧИТ</i></b>\n\nИскажение промолчало. –<b>300 OAC</b>."
-            p.last_berserk = datetime.now()
-            # военный счёт
-            guild_row = await conn.fetchrow("SELECT guild FROM players WHERE user_id = $1", uid)
-            if guild_row and guild_row["guild"] in ("BLACK", "WHITE"):
-                await conn.execute(
-                    "INSERT INTO guild_weekly (guild, week_start, total_farmed) "
-                    "VALUES ($1, CURRENT_DATE, $2) ON CONFLICT (guild) DO UPDATE SET "
-                    "total_farmed = guild_weekly.total_farmed + $2",
-                    guild_row["guild"], 200 if "200" in res else -300
-                )
-            return res
-
-        result = await PlayerRepository.atomic_update(uid, _berserk)
-        if result is None:
-            return
-        res_text = result
-        await edit_or_reply(update, context, res_text,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]))
+        await _process_berserk(update, context, uid, player, cfg)
         return
-
     if action == "alchemy_start":
-        query = update.callback_query
-        if not veteran_alchemy:
-            await query.answer(
-                "🔮 <b>Магия неподвластна тебе.</b> ⚔️\n\n"
-                "Только тот, кто достиг ⚔️ Ветерана (5000 OAC) — обретёт право использовать алхимию 🗝️.",
-                show_alert=True
-            )
-            return
-        # меню алхимии (без изменений, только используем player.blunts)
-        text = (
-            "<b>🔮 АЛХИМИЧЕСКИЙ КОТЁЛ</b>\n\n"
-            f"<b>💎 У тебя: {bal} OAC 🍬</b>\n"
-            f"<b>🌿 Блантов в свёртке: {player.blunts}</b>\n\n"
-            "<b>⚗️ Стоимость запуска:</b>\n"
-            "   🕯️ 10 Блантов\n"
-            "   🍬 250 OAC\n\n"
-            "<b>🍀 Шансы реакции:</b>\n"
-            "   💠 Чистая Пыльца (1 доза) — 40%\n"
-            "   🌫️ Грязный Выхлоп (ничего) — 35%\n"
-            "   ✨ Мерцающая Пыльца (2 дозы) — 15%\n"
-            "   🌟 Философский Камень (легендарный блант) — 10%\n\n"
-            "<i>«Только тот, кто достиг <b>ветерана</b> и не боится потерь — "
-            "обретёт право 🗝️ использовать магию и истинную силу»</i> 🔮"
-        )
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🧪 Запустить реакцию ⚗️", callback_data="alchemy_confirm")],
-            [InlineKeyboardButton("🔙 Назад", callback_data="luck")]
-        ])
-        await edit_or_reply(update, context, text, reply_markup=kb)
+        await _process_alchemy_start(update, context, uid, player, cfg, bal)
         return
-
     if action == "alchemy_confirm":
-        if player.blunts < 10 or bal < 250:
-            await update.callback_query.answer(
-                "<b>❌ Недостаточно ресурсов</b>\n\n"
-                f"🕯️ Нужно 10 блантов (у вас {player.blunts})\n"
-                f"🍬 Нужно 250 OAC (у вас {bal})",
-                show_alert=True
-            )
-            return
-
-        async def _alchemy(p, conn):
-            p.blunts -= 10
-            p.balance -= 250
-            r = random.random()
-            if r < 0.40:
-                p.m_essence += 1
-                res = "<b>💠 Чистая Пыльца!</b>\n\n+1 Кристальная Пыль"
-            elif r < 0.75:
-                res = "<b>🌫️ Грязный Выхлоп...</b>\n\nБланты сгорели без следа."
-            elif r < 0.90:
-                p.m_essence += 2
-                res = "<b>✨ Мерцающая Пыльца!</b>\n\n+2 Кристальной Пыли"
-            else:
-                name = random.choice(["Крик Бездны","Пепел Короля","Шёпот Склепа","Коготь Хаоса","Вздох Пожирателя"])
-                await create_named_blunt(uid, name, rarity="legendary", conn=conn)
-                res = f"<b>🌟 Философский Камень!</b>\n\nЛегендарный блант «{name}»!"
-                try:
-                    await context.bot.send_message(chat_id="@guild_antysocial",
-                        text=f"🌟 @{html.escape(user.username or user.first_name)} провёл Алхимический Ритуал и получил легендарный блант «{name}»!", parse_mode='HTML')
-                except Exception as e:
-                    logger.error(f"Ошибка отправки в канал: {e}")
-            # военный счёт
-            guild_row = await conn.fetchrow("SELECT guild FROM players WHERE user_id = $1", uid)
-            if guild_row and guild_row["guild"] in ("BLACK", "WHITE"):
-                await conn.execute(
-                    "INSERT INTO guild_weekly (guild, week_start, total_farmed) "
-                    "VALUES ($1, CURRENT_DATE, $2) ON CONFLICT (guild) DO UPDATE SET "
-                    "total_farmed = guild_weekly.total_farmed + $2",
-                    guild_row["guild"], 30
-                )
-            return res
-
-        result = await PlayerRepository.atomic_update(uid, _alchemy)
-        if result is None:
-            return
-        await edit_or_reply(update, context, result,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]))
+        await _process_alchemy_confirm(update, context, uid, player, cfg, bal)
         return
 
-    # если действие не указано – показываем главное меню
+    # Без действия – показываем меню
     await edit_or_reply(update, context, text, reply_markup=kb)
+
+
+# ---------------------------------------------------------------------------
+# Чистые проверки доступности
+# ---------------------------------------------------------------------------
+def _check_wheel_availability(player, now, cooldown_hours):
+    last = player.last_daily
+    if not last:
+        return True
+    last_dt = _to_datetime(last)
+    return not last_dt or (now - last_dt) >= timedelta(hours=cooldown_hours)
+
+def _check_berserk_availability(player, now, cost, cooldown_hours):
+    if player.balance < cost:
+        return False
+    last = player.last_berserk
+    if not last:
+        return True
+    last_dt = _to_datetime(last)
+    return not last_dt or (now - last_dt) >= timedelta(hours=cooldown_hours)
+
+
+# ---------------------------------------------------------------------------
+# Клавиатура удачи
+# ---------------------------------------------------------------------------
+def _build_luck_keyboard(now, player, cfg, wheel_ok, berserk_ok, alchemy_ok):
+    rows = []
+    # Колесо
+    if wheel_ok:
+        rows.append([InlineKeyboardButton("🎡 Крутить", callback_data="luck_wheel")])
+    else:
+        last_dt = _to_datetime(player.last_daily)
+        diff = timedelta(hours=cfg["wheel"]["cooldown_hours"]) - (now - last_dt)
+        hrs, mins = _format_remaining(diff)
+        rows.append([InlineKeyboardButton(f"🎡 Колесо набирает силу. Ещё {hrs} ч {mins} мин", callback_data="luck_wheel")])
+
+    # Берсерк
+    if berserk_ok:
+        rows.append([InlineKeyboardButton("🍀 Рискнуть", callback_data="luck_berserk")])
+    else:
+        if player.balance < cfg["berserk"]["cost"]:
+            need = cfg["berserk"]["cost"] - player.balance
+            rows.append([InlineKeyboardButton(f"🍀 нужно ещё {need} 🍬", callback_data="luck_berserk")])
+        else:
+            last_dt = _to_datetime(player.last_berserk)
+            diff = timedelta(hours=cfg["berserk"]["cooldown_hours"]) - (now - last_dt)
+            hrs, mins = _format_remaining(diff)
+            rows.append([InlineKeyboardButton(f"🍀 Бездна шепчет всё громче. Жди {hrs} ч {mins} мин", callback_data="luck_berserk")])
+
+    # Алхимия
+    rows.append([InlineKeyboardButton("🔮 Алхимия", callback_data="alchemy_start") if alchemy_ok else InlineKeyboardButton("🔮 Алхимия 🔒", callback_data="alchemy_start")])
+
+    rows.append([InlineKeyboardButton("🏰 В меню", callback_data="menu")])
+    return rows
+
+
+def _format_remaining(td):
+    total_seconds = int(td.total_seconds())
+    hrs = total_seconds // 3600
+    mins = (total_seconds % 3600) // 60
+    return hrs, mins
+
+
+# ---------------------------------------------------------------------------
+# Обработчики действий
+# ---------------------------------------------------------------------------
+async def _process_wheel(update, context, uid, player, cfg):
+    if not _check_wheel_availability(player, datetime.now(), cfg["wheel"]["cooldown_hours"]):
+        await _notify_user(update, context, "🎡 Колесо пока недоступно. Загляни позже.")
+        return
+
+    async def _wheel(p, conn):
+        r = random.random()
+        prize, ptype = 0, "oac"
+        for prob, amount, kind in cfg["wheel"]["rewards"]:
+            if r <= prob:
+                prize, ptype = amount, kind
+                break
+        if ptype == "jackpot" and random.random() < 0.5:
+            prize *= 2
+        if context.bot_data.get("happy_hour") and ptype in ("oac", "jackpot"):
+            prize *= HAPPY_HOUR_MULTIPLIER
+
+        if ptype in ("oac", "jackpot"):
+            p.balance += prize
+        else:
+            p.blunts += prize
+        p.last_daily = datetime.now()
+        if ptype in ("oac", "jackpot"):
+            await add_war_score(uid, prize, conn)   # правильный порядок: user_id, points, conn
+        return prize, ptype, p.balance
+
+    result = await PlayerRepository.atomic_update(uid, _wheel)
+    if result is None:
+        logger.error("wheel atomic_update failed", extra={"user_id": uid})
+        await _notify_user(update, context, "❌ Ошибка при обработке. Попробуй позже.")
+        return
+    prize, ptype, new_balance = result
+
+    # Формируем сообщение
+    uname = html.escape(update.effective_user.username or update.effective_user.first_name)
+    if ptype == "jackpot":
+        try:
+            await context.bot.send_message(chat_id="@guild_antysocial", text=f"🌟 @{uname} сорвал Джекпот! +{prize} OAC", parse_mode='HTML')
+        except Exception as e:
+            logger.error(f"Канал джепот: {e}")
+        msg_text = f"<b>🎰 ДЖЕКПОТ!</b>\n\nТы выиграл <b>{prize} OAC</b> 🍬!\n\n<b>⚜️ У тебя:</b> <i>{new_balance} OAC</i>"
+    elif ptype == "oac":
+        msg_text = f"<b>🩸 ДАР ИСКАЖЕНИЯ</b>\n\n<b>💎 Ты нафармил +{prize} OAC 🍬!</b>\n⚜️ <b>У тебя:</b> <i>{new_balance} OAC</i>"
+    else:
+        msg_text = f"<b><i>🌱 КОЛЕСО СМОТРИТЕЛЯ</i></b>\n\n+{prize} 🌿 Блант → 💰 <b>{new_balance} OAC</b> 🍬"
+
+    await edit_or_reply(update, context, msg_text,
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]))
+
+
+async def _process_berserk(update, context, uid, player, cfg):
+    if not _check_berserk_availability(player, datetime.now(), cfg["berserk"]["cost"], cfg["berserk"]["cooldown_hours"]):
+        await _notify_user(update, context, "🍀 Берсерк недоступен. Проверь баланс или время.")
+        return
+
+    async def _berserk(p, conn):
+        if p.balance < cfg["berserk"]["cost"]:
+            return ("no_money", p.balance)
+        if random.random() < 0.6:
+            p.balance += cfg["berserk"]["win_amount"]
+            res = f"<b><i>🎲 БЕЗДНА ОТВЕТИЛА</i></b>\n\nИскажение благосклонно! +<b>{cfg['berserk']['win_amount']} OAC</b> 🍬."
+            await add_war_score(uid, cfg["war_points"]["berserk_win"], conn)
+        else:
+            p.balance -= cfg["berserk"]["cost"]
+            res = f"<b><i>🕯️ БЕЗДНА МОЛЧИТ</i></b>\n\nИскажение промолчало. –<b>{cfg['berserk']['cost']} OAC</b>."
+            await add_war_score(uid, cfg["war_points"]["berserk_lose"], conn)
+        p.last_berserk = datetime.now()
+        return ("ok", res, p.balance)
+
+    result = await PlayerRepository.atomic_update(uid, _berserk)
+    if result is None:
+        logger.error("berserk atomic_update failed", extra={"user_id": uid})
+        await _notify_user(update, context, "❌ Ошибка при обработке. Попробуй позже.")
+        return
+    status, *data = result
+    if status == "no_money":
+        await _notify_user(update, context, f"❌ Недостаточно OAC. Текущий баланс: {data[0]}")
+        return
+    res_text, _ = data
+    await edit_or_reply(update, context, res_text,
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]))
+
+
+async def _process_alchemy_start(update, context, uid, player, cfg, bal):
+    if bal < cfg["alchemy"]["required_balance"]:
+        await _notify_user(update, context, "❌ Доступно с ранга ⚔️ Ветеран (5000 OAC 🍬)", show_alert=True)
+        return
+    text = (
+        "<b>🔮 АЛХИМИЧЕСКИЙ КОТЁЛ</b>\n\n"
+        f"<b>💎 У тебя: {bal} OAC 🍬</b>\n"
+        f"<b>🌿 Блантов в свёртке: {player.blunts}</b>\n\n"
+        "<b>⚗️ Стоимость запуска:</b>\n"
+        "   🕯️ 10 Блантов\n"
+        "   🍬 250 OAC\n\n"
+        "<b>🍀 Шансы реакции:</b>\n"
+        "   💠 Чистая Пыльца (1 доза) — 40%\n"
+        "   🌫️ Грязный Выхлоп (ничего) — 35%\n"
+        "   ✨ Мерцающая Пыльца (2 дозы) — 15%\n"
+        "   🌟 Философский Камень (легендарный блант) — 10%\n\n"
+        "<i>«Только тот, кто достиг <b>ветерана</b> и не боится потерь — "
+        "обретёт право 🗝️ использовать магию и истинную силу»</i> 🔮"
+    )
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🧪 Запустить реакцию ⚗️", callback_data="alchemy_confirm")],
+        [InlineKeyboardButton("🔙 Назад", callback_data="luck")]
+    ])
+    await edit_or_reply(update, context, text, reply_markup=kb)
+
+
+async def _process_alchemy_confirm(update, context, uid, player, cfg, bal):
+    if player.blunts < cfg["alchemy"]["cost_blunts"] or bal < cfg["alchemy"]["cost_oac"]:
+        await _notify_user(update, context, "❌ Недостаточно ресурсов. Нужно 10 блантов и 250 OAC.", show_alert=True)
+        return
+
+    async def _alchemy(p, conn):
+        if p.blunts < cfg["alchemy"]["cost_blunts"] or p.balance < cfg["alchemy"]["cost_oac"]:
+            return ("no_resources",)
+        p.blunts -= cfg["alchemy"]["cost_blunts"]
+        p.balance -= cfg["alchemy"]["cost_oac"]
+        r = random.random()
+        for prob, effect, value in cfg["alchemy"]["reactions"]:
+            if r < prob:
+                if effect == "dust":
+                    p.m_essence += value
+                    res = f"<b>💠 {'Чистая' if value==1 else 'Мерцающая'} Пыльца!</b>\n\n+{value} Кристальной Пыли"
+                elif effect == "legendary":
+                    name = random.choice(["Крик Бездны","Пепел Короля","Шёпот Склепа","Коготь Хаоса","Вздох Пожирателя"])
+                    await create_named_blunt(uid, name, rarity="legendary", conn=conn)
+                    res = f"<b>🌟 Философский Камень!</b>\n\nЛегендарный блант «{name}»!"
+                    try:
+                        await context.bot.send_message(chat_id="@guild_antysocial",
+                            text=f"🌟 @{html.escape(update.effective_user.username or update.effective_user.first_name)} провёл Алхимический Ритуал и получил легендарный блант «{name}»!", parse_mode='HTML')
+                    except Exception as e:
+                        logger.error(f"Ошибка отправки в канал: {e}")
+                else:
+                    res = "<b>🌫️ Грязный Выхлоп...</b>\n\nБланты сгорели без следа."
+                break
+        await add_war_score(uid, cfg["war_points"]["alchemy"], conn)
+        return ("ok", res)
+
+    result = await PlayerRepository.atomic_update(uid, _alchemy)
+    if result is None:
+        logger.error("alchemy atomic_update failed", extra={"user_id": uid})
+        await _notify_user(update, context, "❌ Ошибка при обработке. Попробуй позже.")
+        return
+    status, *data = result
+    if status == "no_resources":
+        await _notify_user(update, context, "❌ Недостаточно ресурсов.", show_alert=True)
+        return
+    await edit_or_reply(update, context, data[0],
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]))
 
 # /check
 async def check_blunt(update, context):
@@ -3355,7 +3408,6 @@ async def check_blunt(update, context):
             date_str = format_date(entry.get('since',''))
             details += f"   @{entry.get('user_id','?')} — {date_str}\n"
     await update.message.reply_text(details, parse_mode='HTML')
-    # в конце check_blunt вместо increment_counter
 player = await PlayerRepository.get_by_id(update.effective_user.id)
 if player:
     player.check_count = (player.check_count or 0) + 1
@@ -3856,14 +3908,7 @@ async def show_lab_death(update, context):
         p.balance += 50
         p.lab_deaths += 1
         # военный счёт (опционально)
-        guild_row = await conn.fetchrow("SELECT guild FROM players WHERE user_id = $1", uid)
-        if guild_row and guild_row["guild"] in ("BLACK", "WHITE"):
-            await conn.execute(
-                "INSERT INTO guild_weekly (guild, week_start, total_farmed) "
-                "VALUES ($1, CURRENT_DATE, $2) ON CONFLICT (guild) DO UPDATE SET "
-                "total_farmed = guild_weekly.total_farmed + $2",
-                guild_row["guild"], 10
-            )
+        await add_war_score(conn, uid, earned + medal_bonus)
         return
 
     await PlayerRepository.atomic_update(uid, _lab_die)
@@ -3977,7 +4022,7 @@ CALLBACKS = {
     "my_blunts": my_blunts_callback,
     "lab_start": lab_enter,
     "lab_enter_confirm": lab_enter_confirm,
-    "lab_escape": show_lab_final,
+    "lab_escape": handle_lab_option,
     "guild_shrine": guild_shrine_callback,
     "guild_war": guild_war_callback,
     "confess": confess_callback,
@@ -4235,11 +4280,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await luck_callback(update, context, action=data)
             return
 
-        if data in ("luck_wheel", "luck_berserk", "alchemy_start", "alchemy_confirm"):
-            await q.answer()
-            await luck_callback(update, context, action=data)
-            return
-
         handler = CALLBACKS.get(data)
         if handler:
             await q.answer()
@@ -4415,16 +4455,24 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_member))
     app.add_handler(CallbackQueryHandler(button_handler))
 
-    job = app.job_queue
-    job.run_repeating(update_pulse, interval=900, first=10)
-    job.run_repeating(happy_hour_trigger, interval=random.randint(14400, 28800), first=random.randint(3600, 10800))
-    job.run_daily(echo_of_distortion, time=time(hour=18, minute=0))
-    now = datetime.now()
-    days_until_saturday = (5 - now.weekday()) % 7
-    next_saturday = (now + timedelta(days=days_until_saturday)).replace(hour=12, minute=0, second=0, microsecond=0)
-    if next_saturday <= now: next_saturday += timedelta(days=7)
-    job.run_repeating(weekly_guild_rating, interval=7*24*3600, first=max(1, (next_saturday - now).total_seconds()))
-    job.run_repeating(keep_db_alive, interval=180, first=10)
+        job = app.job_queue
+    # Все джобы, отправляющие сообщения, отключены для нового бота.
+    # Включать по одной через 14-20 дней после старта бота.
+    # job.run_repeating(update_pulse, interval=14400, first=10)                     # обновление описания канала (раз в 4 часа)
+    # job.run_repeating(happy_hour_trigger, interval=random.randint(86400, 129600), first=random.randint(3600, 43200))  # х2 OAC
+    # job.run_daily(echo_of_distortion, time=time(hour=18, minute=0))              # ежедневный пост в канал
+
+    # Расчёт времени для weekly_guild_rating (закомментирован вместе с джобой)
+    # День 17-20: включаем войну гильдий (раз в неделю по субботам в 12:00)
+    # now = datetime.now()
+    # days_until_saturday = (5 - now.weekday()) % 7
+    # next_saturday = (now + timedelta(days=days_until_saturday)).replace(hour=12, minute=0, second=0, microsecond=0)
+    # if next_saturday <= now: next_saturday += timedelta(days=7)
+    # job.run_repeating(weekly_guild_rating, interval=7*24*3600, 
+    # first=max(1, (next_saturday - now).total_seconds()))  # война гильдий
+
+    # Эта джоба безопасна — просто пингует БД.
+    job.run_repeating(keep_db_alive, interval=180, first=10)  # Безопасная джоба (работает всегда)
 
     # === GRACEFUL SHUTDOWN ===
     async def shutdown():
