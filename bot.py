@@ -2623,19 +2623,18 @@ async def achievements_callback(update: Update, context: ContextTypes.DEFAULT_TY
 async def top_callback(update, context):
     user, msg = get_user_and_msg(update)
     uid = user.id
-    top = await get_top(10)                 # должен возвращать поле user_id
+    top = await get_top(10)
     if not top:
         await edit_or_reply(update, context, "🏆 Топ-10 пока пуст.")
         return
 
     first_balance = top[0]["balance"]
-    p = await get_player_cached(uid, fields=["balance", "guild"])
-    my_balance = p["balance"] if p else 0
+    player = await PlayerRepository.get_by_id(uid)
+    my_balance = player.balance if player else 0
 
-    # Шапка
     text = "<b>💎 ТОП-10 ИГРОКОВ 🏆</b>\n\n"
-
     my_position = None
+
     for i, row in enumerate(top, 1):
         bal = row["balance"]
         percent = int(bal / first_balance * 100) if first_balance else 100
@@ -2643,26 +2642,16 @@ async def top_callback(update, context):
         bar = "▓" * filled + "░" * (10 - filled)
 
         # Префикс с эмодзи и номером
-        if i == 1:
-            prefix = "🥇 1. "
-        elif i == 2:
-            prefix = "🥈 2. "
-        elif i == 3:
-            prefix = "🥉 3. "
-        elif i == 4:
-            prefix = "⚜️ 4. "
-        elif i == 5:
-            prefix = "🌿 5. "
-        elif i == 6:
-            prefix = "🫧 6. "
-        elif i == 7:
-            prefix = "🪄 7. "
-        elif i == 8:
-            prefix = "🎈 8. "
-        elif i == 9:
-            prefix = "🍀 9. "
-        else:  # i == 10
-            prefix = "🌱 10. "
+        if i == 1: prefix = "🥇 1. "
+        elif i == 2: prefix = "🥈 2. "
+        elif i == 3: prefix = "🥉 3. "
+        elif i == 4: prefix = "⚜️ 4. "
+        elif i == 5: prefix = "🌿 5. "
+        elif i == 6: prefix = "🫧 6. "
+        elif i == 7: prefix = "🪄 7. "
+        elif i == 8: prefix = "🎈 8. "
+        elif i == 9: prefix = "🍀 9. "
+        else: prefix = "🌱 10. "
 
         # Гильдия
         guild = row.get("guild", "")
@@ -2675,8 +2664,6 @@ async def top_callback(update, context):
 
         # Ранг
         rank_emoji, rank_name = get_rank_info(bal)
-
-        # Никнейм (экранирование HTML)
         username = html.escape(row["username"])
 
         text += (
@@ -2691,7 +2678,6 @@ async def top_callback(update, context):
 
     # --- Блок позиции игрока (динамическая дата) ---
     deadline = next_sunday_str()
-
     if my_position == 1:
         text += (
             f"<b>✦ 📊 Твоя позиция: 1 — ТЫ ДЕРЖИШЬ ТРОН 💎🫧 ✦</b>\n\n"
@@ -2713,8 +2699,7 @@ async def top_callback(update, context):
             "<b>   🎁 Скин: «Золотой Венец» — фон профиля</b>\n"
             "<b>   ⚜️ Титул: «Хранитель Топа»</b>\n"
         )
-    # ... остальные elif / else
-    elif my_position is not None:            # 4-10 места
+    elif my_position is not None:  # 4-10 места
         third_balance = top[2]["balance"] if len(top) >= 3 else 0
         gap = third_balance - my_balance
         if gap > 0:
@@ -2724,11 +2709,10 @@ async def top_callback(update, context):
             )
         else:
             text += f"✦ 📊 Твоя позиция: {my_position} ✦\n"
-    else:                                    # вне топа
+    else:  # вне топа
         async with db_pool.acquire() as conn:
             cnt_row = await conn.fetchrow(
-                "SELECT COUNT(*) as cnt FROM players WHERE balance > $1",
-                my_balance
+                "SELECT COUNT(*) as cnt FROM players WHERE balance > $1", my_balance
             )
         pos = cnt_row["cnt"] + 1 if cnt_row else 1
         async with db_pool.acquire() as conn:
@@ -2745,43 +2729,11 @@ async def top_callback(update, context):
         else:
             text += f"✦ 📊 Твоя позиция: {pos} — ты уже в топе! 💎 ✦\n"
 
-    # --- Кнопки ---
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔍 Разведка", callback_data="top_scout")],
         [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
     ])
-
-    if update.callback_query:
-        await edit_or_reply(update, context, text, reply_markup=kb, parse_mode="HTML")
-    else:
-        await msg.reply_text(text, reply_markup=kb, parse_mode="HTML")
-
-
-def get_rank_info(balance):
-    """Возвращает эмодзи и название ранга."""
-    if balance >= 50000: return "🪬", "Некромант"
-    elif balance >= 20000: return "🪦", "Призрак"
-    elif balance >= 5000: return "⚔️", "Ветеран"
-    return "🪓", "Рекрут"
-
-def get_rank_info(balance):
-    """Возвращает эмодзи и название ранга."""
-    if balance >= 50000: return "🪬", "Некромант"
-    elif balance >= 20000: return "🪦", "Призрак"
-    elif balance >= 5000: return "⚔️", "Ветеран"
-    return "🪓", "Рекрут"
-
-
-def get_rank_info(balance):
-    """Возвращает эмодзи и название ранга по балансу."""
-    if balance >= 50000:
-        return "🪬", "Некромант"
-    elif balance >= 20000:
-        return "🪦", "Призрак"
-    elif balance >= 5000:
-        return "⚔️", "Ветеран"
-    else:
-        return "🪓", "Рекрут"
+    await edit_or_reply(update, context, text, reply_markup=kb, parse_mode="HTML")
 
 async def top_scout_callback(update, context):
     query = update.callback_query
@@ -2795,7 +2747,7 @@ async def top_scout_callback(update, context):
         name = html.escape(row["username"])
         bal = row["balance"]
         guild = row["guild"]
-        g = "🕯️" if guild=="BLACK" else "⚜️" if guild=="WHITE" else ""
+        g = "🕯️" if guild == "BLACK" else "⚜️" if guild == "WHITE" else ""
         text += f"{'🥇' if i==0 else '🥈' if i==1 else '🥉'} <b>{name}</b> {g}\n💰 {bal} OAC\n\n"
     await send_whisper_dm(update, context, text)
 
@@ -2804,11 +2756,12 @@ async def top_scout_callback(update, context):
 async def guild_info_callback(update, context):
     user, msg = get_user_and_msg(update)
     uid = user.id
-    guild = await get_guild(uid)
     player = await PlayerRepository.get_by_id(uid)
-    if not p:
+    if not player:
         await edit_or_reply(update, context, "Профиль не найден. Напиши /start")
         return
+
+    guild = player.guild
 
     # Безопасный подсчёт гильдий
     cnt = await count_guilds()
@@ -2828,7 +2781,6 @@ async def guild_info_callback(update, context):
         filled = perc // 10
         return "▓" * filled + "░" * (10 - filled)
 
-    # Прогресс-бары под названиями гильдий
     text = (
         f"<b>🕋 ГИЛЬДИИ</b>\n\n"
         f"🕯️ <b>Тёмная Гильдия: {black_cnt}</b> странников\n"
@@ -2842,9 +2794,9 @@ async def guild_info_callback(update, context):
         g_emoji = "🕯️" if guild == "BLACK" else "⚜️"
         g_name = "Тёмная" if guild == "BLACK" else "Светлая"
         text += f"Ты состоишь в {g_emoji} <b>{g_name} Гильдии</b>.\n"
-        if guild == "BLACK" and p:
-            if p.get("last_ritual"):
-                last_ritual = _to_datetime(p["last_ritual"])
+        if guild == "BLACK":
+            if player.last_ritual:
+                last_ritual = _to_datetime(player.last_ritual)
                 if last_ritual and datetime.now() - last_ritual < timedelta(hours=24):
                     diff = timedelta(hours=24) - (datetime.now() - last_ritual)
                     hrs = int(diff.seconds // 3600)
@@ -2854,7 +2806,7 @@ async def guild_info_callback(update, context):
                     kb_rows.append([InlineKeyboardButton("🕯️ Ритуал", callback_data="ritual")])
             else:
                 kb_rows.append([InlineKeyboardButton("🕯️ Ритуал", callback_data="ritual")])
-        if guild == "WHITE" and p:
+        elif guild == "WHITE":
             kb_rows.append([InlineKeyboardButton("⚜️ Исповедь", callback_data="confess")])
         kb_rows.append([
             InlineKeyboardButton("🏛️ Храм", callback_data="guild_shrine"),
@@ -2869,16 +2821,17 @@ async def guild_info_callback(update, context):
 
     await edit_or_reply(update, context, text, reply_markup=kb)
 
+@error_handler
 async def guild_shrine_callback(update, context):
     query = update.callback_query
     await query.answer()
     uid = query.from_user.id
-    p = await get_player_cached(uid)
-    if not p or not p["guild"]:
+    player = await PlayerRepository.get_by_id(uid)
+    if not player or not player.guild:
         await query.answer("Ты не в гильдии.")
         return
 
-    guild = p["guild"]
+    guild = player.guild
     async with db_pool.acquire() as conn:
         total_donated = await conn.fetchval(
             "SELECT COALESCE(SUM(donated),0) FROM players WHERE guild=$1", guild
@@ -2938,8 +2891,8 @@ async def guild_war_callback(update, context):
     query = update.callback_query
     await query.answer()
     uid = query.from_user.id
-    p = await get_player_cached(uid)
-    if not p:
+    player = await PlayerRepository.get_by_id(uid)
+    if not player:
         await edit_or_reply(update, context, "Профиль не найден.")
         return
 
@@ -2947,7 +2900,7 @@ async def guild_war_callback(update, context):
         war = await conn.fetchrow("SELECT war_active FROM guild_weekly WHERE war_active = TRUE LIMIT 1")
         if not war:
             await edit_or_reply(update, context, "🕊️ Сейчас мирное время.",
-    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="guild_info")]]))
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="guild_info")]]))
             return
 
         scores = await conn.fetch("SELECT guild, total_farmed FROM guild_weekly")
@@ -2994,56 +2947,70 @@ async def guild_war_callback(update, context):
 
 @error_handler
 async def confess_callback(update, context):
-    """Исповедь (для Светлой Гильдии) – работает и по кнопке, и по команде /repent."""
     user, msg = get_user_and_msg(update)
     uid = user.id
-    player = await PlayerRepository.get_by_id(uid)
 
-    # Проверки
-    if not p:
+    # Вся логика с проверками и изменениями внутри атомарной транзакции
+    async def _confess(player, conn):
+        # Проверки
+        if not player or not player.user_id:
+            return ("no_player",)
+        if player.guild != "WHITE":
+            return ("wrong_guild",)
+        if (player.blunts or 0) < 1:
+            return ("no_blunts",)
+
+        # Списание бланта
+        player.blunts -= 1
+
+        # Случайный результат
+        r = random.random()
+        if r < 0.70:
+            reward = random.randint(100, 200)
+            player.balance = (player.balance or 0) + reward
+            return ("ok", f"<b><i>⚜️ ИСПОВЕДЬ</i></b>\n\nБлагословение! +{reward} OAC.")
+        elif r < 0.95:
+            player.m_essence = (player.m_essence or 0) + 1
+            return ("ok", "<b><i>⚜️ ИСПОВЕДЬ</i></b>\n\nТы получил 💠 Кристальную Пыль.")
+        else:
+            # Легендарный блант – создаём через create_named_blunt внутри транзакции
+            name = random.choice(["Крик Бездны","Пепел Короля","Шёпот Склепа"])
+            await create_named_blunt(uid, name, rarity="legendary", conn=conn)
+            return ("ok", f"<b><i>⚜️ ИСПОВЕДЬ</i></b>\n\n🌟 Чудо! Легендарный блант «{name}»!")
+
+    result = await PlayerRepository.atomic_update(uid, _confess)
+
+    # Обработка результата
+    if result is None:
         await context.bot.send_message(chat_id=uid, text="Сначала активируйся: /start")
         return
-    if p.get("guild") != "WHITE":
+
+    status, data = result[0], result[1] if len(result) > 1 else ""
+    if status == "no_player":
+        await context.bot.send_message(chat_id=uid, text="Сначала активируйся: /start")
+        return
+    if status == "wrong_guild":
         if update.callback_query:
             await update.callback_query.answer("Только для Светлой Гильдии.", show_alert=True)
         else:
             await msg.reply_text("❌ Только для Светлой Гильдии.")
         return
-    if p.get("blunts", 0) < 1:
+    if status == "no_blunts":
         if update.callback_query:
             await update.callback_query.answer("Нужен 1 блант.", show_alert=True)
         else:
             await msg.reply_text("❌ Нужен 1 блант.")
         return
 
-    # Списание бланта
-    await update_blunts(uid, p.get("username"), -1)
-    p = await get_player_cached(uid)
-
-    # Случайный результат
-    r = random.random()
-    if r < 0.70:
-        reward = random.randint(100, 200)
-        await update_balance(uid, p.get("username"), reward)
-        text = f"<b><i>⚜️ ИСПОВЕДЬ</i></b>\n\nБлагословение! +{reward} OAC."
-    elif r < 0.95:
-        await update_essence(uid, 1)
-        text = "<b><i>⚜️ ИСПОВЕДЬ</i></b>\n\nТы получил 💠 Кристальную Пыль."
-    else:
-        # Редкий случай – бесплатный легендарный блант
-        name = random.choice(["Крик Бездны","Пепел Короля","Шёпот Склепа"])
-        await create_named_blunt(uid, name, rarity="legendary")
-        text = f"<b><i>⚜️ ИСПОВЕДЬ</i></b>\n\n🌟 Чудо! Легендарный блант «{name}»!"
-
-    # Отправка результата
+    # Успех
     if update.callback_query:
         await update.callback_query.message.edit_text(
-            text,
+            data,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="guild_info")]]),
             parse_mode='HTML'
         )
     else:
-        await msg.reply_text(text, parse_mode='HTML')
+        await msg.reply_text(data, parse_mode='HTML')
 
 @error_handler
 async def rules_callback(update, context):
