@@ -4097,7 +4097,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             uname = user.username or user.first_name
             player = await PlayerRepository.get_by_id(uid)
             if not player or not player.user_id:
-                # создаём нового через репозиторий
                 player = Player(user_id=uid, username=uname, balance=800)
                 new_name = random.choice(["Крик Бездны","Пепел Короля","Шёпот Склепа"])
                 await create_named_blunt(uid, new_name)
@@ -4208,7 +4207,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text = f"Блант не найден.\n{ref_link}"
             await send_whisper_dm(update, context, text)
             return
-            
+
         if data.startswith("gift_blunt_"):
             await gift_blunt_start(update, context)
             return
@@ -4297,6 +4296,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"<i>🩸 Искажение стало плотнее...</i>",
                 parse_mode='HTML'
             )
+            # Оповещение в канал (закомментировано для безопасного старта)
             # try:
             #     await context.bot.send_message(
             #         chat_id="@guild_antysocial",
