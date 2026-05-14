@@ -2523,6 +2523,76 @@ async def profile_callback(update, context):
     else:
         await msg.reply_text(text, reply_markup=kb, parse_mode='HTML')
 
+async def handle_set_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    new_title = query.data.replace("set_title_", "")
+
+    async def _set(p, conn):
+        skins = p.profile_skins or {}
+        if not isinstance(skins, dict):
+            skins = {}
+        skins["active_title"] = new_title
+        p.profile_skins = skins
+        # Дополнительно можно добавить титул в titles (если надо)
+        titles = (p.titles or "").split()
+        if new_title not in titles:
+            titles.append(new_title)
+            p.titles = " ".join(titles).strip()
+        return new_title  # чтобы вывести сообщение
+
+    result = await PlayerRepository.atomic_update(user_id, _set)
+    if result is None:
+        await query.answer("Профиль не найден", show_alert=True)
+        return
+
+    # Подтверждение игроку
+    await context.bot.send_message(
+        chat_id=query.message.chat.id,
+        text=f"✨ Титул «{new_title}» активирован!"
+    )
+    # Возвращаемся в меню кастомизации (можно вызвать функцию skins_menu)
+    await skins_menu_handler(update, context)
+
+async def handle_set_bg(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    new_bg = query.data.replace("set_bg_", "")
+
+    async def _set(p, conn):
+        skins = p.profile_skins or {}
+        if not isinstance(skins, dict):
+            skins = {}
+        skins["active_background"] = new_bg
+        p.profile_skins = skins
+        return new_bg
+
+    result = await PlayerRepository.atomic_update(user_id, _set)
+    if result is None:
+        await query.answer("Профиль не найден", show_alert=True)
+        return
+
+    await context.bot.send_message(
+        chat_id=query.message.chat.id,
+        text=f"✨ Фон «{new_bg}» активирован!"
+    )
+    await skins_menu_handler(update, context)
+
+async def skins_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("💬 Выбрать титул", callback_data="choose_title")],
+        [InlineKeyboardButton("🖼️ Выбрать фон", callback_data="choose_bg")],
+        [InlineKeyboardButton("🔙 Назад", callback_data="profile")]
+    ])
+    await query.message.edit_text(
+        "<b>🎨 СКИНЫ</b>\n\nВыбери, что хочешь изменить.",
+        reply_markup=kb,
+        parse_mode='HTML'
+    )
+
 # Все бланты
 @error_handler
 @rate_limit(1)
@@ -4051,10 +4121,260 @@ async def setbluntpic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     names = {"common":"⚪ Обычный","rare":"🔵 Редкий","epic":"🟣 Эпический","legendary":"🟡 Легендарный"}
     await update.message.reply_text(f"✅ Изображение для {names[rarity]} обновлено!", parse_mode='HTML')
 
-# Обработчик кнопок + словарь колбэков
+# ========== ВСПОМОГАТЕЛЬНЫЕ ОБРАБОТЧИКИ ДЛЯ КНОПОК ==========
+# Заглушка для меню (просто перезапускает главное меню)
+async def menu_handler(update, context):
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+    kb, whisper = await get_main_menu_keyboard(uid)
+    menu_text = f"<b>🎮 ГЛАВНОЕ МЕНЮ</b>\n\n<i>{whisper}</i>"
+    try:
+        await query.message.edit_text(menu_text, reply_markup=kb, parse_mode='HTML')
+    except Exception:
+        await query.message.reply_text(menu_text, reply_markup=kb, parse_mode='HTML')
+
+# Питомец (заглушка)
+async def pet_preview_handler(update, context):
+    query = update.callback_query
+    await query.answer()
+    await query.message.edit_text(
+        "🐾 Питомцы пока не реализованы.",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
+    )
+
+# Куст (заглушка)
+async def bush_preview_handler(update, context):
+    query = update.callback_query
+    await query.answer("❌ Доступно с ранга ⚔️ Ветеран (5000 OAC 🍬)", show_alert=True)
+
+# Активация нового игрока (старый activate_menu)
+async def activate_menu_handler(update, context):
+    query = update.callback_query
+    await query.answer()
+    user = query.from_user
+    uname = user.username or user.first_name
+    uid = user.id
+    player = await PlayerRepository.get_by_id(uid)
+    if not player or not player.user_id:
+        player = Player(user_id=uid, username=uname, balance=800)
+        new_name = random.choice(["Крик Бездны","Пепел Короля","Шёпот Склепа"])
+        await create_named_blunt(uid, new_name)
+        await PlayerRepository.save(player)
+        bonus = "🎁 Смотритель дарует тебе <code>800</code> 🍬 и твой первый именной блант!\n\n"
+    else:
+        bonus = ""
+    welcome = (
+        "<b><i>🎉 Добро пожаловать в Гильдию Antysocialshop!</i></b>\n\n"
+        "🕯️ <b>Тёмная Гильдия</b> — стабильность, ритуалы, тёмное благословение.\n"
+        "⚜️ <b>Светлая Гильдия</b> — азарт, удача, танец на лезвии.\n\n"
+        "▸ <i>Выбери свой путь:</i>"
+    )
+    guild_kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🕯️ Тёмная Гильдия", callback_data="guild_join_BLACK"),
+         InlineKeyboardButton("⚜️ Светлая Гильдия", callback_data="guild_join_WHITE")]
+    ])
+    await query.message.edit_text(bonus + welcome, reply_markup=guild_kb, parse_mode='HTML')
+
+# Меню скинов
+async def skins_menu_handler(update, context):
+    query = update.callback_query
+    await query.answer()
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("💬 Выбрать титул", callback_data="choose_title")],
+        [InlineKeyboardButton("🖼️ Выбрать фон", callback_data="choose_bg")],
+        [InlineKeyboardButton("🔙 Назад", callback_data="profile")]
+    ])
+    await query.message.edit_text(
+        "<b>🎨 СКИНЫ</b>\n\nВыбери, что хочешь изменить.",
+        reply_markup=kb,
+        parse_mode='HTML'
+    )
+
+# Показывает список титулов для выбора
+async def choose_title_handler(update, context):
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+    player = await PlayerRepository.get_by_id(uid)
+    if not player:
+        return
+    titles = (player.titles or "").split()
+    if not titles:
+        await query.message.edit_text("У тебя пока нет титулов.", reply_markup=get_back_to_menu_keyboard())
+        return
+    skins = player.profile_skins or {}
+    active_title = skins.get("active_title", "")
+    kb_rows = []
+    for title in titles:
+        mark = " ✅" if title == active_title else ""
+        kb_rows.append([InlineKeyboardButton(f"{title}{mark}", callback_data=f"set_title_{title}")])
+    kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="skins_menu")])
+    await query.message.edit_text(
+        "<b>🎨 ВЫБОР ТИТУЛА</b>\n\nВыбери титул:",
+        reply_markup=InlineKeyboardMarkup(kb_rows),
+        parse_mode='HTML'
+    )
+
+# Показывает список фонов
+async def choose_bg_handler(update, context):
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+    player = await PlayerRepository.get_by_id(uid)
+    if not player:
+        return
+    skins = player.profile_skins or {}
+    unlocked = skins.get("unlocked_backgrounds", [])
+    if not unlocked:
+        await query.message.edit_text("У тебя пока нет разблокированных фонов.", reply_markup=get_back_to_menu_keyboard())
+        return
+    active_bg = skins.get("active_background", "")
+    kb_rows = []
+    for bg in unlocked:
+        mark = " ✅" if bg == active_bg else ""
+        kb_rows.append([InlineKeyboardButton(f"{bg}{mark}", callback_data=f"set_bg_{bg}")])
+    kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="skins_menu")])
+    await query.message.edit_text(
+        "<b>🖼️ ВЫБОР ФОНА</b>\n\nВыбери фон:",
+        reply_markup=InlineKeyboardMarkup(kb_rows),
+        parse_mode='HTML'
+    )
+
+# Установка титула (через атомарную операцию)
+async def handle_set_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+    new_title = query.data.replace("set_title_", "")
+
+    async def _set(p, conn):
+        skins = p.profile_skins or {}
+        skins["active_title"] = new_title
+        p.profile_skins = skins
+        return new_title
+
+    result = await PlayerRepository.atomic_update(uid, _set)
+    if result is None:
+        await query.answer("Профиль не найден", show_alert=True)
+        return
+    await context.bot.send_message(
+        chat_id=query.message.chat.id,
+        text=f"✨ Титул «{new_title}» активирован!"
+    )
+    await skins_menu_handler(update, context)
+
+# Установка фона
+async def handle_set_bg(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+    new_bg = query.data.replace("set_bg_", "")
+
+    async def _set(p, conn):
+        skins = p.profile_skins or {}
+        skins["active_background"] = new_bg
+        p.profile_skins = skins
+        return new_bg
+
+    result = await PlayerRepository.atomic_update(uid, _set)
+    if result is None:
+        await query.answer("Профиль не найден", show_alert=True)
+        return
+    await context.bot.send_message(
+        chat_id=query.message.chat.id,
+        text=f"✨ Фон «{new_bg}» активирован!"
+    )
+    await skins_menu_handler(update, context)
+
+# Обработчик деталей бланта (если у тебя ещё нет отдельной функции)
+async def blunt_details_handler(update, context):
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+    blunt_id = query.data.replace("blunt_details_", "")
+    player = await PlayerRepository.get_by_id(uid)
+    if not player:
+        return
+    inv = player.inventory or []
+    item = next((it for it in inv if it.get("id") == blunt_id), None)
+    if not item:
+        await query.answer("Блант не найден.")
+        return
+    name = item["name"]
+    rarity = item.get("rarity", "common")
+    color = {"legendary": "🟡", "epic": "🟣", "rare": "🔵"}.get(rarity, "🟢")
+    rare_number = item.get("rare_number", "?-????")
+    hash_code = item.get("hash", "0x????...????")
+    reaction = item.get("reaction", "")
+    text = (
+        f"<b>💎 ДЕТАЛИ NFT БЛАНТА</b>\n\n"
+        f"{color} <b>«{name}»</b>\n"
+        f"<b>Редкость:</b> <i>{rarity}</i> {color}\n\n"
+        f"🩸 <b>Серийный номер:</b> <i>#{rare_number}</i>\n\n"
+        f"🔗 <b>Хеш:</b> <i>{hash_code}</i>\n\n"
+        f"📜 <b>Реакция:</b> <i>{reaction}</i>\n\n"
+    )
+    if "owner_history" in item:
+        text += "🕊️ <b>История владения:</b>\n"
+        for entry in item["owner_history"]:
+            date_str = format_date(entry.get('since', ''))
+            text += f"   <b>@{entry.get('user_id', '?')}</b> — {date_str}\n"
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔗 Поделиться", callback_data=f"share_blunt_{blunt_id}"),
+         InlineKeyboardButton("🎁 Подарить", callback_data=f"gift_blunt_{blunt_id}")],
+        [InlineKeyboardButton("🏆 К списку", callback_data="my_blunts")]
+    ])
+    file_id = BLUNT_IMAGES.get(rarity)
+    if file_id:
+        await query.message.delete()
+        await context.bot.send_photo(
+            chat_id=query.message.chat.id,
+            photo=file_id,
+            caption=text,
+            reply_markup=kb,
+            parse_mode='HTML'
+        )
+    else:
+        await query.message.edit_text(text=text, reply_markup=kb, parse_mode='HTML')
+
+# Поделиться блантом
+async def share_blunt_handler(update, context):
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+    blunt_id = query.data.replace("share_blunt_", "")
+    player = await PlayerRepository.get_by_id(uid)
+    if not player:
+        return
+    bot_username = (await context.bot.get_me()).username
+    ref_link = f"https://t.me/{bot_username}?start=blunt_{blunt_id}"
+    inv = player.inventory or []
+    item = next((it for it in inv if it.get("id") == blunt_id), None)
+    username = html.escape(player.username)
+    if item:
+        name = item["name"]
+        rarity = item.get("rarity", "common")
+        color = {"legendary": "🟡", "epic": "🟣", "rare": "🔵"}.get(rarity, "🟢")
+        text = (
+            f"<b>{username}</b>\n\n"
+            f"{color} <b>Имя NFT бланта: «{name}»</b>\n"
+            f"🧬 <b>Редкость:</b> {rarity} {color}\n"
+            f"🩸 <b>Серийный номер:</b> #{item.get('rare_number', '?-????')}\n"
+            f"📜 <b>Реакция:</b> <i>{item.get('reaction', '')}</i>\n\n"
+            f"<i>Присоединяйся к Искажению:</i>\n{ref_link}"
+        )
+    else:
+        text = f"Блант не найден.\n{ref_link}"
+    await context.bot.send_message(
+        chat_id=query.message.chat.id,
+        text=text,
+        parse_mode='HTML'
+    )
+
 # ========== СЛОВАРЬ КОЛБЭКОВ ==========
 CALLBACKS = {
-    "menu": "menu",
+    "menu": menu_handler,
     "farm": farm_callback,
     "craft": craft_callback,
     "smoke": smoke_callback,
@@ -4077,18 +4397,60 @@ CALLBACKS = {
     "my_blunts": my_blunts_callback,
     "lab_start": lab_enter,
     "lab_enter_confirm": lab_enter_confirm,
-    "lab_escape": handle_lab_option,
     "guild_shrine": guild_shrine_callback,
     "guild_war": guild_war_callback,
     "confess": confess_callback,
-    "pet_preview": pet_preview,
-    "bush_preview": "bush_preview",
-    "activate_menu": "activate_menu",
-    "skins_menu": "skins_menu",
-    "choose_title": "choose_title",
-    "choose_bg": "choose_bg",
     "shop": shop_callback,
+    "pet_preview": pet_preview_handler,
+    "bush_preview": bush_preview_handler,
+    "activate_menu": activate_menu_handler,
+    "skins_menu": skins_menu_handler,
+    "choose_title": choose_title_handler,
+    "choose_bg": choose_bg_handler,
 }
+
+# ========== ОБРАБОТЧИКИ ДЛЯ КОЛБЭКОВ С ПРЕФИКСАМИ ==========
+PREFIX_HANDLERS = {
+    "ach_page_": achievements_callback,
+    "blunts_page_": my_blunts_callback,
+    "blunt_details_": blunt_details_handler,
+    "share_blunt_": share_blunt_handler,
+    "gift_blunt_": gift_blunt_start,
+    "set_title_": handle_set_title,
+    "set_bg_": handle_set_bg,
+    "lab_attack_": handle_lab_option,
+    "lab_special": handle_lab_option,
+    "lab_focus_use": handle_lab_option,
+    "lab_escape": handle_lab_option,
+    # можно добавить luck_wheel / luck_berserk / alchemy_start / alchemy_confirm
+    "luck_wheel": lambda u, c: luck_callback(u, c, action="luck_wheel"),
+    "luck_berserk": lambda u, c: luck_callback(u, c, action="luck_berserk"),
+    "alchemy_start": lambda u, c: luck_callback(u, c, action="alchemy_start"),
+    "alchemy_confirm": lambda u, c: luck_callback(u, c, action="alchemy_confirm"),
+}
+
+# ========== НОВЫЙ button_handler ==========
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    data = q.data
+    uid = q.from_user.id
+
+    try:
+        # 1. Проверяем префиксы
+        for prefix, handler in PREFIX_HANDLERS.items():
+            if data.startswith(prefix):
+                await handler(update, context)
+                return
+
+        # 2. Ищем простой колбэк
+        handler = CALLBACKS.get(data)
+        if handler:
+            await handler(update, context)
+        else:
+            await q.answer("Неизвестная команда.")
+    except Exception as e:
+        logger.error(f"Button error: {e}", exc_info=True)
+        await q.answer(f"❌ Ошибка: {e}", show_alert=True)
 
 # ========== ОБРАБОТЧИК КНОПОК (СЕНЬОРСКИЙ) ==========
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
