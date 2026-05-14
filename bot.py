@@ -3400,12 +3400,14 @@ async def _process_alchemy_confirm(update, context, uid, player, cfg, bal):
 
 # /check
 async def check_blunt(update, context):
-    if not context.args: await update.message.reply_text("Укажи серийный номер бланта: /check R-0001"); return
+    if not context.args:
+        await update.message.reply_text("Укажи серийный номер бланта: /check R-0001")
+        return
     nft_id = context.args[0].strip().upper()
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("SELECT blunt_id, created_by, serial, rare_number FROM nft_registry WHERE rare_number = $1", nft_id)
         if not rows:
-            await update.message.reply_text("❌ Блант с таким серийным номером не найден. 🌿")
+            await update.message.reply_text("🕳️ Блант с таким серийным номером не найден.")
             return
         if len(rows) > 1:
             await update.message.reply_text("⚠️ Найдено несколько блантов с таким номером, обратитесь к администратору.")
@@ -3423,7 +3425,9 @@ async def check_blunt(update, context):
                         owner_id = user_row["user_id"]; item = it; break
             except: continue
             if owner_id: break
-    if not item: await update.message.reply_text("Блант найден в реестре, но его владелец не обнаружен."); return
+    if not item:
+        await update.message.reply_text("Блант найден в реестре, но его владелец не обнаружен.")
+        return
     name = item["name"]; rarity = item.get("rarity","common")
     color = {"legendary":"🟡","epic":"🟣","rare":"🔵"}.get(rarity,"🟢")
     reaction = item.get("reaction",""); hash_code = item.get("hash","0x????...????")
@@ -3435,10 +3439,12 @@ async def check_blunt(update, context):
             date_str = format_date(entry.get('since',''))
             details += f"   @{entry.get('user_id','?')} — {date_str}\n"
     await update.message.reply_text(details, parse_mode='HTML')
-player = await PlayerRepository.get_by_id(update.effective_user.id)
-if player:
-    player.check_count = (player.check_count or 0) + 1
-    await PlayerRepository.save(player)
+
+    # Обновляем счётчик проверок через модель
+    player = await PlayerRepository.get_by_id(update.effective_user.id)
+    if player:
+        player.check_count = (player.check_count or 0) + 1
+        await PlayerRepository.save(player)
 
 # ============================================================
 # ЛАБИРИНТ ИСКАЖЕНИЯ — ИТОГОВАЯ СЕНЬОР-ВЕРСИЯ (ПОЛНАЯ ЗАМЕНА)
