@@ -4484,30 +4484,17 @@ if __name__ == "__main__":
             await update.message.reply_text(fid)
 
     app.add_handler(MessageHandler(filters.PHOTO, get_file_id))
-
     app.add_handler(MessageHandler(filters.COMMAND, handle_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_chat_shortcut))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_member))
     app.add_handler(CallbackQueryHandler(button_handler))
 
-        job = app.job_queue
-    # Все джобы, отправляющие сообщения, отключены для нового бота.
-    # Включать по одной через 14-20 дней после старта бота.
-    # job.run_repeating(update_pulse, interval=14400, first=10)                     # обновление описания канала (раз в 4 часа)
-    # job.run_repeating(happy_hour_trigger, interval=random.randint(86400, 129600), first=random.randint(3600, 43200))  # х2 OAC
-    # job.run_daily(echo_of_distortion, time=time(hour=18, minute=0))              # ежедневный пост в канал
-
-    # Расчёт времени для weekly_guild_rating (закомментирован вместе с джобой)
-    # День 17-20: включаем войну гильдий (раз в неделю по субботам в 12:00)
-    # now = datetime.now()
-    # days_until_saturday = (5 - now.weekday()) % 7
-    # next_saturday = (now + timedelta(days=days_until_saturday)).replace(hour=12, minute=0, second=0, microsecond=0)
-    # if next_saturday <= now: next_saturday += timedelta(days=7)
-    # job.run_repeating(weekly_guild_rating, interval=7*24*3600, 
-    # first=max(1, (next_saturday - now).total_seconds()))  # война гильдий
-
-    # Эта джоба безопасна — просто пингует БД.
-    job.run_repeating(keep_db_alive, interval=180, first=10)  # Безопасная джоба (работает всегда)
+    job = app.job_queue
+    # job.run_repeating(update_pulse, interval=900, first=10)
+    # job.run_repeating(happy_hour_trigger, interval=random.randint(14400, 28800), first=random.randint(3600, 10800))
+    # job.run_daily(echo_of_distortion, time=time(hour=18, minute=0))
+    # job.run_repeating(weekly_guild_rating, interval=7*24*3600, first=max(1, (next_saturday - now).total_seconds()))
+    job.run_repeating(keep_db_alive, interval=180, first=10)
 
     # === GRACEFUL SHUTDOWN ===
     async def shutdown():
@@ -4523,7 +4510,6 @@ if __name__ == "__main__":
         try:
             loop.add_signal_handler(sig, lambda: asyncio.ensure_future(shutdown()))
         except NotImplementedError:
-            # На Windows сигналы могут не поддерживаться – ничего страшного
             pass
 
     # ===== ГЛОБАЛЬНЫЙ ОБРАБОТЧИК RetryAfter =====
