@@ -16,7 +16,7 @@ from telegram.error import BadRequest
 from telegram.ext import AIORateLimiter
 
 from pydantic import BaseModel, Field
-from typing import Optional, List, Any, Dict
+from typing import Optional, List, Any, Dict, NamedTuple
 
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from telegram.error import RetryAfter
