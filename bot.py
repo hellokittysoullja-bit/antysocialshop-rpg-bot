@@ -311,7 +311,6 @@ class PlayerRepository:
             player_cache.pop(player.user_id, None)
 
     @staticmethod
-    @db_retry()
     async def atomic_update(user_id: int, update_func):
         """
         Атомарно блокирует игрока (SELECT ... FOR UPDATE),
@@ -343,6 +342,43 @@ class PlayerRepository:
                 # Возвращаем результат (например, данные для сообщения)
                 return result
 
+    @staticmethod
+    async def claim_daily(user_id: int, today: date, streak: int, reward_oac: int,
+                          title: Optional[str], inventory_items: dict) -> bool:
+        """
+        Атомарно начисляет ежедневную награду.
+        Возвращает True, если награда начислена, False – если сегодня уже заходил.
+        """
+        async with db_pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    "SELECT * FROM players WHERE user_id = $1 FOR UPDATE", user_id
+                )
+                if not row:
+                    return False
+                p = dict(row)
+                p["inventory"] = _json_safe_load(p.get("inventory"), [])
+                p["profile_skins"] = _json_safe_load(p.get("profile_skins"), {})
+                player = Player(**p)
+
+                if player.last_login_date == today:
+                    return False
+
+                player.balance = (player.balance or 0) + reward_oac
+                player.login_streak = streak
+                player.last_login_date = today
+
+                if title:
+                    current = (player.titles or "").strip()
+                    if title not in current:
+                        player.titles = f"{current} {title}".strip()
+
+                for field, amount in inventory_items.items():
+                    if hasattr(player, field):
+                        setattr(player, field, (getattr(player, field) or 0) + amount)
+
+                await PlayerRepository.save(player, conn=conn)
+                return True
 
 @db_retry()
 async def create_named_blunt(user_id, name, rarity=None, conn=None):
@@ -1375,45 +1411,6 @@ class RewardResult(NamedTuple):
 
 # Основная функция с полной атомарностью (пункты 1, 5)
 # ---------------------------------------------------------------------------
-
-@staticmethod
-    async def claim_daily(user_id: int, today: date, streak: int, reward_oac: int,
-                          title: Optional[str], inventory_items: dict) -> bool:
-        """
-        Атомарно начисляет ежедневную награду.
-        Возвращает True, если награда начислена, False – если сегодня уже заходил.
-        """
-        async with db_pool.acquire() as conn:
-            async with conn.transaction():
-                row = await conn.fetchrow(
-                    "SELECT * FROM players WHERE user_id = $1 FOR UPDATE", user_id
-                )
-                if not row:
-                    return False
-                p = dict(row)
-                p["inventory"] = _json_safe_load(p.get("inventory"), [])
-                p["profile_skins"] = _json_safe_load(p.get("profile_skins"), {})
-                player = Player(**p)
-
-                if player.last_login_date == today:
-                    return False
-
-                player.balance = (player.balance or 0) + reward_oac
-                player.login_streak = streak
-                player.last_login_date = today
-
-                if title:
-                    current = (player.titles or "").strip()
-                    if title not in current:
-                        player.titles = f"{current} {title}".strip()
-
-                for field, amount in inventory_items.items():
-                    if hasattr(player, field):
-                        setattr(player, field, (getattr(player, field) or 0) + amount)
-
-                await PlayerRepository.save(player, conn=conn)
-                return True
-
 async def process_daily_login(user_id: int, context) -> None:
     today = date.today()
     player = await PlayerRepository.get_by_id(user_id)
@@ -1592,7 +1589,7 @@ async def farm_callback(update, context):
         player.last_farm_date = date.today()
 
         # Военный счёт
-        await add_war_score(conn, uid, earned + medal_bonus)
+        await add_war_score(uid, earned + medal_bonus, conn=conn)
 
         return ("ok", earned, crit, happy, medal_text, new_count, player.balance)
 
