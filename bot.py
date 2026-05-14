@@ -1,6 +1,7 @@
 # bot.py — ANTY SOCIAL SHOP RPG v7.6.6.6 FINAL FIXED 
 import asyncio, logging, os, random, re, json, hashlib, html
 from datetime import datetime, timedelta, date, time
+from dataclasses import dataclass, field
 from threading import Thread
 
 import asyncpg
