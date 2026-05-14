@@ -955,6 +955,17 @@ def progress_bar(percent):
     empty = 10 - filled
     return "▓" * filled + "░" * empty
 
+def get_rank_info(balance: int):
+    """Возвращает эмодзи и название ранга по балансу."""
+    if balance >= 50000:
+        return "🪬", "Некромант"
+    elif balance >= 20000:
+        return "🪦", "Призрак"
+    elif balance >= 5000:
+        return "⚔️", "Ветеран"
+    else:
+        return "🪓", "Рекрут"
+
 def get_rank_progress(balance):
     if balance >= RANKS[-1][1]:
         emoji = RANKS[-1][0]
