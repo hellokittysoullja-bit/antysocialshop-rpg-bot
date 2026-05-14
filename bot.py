@@ -1377,8 +1377,12 @@ class RewardResult(NamedTuple):
 # ---------------------------------------------------------------------------
 
 @staticmethod
-async def claim_daily(user_id: int, today: date, streak: int, reward_oac: int,
+    async def claim_daily(user_id: int, today: date, streak: int, reward_oac: int,
                           title: Optional[str], inventory_items: dict) -> bool:
+        """
+        Атомарно начисляет ежедневную награду.
+        Возвращает True, если награда начислена, False – если сегодня уже заходил.
+        """
         async with db_pool.acquire() as conn:
             async with conn.transaction():
                 row = await conn.fetchrow(
