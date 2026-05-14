@@ -4121,8 +4121,25 @@ async def setbluntpic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     names = {"common":"⚪ Обычный","rare":"🔵 Редкий","epic":"🟣 Эпический","legendary":"🟡 Легендарный"}
     await update.message.reply_text(f"✅ Изображение для {names[rarity]} обновлено!", parse_mode='HTML')
 
-# ========== ВСПОМОГАТЕЛЬНЫЕ ОБРАБОТЧИКИ ДЛЯ КНОПОК ==========
-# Заглушка для меню (просто перезапускает главное меню)
+# ========== ВСПОМОГАТЕЛЬНЫЕ ОБРАБОТЧИКИ КНОПОК ==========
+import functools
+from typing import Callable, Dict
+
+def safe_callback(func: Callable):
+    """Декоратор, который логирует ошибки callback-запросов, не вызывая answer."""
+    @functools.wraps(func)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        try:
+            return await func(update, context)
+        except Exception as e:
+            logger.error(f"Callback error in {func.__name__}: {e}", exc_info=True)
+            try:
+                await update.callback_query.answer(f"❌ Ошибка: {e}", show_alert=True)
+            except Exception:
+                pass
+    return wrapper
+
+@safe_callback
 async def menu_handler(update, context):
     query = update.callback_query
     await query.answer()
@@ -4134,7 +4151,7 @@ async def menu_handler(update, context):
     except Exception:
         await query.message.reply_text(menu_text, reply_markup=kb, parse_mode='HTML')
 
-# Питомец (заглушка)
+@safe_callback
 async def pet_preview_handler(update, context):
     query = update.callback_query
     await query.answer()
@@ -4143,12 +4160,12 @@ async def pet_preview_handler(update, context):
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
     )
 
-# Куст (заглушка)
+@safe_callback
 async def bush_preview_handler(update, context):
     query = update.callback_query
     await query.answer("❌ Доступно с ранга ⚔️ Ветеран (5000 OAC 🍬)", show_alert=True)
 
-# Активация нового игрока (старый activate_menu)
+@safe_callback
 async def activate_menu_handler(update, context):
     query = update.callback_query
     await query.answer()
@@ -4176,7 +4193,7 @@ async def activate_menu_handler(update, context):
     ])
     await query.message.edit_text(bonus + welcome, reply_markup=guild_kb, parse_mode='HTML')
 
-# Меню скинов
+@safe_callback
 async def skins_menu_handler(update, context):
     query = update.callback_query
     await query.answer()
@@ -4191,7 +4208,7 @@ async def skins_menu_handler(update, context):
         parse_mode='HTML'
     )
 
-# Показывает список титулов для выбора
+@safe_callback
 async def choose_title_handler(update, context):
     query = update.callback_query
     await query.answer()
@@ -4216,7 +4233,7 @@ async def choose_title_handler(update, context):
         parse_mode='HTML'
     )
 
-# Показывает список фонов
+@safe_callback
 async def choose_bg_handler(update, context):
     query = update.callback_query
     await query.answer()
@@ -4241,8 +4258,8 @@ async def choose_bg_handler(update, context):
         parse_mode='HTML'
     )
 
-# Установка титула (через атомарную операцию)
-async def handle_set_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
+@safe_callback
+async def handle_set_title(update, context):
     query = update.callback_query
     await query.answer()
     uid = query.from_user.id
@@ -4258,14 +4275,11 @@ async def handle_set_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if result is None:
         await query.answer("Профиль не найден", show_alert=True)
         return
-    await context.bot.send_message(
-        chat_id=query.message.chat.id,
-        text=f"✨ Титул «{new_title}» активирован!"
-    )
+    await context.bot.send_message(chat_id=query.message.chat.id, text=f"✨ Титул «{new_title}» активирован!")
     await skins_menu_handler(update, context)
 
-# Установка фона
-async def handle_set_bg(update: Update, context: ContextTypes.DEFAULT_TYPE):
+@safe_callback
+async def handle_set_bg(update, context):
     query = update.callback_query
     await query.answer()
     uid = query.from_user.id
@@ -4281,13 +4295,10 @@ async def handle_set_bg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if result is None:
         await query.answer("Профиль не найден", show_alert=True)
         return
-    await context.bot.send_message(
-        chat_id=query.message.chat.id,
-        text=f"✨ Фон «{new_bg}» активирован!"
-    )
+    await context.bot.send_message(chat_id=query.message.chat.id, text=f"✨ Фон «{new_bg}» активирован!")
     await skins_menu_handler(update, context)
 
-# Обработчик деталей бланта (если у тебя ещё нет отдельной функции)
+@safe_callback
 async def blunt_details_handler(update, context):
     query = update.callback_query
     await query.answer()
@@ -4338,7 +4349,7 @@ async def blunt_details_handler(update, context):
     else:
         await query.message.edit_text(text=text, reply_markup=kb, parse_mode='HTML')
 
-# Поделиться блантом
+@safe_callback
 async def share_blunt_handler(update, context):
     query = update.callback_query
     await query.answer()
@@ -4366,14 +4377,67 @@ async def share_blunt_handler(update, context):
         )
     else:
         text = f"Блант не найден.\n{ref_link}"
-    await context.bot.send_message(
-        chat_id=query.message.chat.id,
-        text=text,
+    await context.bot.send_message(chat_id=query.message.chat.id, text=text, parse_mode='HTML')
+
+@safe_callback
+async def shrine_donate_handler(update, context):
+    query = update.callback_query
+    await query.answer()
+    amount = 100 if query.data == "shrine_donate_100" else 500
+    uid = query.from_user.id
+    player = await PlayerRepository.get_by_id(uid)
+    if player.balance < amount:
+        await query.answer("Недостаточно OAC.", show_alert=True)
+        return
+    player.balance -= amount
+    player.donated = (player.donated or 0) + amount
+    await PlayerRepository.save(player)
+    await send_whisper_dm(update, context, f"💎 Ты внёс {amount} OAC в Храм. Спасибо, Странник!")
+
+@safe_callback
+async def guild_join_handler(update, context):
+    query = update.callback_query
+    await query.answer()
+    guild = "BLACK" if query.data == "guild_join_BLACK" else "WHITE"
+    uid = query.from_user.id
+    player = await PlayerRepository.get_by_id(uid)
+    player.guild = guild
+    await PlayerRepository.save(player)
+    g_emoji = "🕯️" if guild == "BLACK" else "⚜️"
+    g_name = "Тёмная" if guild == "BLACK" else "Светлая"
+    uname = html.escape(query.from_user.username or query.from_user.first_name)
+    await query.message.edit_text(
+        f"<b><i>🕋 ГИЛЬДИЯ ТЕБЯ ПРИНЯЛА</i></b>\n\n"
+        f"✅ Теперь <b>ты</b> — {g_emoji} <b>{g_name} Гильдия</b> ·\n\n"
+        f"<i>🩸 Искажение стало плотнее...</i>",
         parse_mode='HTML'
     )
 
-# ========== СЛОВАРЬ КОЛБЭКОВ ==========
-CALLBACKS = {
+@safe_callback
+async def luck_wheel_handler(update, context):
+    await luck_callback(update, context, action="luck_wheel")
+
+@safe_callback
+async def luck_berserk_handler(update, context):
+    await luck_callback(update, context, action="luck_berserk")
+
+@safe_callback
+async def alchemy_start_handler(update, context):
+    await luck_callback(update, context, action="alchemy_start")
+
+@safe_callback
+async def alchemy_confirm_handler(update, context):
+    await luck_callback(update, context, action="alchemy_confirm")
+
+@safe_callback
+async def cancel_gift_handler(update, context):
+    query = update.callback_query
+    await query.answer()
+    context.user_data.pop("gifting_blunt_id", None)
+    await profile_callback(update, context)
+
+# ========== СЛОВАРЬ ПРОСТЫХ КОЛБЭКОВ ==========
+CALLBACKS: Dict[str, Callable] = {
     "menu": menu_handler,
     "farm": farm_callback,
     "craft": craft_callback,
@@ -4407,10 +4471,26 @@ CALLBACKS = {
     "skins_menu": skins_menu_handler,
     "choose_title": choose_title_handler,
     "choose_bg": choose_bg_handler,
+    "shrine_donate_100": shrine_donate_handler,
+    "shrine_donate_500": shrine_donate_handler,
+    "guild_join_BLACK": guild_join_handler,
+    "guild_join_WHITE": guild_join_handler,
+    "cancel_gift": cancel_gift_handler,
 }
 
-# ========== ОБРАБОТЧИКИ ДЛЯ КОЛБЭКОВ С ПРЕФИКСАМИ ==========
-PREFIX_HANDLERS = {
+# ========== ТОЧНЫЕ КОЛБЭКИ (без префиксов) ==========
+EXACT_HANDLERS: Dict[str, Callable] = {
+    "lab_special": handle_lab_option,
+    "lab_focus_use": handle_lab_option,
+    "lab_escape": handle_lab_option,
+    "luck_wheel": luck_wheel_handler,
+    "luck_berserk": luck_berserk_handler,
+    "alchemy_start": alchemy_start_handler,
+    "alchemy_confirm": alchemy_confirm_handler,
+}
+
+# ========== ПРЕФИКСНЫЕ КОЛБЭКИ ==========
+PREFIX_HANDLERS: Dict[str, Callable] = {
     "ach_page_": achievements_callback,
     "blunts_page_": my_blunts_callback,
     "blunt_details_": blunt_details_handler,
@@ -4419,291 +4499,35 @@ PREFIX_HANDLERS = {
     "set_title_": handle_set_title,
     "set_bg_": handle_set_bg,
     "lab_attack_": handle_lab_option,
-    "lab_special": handle_lab_option,
-    "lab_focus_use": handle_lab_option,
-    "lab_escape": handle_lab_option,
-    # можно добавить luck_wheel / luck_berserk / alchemy_start / alchemy_confirm
-    "luck_wheel": lambda u, c: luck_callback(u, c, action="luck_wheel"),
-    "luck_berserk": lambda u, c: luck_callback(u, c, action="luck_berserk"),
-    "alchemy_start": lambda u, c: luck_callback(u, c, action="alchemy_start"),
-    "alchemy_confirm": lambda u, c: luck_callback(u, c, action="alchemy_confirm"),
 }
 
-# ========== НОВЫЙ button_handler ==========
+# ========== ЕДИНСТВЕННЫЙ button_handler ==========
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     data = q.data
-    uid = q.from_user.id
-
     try:
-        # 1. Проверяем префиксы
+        # 1. Точные колбэки
+        if data in EXACT_HANDLERS:
+            await EXACT_HANDLERS[data](update, context)
+            return
+
+        # 2. Префиксные колбэки с параметрами
         for prefix, handler in PREFIX_HANDLERS.items():
             if data.startswith(prefix):
-                await handler(update, context)
+                # Извлекаем page для пагинации
+                if prefix in ("ach_page_", "blunts_page_"):
+                    page = int(data.split("_")[-1])
+                    await handler(update, context, page=page)
+                else:
+                    await handler(update, context)
                 return
 
-        # 2. Ищем простой колбэк
+        # 3. Простые колбэки
         handler = CALLBACKS.get(data)
         if handler:
             await handler(update, context)
         else:
             await q.answer("Неизвестная команда.")
-    except Exception as e:
-        logger.error(f"Button error: {e}", exc_info=True)
-        await q.answer(f"❌ Ошибка: {e}", show_alert=True)
-
-# ========== ОБРАБОТЧИК КНОПОК (СЕНЬОРСКИЙ) ==========
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    data = q.data
-    uid = q.from_user.id
-    try:
-        # 1. Обработка специальных кнопок со своими параметрами
-        if data == "menu":
-            await q.answer()
-            kb, whisper = await get_main_menu_keyboard(uid)
-            menu_text = f"<b>🎮 ГЛАВНОЕ МЕНЮ</b>\n\n<i>{whisper}</i>"
-            try:
-                await q.message.edit_text(menu_text, reply_markup=kb, parse_mode='HTML')
-            except Exception:
-                await q.message.reply_text(menu_text, reply_markup=kb, parse_mode='HTML')
-            return
-
-        if data == "bush_preview" or data == "pet_preview":
-            await q.answer("❌ Доступно с ранга ⚔️ Ветеран (5000 OAC 🍬)", show_alert=True)
-            return
-
-        if data == "activate_menu":
-            await q.answer()
-            user = q.from_user
-            uname = user.username or user.first_name
-            player = await PlayerRepository.get_by_id(uid)
-            if not player or not player.user_id:
-                player = Player(user_id=uid, username=uname, balance=800)
-                new_name = random.choice(["Крик Бездны","Пепел Короля","Шёпот Склепа"])
-                await create_named_blunt(uid, new_name)
-                await PlayerRepository.save(player)
-                bonus = "🎁 Смотритель дарует тебе <code>800</code> 🍬 и твой первый именной блант!\n\n"
-            else:
-                bonus = ""
-            welcome = (
-                "<b><i>🎉 Добро пожаловать в Гильдию Antysocialshop!</i></b>\n\n"
-                "🕯️ <b>Тёмная Гильдия</b> — стабильность, ритуалы, тёмное благословение.\n"
-                "⚜️ <b>Светлая Гильдия</b> — азарт, удача, танец на лезвии.\n\n"
-                "▸ <i>Выбери свой путь:</i>"
-            )
-            guild_kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🕯️ Тёмная Гильдия", callback_data="guild_join_BLACK"),
-                 InlineKeyboardButton("⚜️ Светлая Гильдия", callback_data="guild_join_WHITE")]
-            ])
-            await q.message.edit_text(bonus + welcome, reply_markup=guild_kb, parse_mode='HTML')
-            return
-
-        if data == "skins_menu":
-            await q.answer()
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("💬 Выбрать титул", callback_data="choose_title")],
-                [InlineKeyboardButton("🖼️ Выбрать фон", callback_data="choose_bg")],
-                [InlineKeyboardButton("🔙 Назад", callback_data="profile")]
-            ])
-            await q.message.edit_text("<b>🎨 СКИНЫ</b>\n\nВыбери, что хочешь изменить.", reply_markup=kb, parse_mode='HTML')
-            return
-
-        if data == "choose_title":
-            await q.answer()
-            player = await PlayerRepository.get_by_id(uid)
-            titles = (player.titles or "").split()
-            if not titles:
-                await send_whisper_dm(update, context, "У тебя пока нет титулов.")
-                return
-            skins = player.profile_skins or {}
-            active_title = skins.get("active_title", "")
-            kb_rows = []
-            for title in titles:
-                mark = " ✅" if title == active_title else ""
-                kb_rows.append([InlineKeyboardButton(f"{title}{mark}", callback_data=f"set_title_{title}")])
-            kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="skins_menu")])
-            await q.message.edit_text(
-                "<b>🎨 ВЫБОР ТИТУЛА</b>\n\nВыбери титул:",
-                reply_markup=InlineKeyboardMarkup(kb_rows),
-                parse_mode='HTML'
-            )
-            return
-
-        if data == "choose_bg":
-            await q.answer()
-            player = await PlayerRepository.get_by_id(uid)
-            skins = player.profile_skins or {}
-            unlocked = skins.get("unlocked_backgrounds", [])
-            if not unlocked:
-                await send_whisper_dm(update, context, "У тебя пока нет разблокированных фонов.")
-                return
-            active_bg = skins.get("active_background", "")
-            kb_rows = []
-            for bg in unlocked:
-                mark = " ✅" if bg == active_bg else ""
-                kb_rows.append([InlineKeyboardButton(f"{bg}{mark}", callback_data=f"set_bg_{bg}")])
-            kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="skins_menu")])
-            await q.message.edit_text(
-                "<b>🖼️ ВЫБОР ФОНА</b>\n\nВыбери фон:",
-                reply_markup=InlineKeyboardMarkup(kb_rows),
-                parse_mode='HTML'
-            )
-            return
-
-        # 2. Обработчики с параметрами (пагинация, колбэки с префиксами)
-        if data.startswith("ach_page_"):
-            page = int(data.split("_")[-1])
-            await achievements_callback(update, context, page=page)
-            return
-
-        if data.startswith("blunts_page_"):
-            page = int(data.split("_")[-1])
-            await my_blunts_callback(update, context, page=page)
-            return
-
-        if data.startswith("share_blunt_"):
-            await q.answer()
-            blunt_id = data.replace("share_blunt_", "")
-            player = await PlayerRepository.get_by_id(uid)
-            if not player:
-                return
-            bot_username = (await context.bot.get_me()).username
-            ref_link = f"https://t.me/{bot_username}?start=blunt_{blunt_id}"
-            inv = player.inventory or []
-            item = next((it for it in inv if it.get("id") == blunt_id), None)
-            username = html.escape(player.username)
-            if item:
-                name = item["name"]
-                rarity = item.get("rarity", "common")
-                color = {"legendary": "🟡", "epic": "🟣", "rare": "🔵"}.get(rarity, "🟢")
-                text = (
-                    f"<b>{username}</b>\n\n"
-                    f"{color} <b>Имя NFT бланта: «{name}»</b>\n"
-                    f"🧬 <b>Редкость:</b> {rarity} {color}\n"
-                    f"🩸 <b>Серийный номер:</b> #{item.get('rare_number', '?-????')}\n"
-                    f"📜 <b>Реакция:</b> <i>{item.get('reaction', '')}</i>\n\n"
-                    f"<i>Присоединяйся к Искажению:</i>\n{ref_link}"
-                )
-            else:
-                text = f"Блант не найден.\n{ref_link}"
-            await send_whisper_dm(update, context, text)
-            return
-
-        if data.startswith("gift_blunt_"):
-            await gift_blunt_start(update, context)
-            return
-
-        if data == "cancel_gift":
-            await cancel_gift(update, context)
-            return
-
-        if data.startswith("blunt_details_"):
-            await q.answer()
-            blunt_id = data.replace("blunt_details_", "")
-            player = await PlayerRepository.get_by_id(uid)
-            if not player:
-                return
-            inv = player.inventory or []
-            item = next((it for it in inv if it.get("id") == blunt_id), None)
-            if not item:
-                await q.answer("Блант не найден.")
-                return
-            name = item["name"]
-            rarity = item.get("rarity", "common")
-            color = {"legendary": "🟡", "epic": "🟣", "rare": "🔵"}.get(rarity, "🟢")
-            rare_number = item.get("rare_number", "?-????")
-            hash_code = item.get("hash", "0x????...????")
-            reaction = item.get("reaction", "")
-            text = (
-                f"<b>💎 ДЕТАЛИ NFT БЛАНТА</b>\n\n"
-                f"{color} <b>«{name}»</b>\n"
-                f"<b>Редкость:</b> <i>{rarity}</i> {color}\n\n"
-                f"🩸 <b>Серийный номер:</b> <i>#{rare_number}</i>\n\n"
-                f"🔗 <b>Хеш:</b> <i>{hash_code}</i>\n\n"
-                f"📜 <b>Реакция:</b> <i>{reaction}</i>\n\n"
-            )
-            if "owner_history" in item:
-                text += "🕊️ <b>История владения:</b>\n"
-                for entry in item["owner_history"]:
-                    date_str = format_date(entry.get('since', ''))
-                    text += f"   <b>@{entry.get('user_id', '?')}</b> — {date_str}\n"
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔗 Поделиться", callback_data=f"share_blunt_{blunt_id}"),
-                 InlineKeyboardButton("🎁 Подарить", callback_data=f"gift_blunt_{blunt_id}")],
-                [InlineKeyboardButton("🏆 К списку", callback_data="my_blunts")]
-            ])
-            file_id = BLUNT_IMAGES.get(rarity)
-            if file_id:
-                await q.message.delete()
-                await context.bot.send_photo(
-                    chat_id=q.message.chat.id,
-                    photo=file_id,
-                    caption=text,
-                    reply_markup=kb,
-                    parse_mode='HTML'
-                )
-            else:
-                await q.message.edit_text(text=text, reply_markup=kb, parse_mode='HTML')
-            return
-
-        if data.startswith("lab_option_"):
-            await handle_lab_option(update, context, int(data.split("_")[-1]))
-            return
-
-        if data in ("shrine_donate_100", "shrine_donate_500"):
-            amount = 100 if data == "shrine_donate_100" else 500
-            player = await PlayerRepository.get_by_id(uid)
-            if player.balance < amount:
-                await q.answer("Недостаточно OAC.")
-                return
-            player.balance -= amount
-            player.donated = (player.donated or 0) + amount
-            await PlayerRepository.save(player)
-            await send_whisper_dm(update, context, f"💎 Ты внёс {amount} OAC в Храм. Спасибо, Странник!")
-            return
-
-        if data in ("guild_join_BLACK", "guild_join_WHITE"):
-            await q.answer()
-            guild = "BLACK" if data == "guild_join_BLACK" else "WHITE"
-            player = await PlayerRepository.get_by_id(uid)
-            player.guild = guild
-            await PlayerRepository.save(player)
-            g_emoji = "🕯️" if guild == "BLACK" else "⚜️"
-            g_name = "Тёмная" if guild == "BLACK" else "Светлая"
-            uname = html.escape(q.from_user.username or q.from_user.first_name)
-            await q.message.edit_text(
-                f"<b><i>🕋 ГИЛЬДИЯ ТЕБЯ ПРИНЯЛА</i></b>\n\n"
-                f"✅ Теперь <b>ты</b> — {g_emoji} <b>{g_name} Гильдия</b> ·\n\n"
-                f"<i>🩸 Искажение стало плотнее...</i>",
-                parse_mode='HTML'
-            )
-            # Оповещение в канал (закомментировано для безопасного старта)
-            # try:
-            #     await context.bot.send_message(
-            #         chat_id="@guild_antysocial",
-            #         text=f"<b><i>🩸 ЭХО ИСКАЖЕНИЯ</i></b>\n\n"
-            #              f"⚜️ <b>@{uname}</b> вплёл свою нить в {g_emoji} <b>{g_name} Гильдию</b>💎\n"
-            #              f"<i>🕯️ Искажение приняло нового странника. 🌿</i>",
-            #         parse_mode='HTML'
-            #     )
-            # except Exception as e:
-            #     logger.error(f"Ошибка отправки в канал: {e}")
-            return
-
-        # 3. Простые колбэки из словаря
-        if data in ("luck_wheel", "luck_berserk", "alchemy_start", "alchemy_confirm"):
-            await q.answer()
-            await luck_callback(update, context, action=data)
-            return
-
-        handler = CALLBACKS.get(data)
-        if handler:
-            await q.answer()
-            await handler(update, context)
-        else:
-            await q.answer("Неизвестная команда.")
-
     except Exception as e:
         logger.error(f"Button error: {e}", exc_info=True)
         await q.answer(f"❌ Ошибка: {e}", show_alert=True)
