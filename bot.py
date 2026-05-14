@@ -140,6 +140,7 @@ def run_web_server():
     web_app.run(host="0.0.0.0", port=port)
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+logging.getLogger("telegram").setLevel(logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 TOKEN = os.getenv("TOKEN")
