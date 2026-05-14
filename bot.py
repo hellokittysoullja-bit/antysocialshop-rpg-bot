@@ -11,7 +11,7 @@ from telegram.ext import (
     Application, CallbackQueryHandler,
     ContextTypes, MessageHandler, filters
 )
-from telegram.error import BadRequest
+from telegram.error import BadRequest, Forbidden
 
 from telegram.ext import AIORateLimiter
 
