@@ -1722,7 +1722,7 @@ async def _check_achievements(user_id: int, context) -> None:
 async def grant_title(user_id, emoji, name, context):
     await add_title(user_id, emoji)
 
-# Продолжение # Фарм + анимация
+#===•===****=====ФАРМ ОАС=====*****=====
 @error_handler
 @rate_limit(3)
 async def farm_callback(update, context):
@@ -1758,8 +1758,8 @@ async def farm_callback(update, context):
         player.last_farm = now
         player.last_farm_date = date.today()
 
-        # Военный счёт
-        await add_war_score(uid, earned + medal_bonus, conn=conn)
+        war_service = context.bot_data["war_service"]
+        await war_service.add_score_raw(uid, earned + medal_bonus, conn)
 
         return ("ok", earned, crit, happy, medal_text, new_count, player.balance)
 
@@ -1810,7 +1810,7 @@ async def farm_callback(update, context):
     await check_rank_up(context, uid, uname, player.balance - earned - medal_bonus, new_balance)
     await check_achievements(uid, context)
     
-# Крафт
+# ===========*****==========Крафт
 @error_handler
 @rate_limit(2)
 async def craft_callback(update, context):
@@ -1857,6 +1857,7 @@ async def craft_callback(update, context):
     kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="menu")])
     await edit_or_reply(update, context, text, reply_markup=InlineKeyboardMarkup(kb_rows))
 
+#   КРАФТ БЛАНТОВ НОРМАЛ =====****======
 @error_handler
 async def handle_craft_normal(update, context):
     query = update.callback_query
@@ -1876,25 +1877,19 @@ async def handle_craft_normal(update, context):
         player.blunts += 1
         player.craft_count = new_count
 
-        # бонусный блант (5%)
-        bonus = 0
         if random.random() < 0.05:
-            bonus = 1
             player.blunts += 1
 
         player.balance += medal_bonus
 
-        # военный счёт
-        await add_war_score(conn, uid, earned + medal_bonus)
+        war_service = context.bot_data["war_service"]
+        await war_service.add_score(uid, WarAction.CRAFT, conn)
 
         return ("ok", medal_text, new_count, player.blunts, player.balance)
 
     result = await PlayerRepository.atomic_update(uid, _craft)
     if result is None:
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="Сначала активируйся: /start"
-        )
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="Сначала активируйся: /start")
         return
 
     status, *data = result
@@ -1929,6 +1924,7 @@ async def handle_craft_normal(update, context):
 
     await check_achievements(uid, context)
 
+# ИМЕННЫЕ БЛАНОЫ КРАФТ =============*********==========***********
 @error_handler
 async def handle_craft_named(update, context):
     query = update.callback_query
@@ -1982,7 +1978,8 @@ async def handle_named_name(update, context):
             return
 
         item = data
-        await add_war_score(uid, 25)
+        war_service = context.bot_data["war_service"]
+        await war_service.add_score(uid, WarAction.NAMED_CRAFT)
 
         blunt_id = item["id"]
         name_escaped = html.escape(name)
@@ -2014,7 +2011,7 @@ async def handle_named_name(update, context):
         else:
             await update.message.reply_text(caption, reply_markup=kb, parse_mode='HTML')
 
-        # Оповещение в канал (закомментировано для безопасного старта)
+        # ── Оповещение в канал ── (закомментировано)
         # try:
         #     await context.bot.send_message(
         #         chat_id="@guild_antysocial",
@@ -2052,20 +2049,8 @@ async def handle_use_dust(update, context):
         p.m_essence -= 1
         name = random.choice(["Крик Бездны","Пепел Короля","Шёпот Склепа","Коготь Хаоса","Вздох Пожирателя"])
         item = await create_named_blunt(uid, name, rarity="legendary", conn=conn)
-        try:
-            war = await conn.fetchrow("SELECT war_active FROM guild_weekly WHERE war_active = TRUE LIMIT 1")
-            if war:
-                guild_row = await conn.fetchrow("SELECT guild FROM players WHERE user_id = $1", uid)
-                guild = guild_row["guild"] if guild_row else None
-                if guild in ("BLACK", "WHITE"):
-                    await conn.execute(
-                        "INSERT INTO guild_weekly (guild, week_start, total_farmed) "
-                        "VALUES ($1, CURRENT_DATE, $2) ON CONFLICT (guild) DO UPDATE SET "
-                        "total_farmed = guild_weekly.total_farmed + $2",
-                        guild, 50
-                    )
-        except Exception:
-            pass
+        war_service = context.bot_data["war_service"]
+        await war_service.add_score(uid, WarAction.DUST_USE, conn)
         return item, name
 
     result = await PlayerRepository.atomic_update(uid, _use_dust)
@@ -2084,7 +2069,7 @@ async def handle_use_dust(update, context):
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
     await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
 
-    # Оповещение в канал (закомментировано для безопасного старта)
+    # ── Оповещение в канал ── (закомментировано)
     # try:
     #     await context.bot.send_message(chat_id="@guild_antysocial",
     #         text=f"<b><i>⚜️ ЭХО ИСКАЖЕНИЯ 🩸</i></b>\n\n🎉 <b>@{html.escape(player.username)}</b> использовал 💠 Пыль и получил легендарный Блант <b><i>«{name}»💍</i></b>!",
@@ -2117,98 +2102,61 @@ async def cancel_named(update, context):
     
 # ===== ФУНКЦИЯ ПЕРЕДАЧИ БЛАНТА (АТОМАРНАЯ, БЕЗОПАСНАЯ) =====
 class TransferError(Exception):
-    """Общая ошибка передачи."""
     pass
-
 class BluntNotFound(TransferError):
-    """Блант не найден в инвентаре отправителя."""
     pass
-
 class SameUserError(TransferError):
-    """Попытка передать блант самому себе."""
     pass
 
 async def transfer_blunt(sender_id: int, receiver_id: int, blunt_id: str) -> None:
-    """
-    Атомарная передача именного бланта с блокировкой строк.
-    Гарантирует, что блант либо полностью переместится, либо останется у отправителя.
-    """
     if sender_id == receiver_id:
         raise SameUserError("Нельзя передать блант самому себе")
-
     try:
         async with db_pool.acquire() as conn:
             async with conn.transaction():
-                # Блокируем строки обоих игроков в этой же транзакции
-                sender_row = await conn.fetchrow(
-                    "SELECT * FROM players WHERE user_id = $1 FOR UPDATE", sender_id
-                )
-                receiver_row = await conn.fetchrow(
-                    "SELECT * FROM players WHERE user_id = $1 FOR UPDATE", receiver_id
-                )
-
+                sender_row = await conn.fetchrow("SELECT * FROM players WHERE user_id = $1 FOR UPDATE", sender_id)
+                receiver_row = await conn.fetchrow("SELECT * FROM players WHERE user_id = $1 FOR UPDATE", receiver_id)
                 if not sender_row or not receiver_row:
                     raise TransferError("Игрок не найден")
-
-                # Строим модели
                 sender = Player(**dict(sender_row))
                 receiver = Player(**dict(receiver_row))
-
-                # Парсим инвентари (JSONB)
                 sender.inventory = _json_safe_load(sender.inventory, [])
                 receiver.inventory = _json_safe_load(receiver.inventory, [])
-
-                # Проверки на повреждённые данные
                 if not isinstance(sender.inventory, list):
-                    raise TransferError("Инвентарь отправителя повреждён или отсутствует")
+                    raise TransferError("Инвентарь отправителя повреждён")
                 if not isinstance(receiver.inventory, list):
                     receiver.inventory = []
-
-                # Ищем блант у отправителя
                 item = None
                 for it in sender.inventory:
                     if it.get("id") == blunt_id and it.get("type") == "named":
                         item = it
                         break
                 if not item:
-                    raise BluntNotFound("Блант не найден или не является именным блантом")
-
-                # Удаляем у отправителя
+                    raise BluntNotFound("Блант не найден или не является именным")
                 initial_len = len(sender.inventory)
                 sender.inventory.remove(item)
                 if len(sender.inventory) == initial_len:
-                    raise TransferError("Не удалось удалить предмет из инвентаря отправителя")
-
-                # Проверка на дубликат (на всякий случай)
+                    raise TransferError("Не удалось удалить предмет")
                 if any(it.get("id") == blunt_id for it in sender.inventory):
-                    raise TransferError("Обнаружен дубликат бланта в инвентаре (данные повреждены)")
-
-                # Обновляем историю владения
+                    raise TransferError("Обнаружен дубликат бланта")
                 if "owner_history" not in item:
                     item["owner_history"] = []
                 item["owner_history"].append({
                     "user_id": str(receiver_id),
-                    "since": datetime.now(timezone.utc).isoformat()
+                    "since": datetime.utcnow().isoformat()
                 })
-
-                # Добавляем получателю
                 receiver.inventory.append(item)
-
-                # Сохраняем обоих (передаём conn, чтобы остаться в транзакции)
                 await PlayerRepository.save(sender, conn=conn)
                 await PlayerRepository.save(receiver, conn=conn)
-
                 logger.info(f"Blunt {blunt_id} передан от {sender_id} к {receiver_id}")
-
     except TransferError:
-        raise  # пробрасываем наши специфичные ошибки
+        raise
     except Exception as e:
         logger.exception("Неожиданная ошибка при передаче бланта")
         raise TransferError("Внутренняя ошибка передачи") from e
 
 # ===== НОВЫЕ ФУНКЦИИ ДЛЯ ОБМЕНА БЛАНТАМИ =====
 async def gift_blunt_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Начало процесса дарения – запрос получателя."""
     query = update.callback_query
     await query.answer()
     blunt_id = query.data.replace("gift_blunt_", "")
@@ -2222,6 +2170,46 @@ async def gift_blunt_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("❌ Отмена", callback_data="cancel_gift")
         ]])
     )
+
+async def cancel_gift(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    context.user_data.pop("gifting_blunt_id", None)
+    await profile_callback(update, context)
+
+async def handle_gift_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if "gifting_blunt_id" not in context.user_data:
+        return
+    text = update.message.text.strip()
+    receiver_id = None
+    if text.isdigit():
+        receiver_id = int(text)
+    elif text.startswith("@"):
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT user_id FROM players WHERE LOWER(username) = LOWER($1)", text.lstrip("@")
+            )
+            if row:
+                receiver_id = row["user_id"]
+    if not receiver_id:
+        await update.message.reply_text("❌ Игрок не найден.")
+        return
+    if receiver_id == update.effective_user.id:
+        await update.message.reply_text("❌ Нельзя подарить блант самому себе.")
+        return
+    blunt_id = context.user_data.pop("gifting_blunt_id")
+    try:
+        await transfer_blunt(update.effective_user.id, receiver_id, blunt_id)
+        await update.message.reply_text("✅ Блант успешно подарен! 🎁")
+        try:
+            await context.bot.send_message(chat_id=receiver_id, text="🎁 Вам подарили именной блант! Проверьте инвентарь.")
+        except Exception:
+            pass
+    except ValueError as e:
+        await update.message.reply_text(f"❌ Ошибка: {e}")
+    except Exception as e:
+        logger.error(f"Gift error: {e}")
+        await update.message.reply_text("⚠️ Внутренняя ошибка. Попробуй позже.")
 
 async def cancel_gift(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Отмена дарения."""
@@ -2510,7 +2498,7 @@ async def ritual_callback(update, context):
 
     await check_achievements(uid, context)
 
-# Куст (с защитой от None)
+# КУСТИК (с защитой от None)
 @error_handler
 async def collect_callback(update, context):
     user, msg = get_user_and_msg(update)
@@ -2534,14 +2522,10 @@ async def collect_callback(update, context):
             return ("not_ready",)
         player.balance += earned
         player.passive_collected = now
-        guild_row = await conn.fetchrow("SELECT guild FROM players WHERE user_id = $1", uid)
-        if guild_row and guild_row["guild"] in ("BLACK", "WHITE"):
-            await conn.execute(
-                "INSERT INTO guild_weekly (guild, week_start, total_farmed) "
-                "VALUES ($1, CURRENT_DATE, $2) ON CONFLICT (guild) DO UPDATE SET "
-                "total_farmed = guild_weekly.total_farmed + $2",
-                guild_row["guild"], earned
-            )
+
+        war_service = context.bot_data["war_service"]
+        await war_service.add_score_raw(uid, earned, conn)
+
         return ("ok", earned, player.balance)
 
     result = await PlayerRepository.atomic_update(uid, _collect)
@@ -4797,13 +4781,19 @@ if __name__ == "__main__":
     loop.run_until_complete(init_db_pool())
     Thread(target=run_web_server, daemon=True).start()
 
-    # ===== СОЗДАНИЕ ПРИЛОЖЕНИЯ С ЛИМИТЕРОМ =====
+    # ===== СОЗДАНИЕ ПРИЛОЖЕНИЯ С ЛИМИТЕРОМ =====****========
     app = (Application.builder()
            .token(TOKEN)
            .rate_limiter(AIORateLimiter())
            .build())
 
-    # ===== ИНИЦИАЛИЗАЦИЯ SENTRY =====
+    # ИНИЦАЛИЗАЦИЯ СЕРВИСА ВОЙНЫ ========******======
+    war_settings = WarSettings()
+    war_config = WarConfig()
+    war_service = GuildWarService(db_pool, redis_client=redis, config=war_config, settings=war_settings)
+    app.bot_data["war_service"] = war_service
+
+    # ===== ИНИЦИАЛИЗАЦИЯ SENTRY =====****•==•••••••
     import sentry_sdk
     SENTRY_DSN = os.getenv("SENTRY_DSN")
     if SENTRY_DSN:
