@@ -16,7 +16,6 @@ from telegram.error import BadRequest, Forbidden
 
 from telegram.ext import AIORateLimiter
 
-from pydantic import BaseModel, Field, ConfigDict   # <-- ConfigDict для Pydantic V2
 from typing import Optional, List, Any, Dict, NamedTuple
 
 from tenacity import (
@@ -69,12 +68,13 @@ class WarConfig(BaseModel):
 
 
 # ── Настройки окружения ──
-class WarSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="WAR_")
-    cache_ttl: int = 60
-    retry_max: int = 3
-    retry_wait_sec: float = 0.5
-    redis_url: str = "redis://localhost"
+class WarSettings:
+    """Настройки войны, читаемые из переменных окружения с префиксом WAR_."""
+    def __init__(self):
+        self.cache_ttl = int(os.getenv("WAR_CACHE_TTL", "60"))
+        self.retry_max = int(os.getenv("WAR_RETRY_MAX", "3"))
+        self.retry_wait_sec = float(os.getenv("WAR_RETRY_WAIT_SEC", "0.5"))
+        self.redis_url = os.getenv("WAR_REDIS_URL", "redis://localhost")
 
 
 # ── Сервис войны ──
