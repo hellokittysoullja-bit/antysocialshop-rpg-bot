@@ -66,16 +66,13 @@ class WarConfig(BaseModel):
         WarAction.DAILY: 0,
     })
 
-
 # ── Настройки окружения ──
 class WarSettings:
-    """Настройки войны, читаемые из переменных окружения с префиксом WAR_."""
     def __init__(self):
         self.cache_ttl = int(os.getenv("WAR_CACHE_TTL", "60"))
         self.retry_max = int(os.getenv("WAR_RETRY_MAX", "3"))
         self.retry_wait_sec = float(os.getenv("WAR_RETRY_WAIT_SEC", "0.5"))
         self.redis_url = os.getenv("WAR_REDIS_URL", "redis://localhost")
-
 
 # ── Сервис войны ──
 class GuildWarService:
@@ -1287,13 +1284,11 @@ async def safe_edit(message, text, **kwargs):
 #короче тут у нас этот ёбаный эдит
 
 async def edit_or_reply(update, context, text, reply_markup=None, parse_mode='HTML', disable_web_page_preview=True):
-    safe_text = html.escape(text, quote=False) if parse_mode == 'HTML' else text
     chat_id = update.effective_chat.id
     message = update.callback_query.message if update.callback_query else update.message
-
     try:
         if message and message.text:
-            await safe_edit(message, safe_text, reply_markup=reply_markup,
+            await safe_edit(message, text, reply_markup=reply_markup,
                             parse_mode=parse_mode, disable_web_page_preview=disable_web_page_preview)
         else:
             raise BadRequest("no text to edit")
@@ -1303,14 +1298,14 @@ async def edit_or_reply(update, context, text, reply_markup=None, parse_mode='HT
             return
         logger.warning("edit_or_reply fallback to safe_send: %s", e, extra={"chat_id": chat_id})
         try:
-            await safe_send(context, chat_id, safe_text, reply_markup=reply_markup,
+            await safe_send(context, chat_id, text, reply_markup=reply_markup,
                             parse_mode=parse_mode, disable_web_page_preview=disable_web_page_preview)
         except Exception as send_error:
             logger.error("safe_send also failed: %s", send_error, exc_info=True)
     except Exception as e:
         logger.exception("Unexpected error in edit_or_reply")
         try:
-            await safe_send(context, chat_id, safe_text)
+            await safe_send(context, chat_id, text)
         except Exception:
             pass
 
