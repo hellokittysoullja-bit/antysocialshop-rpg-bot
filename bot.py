@@ -3,6 +3,7 @@ import asyncio, logging, os, random, re, json, hashlib, html
 from datetime import datetime, timedelta, date, time
 from dataclasses import dataclass, field
 from threading import Thread
+import time                       # <-- нужно для throttling логов Redis
 
 import asyncpg
 from flask import Flask
@@ -15,11 +16,17 @@ from telegram.error import BadRequest, Forbidden
 
 from telegram.ext import AIORateLimiter
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict   # <-- ConfigDict для Pydantic V2
 from typing import Optional, List, Any, Dict, NamedTuple
 
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from tenacity import (
+    retry, stop_after_attempt, wait_exponential,
+    retry_if_exception_type, before_sleep_log
+)
 from telegram.error import RetryAfter
+
+import enum                     # <-- для WarAction
+from pydantic_settings import BaseSettings, SettingsConfigDict  # <-- для WarSettings
 
 class Player(BaseModel):
     user_id: int
@@ -926,30 +933,6 @@ def get_medal_text_and_reward(old_count, new_count, medals_list):
             text += f"🎉 <b>Твой ранг повышен до {medal_name}!</b> (+{reward} OAC)\n"
     return text, bonus
 
-def get_medal_progress(new_count, medals_list):
-    cur_medal = medals_list[0][1]
-    cur_th = medals_list[0][0]
-    next_th = medals_list[1][0] if len(medals_list) > 1 else None
-    next_medal = medals_list[1][1] if len(medals_list) > 1 else ""
-    for th, name, _ in medals_list:
-        if new_count >= th:
-            cur_medal = name
-            cur_th = th
-        else:
-            next_th = th
-            next_medal = name
-            break
-    max_rank = new_count >= medals_list[-1][0]
-    if max_rank:
-        goal_str = f"{cur_medal} (Максимум)"
-        progress = 100
-        bar = "▓" * 10
-    else:
-        progress = int((new_count - cur_th) / (next_th - cur_th) * 100)
-        bar = "▓" * (progress // 10) + "░" * (10 - progress // 10)
-        goal_str = f"{cur_medal} → {next_medal}"
-    return f"{bar} {progress}%\n{goal_str}"
-
 def progress_bar(percent):
     filled = int(percent / 10)
     empty = 10 - filled
@@ -985,25 +968,68 @@ def get_rank_progress(balance):
             )
     return ""
 
-async def add_war_score(conn, user_id: int, points: int):
-    """Добавляет очки войны гильдии игрока, если война активна."""
-    if not conn or points == 0:
+async def process_daily_login(user_id: int, context) -> None:
+    today = date.today()
+    player = await PlayerRepository.get_by_id(user_id)
+    if not player or not player.user_id:
         return
+
+    last = _parse_last_login_date(player.last_login_date)
+    # Быстрая проверка (без транзакции) – если точно уже заходил, выходим
+    if last == today:
+        return
+
+    streak = (player.login_streak or 0) + 1 if last and (today - last).days == 1 else 1
+    reward = _calculate_reward(streak, daily_config)
+
+    # Атомарно применяем награду с повторной проверкой даты после блокировки
+    async def _apply_daily(p, conn):
+        # ★ После блокировки строки проверяем, не изменилась ли дата
+        if isinstance(p.last_login_date, datetime):
+            p_date = p.last_login_date.date()
+        else:
+            p_date = _parse_last_login_date(p.last_login_date)
+        if p_date == today:
+            return False   # уже начислено другим запросом, выходим без изменений
+
+        p.balance += reward.total_oac
+        p.login_streak = streak
+        p.last_login_date = today
+        if reward.title:
+            current_titles = (p.titles or "").strip()
+            if reward.title not in current_titles:
+                p.titles = f"{current_titles} {reward.title}".strip()
+        # Реальные предметы (только blunts, т.к. focus/lives – это просто текст)
+        for field, qty in reward.inventory_items.items():
+            if field == "blunts":
+                p.blunts += qty
+        return True
+
+    result = await PlayerRepository.atomic_update(user_id, _apply_daily)
+    if not result:
+        # Если False или None – либо гонка, либо игрок не найден
+        if result is False:
+            logger.info("Daily login already claimed (race prevented) for user %d", user_id)
+        else:
+            logger.warning("Daily login: atomic_update returned None for user %d", user_id)
+        return
+
+    logger.info("Daily login processed", extra={
+        "user_id": user_id, "streak": streak,
+        "reward_oac": reward.total_oac, "title": reward.title,
+        "items": reward.inventory_items
+    })
+
     try:
-        war = await conn.fetchrow("SELECT war_active FROM guild_weekly WHERE war_active = TRUE LIMIT 1")
-        if not war:
-            return
-        guild_row = await conn.fetchrow("SELECT guild FROM players WHERE user_id = $1", user_id)
-        guild = guild_row["guild"] if guild_row else None
-        if guild in ("BLACK", "WHITE"):
-            await conn.execute(
-                "INSERT INTO guild_weekly (guild, week_start, total_farmed) "
-                "VALUES ($1, CURRENT_DATE, $2) ON CONFLICT (guild) DO UPDATE SET "
-                "total_farmed = guild_weekly.total_farmed + $2",
-                guild, points
-            )
+        text = _build_daily_message(streak, reward, daily_config)
+        await context.bot.send_message(chat_id=user_id, text=text, parse_mode='HTML')
     except Exception as e:
-        logger.error(f"add_war_score error: {e}")
+        logger.error("Failed to send daily login msg", extra={"user_id": user_id}, exc_info=True)
+
+    try:
+        await check_achievements(user_id, context)
+    except Exception:
+        logger.exception("Achievement check failed", extra={"user_id": user_id})
 
 async def get_main_menu_keyboard(user_id):
     whisper = random.choice(WHISPERS)
