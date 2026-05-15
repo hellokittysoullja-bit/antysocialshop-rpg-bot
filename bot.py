@@ -28,6 +28,181 @@ from telegram.error import RetryAfter
 import enum                     # <-- для WarAction
 from pydantic_settings import BaseSettings, SettingsConfigDict  # <-- для WarSettings
 
+# ── Исключения ──────────────────────────────────────────────
+class UnknownWarActionError(Exception):
+    """В конфиге отсутствует цена действия."""
+
+
+# ── Enum действий ───────────────────────────────────────────
+class WarAction(enum.Enum):
+    FARM = "farm"
+    CRAFT = "craft"
+    NAMED_CRAFT = "named_craft"
+    DUST_USE = "dust_use"
+    BERSERK_WIN = "berserk_win"
+    BERSERK_LOSE = "berserk_lose"
+    ALCHEMY = "alchemy"
+    LAB_WIN = "lab_win"
+    LAB_DEATH = "lab_death"
+    RITUAL = "ritual"
+    CONFESS = "confess"
+    DAILY = "daily"
+
+
+# ── Конфиг очков (frozen) ──
+class WarConfig(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    points: dict[WarAction, int] = Field(default_factory=lambda: {
+        WarAction.FARM: 0,
+        WarAction.CRAFT: 10,
+        WarAction.NAMED_CRAFT: 25,
+        WarAction.DUST_USE: 50,
+        WarAction.BERSERK_WIN: 200,
+        WarAction.BERSERK_LOSE: -300,
+        WarAction.ALCHEMY: 30,
+        WarAction.LAB_WIN: 80,
+        WarAction.LAB_DEATH: 0,
+        WarAction.RITUAL: 0,
+        WarAction.CONFESS: 0,
+        WarAction.DAILY: 0,
+    })
+
+
+# ── Настройки окружения ──
+class WarSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="WAR_")
+    cache_ttl: int = 60
+    retry_max: int = 3
+    retry_wait_sec: float = 0.5
+    redis_url: str = "redis://localhost"
+
+
+# ── Сервис войны ──
+class GuildWarService:
+    CACHE_KEY = "war_active"
+
+    def __init__(self, db_pool, redis_client, config: WarConfig, settings: WarSettings):
+        self.db_pool = db_pool
+        self.redis = redis_client
+        self.config = config
+        self.settings = settings
+        self.logger = logging.getLogger("war_service")
+        self._last_redis_err = 0.0
+
+        self._add_score_retry = retry(
+            stop=stop_after_attempt(self.settings.retry_max),
+            wait=wait_exponential(multiplier=1, min=self.settings.retry_wait_sec, max=5),
+            retry=retry_if_exception_type((asyncpg.exceptions.PostgresConnectionError, OSError, TimeoutError)),
+            before_sleep=before_sleep_log(self.logger, logging.WARNING),
+            reraise=True,
+        )(self._add_score_impl)
+
+    async def _get_active(self, conn):
+        row = await conn.fetchrow("SELECT is_active FROM war_state WHERE id=1")
+        return row["is_active"] if row else False
+
+    async def is_war_active(self, conn=None) -> bool:
+        try:
+            if self.redis:
+                cached = await self.redis.get(self.CACHE_KEY)
+                if cached is not None:
+                    return cached == b"1"
+        except Exception:
+            now = time.time()
+            if now - self._last_redis_err > 60:
+                self.logger.warning("Redis unavailable for war cache")
+                self._last_redis_err = now
+
+        if conn is not None:
+            active = await self._get_active(conn)
+        else:
+            async with self.db_pool.acquire() as c:
+                active = await self._get_active(c)
+
+        try:
+            if self.redis:
+                await self.redis.setex(self.CACHE_KEY, self.settings.cache_ttl,
+                                       b"1" if active else b"0")
+        except Exception:
+            pass
+        return active
+
+    async def start_war(self):
+        async with self.db_pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute("SELECT pg_advisory_xact_lock(1)")
+                await conn.execute("UPDATE war_state SET is_active = TRUE WHERE id=1")
+                week_start = datetime.now().date() - timedelta(days=datetime.now().weekday())
+                await conn.execute("DELETE FROM guild_weekly WHERE week_start < $1", week_start)
+        await self.invalidate_cache()
+        self.logger.info("War started")
+
+    async def stop_war(self):
+        async with self.db_pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute("SELECT pg_advisory_xact_lock(1)")
+                await conn.execute("UPDATE war_state SET is_active = FALSE WHERE id=1")
+        await self.invalidate_cache()
+        self.logger.info("War stopped")
+
+    async def add_score(self, user_id: int, action: WarAction, conn=None) -> None:
+        points = self.config.points.get(action)
+        if points is None:
+            raise UnknownWarActionError(f"No points defined for {action}")
+        if points == 0:
+            return
+
+        if self.redis:
+            week_start = (datetime.now().date() - timedelta(days=datetime.now().weekday())).isoformat()
+            idemp_key = f"war_score:{user_id}:{action.value}:{week_start}"
+            success = await self.redis.setnx(idemp_key, 1)
+            if success:
+                await self.redis.expire(idemp_key, 60 * 60 * 24 * 7)
+            else:
+                self.logger.debug("Duplicate war score blocked: %s", idemp_key)
+                return
+
+        await self._add_score_retry(user_id, points, action, conn)
+
+    async def add_score_raw(self, user_id: int, points: int, conn=None) -> None:
+        if points == 0:
+            return
+        await self._add_score_retry(user_id, points, None, conn)
+
+    async def _add_score_impl(self, user_id: int, points: int, action: WarAction | None, conn=None):
+        async def _execute(c):
+            row = await c.fetchrow("SELECT is_active FROM war_state WHERE id=1 FOR UPDATE")
+            if not row or not row["is_active"]:
+                return
+            guild_row = await c.fetchrow("SELECT guild FROM players WHERE user_id=$1", user_id)
+            guild = guild_row["guild"] if guild_row else None
+            if guild not in ("BLACK", "WHITE"):
+                return
+            week_start = datetime.now().date() - timedelta(days=datetime.now().weekday())
+            await c.execute(
+                "INSERT INTO guild_weekly (guild, week_start, total_score) "
+                "VALUES ($1, $2, $3) "
+                "ON CONFLICT (guild, week_start) DO UPDATE SET "
+                "total_score = guild_weekly.total_score + EXCLUDED.total_score",
+                guild, week_start, points,
+            )
+            self.logger.info("War score: user=%d action=%s guild=%s points=%d",
+                             user_id, action.value if action else "raw", guild, points)
+
+        if conn is not None:
+            await _execute(conn)
+        else:
+            async with self.db_pool.acquire() as c:
+                async with c.transaction():
+                    await _execute(c)
+
+    async def invalidate_cache(self):
+        try:
+            if self.redis:
+                await self.redis.delete(self.CACHE_KEY)
+        except Exception:
+            pass
+
 class Player(BaseModel):
     user_id: int
     username: str = ""
@@ -1439,52 +1614,10 @@ daily_config = StreakConfig()
 
 # ---------------------------------------------------------------------------
 # Результат расчёта награды
-
 class RewardResult(NamedTuple):
     total_oac: int
     title: Optional[str]
     inventory_items: Dict[str, int]  # имя поля → количество
-
-
-# Основная функция с полной атомарностью (пункты 1, 5)
-# ---------------------------------------------------------------------------
-async def process_daily_login(user_id: int, context) -> None:
-    today = date.today()
-    player = await PlayerRepository.get_by_id(user_id)
-    if not player or not player.user_id:
-        return
-
-    last = _parse_last_login_date(player.last_login_date)
-    streak = (player.login_streak or 0) + 1 if last and (today - last).days == 1 else 1
-    reward = _calculate_reward(streak, daily_config)
-
-    # Атомарно применяем (True – успех, False – уже заходил сегодня)
-    success = await PlayerRepository.claim_daily(
-        user_id, today, streak,
-        reward.total_oac, reward.title,
-        reward.inventory_items
-    )
-
-    if not success:
-        logger.info("Daily already claimed or error", extra={"user_id": user_id})
-        return
-
-    logger.info("Daily login processed", extra={
-        "user_id": user_id, "streak": streak,
-        "reward_oac": reward.total_oac, "title": reward.title,
-        "items": reward.inventory_items
-    })
-
-    try:
-        text = _build_daily_message(streak, reward, daily_config)
-        await context.bot.send_message(chat_id=user_id, text=text, parse_mode='HTML')
-    except Exception as e:
-        logger.error("Failed to send daily login msg", extra={"user_id": user_id}, exc_info=True)
-
-    try:
-        await check_achievements(user_id, context)
-    except Exception:
-        logger.exception("Achievement check failed", extra={"user_id": user_id})
 
 # Расчёт награды (чистая функция)
 # ---------------------------------------------------------------------------
