@@ -3361,16 +3361,22 @@ async def guild_war_callback(update, context):
         await edit_or_reply(update, context, "Профиль не найден.")
         return
 
-    async with db_pool.acquire() as conn:
-        war = await conn.fetchrow("SELECT war_active FROM guild_weekly WHERE war_active = TRUE LIMIT 1")
-        if not war:
-            await edit_or_reply(update, context, "🕊️ Сейчас мирное время.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="guild_info")]]))
-            return
+    war_service = context.bot_data.get("war_service")
+if not war_service:
+    await edit_or_reply(update, context, "Сервис войны недоступен.")
+    return
 
-        scores = await conn.fetch("SELECT guild, total_farmed FROM guild_weekly")
-        black_score = next((r["total_farmed"] for r in scores if r["guild"] == "BLACK"), 0)
-        white_score = next((r["total_farmed"] for r in scores if r["guild"] == "WHITE"), 0)
+async with db_pool.acquire() as conn:
+    # Проверяем, активна ли война
+    is_active = await war_service.is_war_active()
+    if not is_active:
+        await edit_or_reply(update, context, "🕊️ Сейчас мирное время.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="guild_info")]]))
+        return
+
+    scores = await conn.fetch("SELECT guild, total_score FROM guild_weekly")
+    black_score = next((r["total_score"] for r in scores if r["guild"] == "BLACK"), 0)
+    white_score = next((r["total_score"] for r in scores if r["guild"] == "WHITE"), 0)
 
         top_black = await conn.fetch(
             "SELECT username, donated FROM players WHERE guild='BLACK' ORDER BY donated DESC LIMIT 3"
