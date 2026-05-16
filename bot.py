@@ -18,8 +18,9 @@ from telegram.ext import AIORateLimiter
 
 from typing import Optional, List, Any, Dict, NamedTuple
 
+from tenacity.asyncio import retry
 from tenacity import (
-    retry, stop_after_attempt, wait_exponential,
+    stop_after_attempt, wait_exponential,
     retry_if_exception_type, before_sleep_log
 )
 from telegram.error import RetryAfter
@@ -897,7 +898,7 @@ async def init_db_pool():
 
 async def _run_migrations(conn):
     """Все миграции, которые необходимо применить перед запуском."""
-    # Добавление столбца war_active в guild_weekly
+    # Добавление столбца war_active в guild_weekly (если его ещё нет)
     await conn.execute("""
         DO $$
         BEGIN
@@ -933,7 +934,84 @@ async def _run_migrations(conn):
             END IF;
         END $$;
     """)
-    # Здесь можно добавлять будущие миграции...
+
+    # ===== Новые миграции для сервиса войны =====
+    # 1. Таблица состояния войны
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS war_state (
+            id INTEGER PRIMARY KEY DEFAULT 1,
+            is_active BOOLEAN DEFAULT FALSE
+        );
+        INSERT INTO war_state (id, is_active) VALUES (1, FALSE)
+        ON CONFLICT (id) DO NOTHING;
+    """)
+
+    # 2. Добавляем week_start в guild_weekly, если его нет (старые базы)
+    await conn.execute("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='guild_weekly' AND column_name='week_start'
+            ) THEN
+                ALTER TABLE guild_weekly ADD COLUMN week_start DATE;
+            END IF;
+        END $$;
+    """)
+
+    # 3. Переименовываем total_farmed -> total_score, если столбец ещё старый
+    await conn.execute("""
+        DO $$
+        BEGIN
+            IF EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name='guild_weekly' AND column_name='total_farmed')
+            THEN
+                ALTER TABLE guild_weekly RENAME COLUMN total_farmed TO total_score;
+            END IF;
+        END $$;
+    """)
+
+    # 4. Если после переименования total_score всё ещё отсутствует (новая база),
+    #    создаём его с нуля
+    await conn.execute("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='guild_weekly' AND column_name='total_score'
+            ) THEN
+                ALTER TABLE guild_weekly ADD COLUMN total_score INTEGER DEFAULT 0;
+            END IF;
+        END $$;
+    """)
+
+    # 5. Удаляем устаревший war_active из guild_weekly, если он там есть
+    await conn.execute("""
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='guild_weekly' AND column_name='war_active'
+            ) THEN
+                ALTER TABLE guild_weekly DROP COLUMN war_active;
+            END IF;
+        END $$;
+    """)
+
+    # 6. Уникальный индекс для UPSERT по (guild, week_start)
+    await conn.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_guild_week
+        ON guild_weekly (guild, week_start);
+    """)
+
+    # === Финальная проверка целостности ===
+    try:
+        await conn.execute("SELECT 1 FROM war_state LIMIT 1")
+        await conn.execute("SELECT total_score, week_start FROM guild_weekly LIMIT 0")
+        logger.info("✅ Миграции успешно применены, целостность БД подтверждена")
+    except Exception as e:
+        logger.critical("❌ Ошибка целостности после миграций: %s", e)
+        raise RuntimeError("Database integrity check failed") from e
     
 async def close_db_pool():
     global db_pool
@@ -1226,24 +1304,58 @@ async def process_daily_login(user_id: int, context) -> None:
     except Exception:
         logger.exception("Achievement check failed", extra={"user_id": user_id})
 
+# Глобальный кеш меню (user_id -> (timestamp, keyboard, whisper))
+_menu_cache = {}
+
 async def get_main_menu_keyboard(user_id):
+    now = time.time()
+    # Если кеш свежий (2 секунды), возвращаем готовое
+    if user_id in _menu_cache:
+        cached_time, kb, whisper = _menu_cache[user_id]
+        if now - cached_time < 2:
+            return kb, whisper
+
+    # Иначе строим заново
     whisper = random.choice(WHISPERS)
     player = await PlayerRepository.get_by_id(user_id)
     balance = player.balance if player else 0
 
-    bush_btn = InlineKeyboardButton("🪴 Куст", callback_data="collect") if balance >= 5000 else InlineKeyboardButton("🔒 Куст (⚔️ Ветеран)", callback_data="bush_preview")
-    pet_btn = InlineKeyboardButton("🐾 Питомец", callback_data="pet_preview") if balance >= 5000 else InlineKeyboardButton("🔒 Питомец (⚔️ Ветеран)", callback_data="pet_preview")
+    bush_btn = (
+        InlineKeyboardButton("🪴 Куст", callback_data="collect")
+        if balance >= 5000
+        else InlineKeyboardButton("🪴 Куст 🔒)", callback_data="bush_preview")
+    )
+    pet_btn = (
+        InlineKeyboardButton("🐾 Питомец", callback_data="pet_preview")
+        if balance >= 5000
+        else InlineKeyboardButton("🐾 Питомец 🔒", callback_data="pet_preview")
+    )
 
     keyboard = [
         [InlineKeyboardButton("🍬 Фармить", callback_data="farm")],
-        [InlineKeyboardButton("🌿 Крафт", callback_data="craft"), InlineKeyboardButton("💨 Дунуть", callback_data="smoke")],
+        [
+            InlineKeyboardButton("🌿 Крафт", callback_data="craft"),
+            InlineKeyboardButton("💨 Дунуть", callback_data="smoke"),
+        ],
         [bush_btn],
-        [InlineKeyboardButton("⚜️ Профиль", callback_data="profile"), InlineKeyboardButton("🏆 Лидеры", callback_data="top")],
-        [InlineKeyboardButton("🕋 Гильдия", callback_data="guild_info"), pet_btn],
-        [InlineKeyboardButton("🎲 Удача", callback_data="luck"), InlineKeyboardButton("🏛️ Лабиринт", callback_data="lab_start")],
+        [
+            InlineKeyboardButton("⚜️ Профиль", callback_data="profile"),
+            InlineKeyboardButton("🏆 Лидеры", callback_data="top"),
+        ],
+        [
+            InlineKeyboardButton("🕋 Гильдия", callback_data="guild_info"),
+            pet_btn,
+        ],
+        [
+            InlineKeyboardButton("🍀 Удача", callback_data="luck"),
+            InlineKeyboardButton("🏛️ Лабиринт", callback_data="lab_start"),
+        ],
         [InlineKeyboardButton("🛒 Магазин", callback_data="shop")],
     ]
-    return InlineKeyboardMarkup(keyboard), whisper
+    kb = InlineKeyboardMarkup(keyboard)
+    # Кладём в кеш
+    _menu_cache[user_id] = (now, kb, whisper)
+    return kb, whisper
 
 def get_back_to_menu_keyboard():
     return InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
