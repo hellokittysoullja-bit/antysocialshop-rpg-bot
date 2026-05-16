@@ -3604,67 +3604,65 @@ async def _notify_user(update, context, text, show_alert=False, reply_markup=Non
         await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=reply_markup, parse_mode='HTML')
 
 
-# ---------------------------------------------------------------------------
-# Удача – максимально сеньорская версия
-# ---------------------------------------------------------------------------
-@error_handler
-@rate_limit(2)
-async def luck_callback(update, context, action=None):
-    user, msg = get_user_and_msg(update)
-    uid = user.id
-    player = await PlayerRepository.get_by_id(uid)
-    if not player or not player.user_id:
-        await _notify_user(update, context, "Сначала активируйся: /start")
-        return
+# ============================================================
+# УДАЧА – полная сеньорская версия
+# ============================================================
 
-    now = datetime.now()
-    bal = player.balance
-    cfg = LUCK_CONFIG
-
-    # Чистые проверки доступности
-    wheel_ok = _check_wheel_availability(player, now, cfg["wheel"]["cooldown_hours"])
-    berserk_ok = _check_berserk_availability(player, now, cfg["berserk"]["cost"], cfg["berserk"]["cooldown_hours"])
-    alchemy_ok = bal >= cfg["alchemy"]["required_balance"]
-
-    # ── Главное меню ──
-    text = (
-        "<b>🍀 УДАЧА</b>\n\n"
-        "<i>🌀 «Испытай свою удачу и выиграй OAC 🍬 и редкие эксклюзивные вещи!» 🪽</i>\n\n"
-        "🎡 <b>Крутить Колесо</b> — ежедневный выигрыш 🎉\n"
-        "🍀 <b>Рискнуть</b> — бросить вызов и отдать 300 оас ради джекпота 💫\n"
-        "⚗️ <b>Алхимия</b> — древнее искусство, магия для достойных 🔮"
-    )
-
-    kb_rows = _build_luck_keyboard(now, player, cfg, wheel_ok, berserk_ok, alchemy_ok)
-    kb = InlineKeyboardMarkup(kb_rows)
-
-    # ── Обработка действий ──
-    if action == "luck_wheel":
-        await _process_wheel(update, context, uid, player, cfg)
-        return
-    if action == "luck_berserk":
-        await _process_berserk(update, context, uid, player, cfg)
-        return
-    if action == "alchemy_start":
-        await _process_alchemy_start(update, context, uid, player, cfg, bal)
-        return
-    if action == "alchemy_confirm":
-        await _process_alchemy_confirm(update, context, uid, player, cfg, bal)
-        return
-
-    # Без действия – показываем меню
-    await edit_or_reply(update, context, text, reply_markup=kb)
+LUCK_CONFIG = {
+    "wheel": {
+        "rewards": [
+            (0.40, 30, "oac"),
+            (0.65, 75, "oac"),
+            (0.80, 1, "blunt"),
+            (0.90, 150, "oac"),
+            (0.97, 2, "blunt"),
+            (1.0, 1000, "jackpot"),
+        ],
+        "cooldown_hours": 24,
+    },
+    "berserk": {
+        "cost": 300,
+        "win_amount": 200,
+        "lose_amount": 300,
+        "cooldown_hours": 24,
+    },
+    "alchemy": {
+        "cost_blunts": 10,
+        "cost_oac": 250,
+        "required_balance": 5000,
+        "reactions": [
+            (0.40, "dust", 1),
+            (0.75, "none", 0),
+            (0.90, "dust", 2),
+            (1.0, "legendary", 1),
+        ],
+        "legendary_names": [
+            "Крик Бездны", "Пепел Короля", "Шёпот Склепа",
+            "Коготь Хаоса", "Вздох Пожирателя"
+        ],
+    },
+}
 
 
-# ---------------------------------------------------------------------------
-# Чистые проверки доступности
-# ---------------------------------------------------------------------------
+# ── Хелперы ─────────────────────────────────────────────────
+async def _notify_user(update, context, text, show_alert=False, reply_markup=None):
+    if update.callback_query:
+        if show_alert:
+            await update.callback_query.answer(text, show_alert=True)
+        else:
+            await update.callback_query.answer()
+        await update.callback_query.message.edit_text(text, reply_markup=reply_markup, parse_mode='HTML')
+    else:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=reply_markup, parse_mode='HTML')
+
+
 def _check_wheel_availability(player, now, cooldown_hours):
     last = player.last_daily
     if not last:
         return True
     last_dt = _to_datetime(last)
     return not last_dt or (now - last_dt) >= timedelta(hours=cooldown_hours)
+
 
 def _check_berserk_availability(player, now, cost, cooldown_hours):
     if player.balance < cost:
@@ -3676,12 +3674,8 @@ def _check_berserk_availability(player, now, cost, cooldown_hours):
     return not last_dt or (now - last_dt) >= timedelta(hours=cooldown_hours)
 
 
-# ---------------------------------------------------------------------------
-# Клавиатура удачи
-# ---------------------------------------------------------------------------
 def _build_luck_keyboard(now, player, cfg, wheel_ok, berserk_ok, alchemy_ok):
     rows = []
-    # Колесо
     if wheel_ok:
         rows.append([InlineKeyboardButton("🎡 Крутить", callback_data="luck_wheel")])
     else:
@@ -3690,7 +3684,6 @@ def _build_luck_keyboard(now, player, cfg, wheel_ok, berserk_ok, alchemy_ok):
         hrs, mins = _format_remaining(diff)
         rows.append([InlineKeyboardButton(f"🎡 Колесо набирает силу. Ещё {hrs} ч {mins} мин", callback_data="luck_wheel")])
 
-    # Берсерк
     if berserk_ok:
         rows.append([InlineKeyboardButton("🍀 Рискнуть", callback_data="luck_berserk")])
     else:
@@ -3703,9 +3696,7 @@ def _build_luck_keyboard(now, player, cfg, wheel_ok, berserk_ok, alchemy_ok):
             hrs, mins = _format_remaining(diff)
             rows.append([InlineKeyboardButton(f"🍀 Бездна шепчет всё громче. Жди {hrs} ч {mins} мин", callback_data="luck_berserk")])
 
-    # Алхимия
     rows.append([InlineKeyboardButton("🔮 Алхимия", callback_data="alchemy_start") if alchemy_ok else InlineKeyboardButton("🔮 Алхимия 🔒", callback_data="alchemy_start")])
-
     rows.append([InlineKeyboardButton("🏰 В меню", callback_data="menu")])
     return rows
 
@@ -3717,10 +3708,55 @@ def _format_remaining(td):
     return hrs, mins
 
 
-# ---------------------------------------------------------------------------
-# Обработчики действий
-# ---------------------------------------------------------------------------
-async def _process_wheel(update, context, uid, player, cfg):
+# ── Основной обработчик ─────────────────────────────────────
+@error_handler
+@rate_limit(2)
+async def luck_callback(update, context, action=None):
+    user, msg = get_user_and_msg(update)
+    uid = user.id
+    player = await PlayerRepository.get_by_id(uid)
+    if not player or not player.user_id:
+        await _notify_user(update, context, "Сначала активируйся: /start")
+        return
+
+    now = datetime.now()
+    cfg = LUCK_CONFIG
+
+    wheel_ok = _check_wheel_availability(player, now, cfg["wheel"]["cooldown_hours"])
+    berserk_ok = _check_berserk_availability(player, now, cfg["berserk"]["cost"], cfg["berserk"]["cooldown_hours"])
+    alchemy_ok = player.balance >= cfg["alchemy"]["required_balance"]
+
+    # Получаем сервис войны один раз
+    war_service = context.bot_data.get("war_service")
+
+    if action == "luck_wheel":
+        await _process_wheel(update, context, uid, player, cfg, war_service)
+        return
+    if action == "luck_berserk":
+        await _process_berserk(update, context, uid, player, cfg, war_service)
+        return
+    if action == "alchemy_start":
+        await _process_alchemy_start(update, context, player, cfg)
+        return
+    if action == "alchemy_confirm":
+        await _process_alchemy_confirm(update, context, uid, player, cfg, war_service)
+        return
+
+    # Главное меню удачи
+    text = (
+        "<b>🍀 УДАЧА</b>\n\n"
+        "<i>🌀 «Испытай свою удачу и выиграй OAC 🍬 и редкие эксклюзивные вещи!» 🪽</i>\n\n"
+        "🎡 <b>Крутить Колесо</b> — ежедневный выигрыш 🎉\n"
+        "🍀 <b>Рискнуть</b> — бросить вызов и отдать 300 оас ради джекпота 💫\n"
+        "⚗️ <b>Алхимия</b> — древнее искусство, магия для достойных 🔮"
+    )
+    kb_rows = _build_luck_keyboard(now, player, cfg, wheel_ok, berserk_ok, alchemy_ok)
+    kb = InlineKeyboardMarkup(kb_rows)
+    await edit_or_reply(update, context, text, reply_markup=kb)
+
+
+# ── Колесо ──────────────────────────────────────────────────
+async def _process_wheel(update, context, uid, player, cfg, war_service):
     if not _check_wheel_availability(player, datetime.now(), cfg["wheel"]["cooldown_hours"]):
         await _notify_user(update, context, "🎡 Колесо пока недоступно. Загляни позже.")
         return
@@ -3729,7 +3765,7 @@ async def _process_wheel(update, context, uid, player, cfg):
         r = random.random()
         prize, ptype = 0, "oac"
         for prob, amount, kind in cfg["wheel"]["rewards"]:
-            if r <= prob:
+            if r < prob:
                 prize, ptype = amount, kind
                 break
         if ptype == "jackpot" and random.random() < 0.5:
@@ -3743,11 +3779,8 @@ async def _process_wheel(update, context, uid, player, cfg):
             p.blunts += prize
         p.last_daily = datetime.now()
 
-        # Военный счёт – только для OAC/джекпота
-        if ptype in ("oac", "jackpot"):
-            war_service = context.bot_data.get("war_service")
-            if war_service:
-                await war_service.add_score_raw(uid, prize, conn)
+        if war_service and ptype in ("oac", "jackpot"):
+            await war_service.add_score_raw(uid, prize, conn)
 
         return prize, ptype, p.balance
 
@@ -3758,7 +3791,6 @@ async def _process_wheel(update, context, uid, player, cfg):
         return
     prize, ptype, new_balance = result
 
-    # Формируем сообщение
     uname = html.escape(update.effective_user.username or update.effective_user.first_name)
     if ptype == "jackpot":
         msg_text = f"<b>🎰 ДЖЕКПОТ!</b>\n\nТы выиграл <b>{prize} OAC</b> 🍬!\n\n<b>⚜️ У тебя:</b> <i>{new_balance} OAC</i>"
@@ -3771,7 +3803,8 @@ async def _process_wheel(update, context, uid, player, cfg):
                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]))
 
 
-async def _process_berserk(update, context, uid, player, cfg):
+# ── Берсерк ─────────────────────────────────────────────────
+async def _process_berserk(update, context, uid, player, cfg, war_service):
     if not _check_berserk_availability(player, datetime.now(), cfg["berserk"]["cost"], cfg["berserk"]["cooldown_hours"]):
         await _notify_user(update, context, "🍀 Берсерк недоступен. Проверь баланс или время.")
         return
@@ -3779,14 +3812,17 @@ async def _process_berserk(update, context, uid, player, cfg):
     async def _berserk(p, conn):
         if p.balance < cfg["berserk"]["cost"]:
             return ("no_money", p.balance)
+
         if random.random() < 0.6:
             p.balance += cfg["berserk"]["win_amount"]
             res = f"<b><i>🎲 БЕЗДНА ОТВЕТИЛА</i></b>\n\nИскажение благосклонно! +<b>{cfg['berserk']['win_amount']} OAC</b> 🍬."
-            await add_war_score(uid, cfg["war_points"]["berserk_win"], conn)
+            if war_service:
+                await war_service.add_score(uid, WarAction.BERSERK_WIN, conn)
         else:
             p.balance -= cfg["berserk"]["cost"]
             res = f"<b><i>🕯️ БЕЗДНА МОЛЧИТ</i></b>\n\nИскажение промолчало. –<b>{cfg['berserk']['cost']} OAC</b>."
-            await add_war_score(uid, cfg["war_points"]["berserk_lose"], conn)
+            if war_service:
+                await war_service.add_score(uid, WarAction.BERSERK_LOSE, conn)
         p.last_berserk = datetime.now()
         return ("ok", res, p.balance)
 
@@ -3804,13 +3840,14 @@ async def _process_berserk(update, context, uid, player, cfg):
                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]))
 
 
-async def _process_alchemy_start(update, context, uid, player, cfg, bal):
-    if bal < cfg["alchemy"]["required_balance"]:
+# ── Алхимия (начало) ────────────────────────────────────────
+async def _process_alchemy_start(update, context, player, cfg):
+    if player.balance < cfg["alchemy"]["required_balance"]:
         await _notify_user(update, context, "❌ Доступно с ранга ⚔️ Ветеран (5000 OAC 🍬)", show_alert=True)
         return
     text = (
         "<b>🔮 АЛХИМИЧЕСКИЙ КОТЁЛ</b>\n\n"
-        f"<b>💎 У тебя: {bal} OAC 🍬</b>\n"
+        f"<b>💎 У тебя: {player.balance} OAC 🍬</b>\n"
         f"<b>🌿 Блантов в свёртке: {player.blunts}</b>\n\n"
         "<b>⚗️ Стоимость запуска:</b>\n"
         "   🕯️ 10 Блантов\n"
@@ -3830,48 +3867,46 @@ async def _process_alchemy_start(update, context, uid, player, cfg, bal):
     await edit_or_reply(update, context, text, reply_markup=kb)
 
 
-async def _process_alchemy_confirm(update, context, uid, player, cfg, bal):
-    if player.blunts < cfg["alchemy"]["cost_blunts"] or bal < cfg["alchemy"]["cost_oac"]:
-        await _notify_user(update, context, "❌ Недостаточно ресурсов. Нужно 10 блантов и 250 OAC.", show_alert=True)
-        return
-
+# ── Алхимия (запуск) ────────────────────────────────────────
+async def _process_alchemy_confirm(update, context, uid, player, cfg, war_service):
     async def _alchemy(p, conn):
         if p.blunts < cfg["alchemy"]["cost_blunts"] or p.balance < cfg["alchemy"]["cost_oac"]:
-            return ("no_resources",)
+            return (AlchemyResult.NO_RESOURCES,)
         p.blunts -= cfg["alchemy"]["cost_blunts"]
         p.balance -= cfg["alchemy"]["cost_oac"]
         r = random.random()
+        res = ""
         for prob, effect, value in cfg["alchemy"]["reactions"]:
             if r < prob:
                 if effect == "dust":
                     p.m_essence += value
                     res = f"<b>💠 {'Чистая' if value==1 else 'Мерцающая'} Пыльца!</b>\n\n+{value} Кристальной Пыли"
                 elif effect == "legendary":
-                    name = random.choice(["Крик Бездны","Пепел Короля","Шёпот Склепа","Коготь Хаоса","Вздох Пожирателя"])
+                    name = random.choice(cfg["alchemy"]["legendary_names"])
                     await create_named_blunt(uid, name, rarity="legendary", conn=conn)
                     res = f"<b>🌟 Философский Камень!</b>\n\nЛегендарный блант «{name}»!"
-                    # try:
-                    #     await context.bot.send_message(chat_id="@guild_antysocial",
-                    #         text=f"🌟 @{html.escape(update.effective_user.username or update.effective_user.first_name)} провёл Алхимический Ритуал 🔮 и получил легендарный блант «{name}»!" 💍, parse_mode='HTML')
-                    # except Exception as e:
-                    #     logger.error(f"Ошибка отправки в канал: {e}")
                 else:
                     res = "<b>🌫️ Грязный Выхлоп...</b>\n\nБланты сгорели без следа."
                 break
-        war_service = context.bot_data.get("war_service")
-if war_service:
-    await war_service.add_score(uid, WarAction.ALCHEMY, conn)
-        return ("ok", res)
+        else:
+            logger.error("Alchemy: ни одна реакция не сработала, r=%s", r)
+            res = "<b>🌫️ Грязный Выхлоп...</b>\n\nБланты сгорели без следа."
+
+        if war_service:
+            await war_service.add_score(uid, WarAction.ALCHEMY, conn)
+        return (AlchemyResult.SUCCESS, res)
 
     result = await PlayerRepository.atomic_update(uid, _alchemy)
     if result is None:
         logger.error("alchemy atomic_update failed", extra={"user_id": uid})
         await _notify_user(update, context, "❌ Ошибка при обработке. Попробуй позже.")
         return
+
     status, *data = result
-    if status == "no_resources":
-        await _notify_user(update, context, "❌ Недостаточно ресурсов.", show_alert=True)
+    if status == AlchemyResult.NO_RESOURCES:
+        await _notify_user(update, context, "❌ Недостаточно ресурсов. Нужно 10 блантов и 250 OAC.", show_alert=True)
         return
+
     await edit_or_reply(update, context, data[0],
                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]))
 
