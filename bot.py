@@ -3742,10 +3742,13 @@ async def _process_wheel(update, context, uid, player, cfg):
         else:
             p.blunts += prize
         p.last_daily = datetime.now()
+
+        # Военный счёт – только для OAC/джекпота
         if ptype in ("oac", "jackpot"):
-    war_service = context.bot_data.get("war_service")
-    if war_service:
-        await war_service.add_score_raw(uid, prize, conn)
+            war_service = context.bot_data.get("war_service")
+            if war_service:
+                await war_service.add_score_raw(uid, prize, conn)
+
         return prize, ptype, p.balance
 
     result = await PlayerRepository.atomic_update(uid, _wheel)
@@ -3758,10 +3761,6 @@ async def _process_wheel(update, context, uid, player, cfg):
     # Формируем сообщение
     uname = html.escape(update.effective_user.username or update.effective_user.first_name)
     if ptype == "jackpot":
-        # try:
-        #     await context.bot.send_message(chat_id="@guild_antysocial", text=f"🌟 @{uname} сорвал Джекпот! +{prize} OAC", parse_mode='HTML')
-        # except Exception as e:
-        #     logger.error(f"Канал джепот: {e}")
         msg_text = f"<b>🎰 ДЖЕКПОТ!</b>\n\nТы выиграл <b>{prize} OAC</b> 🍬!\n\n<b>⚜️ У тебя:</b> <i>{new_balance} OAC</i>"
     elif ptype == "oac":
         msg_text = f"<b>🩸 ДАР ИСКАЖЕНИЯ</b>\n\n<b>💎 Ты нафармил +{prize} OAC 🍬!</b>\n⚜️ <b>У тебя:</b> <i>{new_balance} OAC</i>"
@@ -4384,16 +4383,11 @@ async def show_lab_final(update, context):
         p.m_essence += 1
         p.lab_chests += 1
         p.lab_depth += 1
-        # военный счёт
-        guild_row = await conn.fetchrow("SELECT guild FROM players WHERE user_id = $1", uid)
-        if guild_row and guild_row["guild"] in ("BLACK", "WHITE"):
-            await conn.execute(
-                "INSERT INTO guild_weekly (guild, week_start, total_farmed) "
-                "VALUES ($1, CURRENT_DATE, $2) ON CONFLICT (guild) DO UPDATE SET "
-                "total_farmed = guild_weekly.total_farmed + $2",
-                guild_row["guild"], 80
-            )
-        return
+
+        # Военный счёт
+        war_service = context.bot_data.get("war_service")
+        if war_service:
+            await war_service.add_score(uid, WarAction.LAB_WIN, conn)
 
     await PlayerRepository.atomic_update(uid, _lab_win)
 
