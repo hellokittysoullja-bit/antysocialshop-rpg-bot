@@ -21,11 +21,15 @@ from typing import Optional, List, Any, Dict, NamedTuple
 # ---------- tenacity setup (без конфликтов) ----------
 import tenacity
 
-retry = tenacity.retry                    # основной декоратор
-stop_after_attempt = tenacity.stop_after_attempt   # а не tenacity.stop.stop_after_attempt
-wait_exponential = tenacity.wait_exponential
-retry_if_exception_type = tenacity.retry_if_exception_type
-before_sleep_log = tenacity.before_sleep_log
+stop_after_attempt = tenacity.stop.stop_after_attempt
+wait_exponential = tenacity.wait.wait_exponential
+retry_if_exception_type = tenacity.retry_if_exception_type   # из корня пакета
+before_sleep_log = tenacity.before_sleep.before_sleep_log
+retry = tenacity.retry.retry   # декоратор из модуля retry
+
+# Проверка без падения
+if not callable(retry):
+    raise ImportError("retry не является функцией – проверь структуру tenacity")
 
 # Асинхронный retry – гарантированно функция
 retry = tenacity.asyncio.retry
