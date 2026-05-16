@@ -239,9 +239,7 @@ class Player(BaseModel):
     pending_transfer: Optional[dict] = None
     lab_depth: int = 1
 
-    class Config:
-        # разрешаем присваивать значения по старым именам, если понадобится
-        populate_by_name = True
+    model_config = ConfigDict(populate_by_name=True)
 
 import functools
 import asyncio
