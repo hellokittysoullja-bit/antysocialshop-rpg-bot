@@ -24,11 +24,9 @@ import tenacity
 
 stop_after_attempt = tenacity.stop.stop_after_attempt
 wait_exponential = tenacity.wait.wait_exponential
-retry_if_exception_type = tenacity.retry_if_exception_type   # исправлено
+retry_if_exception_type = tenacity.retry_if_exception_type
 before_sleep_log = tenacity.before_sleep.before_sleep_log
-retry = tenacity.asyncio.retry
-
-assert callable(retry), "retry должен быть функцией"
+retry = tenacity.retry                  # ← универсальный, работает и с async
 
 # Асинхронный retry – гарантированно функция
 retry = tenacity.asyncio.retry
