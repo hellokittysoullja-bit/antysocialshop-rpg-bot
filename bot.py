@@ -4609,19 +4609,28 @@ async def activate_menu_handler(update, context):
     await query.message.edit_text(bonus + welcome, reply_markup=guild_kb, parse_mode='HTML')
 
 @safe_callback
-async def skins_menu_handler(update, context):
+async def skins_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("💬 Выбрать титул", callback_data="choose_title")],
         [InlineKeyboardButton("🖼️ Выбрать фон", callback_data="choose_bg")],
         [InlineKeyboardButton("🔙 Назад", callback_data="profile")]
     ])
-    await query.message.edit_text(
-        "<b>🎨 СКИНЫ</b>\n\nВыбери, что хочешь изменить.",
-        reply_markup=kb,
-        parse_mode='HTML'
-    )
+    try:
+        await query.message.edit_text(
+            "<b>🎨 СКИНЫ</b>\n\nВыбери, что хочешь изменить.",
+            reply_markup=kb,
+            parse_mode='HTML'
+        )
+    except BadRequest as e:
+        if "message is not modified" in str(e).lower():
+            return
+        # Если не удалось отредактировать, отправляем новое сообщение
+        await query.message.reply_text(
+            "<b>🎨 СКИНЫ</b>\n\nВыбери, что хочешь изменить.",
+            reply_markup=kb,
+            parse_mode='HTML'
+        )
 
 @safe_callback
 async def choose_title_handler(update, context):
