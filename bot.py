@@ -22,11 +22,13 @@ from typing import Optional, List, Any, Dict, NamedTuple
 # ---------- TENACITY (АБСОЛЮТНО НАДЁЖНЫЙ ВАРИАНТ) ----------
 import tenacity
 
-# Все вспомогательные функции берём напрямую из стабильных путей
 stop_after_attempt = tenacity.stop.stop_after_attempt
 wait_exponential = tenacity.wait.wait_exponential
-retry_if_exception_type = tenacity.retry.retry_if_exception_type
+retry_if_exception_type = tenacity.retry_if_exception_type   # исправлено
 before_sleep_log = tenacity.before_sleep.before_sleep_log
+retry = tenacity.asyncio.retry
+
+assert callable(retry), "retry должен быть функцией"
 
 # Асинхронный retry – гарантированно функция
 retry = tenacity.asyncio.retry
