@@ -1875,6 +1875,10 @@ async def grant_title(user_id, emoji, name, context):
     await add_title(user_id, emoji)
 
 #===•===****=====ФАРМ ОАС=====*****=====
+# ============================================================
+# FARM – атомарный сбор OAC
+# ============================================================
+
 def _calculate_farm_reward(player, context) -> tuple[int, bool, bool]:
     """
     Чистая логика расчёта награды за фарм.
@@ -1933,13 +1937,14 @@ async def farm_callback(update, context):
     uid = user.id
     uname = user.username or user.first_name
     now = datetime.now()
-    player = await PlayerRepository.get_by_id(uid)
 
     # --- Атомарная бизнес-логика ---
     async def _farm(player, conn):
         if player.last_farm and (now - player.last_farm) < timedelta(hours=FARM_COOLDOWN_HOURS):
             remain = int((timedelta(hours=FARM_COOLDOWN_HOURS) - (now - player.last_farm)).seconds / 60)
             return ("cooldown", remain)
+
+        old_balance = player.balance  # запоминаем старый баланс до изменений
 
         earned, crit, happy = _calculate_farm_reward(player, context)
 
@@ -1956,10 +1961,8 @@ async def farm_callback(update, context):
         war_service = context.bot_data.get("war_service")
         if war_service:
             await war_service.add_score_raw(uid, earned + medal_bonus, conn)
-        else:
-            logger.warning("GuildWarService not found in bot_data")
 
-        return ("ok", earned, crit, happy, medal_text, new_count, player.balance)
+        return ("ok", earned, crit, happy, medal_text, new_count, player.balance, old_balance)
 
     # --- Выполнение атомарного обновления ---
     result = await PlayerRepository.atomic_update(uid, _farm)
@@ -1980,14 +1983,12 @@ async def farm_callback(update, context):
             await update.callback_query.answer()
         return
 
-    earned, crit, happy, medal_text, new_count, new_balance = data
+    earned, crit, happy, medal_text, new_count, new_balance, old_balance = data
 
-    # Блок критического удара (возвращён в точности как в оригинале)
     if crit:
         uname_escaped = html.escape(uname)
         # await send_whisper(context, "@guild_antysocial", f"🌟 @{uname_escaped} наткнулся на <i>Золотую жилу</i>! +{earned} OAC 🍬")
 
-    # --- Отправка результата ---
     target = get_medal_target(new_count, FARM_MEDALS)
     text = _format_farm_message(earned, crit, happy, medal_text, new_count, target, new_balance)
 
@@ -1997,8 +1998,8 @@ async def farm_callback(update, context):
     else:
         await context.bot.send_message(chat_id=update.effective_chat.id, text=text, parse_mode='HTML')
 
-    # --- Пост-проверки (исправлен баг со старым балансом) ---
-    await check_rank_up(context, uid, uname, player.balance, new_balance)
+    # --- Пост-проверки ---
+    await check_rank_up(context, uid, uname, old_balance, new_balance)
     await check_achievements(uid, context)
     
 # ============================================================
@@ -2704,14 +2705,10 @@ async def ritual_callback(update, context):
         player.ritual_count = new_count
         player.last_ritual = now
 
-        guild_row = await conn.fetchrow("SELECT guild FROM players WHERE user_id = $1", uid)
-        if guild_row and guild_row["guild"] in ("BLACK", "WHITE"):
-            await conn.execute(
-                "INSERT INTO guild_weekly (guild, week_start, total_farmed) "
-                "VALUES ($1, CURRENT_DATE, $2) ON CONFLICT (guild) DO UPDATE SET "
-                "total_farmed = guild_weekly.total_farmed + $2",
-                guild_row["guild"], reward + extra + medal_bonus
-            )
+        # Военный счёт (новый сервис)
+        war_service = context.bot_data.get("war_service")
+        if war_service:
+            await war_service.add_score_raw(uid, reward + extra + medal_bonus, conn)
 
         return ("ok", reward, extra, medal_text, new_count, player.balance)
 
@@ -3359,27 +3356,18 @@ async def guild_war_callback(update, context):
     query = update.callback_query
     await query.answer()
     uid = query.from_user.id
-    player = await PlayerRepository.get_by_id(uid)
-    if not player:
-        await edit_or_reply(update, context, "Профиль не найден.")
-        return
-
-    war_service = context.bot_data.get("war_service")
-    if not war_service:
-        await edit_or_reply(update, context, "Сервис войны недоступен.")
-        return
 
     async with db_pool.acquire() as conn:
-        # Проверяем, активна ли война
-        is_active = await war_service.is_war_active()
-        if not is_active:
-            await edit_or_reply(update, context, "🕊️ Сейчас мирное время.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="guild_info")]]))
-            return
-
+        # Загружаем очки гильдий и героев одним запросом
         scores = await conn.fetch("SELECT guild, total_score FROM guild_weekly")
         black_score = next((r["total_score"] for r in scores if r["guild"] == "BLACK"), 0)
         white_score = next((r["total_score"] for r in scores if r["guild"] == "WHITE"), 0)
+
+        # Если очков нет — война неактивна
+        if black_score == 0 and white_score == 0:
+            await edit_or_reply(update, context, "🕊️ Сейчас мирное время.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="guild_info")]]))
+            return
 
         top_black = await conn.fetch(
             "SELECT username, donated FROM players WHERE guild='BLACK' ORDER BY donated DESC LIMIT 3"
@@ -3393,7 +3381,6 @@ async def guild_war_callback(update, context):
     wp = int(white_score / total * 100)
 
     def safe_bar(perc):
-        perc = max(0, min(100, perc))
         filled = perc // 10
         return "▓" * filled + "░" * (10 - filled)
 
