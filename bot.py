@@ -25,7 +25,7 @@ from tenacity import (
 from telegram.error import RetryAfter
 
 import enum                     # <-- для WarAction
-from pydantic_settings import BaseSettings, SettingsConfigDict  # <-- для WarSettings
+from pydantic import BaseModel, Field, ConfigDict
 
 # ── Исключения ──────────────────────────────────────────────
 class UnknownWarActionError(Exception):
