@@ -1743,31 +1743,72 @@ async def grant_title(user_id, emoji, name, context):
     await add_title(user_id, emoji)
 
 #===•===****=====ФАРМ ОАС=====*****=====
+def _calculate_farm_reward(player, context) -> tuple[int, bool, bool]:
+    """
+    Чистая логика расчёта награды за фарм.
+    Возвращает (earned, crit, happy).
+    Не содержит побочных эффектов.
+    """
+    now = datetime.now()
+
+    earned = random.randint(FARM_MIN, FARM_MAX)
+
+    # Бонус от числа выкуренных блантов (5%)
+    if player.smoke_count > 0:
+        earned += int(earned * 0.05)
+
+    # Бонус, если курили в последние 5 минут
+    last_smoke = context.user_data.get("last_smoke_time")
+    if last_smoke and (now - last_smoke).total_seconds() < 300:
+        earned += random.randint(3, 5)
+
+    # Happy hour – удвоение
+    happy = context.bot_data.get("happy_hour", False)
+    if happy:
+        earned *= HAPPY_HOUR_MULTIPLIER
+
+    # Критический удар (x10) с шансом 1%
+    crit = random.randint(1, 100) == 1
+    if crit:
+        earned *= 10
+
+    return earned, crit, happy
+
+
+def _format_farm_message(earned: int, crit: bool, happy: bool,
+                         medal_text: str, new_count: int, target: int,
+                         new_balance: int) -> str:
+    """Формирует HTML-сообщение с результатами фарма."""
+    crit_str = " (крит x10!)" if crit else ""
+    happy_str = " 🌟x2" if happy else ""
+    progress_bar_str = get_medal_progress(new_count, FARM_MEDALS)
+    rank_progress = get_rank_progress(new_balance)
+
+    return (
+        f"<b>💎 Ты нафармил: +{earned} OAC</b> 🍬{crit_str}{happy_str}\n\n"
+        f"<b>⚜️ У тебя:</b> <i>{new_balance} OAC</i>\n\n"
+        f"{medal_text}"
+        f"<b>🎯 Фарминг:</b> {new_count}/{target}\n"
+        f"<b>{progress_bar_str}</b>\n\n"
+        f"{rank_progress}"
+    )
+
+
 @error_handler
 @rate_limit(3)
 async def farm_callback(update, context):
-    user, msg = get_user_and_msg(update)
+    user, _ = get_user_and_msg(update)
     uid = user.id
     uname = user.username or user.first_name
     now = datetime.now()
 
+    # --- Атомарная бизнес-логика ---
     async def _farm(player, conn):
         if player.last_farm and (now - player.last_farm) < timedelta(hours=FARM_COOLDOWN_HOURS):
             remain = int((timedelta(hours=FARM_COOLDOWN_HOURS) - (now - player.last_farm)).seconds / 60)
             return ("cooldown", remain)
 
-        earned = random.randint(FARM_MIN, FARM_MAX)
-        crit = False
-        if player.smoke_count > 0:
-            earned += int(earned * 0.05)
-        if context.user_data.get("last_smoke_time") and now - context.user_data["last_smoke_time"] < timedelta(minutes=5):
-            earned += random.randint(3, 5)
-        happy = context.bot_data.get("happy_hour", False)
-        if happy:
-            earned *= HAPPY_HOUR_MULTIPLIER
-        if random.randint(1, 100) == 1:
-            earned *= 10
-            crit = True
+        earned, crit, happy = _calculate_farm_reward(player, context)
 
         old_count = player.farm_count
         new_count = old_count + 1
@@ -1778,14 +1819,19 @@ async def farm_callback(update, context):
         player.last_farm = now
         player.last_farm_date = date.today()
 
-        war_service = context.bot_data["war_service"]
-        await war_service.add_score_raw(uid, earned + medal_bonus, conn)
+        # Военный счёт
+        war_service = context.bot_data.get("war_service")
+        if war_service:
+            await war_service.add_score_raw(uid, earned + medal_bonus, conn)
+        else:
+            logger.warning("GuildWarService not found in bot_data")
 
         return ("ok", earned, crit, happy, medal_text, new_count, player.balance)
 
+    # --- Выполнение атомарного обновления ---
     result = await PlayerRepository.atomic_update(uid, _farm)
     if result is None:
-        await msg.reply_text("Сначала активируйся: /start")
+        await update.effective_message.reply_text("Сначала активируйся: /start")
         return
 
     status, *data = result
@@ -1803,48 +1849,32 @@ async def farm_callback(update, context):
 
     earned, crit, happy, medal_text, new_count, new_balance = data
 
+    # Блок критического удара (возвращён в точности как в оригинале)
     if crit:
         uname_escaped = html.escape(uname)
         # await send_whisper(context, "@guild_antysocial", f"🌟 @{uname_escaped} наткнулся на <i>Золотую жилу</i>! +{earned} OAC 🍬")
 
+    # --- Отправка результата ---
     target = get_medal_target(new_count, FARM_MEDALS)
-    progress_bar_str = get_medal_progress(new_count, FARM_MEDALS)
-    rank_progress = get_rank_progress(new_balance)
+    text = _format_farm_message(earned, crit, happy, medal_text, new_count, target, new_balance)
 
-    crit_str = " (крит x10!)" if crit else ""
-    happy_str = " 🌟x2" if happy else ""
-    text = (
-        f"<b>💎 Ты нафармил: +{earned} OAC</b> 🍬{crit_str}{happy_str}\n\n"
-        f"<b>⚜️ У тебя:</b> <i>{new_balance} OAC</i>\n\n"
-        f"{medal_text}"
-        f"<b>🎯 Фарминг:</b> {new_count}/{target}\n"
-        f"<b>{progress_bar_str}</b>\n\n"
-        f"{rank_progress}"
-    )
     anim_msg = await animate_progress_bar(update, context, title="🍬 Фармим...")
     if anim_msg is not None:
         await anim_msg.edit_text(text, parse_mode='HTML')
     else:
         await context.bot.send_message(chat_id=update.effective_chat.id, text=text, parse_mode='HTML')
 
-    await check_rank_up(context, uid, uname, player.balance - earned - medal_bonus, new_balance)
+    # --- Пост-проверки (исправлен баг со старым балансом) ---
+    await check_rank_up(context, uid, uname, player.balance, new_balance)
     await check_achievements(uid, context)
     
-# ===========*****==========Крафт
-@error_handler
-@rate_limit(2)
-async def craft_callback(update, context):
-    user, msg = get_user_and_msg(update)
-    uid = user.id
-    player = await PlayerRepository.get_by_id(uid)
-    if not player or not player.user_id:
-        await msg.reply_text("Сначала активируйся: /start")
-        return
+# ============================================================
+# КРАФТ ОБЫЧНЫХ И ИМЕННЫХ БЛАНТОВ – атомарное создание блантов
+# ============================================================
 
-    bal = player.balance
-    blunts = player.blunts
-    craft_count = player.craft_count
-
+# ── Вспомогательная чистая функция ──
+def _get_craft_stats(balance: int, blunts: int, craft_count: int) -> dict:
+    """Возвращает текущий медальный прогресс и следующую цель крафта."""
     medal_name = CRAFT_MEDALS[0][1]
     target = CRAFT_MEDALS[0][0]
     for threshold, name, _ in CRAFT_MEDALS:
@@ -1855,35 +1885,85 @@ async def craft_callback(update, context):
             break
     else:
         target = craft_count
+    return {"medal_name": medal_name, "target": target}
 
+
+def _format_craft_menu_text(balance: int, blunts: int, craft_count: int,
+                            medal_name: str, target: int, m_essence: int) -> str:
+    """HTML‑текст меню крафта."""
     text = (
         f"<b>🌿 КРАФТ БЛАНТА</b>\n\n"
-        f"<b>💎 у тебя: {bal} оас 🍬</b>\n\n"
+        f"<b>💎 у тебя: {balance} оас 🍬</b>\n\n"
         f"<b>🌿 Блантов в свёртке: {blunts}</b>\n"
         f"<b>🎯 Крафтинг: {craft_count}/{target} | {medal_name}</b>\n\n"
         f"<b>🕯️ Обычный блант — 15 оас</b>\n"
         f"<b>💍 Именной блант — 50 оас</b>\n"
         f"   <i>🟢 55% | 🔵 30% | 🟣 13% | 🟡 2%</i>"
     )
-    if player.m_essence > 0:
-        text += f"\n\n<b>💠 у тебя есть Кристальная Пыль</b> (<i>{player.m_essence} доза</i>)"
+    if m_essence > 0:
+        text += f"\n\n<b>💠 у тебя есть Кристальная Пыль</b> (<i>{m_essence} доза</i>)"
+    return text
 
+
+def _build_craft_keyboard(m_essence: int) -> InlineKeyboardMarkup:
+    """Клавиатура крафта."""
     kb_rows = [
         [InlineKeyboardButton("🌿 Обычный блант (15 🍬)", callback_data="craft_normal")],
         [InlineKeyboardButton("💍 Именной блант (50 🍬)", callback_data="craft_named")],
     ]
-    if player.m_essence > 0:
+    if m_essence > 0:
         kb_rows.append([InlineKeyboardButton("💠 Использовать Пыль (1 доза)", callback_data="use_dust")])
     kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="menu")])
-    await edit_or_reply(update, context, text, reply_markup=InlineKeyboardMarkup(kb_rows))
+    return InlineKeyboardMarkup(kb_rows)
 
-#   КРАФТ БЛАНТОВ НОРМАЛ =====****======
+
+def _format_normal_craft_message(medal_text: str, new_count: int, target: int,
+                                 blunts: int, new_balance: int) -> str:
+    """Сообщение после обычного крафта."""
+    progress_bar_str = get_medal_progress(new_count, CRAFT_MEDALS)
+    return (
+        f"<b>🌿 БЛАНТ СКРУЧЕН</b>\n\n"
+        f"<b>🛡️ Потрачено:</b> <b>15 OAC</b>\n"
+        f"<b>⚜️ У тебя:</b> <b>{new_balance} OAC</b> 🍬\n\n"
+        f"{medal_text}"
+        f"<b>🎯 Крафтинг:</b> {new_count}/{target}\n"
+        f"<b>{progress_bar_str}</b>\n\n"
+        f"<b>🍃 Блантов в свёртке:</b> <b>{blunts}</b>"
+    )
+
+
+def _format_dust_message(name: str, reaction: str) -> str:
+    """Сообщение после использования Кристальной Пыли."""
+    return (
+        f"<b><i>💠 ПЫЛЬ ИСПОЛЬЗОВАНА</i></b>\n\n"
+        f"🟡 <b><i>«{name}»</i></b> (Легендарный) 🌿\n"
+        f"📜 Реакция: <i>{reaction}</i>"
+    )
+
+
+# ── Обработчики ──
+@error_handler
+@rate_limit(2)
+async def craft_callback(update, context):
+    user, _ = get_user_and_msg(update)
+    uid = user.id
+    player = await PlayerRepository.get_by_id(uid)
+    if not player or not player.user_id:
+        await update.effective_message.reply_text("Сначала активируйся: /start")
+        return
+
+    stats = _get_craft_stats(player.balance, player.blunts, player.craft_count)
+    text = _format_craft_menu_text(player.balance, player.blunts, player.craft_count,
+                                   stats["medal_name"], stats["target"], player.m_essence)
+    kb = _build_craft_keyboard(player.m_essence)
+    await edit_or_reply(update, context, text, reply_markup=kb)
+
+
 @error_handler
 async def handle_craft_normal(update, context):
     query = update.callback_query
     await query.answer()
     uid = query.from_user.id
-    uname = query.from_user.username or query.from_user.first_name
 
     async def _craft(player, conn):
         if player.balance < 15:
@@ -1897,13 +1977,17 @@ async def handle_craft_normal(update, context):
         player.blunts += 1
         player.craft_count = new_count
 
+        # 5% шанс на дополнительный блант
         if random.random() < 0.05:
             player.blunts += 1
 
         player.balance += medal_bonus
 
-        war_service = context.bot_data["war_service"]
-        await war_service.add_score(uid, WarAction.CRAFT, conn)
+        war_service = context.bot_data.get("war_service")
+        if war_service:
+            await war_service.add_score(uid, WarAction.CRAFT, conn)
+        else:
+            logger.warning("GuildWarService not found in bot_data")
 
         return ("ok", medal_text, new_count, player.blunts, player.balance)
 
@@ -1923,19 +2007,9 @@ async def handle_craft_normal(update, context):
         return
 
     medal_text, new_count, blunts, new_balance = data
-
     target = get_medal_target(new_count, CRAFT_MEDALS)
-    progress_bar_str = get_medal_progress(new_count, CRAFT_MEDALS)
+    text = _format_normal_craft_message(medal_text, new_count, target, blunts, new_balance)
 
-    text = (
-        f"<b>🌿 БЛАНТ СКРУЧЕН</b>\n\n"
-        f"<b>🛡️ Потрачено:</b> <b>15 OAC</b>\n"
-        f"<b>⚜️ У тебя:</b> <b>{new_balance} OAC</b> 🍬\n\n"
-        f"{medal_text}"
-        f"<b>🎯 Крафтинг:</b> {new_count}/{target}\n"
-        f"<b>{progress_bar_str}</b>\n\n"
-        f"<b>🍃 Блантов в свёртке:</b> <b>{blunts}</b>"
-    )
     anim_msg = await animate_progress_bar(update, context, title="🌿 Скручиваем Блант...")
     if anim_msg is not None:
         await anim_msg.edit_text(text, parse_mode='HTML')
@@ -1944,7 +2018,7 @@ async def handle_craft_normal(update, context):
 
     await check_achievements(uid, context)
 
-# ИМЕННЫЕ БЛАНОЫ КРАФТ =============*********==========***********
+
 @error_handler
 async def handle_craft_named(update, context):
     query = update.callback_query
@@ -1968,7 +2042,8 @@ async def handle_craft_named(update, context):
         parse_mode='HTML'
     )
     context.user_data['awaiting_named_blunt_msg_id'] = sent_msg.message_id
-    
+
+
 async def handle_named_name(update, context):
     try:
         user = update.effective_user
@@ -1978,14 +2053,20 @@ async def handle_named_name(update, context):
             await update.message.reply_text("❌ Имя не может быть пустым.")
             return
 
-        uname = user.username or user.first_name
-
         async def _named(player, conn):
             if player.balance < 50:
                 return ("no_money",)
             player.balance -= 50
             player.craft_count = (player.craft_count or 0) + 1
             item = await create_named_blunt(uid, name, rarity=None, conn=conn)
+
+            # Очки войны внутри атомарной транзакции
+            war_service = context.bot_data.get("war_service")
+            if war_service:
+                await war_service.add_score(uid, WarAction.NAMED_CRAFT, conn)
+            else:
+                logger.warning("GuildWarService not found")
+
             return ("ok", item)
 
         result = await PlayerRepository.atomic_update(uid, _named)
@@ -1998,9 +2079,6 @@ async def handle_named_name(update, context):
             return
 
         item = data
-        war_service = context.bot_data["war_service"]
-        await war_service.add_score(uid, WarAction.NAMED_CRAFT)
-
         blunt_id = item["id"]
         name_escaped = html.escape(name)
         color = {"legendary": "🟡", "epic": "🟣", "rare": "🔵"}.get(item["rarity"], "🟢")
@@ -2031,11 +2109,12 @@ async def handle_named_name(update, context):
         else:
             await update.message.reply_text(caption, reply_markup=kb, parse_mode='HTML')
 
-        # ── Оповещение в канал ── (закомментировано)
+        # ── Оповещение в канал (закомментировано) ──
         # try:
+        #     uname = html.escape(user.username or user.first_name)
         #     await context.bot.send_message(
         #         chat_id="@guild_antysocial",
-        #         text=f"<b><i>🩸 ЭХО ИСКАЖЕНИЯ</i></b>\n\n⚜️ <b>@{html.escape(uname)}</b> создал свой именной Блант {color} "
+        #         text=f"<b><i>🩸 ЭХО ИСКАЖЕНИЯ</i></b>\n\n⚜️ <b>@{uname}</b> создал свой именной Блант {color} "
         #              f"<b><i>«{name_escaped}»</i></b> 🌿\n<i>Редкость: {item['rarity']}</i>\n🩸 <i>{reaction}</i>",
         #         parse_mode='HTML'
         #     )
@@ -2055,41 +2134,56 @@ async def handle_named_name(update, context):
     finally:
         context.user_data['awaiting_named_blunt'] = False
 
+
+@error_handler
 async def handle_use_dust(update, context):
     query = update.callback_query
     await query.answer()
     uid = query.from_user.id
-    player = await PlayerRepository.get_by_id(uid)
 
+    player = await PlayerRepository.get_by_id(uid)
     if not player or (player.m_essence or 0) < 1:
-        await query.answer("Нет Кристальной Пыли.")
+        await query.answer("Нет Кристальной Пыли.", show_alert=True)
         return
 
     async def _use_dust(p, conn):
+        if (p.m_essence or 0) < 1:
+            return ("no_dust",)
+
         p.m_essence -= 1
-        name = random.choice(["Крик Бездны","Пепел Короля","Шёпот Склепа","Коготь Хаоса","Вздох Пожирателя"])
+        name = random.choice([
+            "Крик Бездны", "Пепел Короля", "Шёпот Склепа",
+            "Коготь Хаоса", "Вздох Пожирателя"
+        ])
         item = await create_named_blunt(uid, name, rarity="legendary", conn=conn)
-        war_service = context.bot_data["war_service"]
-        await war_service.add_score(uid, WarAction.DUST_USE, conn)
-        return item, name
+
+        war_service = context.bot_data.get("war_service")
+        if war_service:
+            await war_service.add_score(uid, WarAction.DUST_USE, conn)
+        else:
+            logger.warning("GuildWarService not found")
+
+        return ("ok", item, name)
 
     result = await PlayerRepository.atomic_update(uid, _use_dust)
     if result is None:
         await query.answer("Профиль не найден.", show_alert=True)
         return
 
-    item, name = result
+    status, *data = result
+    if status == "no_dust":
+        await query.answer("Нет Кристальной Пыли.", show_alert=True)
+        return
+
+    item, name = data
     reaction = item["reaction"]
+
     await send_blunt_image(context, query.message.chat.id, "legendary")
-    text = (
-        f"<b><i>💠 ПЫЛЬ ИСПОЛЬЗОВАНА</i></b>\n\n"
-        f"🟡 <b><i>«{name}»</i></b> (Легендарный) 🌿\n"
-        f"📜 Реакция: <i>{reaction}</i>"
-    )
+    text = _format_dust_message(name, reaction)
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
     await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
 
-    # ── Оповещение в канал ── (закомментировано)
+    # ── Оповещение в канал (закомментировано) ──
     # try:
     #     await context.bot.send_message(chat_id="@guild_antysocial",
     #         text=f"<b><i>⚜️ ЭХО ИСКАЖЕНИЯ 🩸</i></b>\n\n🎉 <b>@{html.escape(player.username)}</b> использовал 💠 Пыль и получил легендарный Блант <b><i>«{name}»💍</i></b>!",
@@ -2099,6 +2193,7 @@ async def handle_use_dust(update, context):
 
     await check_achievements(uid, context)
 
+
 async def clear_named_blunt_state(context):
     user_id = getattr(context.job, "data", None)
     if user_id is None:
@@ -2107,6 +2202,7 @@ async def clear_named_blunt_state(context):
         context.application.user_data[user_id]["awaiting_named_blunt"] = False
     except Exception:
         pass
+
 
 async def cancel_named(update, context):
     query = update.callback_query
@@ -2120,7 +2216,7 @@ async def cancel_named(update, context):
             pass
     await craft_callback(update, context)
     
-# ===== ФУНКЦИЯ ПЕРЕДАЧИ БЛАНТА (АТОМАРНАЯ, БЕЗОПАСНАЯ) =====
+# ====== ФУНКЦИЯ ПЕРЕДАЧИ БЛАНТА (АТОМАРНАЯ, БЕЗОПАСНАЯ) =====
 class TransferError(Exception):
     pass
 class BluntNotFound(TransferError):
