@@ -2587,10 +2587,10 @@ async def do_smoke(update, context):
         if not player.inhaled:
             player.inhaled = 1
 
-        # военный счёт
+        # военный счёт (новый сервис)
         war_service = context.bot_data.get("war_service")
-if war_service:
-    await war_service.add_score_raw(uid, earned + medal_bonus, conn)
+        if war_service:
+            await war_service.add_score_raw(uid, earned + medal_bonus, conn)
 
         return ("ok", earned, r, save, medal_text, new_count, player.blunts, player.balance)
 
