@@ -590,7 +590,7 @@ async def create_named_blunt(user_id, name, rarity=None, conn=None):
     player = await PlayerRepository.get_by_id(user_id)
     player.inventory = _json_safe_load(player.inventory, [])
     player.inventory.append(item)
-    await PlayerRepository.save(player)
+    await PlayerRepository.save(player, conn=conn)
     return item
 
 
@@ -1074,6 +1074,13 @@ async def send_whisper(context, chat_id, text):
     except Exception as e:
         logger.error(f"Whisper error: {e}")
 
+async def send_blunt_image(context, chat_id, rarity):
+    file_id = BLUNT_IMAGES.get(rarity)
+    if file_id:
+        await context.bot.send_photo(chat_id=chat_id, photo=file_id)
+    else:
+        await context.bot.send_message(chat_id=chat_id, text="🖼️ Изображение отсутствует.")
+
 async def send_whisper_dm(update, context, text):
     if update.callback_query:
         chat_id = update.callback_query.message.chat.id
@@ -1090,6 +1097,22 @@ def format_date(iso_string):
         return dt.strftime("%d.%m.%Y в %H:%M")
     except:
         return iso_string
+
+def next_sunday_str() -> str:
+    now = datetime.now()
+    days_until_sunday = (6 - now.weekday()) % 7
+    if days_until_sunday == 0:
+        days_until_sunday = 7
+    next_sunday = now + timedelta(days=days_until_sunday)
+    return next_sunday.strftime("%d.%m")
+
+async def add_title(user_id, emoji, conn=None):
+    player = await PlayerRepository.get_by_id(user_id)
+    titles = (player.titles or "").split()
+    if emoji not in titles:
+        titles.append(emoji)
+        player.titles = " ".join(titles).strip()
+        await PlayerRepository.save(player, conn=conn)
 
 def get_user_and_msg(update: Update):
     if update.callback_query:
@@ -1157,8 +1180,7 @@ async def process_daily_login(user_id: int, context) -> None:
     # Атомарно применяем награду с повторной проверкой даты после блокировки
     async def _apply_daily(p, conn):
         # ★ После блокировки строки проверяем, не изменилась ли дата
-        if isinstance(p.last_login_date, datetime):
-            p_date = p.last_login_date.date()
+        p_date = _parse_last_login_date(p.last_login_date)
         else:
             p_date = _parse_last_login_date(p.last_login_date)
         if p_date == today:
@@ -1170,7 +1192,10 @@ async def process_daily_login(user_id: int, context) -> None:
         if reward.title:
             current_titles = (p.titles or "").strip()
             if reward.title not in current_titles:
-                p.titles = f"{current_titles} {reward.title}".strip()
+                if current_titles:
+        p.titles = f"{current_titles} {reward.title}".strip()
+    else:
+        p.titles = reward.title
         # Реальные предметы (только blunts, т.к. focus/lives – это просто текст)
         for field, qty in reward.inventory_items.items():
             if field == "blunts":
@@ -2115,6 +2140,9 @@ async def transfer_blunt(sender_id: int, receiver_id: int, blunt_id: str) -> Non
                     raise TransferError("Игрок не найден")
                 sender = Player(**dict(sender_row))
                 receiver = Player(**dict(receiver_row))
+                sender.inventory = _json_safe_load(sender.inventory, [])
+                receiver.inventory = _json_safe_load(receiver.inventory, [])
+                receiver.profile_skins = _json_safe_load(receiver.profile_skins, {})
                 sender.inventory = _json_safe_load(sender.inventory, [])
                 receiver.inventory = _json_safe_load(receiver.inventory, [])
                 if not isinstance(sender.inventory, list):
@@ -4171,7 +4199,8 @@ async def show_lab_death(update, context):
         p.balance += 50
         p.lab_deaths += 1
         # военный счёт (опционально)
-        await add_war_score(conn, uid, earned + medal_bonus)
+        war_service = context.bot_data["war_service"]
+    await war_service.add_score(uid, WarAction.LAB_DEATH, conn)
         return
 
     await PlayerRepository.atomic_update(uid, _lab_die)
