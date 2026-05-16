@@ -18,21 +18,13 @@ from telegram.ext import AIORateLimiter
 
 from typing import Optional, List, Any, Dict, NamedTuple
 
-# ---------- tenacity setup (без конфликтов) ----------
-import tenacity
-
-stop_after_attempt = tenacity.stop.stop_after_attempt
-wait_exponential = tenacity.wait.wait_exponential
-retry_if_exception_type = tenacity.retry_if_exception_type   # из корня пакета
-before_sleep_log = tenacity.before_sleep.before_sleep_log
-retry = tenacity.retry.retry   # декоратор из модуля retry
-
-# Проверка без падения
-if not callable(retry):
-    raise ImportError("retry не является функцией – проверь структуру tenacity")
-
-# Асинхронный retry – гарантированно функция
-retry = tenacity.asyncio.retry
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type,
+    before_sleep_log
+)
 
 from telegram.error import RetryAfter
 
@@ -300,8 +292,11 @@ def rate_limit(seconds: int = 2):
         return wrapper
     return decorator
 
-# === ВЕБ-СЕРВЕР ===
+# === ВЕБ-СЕРВЕР (Flask в отдельном потоке) ===
+import threading
+
 web_app = Flask(__name__)
+
 @web_app.route("/")
 def home():
     return "Antysocialshop RPG Bot is alive!"
@@ -309,12 +304,10 @@ def home():
 @web_app.route("/healthz")
 def healthz():
     """Проверяет, жив ли бот и подключена ли БД."""
-    import asyncio
     try:
         loop = asyncio.get_event_loop()
         if loop.is_closed():
             return "Event loop closed", 500
-        # Проверяем БД (если пул не создан или запрос не проходит – 503)
         if db_pool is None:
             return "No DB pool", 503
         loop.run_until_complete(_check_db())
@@ -328,7 +321,7 @@ async def _check_db():
 
 def run_web_server():
     port = int(os.getenv("PORT", 10000))
-    web_app.run(host="0.0.0.0", port=port)
+    web_app.run(host="0.0.0.0", port=port, threaded=True)
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logging.getLogger("telegram").setLevel(logging.DEBUG)
