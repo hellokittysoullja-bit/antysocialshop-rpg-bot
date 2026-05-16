@@ -19,14 +19,13 @@ from telegram.ext import AIORateLimiter
 from typing import Optional, List, Any, Dict, NamedTuple
 
 # ---------- tenacity setup (без конфликтов) ----------
-# ---------- TENACITY (АБСОЛЮТНО НАДЁЖНЫЙ ВАРИАНТ) ----------
 import tenacity
 
 stop_after_attempt = tenacity.stop.stop_after_attempt
 wait_exponential = tenacity.wait.wait_exponential
-retry_if_exception_type = tenacity.retry_if_exception_type
+retry_if_exception_type = tenacity.retry.retry_if_exception_type   # из модуля retry
 before_sleep_log = tenacity.before_sleep.before_sleep_log
-retry = tenacity.retry                  # ← универсальный, работает и с async
+retry = tenacity.retry.retry   # <-- сам декоратор, теперь это функция
 
 # Асинхронный retry – гарантированно функция
 retry = tenacity.asyncio.retry
