@@ -2587,7 +2587,9 @@ async def do_smoke(update, context):
             player.inhaled = 1
 
         # военный счёт
-        await add_war_score(conn, uid, earned + medal_bonus)
+        war_service = context.bot_data.get("war_service")
+if war_service:
+    await war_service.add_score_raw(uid, earned + medal_bonus, conn)
 
         return ("ok", earned, r, save, medal_text, new_count, player.blunts, player.balance)
 
@@ -3753,7 +3755,9 @@ async def _process_wheel(update, context, uid, player, cfg):
             p.blunts += prize
         p.last_daily = datetime.now()
         if ptype in ("oac", "jackpot"):
-            await add_war_score(uid, prize, conn)   # правильный порядок: user_id, points, conn
+    war_service = context.bot_data.get("war_service")
+    if war_service:
+        await war_service.add_score_raw(uid, prize, conn)
         return prize, ptype, p.balance
 
     result = await PlayerRepository.atomic_update(uid, _wheel)
@@ -3867,7 +3871,9 @@ async def _process_alchemy_confirm(update, context, uid, player, cfg, bal):
                 else:
                     res = "<b>🌫️ Грязный Выхлоп...</b>\n\nБланты сгорели без следа."
                 break
-        await add_war_score(uid, cfg["war_points"]["alchemy"], conn)
+        war_service = context.bot_data.get("war_service")
+if war_service:
+    await war_service.add_score(uid, WarAction.ALCHEMY, conn)
         return ("ok", res)
 
     result = await PlayerRepository.atomic_update(uid, _alchemy)
