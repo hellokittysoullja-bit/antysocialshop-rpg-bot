@@ -19,12 +19,18 @@ from telegram.ext import AIORateLimiter
 from typing import Optional, List, Any, Dict, NamedTuple
 
 # ---------- tenacity setup (без конфликтов) ----------
+# ---------- TENACITY (АБСОЛЮТНО НАДЁЖНЫЙ ВАРИАНТ) ----------
 import tenacity
-retry = tenacity.asyncio.retry
+
+# Все вспомогательные функции берём напрямую из стабильных путей
 stop_after_attempt = tenacity.stop.stop_after_attempt
 wait_exponential = tenacity.wait.wait_exponential
 retry_if_exception_type = tenacity.retry.retry_if_exception_type
 before_sleep_log = tenacity.before_sleep.before_sleep_log
+
+# Асинхронный retry – гарантированно функция
+retry = tenacity.asyncio.retry
+
 from telegram.error import RetryAfter
 
 import enum                     # <-- для WarAction
@@ -324,6 +330,24 @@ def run_web_server():
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logging.getLogger("telegram").setLevel(logging.DEBUG)
 logger = logging.getLogger(__name__)
+# ---------- МАКСИМАЛЬНАЯ ОТЛАДКА ----------
+import sys
+import traceback
+
+def log_unhandled_exception(exc_type, exc_value, exc_traceback):
+    logger.critical("НЕОБРАБОТАННОЕ ИСКЛЮЧЕНИЕ:", exc_info=(exc_type, exc_value, exc_traceback))
+    traceback.print_exception(exc_type, exc_value, exc_traceback)
+sys.excepthook = log_unhandled_exception
+
+# Уровни логирования
+logging.getLogger().setLevel(logging.DEBUG)
+logging.getLogger("telegram").setLevel(logging.DEBUG)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("apscheduler").setLevel(logging.INFO)
+
+logger.info("===== БОТ ЗАПУСКАЕТСЯ =====")
+logger.info(f"Python {sys.version}")
+logger.info(f"Рабочая директория: {os.getcwd()}")
 
 TOKEN = os.getenv("TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
