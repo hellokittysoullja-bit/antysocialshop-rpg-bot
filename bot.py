@@ -1170,7 +1170,6 @@ async def process_daily_login(user_id: int, context) -> None:
         return
 
     last = _parse_last_login_date(player.last_login_date)
-    # Быстрая проверка (без транзакции) – если точно уже заходил, выходим
     if last == today:
         return
 
@@ -1179,24 +1178,24 @@ async def process_daily_login(user_id: int, context) -> None:
 
     # Атомарно применяем награду с повторной проверкой даты после блокировки
     async def _apply_daily(p, conn):
-        # ★ После блокировки строки проверяем, не изменилась ли дата
         p_date = _parse_last_login_date(p.last_login_date)
-        else:
-            p_date = _parse_last_login_date(p.last_login_date)
         if p_date == today:
-            return False   # уже начислено другим запросом, выходим без изменений
+            return False   # уже начислено другим запросом
 
         p.balance += reward.total_oac
         p.login_streak = streak
         p.last_login_date = today
+
+        # Начисление титула
         if reward.title:
             current_titles = (p.titles or "").strip()
             if reward.title not in current_titles:
                 if current_titles:
-        p.titles = f"{current_titles} {reward.title}".strip()
-    else:
-        p.titles = reward.title
-        # Реальные предметы (только blunts, т.к. focus/lives – это просто текст)
+                    p.titles = f"{current_titles} {reward.title}".strip()
+                else:
+                    p.titles = reward.title
+
+        # Предметы (только blunts, остальное — просто текст в сообщении)
         for field, qty in reward.inventory_items.items():
             if field == "blunts":
                 p.blunts += qty
@@ -1204,9 +1203,8 @@ async def process_daily_login(user_id: int, context) -> None:
 
     result = await PlayerRepository.atomic_update(user_id, _apply_daily)
     if not result:
-        # Если False или None – либо гонка, либо игрок не найден
         if result is False:
-            logger.info("Daily login already claimed (race prevented) for user %d", user_id)
+            logger.info("Daily already claimed (race prevented) for user %d", user_id)
         else:
             logger.warning("Daily login: atomic_update returned None for user %d", user_id)
         return
