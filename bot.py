@@ -18,11 +18,13 @@ from telegram.ext import AIORateLimiter
 
 from typing import Optional, List, Any, Dict, NamedTuple
 
-from tenacity.asyncio import retry
-from tenacity import (
-    stop_after_attempt, wait_exponential,
-    retry_if_exception_type, before_sleep_log
-)
+# ---------- tenacity setup (без конфликтов) ----------
+import tenacity
+retry = tenacity.asyncio.retry
+stop_after_attempt = tenacity.stop.stop_after_attempt
+wait_exponential = tenacity.wait.wait_exponential
+retry_if_exception_type = tenacity.retry.retry_if_exception_type
+before_sleep_log = tenacity.before_sleep.before_sleep_log
 from telegram.error import RetryAfter
 
 import enum                     # <-- для WarAction
