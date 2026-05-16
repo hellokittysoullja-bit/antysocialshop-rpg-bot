@@ -28,10 +28,12 @@ from telegram.error import RetryAfter
 import enum                     # <-- для WarAction
 from pydantic import BaseModel, Field, ConfigDict
 
+# Проверка: если retry – модуль, а не функция, будет ошибка
+assert callable(retry), "retry должен быть функцией, а не модулем!"
+
 # ── Исключения ──────────────────────────────────────────────
 class UnknownWarActionError(Exception):
     """В конфиге отсутствует цена действия."""
-
 
 # ── Enum действий ───────────────────────────────────────────
 class WarAction(enum.Enum):
