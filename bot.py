@@ -3368,6 +3368,11 @@ if not war_service:
     await edit_or_reply(update, context, "Сервис войны недоступен.")
     return
 
+war_service = context.bot_data.get("war_service")
+if not war_service:
+    await edit_or_reply(update, context, "Сервис войны недоступен.")
+    return
+
 async with db_pool.acquire() as conn:
     # Проверяем, активна ли война
     is_active = await war_service.is_war_active()
