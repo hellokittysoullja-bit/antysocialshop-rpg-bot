@@ -4288,14 +4288,17 @@ async def show_lab_death(update, context):
     if not player:
         return
     depth = player.lab_depth or 1
-    # атомарно начислим утешительный приз
+
+    # атомарно начисляем утешительный приз и военные очки
     async def _lab_die(p, conn):
         p.balance += 50
         p.lab_deaths += 1
-        # военный счёт (опционально)
-        war_service = context.bot_data["war_service"]
-    await war_service.add_score(uid, WarAction.LAB_DEATH, conn)
-        return
+
+        war_service = context.bot_data.get("war_service")
+        if war_service:
+            await war_service.add_score(uid, WarAction.LAB_DEATH, conn)
+        else:
+            logger.warning("GuildWarService not found in bot_data")
 
     await PlayerRepository.atomic_update(uid, _lab_die)
 
