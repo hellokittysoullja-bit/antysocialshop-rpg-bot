@@ -243,6 +243,8 @@ class Player(BaseModel):
     donated: int = 0
     pending_transfer: Optional[dict] = None
     lab_depth: int = 1
+    pet: str = ""           # 🐕 Песик
+    pet_name: str = ""      # кличка
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -2926,18 +2928,27 @@ async def profile_callback(update, context):
 
     rank_progress = get_rank_progress(bal)
 
-    text = (
-        f"<b>⚜️ ПРОФИЛЬ</b>\n"
-        f"👤 <b>{uname}</b>{g_emoji}\n"
-        f"🫧 Фон: {bg}\n\n"
-        f"{rank_progress}\n\n"
-        f"💎 <b>ОАС:</b> <b>{bal} OAC</b> 🍬\n"
-        f"🌿 <b>Блантов в свёртке:</b> <b>{bl}</b>\n"
-        f"🪴 <b>Куст:</b> <b>+{30 * (3 if bal >= 20000 else 2 if bal >= 5000 else 0)} OAC/ч</b>\n"
-        f"🧬 <b>Титул:</b> {active_title}\n"
-        f"🧠 <b>Нейро-статус:</b> <i>{neuro}</i>\n\n"
-        f"🎖️ <b>Заслуги:</b> {badge_str}"
-    )
+###петомец###
+pet_line = ""
+if player.pet:
+    pet_line = f"🐾 <b>Питомец:</b> {player.pet}"
+    if player.pet_name:
+        pet_line += f" «{player.pet_name}»"
+    pet_line += "\n"
+
+text = (
+    f"<b>⚜️ ПРОФИЛЬ</b>\n"
+    f"👤 <b>{uname}</b>{g_emoji}\n"
+    f"🫧 <b>Фон:</b> {bg}\n\n"
+    f"{rank_progress}\n\n"
+    f"💎 <b>ОАС:</b> <b>{bal} OAC</b> 🍬\n"
+    f"🌿 <b>Блантов в свёртке:</b> <b>{bl}</b>\n"
+    f"🪴 <b>Куст:</b> <b>+{30 * (3 if bal >= 20000 else 2 if bal >= 5000 else 0)} OAC/ч</b>\n"
+    f"🧬 <b>Титул:</b> {active_title}\n"
+    f"🧠 <b>Нейро-статус:</b> <i>{neuro}</i>\n"
+    f"{pet_line}"                                            # ← вот сюда вставляем
+    f"🎖️ <b>Заслуги:</b> {badge_str}"
+)
 
     named = [it for it in inv_data if it.get("type") == "named"]
     rarity_order = {"legendary": 0, "epic": 1, "rare": 2, "common": 3}
@@ -4589,8 +4600,84 @@ async def handle_chat_shortcut(update, context):
     if text in mapping:
         await mapping[text](update, context)
 
+async def handle_pet_name(update, context):
+    name = update.message.text.strip()[:15]
+    if not name:
+        await update.message.reply_text("❌ Имя не может быть пустым.")
+        return
+
+    uid = update.effective_user.id
+    async def _set_name(p, conn):
+        p.pet_name = name
+        return ("ok",)
+
+    result = await PlayerRepository.atomic_update(uid, _set_name)
+    if result is None:
+        await update.message.reply_text("Ошибка.")
+    else:
+        await update.message.reply_text(f"Отлично! Теперь твоего питомца зовут «{name}»! 🐕")
+    context.user_data.pop('awaiting_pet_name', None)
+
 async def pet_preview(update, context):
-    await update.effective_message.reply_text("🐾 Питомцы пока не реализованы.")
+    uid = update.effective_user.id
+    player = await PlayerRepository.get_by_id(uid)
+    if player and player.pet:
+        name_str = f" по кличке «{player.pet_name}»" if player.pet_name else ""
+        await update.effective_message.reply_text(f"Твой питомец: {player.pet}{name_str}")
+    else:
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🐕 Купить Песика (3000 🍬)", callback_data="pet_buy_dog")],
+            [InlineKeyboardButton("🔙 Назад", callback_data="menu")]
+        ])
+        await update.effective_message.reply_text(
+            "🐾 <b>ПИТОМЦЫ</b>\n\nПока доступен только Песик.",
+            reply_markup=kb,
+            parse_mode='HTML'
+        )
+        
+@safe_callback
+async def pet_buy_dog_handler(update, context):
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+
+    async def _buy(p, conn):
+        if p.pet:
+            return ("already_have",)
+        if p.balance < 3000:
+            return ("no_money",)
+        p.balance -= 3000
+        p.pet = "🐕 Песик"
+        p.pet_name = ""
+        return ("ok",)
+
+    result = await PlayerRepository.atomic_update(uid, _buy)
+    if result is None:
+        await query.answer("Ошибка.")
+        return
+    status = result[0]
+    if status == "already_have":
+        await query.answer("У тебя уже есть питомец!")
+    elif status == "no_money":
+        await query.answer("Недостаточно OAC. Нужно 3000 🍬")
+    else:
+        context.user_data['awaiting_pet_name'] = True
+        await query.message.edit_text(
+            "<b>🐕 Песик ждёт имя!</b>\n\n"
+            "Введи имя для своего питомца (до 15 символов).\n"
+            "Для отмены нажми кнопку ниже.",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Пропустить (без имени)", callback_data="pet_name_skip")]
+            ])
+        )
+        
+@safe_callback
+async def pet_name_skip_handler(update, context):
+    query = update.callback_query
+    await query.answer()
+    context.user_data.pop('awaiting_pet_name', None)
+    await query.message.edit_text("Питомец останется без имени.")
 
 async def shop_callback(update, context):
     query = update.callback_query
@@ -4981,6 +5068,8 @@ CALLBACKS: Dict[str, Callable] = {
     "guild_join_BLACK": guild_join_handler,
     "guild_join_WHITE": guild_join_handler,
     "cancel_gift": cancel_gift_handler,
+    "pet_buy_dog": pet_buy_dog_handler,
+    "pet_name_skip": pet_name_skip_handler,
 }
 
 # ========== ТОЧНЫЕ КОЛБЭКИ (без префиксов) ==========
