@@ -1326,26 +1326,94 @@ async def process_daily_login(user_id: int, context) -> None:
     except Exception:
         logger.exception("Achievement check failed", extra={"user_id": user_id})
 
-# Глобальный кеш меню (user_id -> (timestamp, keyboard, whisper))
+
+# ── Конфигурация кулдаунов (можно править без захода в функцию) ──
+MAIN_MENU_COOLDOWNS = {
+    "farm": {
+        "text": "🍬 Фармить",
+        "cooldown_hours": FARM_COOLDOWN_HOURS,
+        "last_attr": "last_farm",
+        "format": "min",
+    },
+    "ritual": {
+        "text": "🕯️ Ритуал",
+        "cooldown_hours": 24,
+        "last_attr": "last_ritual",
+        "format": "hrs",
+        "guild_only": "BLACK",        # <-- убрать, если нужна всем
+    },
+    "lab": {
+        "text": "🏛️ Лабиринт",
+        "cooldown_hours": 12,
+        "last_attr": "last_lab_attempt",
+        "format": "full",
+    },
+}
+
+def _format_cooldown(player, now, key: str) -> str:
+    """Возвращает текст кнопки с кулдауном или без."""
+    config = MAIN_MENU_COOLDOWNS.get(key)
+    if not config:
+        return ""
+
+    if config.get("guild_only") and (not player or player.guild != config["guild_only"]):
+        return ""
+
+    text = config["text"]
+    last_attr = config.get("last_attr")
+    if not last_attr or not player:
+        return text
+
+    last_time = getattr(player, last_attr, None)
+    if not last_time:
+        return text
+
+    cooldown_hours = config["cooldown_hours"]
+    remain = timedelta(hours=cooldown_hours) - (now - last_time)
+    if remain.total_seconds() <= 0:
+        return text
+
+    fmt = config.get("format", "min")
+    if fmt == "min":
+        mins = int(remain.total_seconds() // 60)
+        return f"{text} ⏳ {mins} мин"
+    elif fmt == "hrs":
+        hrs = int(remain.total_seconds() // 3600)
+        return f"{text} ⏳ {hrs} ч"
+    else:  # full
+        hrs = int(remain.total_seconds() // 3600)
+        mins = int((remain.total_seconds() % 3600) // 60)
+        return f"{text} ⏳ {hrs} ч {mins} мин"
+
+
 _menu_cache = {}
+
+def invalidate_menu_cache(user_id: int):
+    """Сброс кэша меню для конкретного пользователя."""
+    _menu_cache.pop(user_id, None)
 
 async def get_main_menu_keyboard(user_id):
     now = time.time()
-    # Если кеш свежий (2 секунды), возвращаем готовое
     if user_id in _menu_cache:
         cached_time, kb, whisper = _menu_cache[user_id]
         if now - cached_time < 2:
             return kb, whisper
 
-    # Иначе строим заново
     whisper = random.choice(WHISPERS)
     player = await PlayerRepository.get_by_id(user_id)
     balance = player.balance if player else 0
+    now_dt = datetime.now()
 
+    # ── Кнопки с кулдаунами ──
+    farm_text = _format_cooldown(player, now_dt, "farm")
+    ritual_text = _format_cooldown(player, now_dt, "ritual")
+    lab_text = _format_cooldown(player, now_dt, "lab")
+
+    # ── Кнопки условий ──
     bush_btn = (
         InlineKeyboardButton("🪴 Куст", callback_data="collect")
         if balance >= 5000
-        else InlineKeyboardButton("🪴 Куст 🔒)", callback_data="bush_preview")
+        else InlineKeyboardButton("🪴 Куст 🔒", callback_data="bush_preview")
     )
     pet_btn = (
         InlineKeyboardButton("🐾 Питомец", callback_data="pet_preview")
@@ -1353,29 +1421,30 @@ async def get_main_menu_keyboard(user_id):
         else InlineKeyboardButton("🐾 Питомец 🔒", callback_data="pet_preview")
     )
 
+    # ── Сборка клавиатуры ──
     keyboard = [
-        [InlineKeyboardButton("🍬 Фармить", callback_data="farm")],
-        [
-            InlineKeyboardButton("🌿 Крафт", callback_data="craft"),
-            InlineKeyboardButton("💨 Дунуть", callback_data="smoke"),
-        ],
+        [InlineKeyboardButton(farm_text, callback_data="farm")],
+        [InlineKeyboardButton("🌿 Крафт", callback_data="craft"),
+         InlineKeyboardButton("💨 Дунуть", callback_data="smoke")],
         [bush_btn],
-        [
-            InlineKeyboardButton("⚜️ Профиль", callback_data="profile"),
-            InlineKeyboardButton("🏆 Лидеры", callback_data="top"),
-        ],
-        [
-            InlineKeyboardButton("🕋 Гильдия", callback_data="guild_info"),
-            pet_btn,
-        ],
-        [
-            InlineKeyboardButton("🍀 Удача", callback_data="luck"),
-            InlineKeyboardButton("🏛️ Лабиринт", callback_data="lab_start"),
-        ],
-        [InlineKeyboardButton("🛒 Магазин", callback_data="shop")],
+        [InlineKeyboardButton("⚜️ Профиль", callback_data="profile"),
+         InlineKeyboardButton("🏆 Лидеры", callback_data="top")],
     ]
+
+    # Группа гильдия + питомец + (опционально ритуал)
+    guild_row = [InlineKeyboardButton("🕋 Гильдия", callback_data="guild_info")]
+    if ritual_text:                         # <-- если кнопка ритуала сгенерировалась
+        guild_row.append(InlineKeyboardButton(ritual_text, callback_data="ritual"))
+    guild_row.append(pet_btn)
+    keyboard.append(guild_row)
+
+    keyboard.append([
+        InlineKeyboardButton("🎲 Удача", callback_data="luck"),
+        InlineKeyboardButton(lab_text, callback_data="lab_start"),
+    ])
+    keyboard.append([InlineKeyboardButton("🛒 Магазин", callback_data="shop")])
+
     kb = InlineKeyboardMarkup(keyboard)
-    # Кладём в кеш
     _menu_cache[user_id] = (now, kb, whisper)
     return kb, whisper
 
