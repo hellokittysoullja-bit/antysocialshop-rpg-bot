@@ -245,6 +245,7 @@ class Player(BaseModel):
     lab_depth: int = 1
     pet: str = ""           # 🐕 Песик
     pet_name: str = ""      # кличка
+    exists: bool = False   # True, если игрок загружен из БД
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -422,6 +423,7 @@ class PlayerRepository:
             p["inventory"] = _json_safe_load(p.get("inventory"), [])
             p["profile_skins"] = _json_safe_load(p.get("profile_skins"), {})
             player = Player(**p)
+            player.exists = True
 
             # Кэшируем
             if redis:
@@ -1779,10 +1781,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 2. Обрабатываем реферала (если есть аргумент)
     await _handle_referral(update, context, uid, player)
 
-    # 3. Если игрока нет – создаём новичка и выходим
-    if not player or not player.user_id:
-        await _create_new_player(update, context, uid, username)
-        return
+    if not player or not player.exists:
+    await _create_new_player(update, context, uid, username)
+    return
 
     # 4. Ежедневный вход
     await process_daily_login(uid, context)
