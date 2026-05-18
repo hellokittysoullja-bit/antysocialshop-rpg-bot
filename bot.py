@@ -1768,7 +1768,7 @@ async def _show_main_menu(update, context, player, user):
     await update.effective_message.reply_text(menu_text, reply_markup=kb, parse_mode='HTML')
 
 # САМА ФУНКЦИЯ START — ТОНКИЙ ОРКЕСТРАТОР
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------- def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user, msg = get_user_and_msg(update)
     uid = user.id
@@ -2929,27 +2929,28 @@ async def profile_callback(update, context):
 
     rank_progress = get_rank_progress(bal)
 
-###петомец###
-pet_line = ""
-if player.pet:
-    pet_line = f"🐾 <b>Питомец:</b> {player.pet}"
-    if player.pet_name:
-        pet_line += f" «{player.pet_name}»"
-    pet_line += "\n"
+    # --- Питомец (добавлено) ---
+    pet_line = ""
+    if player.pet:
+        pet_line = f"🐾 <b>Питомец:</b> {player.pet}"
+        if player.pet_name:
+            pet_line += f" «{player.pet_name}»"
+        pet_line += "\n"
+    # --------------------------
 
-text = (
-    f"<b>⚜️ ПРОФИЛЬ</b>\n"
-    f"👤 <b>{uname}</b>{g_emoji}\n"
-    f"🫧 <b>Фон:</b> {bg}\n\n"
-    f"{rank_progress}\n\n"
-    f"💎 <b>ОАС:</b> <b>{bal} OAC</b> 🍬\n"
-    f"🌿 <b>Блантов в свёртке:</b> <b>{bl}</b>\n"
-    f"🪴 <b>Куст:</b> <b>+{30 * (3 if bal >= 20000 else 2 if bal >= 5000 else 0)} OAC/ч</b>\n"
-    f"🧬 <b>Титул:</b> {active_title}\n"
-    f"🧠 <b>Нейро-статус:</b> <i>{neuro}</i>\n"
-    f"{pet_line}"                                            # ← вот сюда вставляем
-    f"🎖️ <b>Заслуги:</b> {badge_str}"
-)
+    text = (
+        f"<b>⚜️ ПРОФИЛЬ</b>\n"
+        f"👤 <b>{uname}</b>{g_emoji}\n"
+        f"🫧 Фон: {bg}\n\n"
+        f"{rank_progress}\n\n"
+        f"💎 <b>ОАС:</b> <b>{bal} OAC</b> 🍬\n"
+        f"🌿 <b>Блантов в свёртке:</b> <b>{bl}</b>\n"
+        f"🪴 <b>Куст:</b> <b>+{30 * (3 if bal >= 20000 else 2 if bal >= 5000 else 0)} OAC/ч</b>\n"
+        f"🧬 <b>Титул:</b> {active_title}\n"
+        f"🧠 <b>Нейро-статус:</b> <i>{neuro}</i>\n"
+        f"{pet_line}"
+        f"🎖️ <b>Заслуги:</b> {badge_str}"
+    )
 
     named = [it for it in inv_data if it.get("type") == "named"]
     rarity_order = {"legendary": 0, "epic": 1, "rare": 2, "common": 3}
