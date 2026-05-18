@@ -1769,7 +1769,6 @@ async def _show_main_menu(update, context, player, user):
 
 # САМА ФУНКЦИЯ START — ТОНКИЙ ОРКЕСТРАТОР
 # ---------------------------------------------------------------------------
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user, msg = get_user_and_msg(update)
     uid = user.id
@@ -1781,9 +1780,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 2. Обрабатываем реферала (если есть аргумент)
     await _handle_referral(update, context, uid, player)
 
+    # 3. Если игрока нет в БД – создаём новичка и выходим
     if not player or not player.exists:
-    await _create_new_player(update, context, uid, username)
-    return
+        await _create_new_player(update, context, uid, username)
+        return
 
     # 4. Ежедневный вход
     await process_daily_login(uid, context)
