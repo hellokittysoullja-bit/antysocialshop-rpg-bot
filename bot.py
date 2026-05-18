@@ -1,9 +1,9 @@
-# bot.py — ANTY SOCIAL SHOP RPG v7.6.6.6 FINAL FIXED 
+# bot.py — ANTY SOCIAL SHOP RPG v7.6.6.6 FINAL FIXED
 import asyncio, logging, os, random, re, json, hashlib, html
 from datetime import datetime, timedelta, date, time
 from dataclasses import dataclass, field
 from threading import Thread
-import time                       # <-- нужно для throttling логов Redis
+import time
 
 import asyncpg
 from flask import Flask
@@ -16,7 +16,8 @@ from telegram.error import BadRequest, Forbidden
 
 from telegram.ext import AIORateLimiter
 
-from typing import Optional, List, Any, Dict, NamedTuple
+from typing import Optional, List, Any, Dict, NamedTuple, Callable
+import functools
 
 from tenacity import (
     retry,
@@ -25,11 +26,81 @@ from tenacity import (
     retry_if_exception_type,
     before_sleep_log
 )
-
 from telegram.error import RetryAfter
 
-import enum                     # <-- для WarAction
+import enum
 from pydantic import BaseModel, Field, ConfigDict
+
+# ============================================================
+# ДЕКОРАТОРЫ (объявлены первыми, доступны везде)
+# ============================================================
+def safe_callback(func: Callable):
+    """Декоратор, который логирует ошибки callback-запросов."""
+    @functools.wraps(func)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        try:
+            return await func(update, context)
+        except Exception as e:
+            logger.error(f"Callback error in {func.__name__}: {e}", exc_info=True)
+            try:
+                await update.callback_query.answer(f"❌ Ошибка: {e}", show_alert=True)
+            except Exception:
+                pass
+    return wrapper
+
+
+def error_handler(func):
+    """Middleware: перехватывает исключения в обработчиках."""
+    @functools.wraps(func)
+    async def wrapper(update, context, *args, **kwargs):
+        try:
+            return await func(update, context, *args, **kwargs)
+        except Exception as e:
+            logger.error(f"Unhandled error in {func.__name__}:", exc_info=True)
+            if 'awaiting_named_blunt' in context.user_data:
+                context.user_data['awaiting_named_blunt'] = False
+            if update.callback_query:
+                await update.callback_query.answer("⚠️ Внутренняя ошибка. Админ уже в курсе.", show_alert=True)
+            else:
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text="⚠️ Что-то пошло не так. Попробуйте позже."
+                )
+            if ADMIN_ID:
+                try:
+                    err_msg = f"🚨 <b>Ошибка в {func.__name__}</b>\n<code>{html.escape(str(e))}</code>"
+                    await context.bot.send_message(chat_id=ADMIN_ID, text=err_msg, parse_mode='HTML')
+                except Exception as notify_err:
+                    logger.error(f"Failed to notify admin: {notify_err}")
+    return wrapper
+
+
+def rate_limit(seconds: int = 2):
+    """Запрещает повторный вызов функции чаще, чем раз в seconds секунд."""
+    def decorator(func):
+        @functools.wraps(func)
+        async def wrapper(update, context, *args, **kwargs):
+            user_id = update.effective_user.id
+            key = f"rate_{func.__name__}_{user_id}"
+            now = datetime.now()
+            last_time = context.user_data.get(key)
+            if last_time and (now - last_time).total_seconds() < seconds:
+                if update.callback_query:
+                    await update.callback_query.answer("⏳ Слишком быстро! Подожди немного.", show_alert=True)
+                else:
+                    await context.bot.send_message(
+                        chat_id=update.effective_chat.id,
+                        text="⏳ Пожалуйста, не так быстро. Попробуй через пару секунд."
+                    )
+                return
+            context.user_data[key] = now
+            return await func(update, context, *args, **kwargs)
+        return wrapper
+    return decorator
+
+# ============================================================
+# КОНЕЦ БЛОКА ДЕКОРАТОРОВ
+# ============================================================
 
 # Проверка: если retry – модуль, а не функция, будет ошибка
 assert callable(retry), "retry должен быть функцией, а не модулем!"
@@ -268,30 +339,6 @@ def db_retry(max_retries=3, delay=0.2):
                         raise
                     logger.warning(f"DB retry {attempt+1}/{max_retries} for {func.__name__}: {e}")
                     await asyncio.sleep(delay * (attempt + 1))
-        return wrapper
-    return decorator
-
-def rate_limit(seconds: int = 2):
-    """Запрещает повторный вызов функции чаще, чем раз в seconds секунд."""
-    def decorator(func):
-        @functools.wraps(func)
-        async def wrapper(update, context, *args, **kwargs):
-            user_id = update.effective_user.id
-            key = f"rate_{func.__name__}_{user_id}"
-            now = datetime.now()
-            last_time = context.user_data.get(key)
-            if last_time and (now - last_time).total_seconds() < seconds:
-                # Показываем предупреждение, но не выполняем действие
-                if update.callback_query:
-                    await update.callback_query.answer("⏳ Слишком быстро! Подожди немного.", show_alert=True)
-                else:
-                    await context.bot.send_message(
-                        chat_id=update.effective_chat.id,
-                        text="⏳ Пожалуйста, не так быстро. Попробуй через пару секунд."
-                    )
-                return
-            context.user_data[key] = now
-            return await func(update, context, *args, **kwargs)
         return wrapper
     return decorator
 
@@ -1454,38 +1501,6 @@ async def get_main_menu_keyboard(user_id):
 
 def get_back_to_menu_keyboard():
     return InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
-
-import functools
-import traceback
-
-def error_handler(func):
-    """Middleware: перехватывает исключения в обработчиках, уведомляет пользователя и админа."""
-    @functools.wraps(func)
-    async def wrapper(update, context, *args, **kwargs):
-        try:
-            return await func(update, context, *args, **kwargs)
-        except Exception as e:
-            # Логируем полную трассировку
-            logger.error(f"Unhandled error in {func.__name__}:", exc_info=True)
-            # Сбрасываем состояние ожидания именного бланта
-            if 'awaiting_named_blunt' in context.user_data:
-                context.user_data['awaiting_named_blunt'] = False
-            # Уведомляем пользователя (всплывашка или сообщение)
-            if update.callback_query:
-                await update.callback_query.answer("⚠️ Внутренняя ошибка. Админ уже в курсе.", show_alert=True)
-            else:
-                await context.bot.send_message(
-                    chat_id=update.effective_chat.id,
-                    text="⚠️ Что-то пошло не так. Попробуйте позже."
-                )
-            # Отправляем детали ошибки админу в Telegram
-            if ADMIN_ID:
-                try:
-                    err_msg = f"🚨 <b>Ошибка в {func.__name__}</b>\n<code>{html.escape(str(e))}</code>"
-                    await context.bot.send_message(chat_id=ADMIN_ID, text=err_msg, parse_mode='HTML')
-                except Exception as notify_err:
-                    logger.error(f"Failed to notify admin: {notify_err}")
-    return wrapper
 
 # ========== ОБРАБОТЧИКИ КОМАНД (полный, надёжный, с лабиринтом) ==========
 logger = logging.getLogger(__name__)   # ← 
@@ -4706,24 +4721,7 @@ async def setbluntpic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     names = {"common":"⚪ Обычный","rare":"🔵 Редкий","epic":"🟣 Эпический","legendary":"🟡 Легендарный"}
     await update.message.reply_text(f"✅ Изображение для {names[rarity]} обновлено!", parse_mode='HTML')
 
-# ========== ВСПОМОГАТЕЛЬНЫЕ ОБРАБОТЧИКИ КНОПОК ==========
-import functools
-from typing import Callable, Dict
-
-def safe_callback(func: Callable):
-    """Декоратор, который логирует ошибки callback-запросов, не вызывая answer."""
-    @functools.wraps(func)
-    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        try:
-            return await func(update, context)
-        except Exception as e:
-            logger.error(f"Callback error in {func.__name__}: {e}", exc_info=True)
-            try:
-                await update.callback_query.answer(f"❌ Ошибка: {e}", show_alert=True)
-            except Exception:
-                pass
-    return wrapper
-
+# ========== ВСПОМОГАТЕЛЬНЫЕ ОБРАБОТЧИКИ КНОПОК =========
 @safe_callback
 async def menu_handler(update, context):
     query = update.callback_query
