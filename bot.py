@@ -4735,15 +4735,6 @@ async def menu_handler(update, context):
         await query.message.reply_text(menu_text, reply_markup=kb, parse_mode='HTML')
 
 @safe_callback
-async def pet_preview_handler(update, context):
-    query = update.callback_query
-    await query.answer()
-    await query.message.edit_text(
-        "🐾 Питомцы пока не реализованы.",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
-    )
-
-@safe_callback
 async def bush_preview_handler(update, context):
     query = update.callback_query
     await query.answer("❌ Доступно с ранга ⚔️ Ветеран (5000 OAC 🍬)", show_alert=True)
@@ -5057,7 +5048,7 @@ CALLBACKS: Dict[str, Callable] = {
     "guild_war": guild_war_callback,
     "confess": confess_callback,
     "shop": shop_callback,
-    "pet_preview": pet_preview_handler,
+    "pet_preview": pet_preview,
     "bush_preview": bush_preview_handler,
     "activate_menu": activate_menu_handler,
     "skins_menu": skins_menu_handler,
