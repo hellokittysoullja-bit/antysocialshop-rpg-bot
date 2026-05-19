@@ -2040,7 +2040,7 @@ def _format_farm_message(earned: int, crit: bool, happy: bool,
         f"<b>⚜️ у тебя:</b> <i>{new_balance} oac 🎉</b>\n\n"
         f"{medal_text}"
         f"<b>🎯 Фарминг: {new_count}/{target}</b>\n"
-        f"<b>{progress_bar_str}</b>\n\n"
+        ff"{progress_bar_str}\n\n"
         f"{rank_progress}"
     )
 
@@ -2176,7 +2176,7 @@ def _format_normal_craft_message(medal_text: str, new_count: int, target: int,
         f"<b>⚜️ У тебя:</b> <b>{new_balance} OAC</b> 🍬\n\n"
         f"{medal_text}"
         f"<b>🎯 Крафтинг:</b> {new_count}/{target}\n"
-        f"<b>{progress_bar_str}</b>\n\n"
+        f"{progress_bar_str}\n\n"
         f"<b>🍃 Блантов в свёртке:</b> <b>{blunts}</b>"
     )
 
@@ -2781,7 +2781,7 @@ async def do_smoke(update, context):
         f"{effect}\n\n"
         f"{medal_text}"
         f"<b>💨 Дым:</b> {new_count}/{target}\n"
-        f"<b>{progress_bar_str}</b>\n\n"
+        f"{progress_bar_str}\n\n"
         f"<b>🍃 Блантов в свёртке:</b> <b>{bl_left}</b>"
     )
     if save:
