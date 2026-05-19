@@ -1124,6 +1124,14 @@ async def _run_migrations(conn):
         ON guild_weekly (guild, week_start);
     """)
 
+    # Таблица для хранения file_id и других настроек
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS bot_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+    """)
+
     # === Финальная проверка целостности ===
     try:
         await conn.execute("SELECT 1 FROM war_state LIMIT 1")
@@ -1265,6 +1273,19 @@ async def count_guilds():
         if r["guild"] in cnt:
             cnt[r["guild"]] = r["cnt"]
     return cnt
+   
+async def get_setting(key: str, default: str = "") -> str:
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT value FROM bot_settings WHERE key=$1", key)
+        return row["value"] if row else default
+
+async def set_setting(key: str, value: str) -> None:
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO bot_settings (key, value) VALUES ($1, $2) "
+            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+            key, value
+        )
 
 async def send_whisper(context, chat_id, text):
     try:
@@ -1272,12 +1293,36 @@ async def send_whisper(context, chat_id, text):
     except Exception as e:
         logger.error(f"Whisper error: {e}")
 
-async def send_blunt_image(context, chat_id, rarity):
+async def safe_send_blunt_image(context, chat_id, rarity):
     file_id = BLUNT_IMAGES.get(rarity)
-    if file_id:
+    if not file_id:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="🖼️ Изображение отсутствует. Админ скоро добавит.",
+            parse_mode='HTML'
+        )
+        return
+
+    try:
         await context.bot.send_photo(chat_id=chat_id, photo=file_id)
-    else:
-        await context.bot.send_message(chat_id=chat_id, text="🖼️ Изображение отсутствует.")
+    except BadRequest as e:
+        if "Wrong file identifier" in str(e):
+            logger.warning("Невалидный file_id для %s, сброшен", rarity)
+            BLUNT_IMAGES.pop(rarity, None)
+            await set_setting(f"blunt_image_{rarity}", "")
+            if ADMIN_ID:
+                await context.bot.send_message(
+                    chat_id=ADMIN_ID,
+                    text=f"⚠️ Изображение для {rarity} более недействительно. "
+                         f"Обновите его командой /setbluntpic {rarity}"
+                )
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"🟡 Легендарный бланк создан!\n<i>Изображение временно недоступно.</i>",
+                parse_mode='HTML'
+            )
+        else:
+            raise
 
 async def send_whisper_dm(update, context, text):
     if update.callback_query:
@@ -4754,15 +4799,33 @@ async def setbluntpic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return await update.message.reply_text("⛔ Только для админа.")
     if not context.args:
-        return await update.message.reply_text("Используй: /setbluntpic common (rare, epic, legendary) и прикрепи фото.")
+        return await update.message.reply_text("Используй: /setbluntpic <rarity> и прикрепи фото.")
     rarity = context.args[0].lower()
     if rarity not in BLUNT_IMAGES:
         return await update.message.reply_text("Редкость должна быть: common, rare, epic, legendary.")
     if not update.message.photo:
         return await update.message.reply_text("Пришли фото вместе с командой.")
-    BLUNT_IMAGES[rarity] = update.message.photo[-1].file_id
+    file_id = update.message.photo[-1].file_id
+    BLUNT_IMAGES[rarity] = file_id
+    await set_setting(f"blunt_image_{rarity}", file_id)
     names = {"common":"⚪ Обычный","rare":"🔵 Редкий","epic":"🟣 Эпический","legendary":"🟡 Легендарный"}
-    await update.message.reply_text(f"✅ Изображение для {names[rarity]} обновлено!", parse_mode='HTML')
+    await update.message.reply_text(f"✅ Изображение для {names[rarity]} обновлено и сохранено!", parse_mode='HTML')
+    
+async def check_blunt_pics(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    status = []
+    for rarity in ("common", "rare", "epic", "legendary"):
+        file_id = BLUNT_IMAGES.get(rarity)
+        if not file_id:
+            status.append(f"❌ {rarity}: не задан")
+        else:
+            try:
+                await context.bot.get_file(file_id)
+                status.append(f"✅ {rarity}")
+            except Exception:
+                status.append(f"⚠️ {rarity}: невалидный file_id")
+    await update.message.reply_text("\n".join(status))
 
 # ========== ВСПОМОГАТЕЛЬНЫЕ ОБРАБОТЧИКИ КНОПОК =========
 @safe_callback
@@ -5254,8 +5317,12 @@ async def keep_db_alive(context):
 
 # ========== ЗАПУСК ==========
 if __name__ == "__main__":
-    import uvloop
-    uvloop.install()
+    try:
+        import uvloop
+        uvloop.install()
+    except ImportError:
+        pass
+
     if not TOKEN:
         raise RuntimeError("TOKEN не установлен")
     if not os.getenv("NEON_DATABASE_URL"):
@@ -5266,19 +5333,50 @@ if __name__ == "__main__":
     loop.run_until_complete(init_db_pool())
     Thread(target=run_web_server, daemon=True).start()
 
-    # ===== СОЗДАНИЕ ПРИЛОЖЕНИЯ С ЛИМИТЕРОМ =====****========
+    # Загружаем сохранённые file_id из БД
+    for rarity in ("common", "rare", "epic", "legendary"):
+        saved = await get_setting(f"blunt_image_{rarity}")
+        if saved:
+            BLUNT_IMAGES[rarity] = saved
+
+    # ===== СОЗДАНИЕ ПРИЛОЖЕНИЯ С ЛИМИТЕРОМ =====
     app = (Application.builder()
            .token(TOKEN)
            .rate_limiter(AIORateLimiter())
            .build())
 
-    # ИНИЦАЛИЗАЦИЯ СЕРВИСА ВОЙНЫ ========******======
+    # ИНИЦИАЛИЗАЦИЯ СЕРВИСА ВОЙНЫ
     war_settings = WarSettings()
     war_config = WarConfig()
     war_service = GuildWarService(db_pool, redis_client=redis, config=war_config, settings=war_settings)
     app.bot_data["war_service"] = war_service
 
-    # ===== ИНИЦИАЛИЗАЦИЯ SENTRY =====****•==•••••••
+    # Валидация изображений после запуска приложения (через job_queue)
+    async def check_all_blunt_images():
+        invalid = []
+        for rarity in ("common", "rare", "epic", "legendary"):
+            file_id = BLUNT_IMAGES.get(rarity)
+            if not file_id:
+                invalid.append(rarity)
+                continue
+            try:
+                await app.bot.get_file(file_id)
+            except Exception:
+                invalid.append(rarity)
+                BLUNT_IMAGES.pop(rarity, None)
+                await set_setting(f"blunt_image_{rarity}", "")
+        if invalid:
+            logger.warning("Невалидные изображения: %s", ", ".join(invalid))
+            if ADMIN_ID:
+                await app.bot.send_message(
+                    chat_id=ADMIN_ID,
+                    text=f"⚠️ При запуске обнаружены невалидные изображения: {', '.join(invalid)}.\n"
+                         f"Они сброшены. Обновите через /setbluntpic."
+                )
+
+    app.job_queue.run_once(check_all_blunt_images, when=0)
+
+    # ===== ИНИЦИАЛИЗАЦИЯ SENTRY =====
     import sentry_sdk
     SENTRY_DSN = os.getenv("SENTRY_DSN")
     if SENTRY_DSN:
