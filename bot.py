@@ -1750,16 +1750,16 @@ async def _show_main_menu(update, context, player, user):
     # Приветствие и гильдия
     back = f"<b>⚔️ С возвращением в Гильдию, {rank_display} {html.escape(display_name)}.</b>\n\n"
     if guild == "BLACK":
-        back += "<b>🔮 Ты — часть Тёмной Гильдии. 🕯️Ритуалы ждут тебя</b>\n"
+        back += "<b>🔮 Ты — часть Темной Гильдии. 🕯️Ритуалы ждут тебя</b>\n"
     elif guild == "WHITE":
-        back += "<b>🔮 Ты — часть Светлой Гильдии. ⚜️ Исповедь очищает душу и ждёт тебя</b>\n"
+        back += "<b>🔮 Ты — часть Светлой Гильдии. ⚜️Исповедь очищает душу и ждёт тебя</b>\n"
     else:
-        back += "<b>🔮 Ты пока не в Гильдии. Нажми /guild чтобы вступить</b>\n"
+        back += "<b>🔮 Ты пока не в Гильдии. Нажми 🕋Гильдии чтобы вступить!</b>\n"
 
     # Мотивационная строка
     if next_threshold > 0:
         gap = next_threshold - bal
-        back += f"\n<b>⚡ Ещё {gap} OAC до ранга {next_rank_emoji} {next_rank_name} — вперёд!</b>"
+        back += f"\n<b>🎉 До следующего ранга {next_rank_emoji} {next_rank_name} осталось {gap} OAC 🍬!</b>"
     else:
         back += f"\n<b>⚡ Ты достиг вершины! Твой ранг — {rank_emoji} {rank_name}.</b>"
 
@@ -1770,11 +1770,11 @@ async def _show_main_menu(update, context, player, user):
     is_veteran = bal >= 5000
 
     if farm_count == 0:
-        hint = "<b>💡 Твой первый шаг: нажми 🍬 Фармить и получи OAC!</b>"
+        hint = "<b>💡 Твой первый шаг: нажми 🍬 Фармить и получи свои первые OAC!</b>"
     elif not guild_joined:
-        hint = "<b>💡 Отлично! Теперь вступи в 🕋 Гильдию — это откроет ритуалы и войну.</b>"
+        hint = "<b>💡 Отлично! Теперь вступи в 🕋 Гильдию — это откроет ритуалы и исповеди.</b>"
     elif craft_count == 0:
-        hint = "<b>💡 Попробуй 🌿 Крафт, чтобы создать свой первый блант.</b>"
+        hint = "<b>💡 Попробуй 🌿 Крафт, чтобы создать свой первый Блант!</b>"
     elif is_veteran:
         hint = "<b>💡 Исследуй 🔮 Алхимию и корми своего 🐾 питомца!</b>"
     else:
@@ -2115,13 +2115,13 @@ def _format_craft_menu_text(balance: int, blunts: int, craft_count: int,
                             medal_name: str, target: int, m_essence: int) -> str:
     """HTML‑текст меню крафта."""
     text = (
-        f"<b>🌿 КРАФТ БЛАНТА</b>\n\n"
+        f"<b>🌱 КРАФТ БЛАНТА</b>\n\n"
         f"<b>💎 у тебя: {balance} оас 🍬</b>\n\n"
         f"<b>🌿 Блантов в свёртке: {blunts}</b>\n"
         f"<b>🎯 Крафтинг: {craft_count}/{target} | {medal_name}</b>\n\n"
-        f"<b>🕯️ Обычный блант — 15 оас</b>\n"
-        f"<b>💍 Именной блант — 50 оас</b>\n"
-        f"   <i>🟢 55% | 🔵 30% | 🟣 13% | 🟡 2%</i>"
+        f"<b>🌿 Блант — 15 OAC 🍬</b>\n"
+        f"<b>💍 Именной блант — 50 OAC 🍬</b>\n"
+        f"<b>Шансы:</b> <i>🟢 55% | 🔵 30% | 🟣 13% | 🟡 2%</i>"
     )
     if m_essence > 0:
         text += f"\n\n<b>💠 у тебя есть Кристальная Пыль</b> (<i>{m_essence} доза</i>)"
@@ -2145,7 +2145,7 @@ def _format_normal_craft_message(medal_text: str, new_count: int, target: int,
     """Сообщение после обычного крафта."""
     progress_bar_str = get_medal_progress(new_count, CRAFT_MEDALS)
     return (
-        f"<b>🌿 БЛАНТ СКРУЧЕН</b>\n\n"
+        f"<b>🌿 БЛАНТ СКРУЧЕН!</b>\n\n"
         f"<b>🛡️ Потрачено:</b> <b>15 OAC</b>\n"
         f"<b>⚜️ У тебя:</b> <b>{new_balance} OAC</b> 🍬\n\n"
         f"{medal_text}"
@@ -2189,18 +2189,17 @@ async def handle_craft_normal(update, context):
     uid = query.from_user.id
 
     async def _craft(player, conn):
-        if player.balance < 15:
+        if player.balance < GAME_CONFIG["craft_cost"]:
             return ("no_money",)
 
         old_count = player.craft_count
         new_count = old_count + 1
         medal_text, medal_bonus = get_medal_text_and_reward(old_count, new_count, CRAFT_MEDALS)
 
-        player.balance -= 15
+        player.balance -= GAME_CONFIG["craft_cost"]
         player.blunts += 1
         player.craft_count = new_count
 
-        # 5% шанс на дополнительный блант
         if random.random() < 0.05:
             player.blunts += 1
 
@@ -2209,8 +2208,6 @@ async def handle_craft_normal(update, context):
         war_service = context.bot_data.get("war_service")
         if war_service:
             await war_service.add_score(uid, WarAction.CRAFT, conn)
-        else:
-            logger.warning("GuildWarService not found in bot_data")
 
         return ("ok", medal_text, new_count, player.blunts, player.balance)
 
@@ -2223,7 +2220,7 @@ async def handle_craft_normal(update, context):
     if status == "no_money":
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text="<b>❌ Недостаточно OAC.</b>\n🕯️ Требуется <b>15 OAC</b> 🍬.",
+            text=f"<b>❌ Недостаточно OAC.</b>\n🕯️ Требуется <b>{GAME_CONFIG['craft_cost']} OAC</b> 🍬.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]]),
             parse_mode='HTML'
         )
@@ -2233,11 +2230,17 @@ async def handle_craft_normal(update, context):
     target = get_medal_target(new_count, CRAFT_MEDALS)
     text = _format_normal_craft_message(medal_text, new_count, target, blunts, new_balance)
 
+    # Кнопки «Скрафтить ещё» и «Назад»
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🌿 Скрафтить ещё", callback_data="craft_normal")],
+        [InlineKeyboardButton("🔙 Назад", callback_data="craft")]
+    ])
+
     anim_msg = await animate_progress_bar(update, context, title="🌿 Скручиваем Блант...")
     if anim_msg is not None:
-        await anim_msg.edit_text(text, parse_mode='HTML')
+        await anim_msg.edit_text(text, reply_markup=kb, parse_mode='HTML')
     else:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=text, parse_mode='HTML')
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=kb, parse_mode='HTML')
 
     await check_achievements(uid, context)
 
@@ -3377,7 +3380,7 @@ async def guild_info_callback(update, context):
             InlineKeyboardButton("⚔️ Война", callback_data="guild_war")
         ])
     else:
-        text += "<i>Ты пока не в Гильдии.</i>\n"
+        text += "<i>🔮 Ты пока не в Гильдии. Выбери Светлую или Темную Гильдию!</i>\n"
         kb_rows.append([InlineKeyboardButton("🕯️ Вступить в Тёмную", callback_data="guild_join_BLACK"),
                         InlineKeyboardButton("⚜️ Вступить в Светлую", callback_data="guild_join_WHITE")])
     kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="menu")])
