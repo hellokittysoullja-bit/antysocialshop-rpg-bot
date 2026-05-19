@@ -31,6 +31,11 @@ from telegram.error import RetryAfter
 import enum
 from pydantic import BaseModel, Field, ConfigDict
 
+from enum import Enum, auto
+
+class AlchemyResult(Enum):
+    SUCCESS = auto()
+    NO_RESOURCES = auto()
 # ============================================================
 # ДЕКОРАТОРЫ (объявлены первыми, доступны везде)
 # ============================================================
