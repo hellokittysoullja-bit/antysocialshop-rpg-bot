@@ -2252,8 +2252,8 @@ def _format_normal_craft_message(medal_text: str, new_count: int, target: int,
     progress_bar_str = get_medal_progress(new_count, CRAFT_MEDALS)
     return (
         f"<b>🌿 БЛАНТ СКРУЧЕН!</b>\n\n"
-        f"<b>🛡️ Потрачено:</b> <b>15 OAC</b>\n"
-        f"<b>⚜️ У тебя:</b> <b>{new_balance} OAC</b> 🍬\n\n"
+        f"<b>💎 Потрачено:</b> <b>15 OAC 🍬</b>\n"
+        f"<b>⚜️ У тебя:</b> <b>{new_balance} OAC 🍬</b>\n\n"
         f"{medal_text}"
         f"<b>🎯 Крафтинг:</b> {new_count}/{target}\n"
         f"{progress_bar_str}\n\n"
