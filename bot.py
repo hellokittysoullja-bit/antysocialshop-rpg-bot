@@ -5351,11 +5351,14 @@ if __name__ == "__main__":
     loop.run_until_complete(init_db_pool())
     Thread(target=run_web_server, daemon=True).start()
 
-    # Загружаем сохранённые file_id из БД
-    for rarity in ("common", "rare", "epic", "legendary"):
-        saved = await get_setting(f"blunt_image_{rarity}")
-        if saved:
-            BLUNT_IMAGES[rarity] = saved
+    # Загружаем сохранённые file_id из БД (асинхронно, безопасно)
+    async def load_blunt_images():
+        for rarity in ("common", "rare", "epic", "legendary"):
+            saved = await get_setting(f"blunt_image_{rarity}")
+            if saved:
+                BLUNT_IMAGES[rarity] = saved
+
+    loop.run_until_complete(load_blunt_images())
 
     # ===== СОЗДАНИЕ ПРИЛОЖЕНИЯ С ЛИМИТЕРОМ =====
     app = (Application.builder()
@@ -5369,7 +5372,7 @@ if __name__ == "__main__":
     war_service = GuildWarService(db_pool, redis_client=redis, config=war_config, settings=war_settings)
     app.bot_data["war_service"] = war_service
 
-    # Валидация изображений после запуска приложения (через job_queue)
+    # Валидация изображений после запуска приложения
     async def check_all_blunt_images():
         invalid = []
         for rarity in ("common", "rare", "epic", "legendary"):
