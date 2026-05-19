@@ -5351,16 +5351,15 @@ if __name__ == "__main__":
     from telegram.error import RetryAfter
 
     async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    error = context.error
-    try:
-        if isinstance(error, RetryAfter):
-            logger.warning(f"Telegram попросил подождать {error.retry_after} сек.")
-        else:
-            logger.critical("Глобальная ошибка:", exc_info=error)
-    except Exception:
-        # Если логгер упал, выводим напрямую в консоль
-        import traceback
-        traceback.print_exc()
+        error = context.error
+        try:
+            if isinstance(error, RetryAfter):
+                logger.warning(f"Telegram попросил подождать {error.retry_after} сек.")
+                await asyncio.sleep(error.retry_after)
+            else:
+                logger.critical("Глобальная ошибка:", exc_info=True)
+        except Exception:
+            import traceback
+            traceback.print_exc()
 
-    print("BOT READY")
-    app.run_polling()
+    app.add_error_handler(global_error_handler)
