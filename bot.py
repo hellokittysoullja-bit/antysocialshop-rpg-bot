@@ -1297,25 +1297,6 @@ def get_rank_info(balance: int):
     else:
         return "🪓", "Рекрут"
 
-def get_rank_progress(balance):
-    if balance >= RANKS[-1][1]:
-        emoji = RANKS[-1][0]
-        name = emoji.split(' ',1)[1]
-        return f"⚜️ Ранг: {emoji} {name} (Максимум)\n▓▓▓▓▓▓▓▓▓▓ 100%"
-    for i in range(len(RANKS)-1):
-        curr_emoji, curr_th, _ = RANKS[i]
-        next_emoji, next_th, _ = RANKS[i+1]
-        if balance < next_th:
-            curr_name = curr_emoji.split(' ',1)[1] if ' ' in curr_emoji else curr_emoji
-            progress = int((balance - curr_th) / (next_th - curr_th) * 100)
-            bar = "▓" * (progress // 10) + "░" * (10 - progress // 10)
-            return (
-                f"⚜️ Ранг: {curr_emoji} → {next_emoji}\n"
-                f"{bar} {progress}%\n"
-                f"{balance} / {next_th} OAC"
-            )
-    return ""
-
 async def process_daily_login(user_id: int, context) -> None:
     today = date.today()
     player = await PlayerRepository.get_by_id(user_id)
@@ -1637,9 +1618,9 @@ def get_rank_progress(balance):
             progress = int((balance - curr_th) / (next_th - curr_th) * 100)
             bar = "▓" * (progress // 10) + "░" * (10 - progress // 10)
             return (
-                f"<b>⚜️ Ранг:</b> {curr_emoji} → {next_emoji}\n"
-                f"<b>{bar} {progress}%</b>\n"
-                f"{balance} / {next_th} OAC"
+                f"<b>⚜️ Ранг: {curr_emoji} → {next_emoji}</b>\n"
+                f"🎯 <b>{bar} {progress}%</b>\n"
+                f"<b>{balance} / {next_th} OAC 💎</b>"
             )
     return ""
     
@@ -2011,9 +1992,9 @@ def _format_farm_message(earned: int, crit: bool, happy: bool,
 
     return (
         f"<b>💎 Ты нафармил: +{earned} OAC</b> 🍬{crit_str}{happy_str}\n\n"
-        f"<b>⚜️ У тебя:</b> <i>{new_balance} OAC</i>\n\n"
+        f"<b>⚜️ У тебя:</b> <i>{new_balance} OAC 🎉</i>\n\n"
         f"{medal_text}"
-        f"<b>🎯 Фарминг:</b> {new_count}/{target}\n"
+        f"<b>🎯 Фарминг: {new_count}/{target}</b>\n"
         f"<b>{progress_bar_str}</b>\n\n"
         f"{rank_progress}"
     )
