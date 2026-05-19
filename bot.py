@@ -5363,3 +5363,6 @@ if __name__ == "__main__":
             traceback.print_exc()
 
     app.add_error_handler(global_error_handler)
+
+    print("BOT READY")
+    app.run_polling()
