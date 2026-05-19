@@ -4589,12 +4589,17 @@ async def welcome_new_member(update, context):
 async def handle_chat_shortcut(update, context):
     if not update.message or not update.message.text:
         return
+    # Имя питомца – САМОЕ ПЕРВОЕ
+    if context.user_data.get('awaiting_pet_name'):
+        await handle_pet_name(update, context)
+        return
     if context.user_data.get('awaiting_named_blunt'):
         await handle_named_name(update, context)
         return
     if context.user_data.get('gifting_blunt_id'):
         await handle_gift_username(update, context)
         return
+    # ... остальные сокращения ...
 
     text = update.message.text.strip().lower()
     mapping = {
@@ -4619,41 +4624,29 @@ async def handle_chat_shortcut(update, context):
     if text in mapping:
         await mapping[text](update, context)
 
-async def handle_pet_name(update, context):
-    name = update.message.text.strip()[:15]
-    if not name:
-        await update.message.reply_text("❌ Имя не может быть пустым.")
-        return
-
-    uid = update.effective_user.id
-    async def _set_name(p, conn):
-        p.pet_name = name
-        return ("ok",)
-
-    result = await PlayerRepository.atomic_update(uid, _set_name)
-    if result is None:
-        await update.message.reply_text("Ошибка.")
-    else:
-        await update.message.reply_text(f"Отлично! Теперь твоего питомца зовут «{name}»! 🐕")
-    context.user_data.pop('awaiting_pet_name', None)
-
+# ============================================================
+# ПИТОМЦЫ (полная версия без багов)
+# ============================================================
+@safe_callback
 async def pet_preview(update, context):
-    uid = update.effective_user.id
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
     player = await PlayerRepository.get_by_id(uid)
     if player and player.pet:
         name_str = f" по кличке «{player.pet_name}»" if player.pet_name else ""
-        await update.effective_message.reply_text(f"Твой питомец: {player.pet}{name_str}")
+        await query.message.edit_text(f"Твой питомец: {player.pet}{name_str}")
     else:
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("🐕 Купить Песика (3000 🍬)", callback_data="pet_buy_dog")],
             [InlineKeyboardButton("🔙 Назад", callback_data="menu")]
         ])
-        await update.effective_message.reply_text(
+        await query.message.edit_text(
             "🐾 <b>ПИТОМЦЫ</b>\n\nПока доступен только Песик.",
             reply_markup=kb,
             parse_mode='HTML'
         )
-        
+
 @safe_callback
 async def pet_buy_dog_handler(update, context):
     query = update.callback_query
@@ -4690,7 +4683,7 @@ async def pet_buy_dog_handler(update, context):
                 [InlineKeyboardButton("❌ Пропустить (без имени)", callback_data="pet_name_skip")]
             ])
         )
-        
+
 @safe_callback
 async def pet_name_skip_handler(update, context):
     query = update.callback_query
@@ -4698,15 +4691,24 @@ async def pet_name_skip_handler(update, context):
     context.user_data.pop('awaiting_pet_name', None)
     await query.message.edit_text("Питомец останется без имени.")
 
-async def shop_callback(update, context):
-    query = update.callback_query
-    await query.answer()
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🪪 Скидка", callback_data="privilege")],
-        [InlineKeyboardButton("📦 Каталог", callback_data="catalog")],
-        [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
-    ])
-    await query.message.edit_text("<b>🛒 МАГАЗИН</b>", reply_markup=kb, parse_mode='HTML')
+async def handle_pet_name(update, context):
+    """Обработчик ввода имени питомца."""
+    name = update.message.text.strip()[:15]
+    if not name:
+        await update.message.reply_text("❌ Имя не может быть пустым.")
+        return
+
+    uid = update.effective_user.id
+    async def _set_name(p, conn):
+        p.pet_name = name
+        return ("ok",)
+
+    result = await PlayerRepository.atomic_update(uid, _set_name)
+    if result is None:
+        await update.message.reply_text("Ошибка при сохранении имени.")
+    else:
+        await update.message.reply_text(f"Отлично! Теперь твоего питомца зовут «{name}»! 🐕")
+    context.user_data.pop('awaiting_pet_name', None)
 
 # Команда установки фото бланта
 async def setbluntpic(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5050,7 +5052,6 @@ CALLBACKS: Dict[str, Callable] = {
     "guild_war": guild_war_callback,
     "confess": confess_callback,
     "shop": shop_callback,
-    "pet_preview": pet_preview,
     "bush_preview": bush_preview_handler,
     "activate_menu": activate_menu_handler,
     "skins_menu": skins_menu_handler,
@@ -5061,6 +5062,7 @@ CALLBACKS: Dict[str, Callable] = {
     "guild_join_BLACK": guild_join_handler,
     "guild_join_WHITE": guild_join_handler,
     "cancel_gift": cancel_gift_handler,
+    "pet_preview": pet_preview,
     "pet_buy_dog": pet_buy_dog_handler,
     "pet_name_skip": pet_name_skip_handler,
 }
