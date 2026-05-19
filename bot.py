@@ -105,6 +105,42 @@ def rate_limit(seconds: int = 2):
 # Проверка: если retry – модуль, а не функция, будет ошибка
 assert callable(retry), "retry должен быть функцией, а не модулем!"
 
+# ============================================================
+# ГЛОБАЛЬНЫЙ КОНФИГ ИГРЫ (редактируй здесь, не трогая код)
+# ============================================================
+GAME_CONFIG = {
+    "craft_cost": 15,                # стоимость обычного бланта
+    "named_blunt_cost": 50,          # стоимость именного бланта
+    "farm_cooldown_hours": 0.5,      # кулдаун фарма в часах
+    "ritual_cooldown_hours": 24,     # кулдаун ритуала в часах
+    "lab_cooldown_hours": 12,        # кулдаун лабиринта в часах
+    "veteran_threshold": 5000,       # порог ранга "Ветеран"
+    "phantom_threshold": 20000,      # порог ранга "Призрак"
+    "necromant_threshold": 50000,    # порог ранга "Некромант"
+}
+
+PET_CONFIG = {
+    "dog": {
+        "name": "🐕 Песик",
+        "price": 3000,
+        "max_name_len": 15,
+    },
+}
+
+# ── Хелпер проверки ранга (чтобы не дублировать if balance >= 5000) ──
+def has_rank(balance: int, rank_name: str = "Ветеран") -> bool:
+    thresholds = {
+        "Ветеран": GAME_CONFIG["veteran_threshold"],
+        "Призрак": GAME_CONFIG["phantom_threshold"],
+        "Некромант": GAME_CONFIG["necromant_threshold"],
+    }
+    return balance >= thresholds.get(rank_name, 0)
+
+# ── Хелпер проверки существования игрока ──
+def ensure_player_exists(player) -> bool:
+    """True, если игрок реально сохранён в БД."""
+    return player is not None and getattr(player, 'exists', False)
+
 # ── Исключения ──────────────────────────────────────────────
 class UnknownWarActionError(Exception):
     """В конфиге отсутствует цена действия."""
@@ -2232,10 +2268,10 @@ async def handle_craft_named(update, context):
     await query.answer()
     uid = query.from_user.id
     player = await PlayerRepository.get_by_id(uid)
-    if not player or player.balance < 50:
+    if not player or player.balance < GAME_CONFIG["named_blunt_cost"]:
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text="<b>🕳️ ИСКАЖЕНИЕ МОЛЧИТ</b>\n\n<i>🛡️ Недостаточно OAC.</i>\n🕯️ Требуется <b>50 OAC</b> 🍬.",
+            text=f"<b>🔮 ИСКАЖЕНИЕ МОЛЧИТ</b>\n\n<i>🛡️ Недостаточно OAC.</i>\n🕯️ Требуется <b>{GAME_CONFIG['named_blunt_cost']} OAC</b> 🍬.",
             parse_mode='HTML'
         )
         return
@@ -2261,7 +2297,7 @@ async def handle_named_name(update, context):
             return
 
         async def _named(player, conn):
-            if player.balance < 50:
+            if player.balance < GAME_CONFIG["named_blunt_cost"]:
                 return ("no_money",)
             player.balance -= 50
             player.craft_count = (player.craft_count or 0) + 1
@@ -2282,7 +2318,7 @@ async def handle_named_name(update, context):
             return
         status, data = result[0], result[1] if len(result) > 1 else None
         if status == "no_money":
-            await update.message.reply_text("<b>🕳️ ИСКАЖЕНИЕ МОЛЧИТ</b>\n\n<i>🛡️ Недостаточно OAC.</i>")
+            await update.message.reply_text(f"<b>🔮 ИСКАЖЕНИЕ МОЛЧИТ</b>\n\n<i>🛡️ Недостаточно OAC.</i>\n🕯️ Требуется <b>{GAME_CONFIG['named_blunt_cost']} OAC 🍬</b>.")
             return
 
         item = data
@@ -2761,8 +2797,8 @@ async def ritual_callback(update, context):
     async def _ritual(player, conn):
         if player.guild != "BLACK":
             return ("wrong_guild",)
-        if player.last_ritual and (now - player.last_ritual) < timedelta(hours=24):
-            remain = int((timedelta(hours=24) - (now - player.last_ritual)).seconds / 3600)
+        if player.last_ritual and (now - player.last_ritual) < timedelta(hours=GAME_CONFIG["ritual_cooldown_hours"]):
+            remain = int((timedelta(hours=GAME_CONFIG["ritual_cooldown_hours"]) - (now - player.last_ritual)).seconds / 3600)
             return ("cooldown", remain)
 
         reward = 150
@@ -2831,7 +2867,7 @@ async def collect_callback(update, context):
     now = datetime.now()
 
     async def _collect(player, conn):
-        if player.balance < 5000:
+        if not has_rank(player.balance, "Ветеран"):
             return ("low_rank",)
         lvl = 3 if player.balance >= 20000 else 2
         if not player.passive_collected:
@@ -3925,8 +3961,8 @@ async def _process_berserk(update, context, uid, player, cfg, war_service):
 
 # ── Алхимия (начало) ────────────────────────────────────────
 async def _process_alchemy_start(update, context, player, cfg):
-    if player.balance < cfg["alchemy"]["required_balance"]:
-        await _notify_user(update, context, "❌ Доступно с ранга ⚔️ Ветеран (5000 OAC 🍬)", show_alert=True)
+    if not has_rank(player.balance, "Ветеран"):
+        await _notify_user(update, context, f"❌ Доступно с ранга ⚔️ Ветеран ({GAME_CONFIG['veteran_threshold']} OAC 🍬)", show_alert=True)
         return
     text = (
         "<b>🔮 АЛХИМИЧЕСКИЙ КОТЁЛ</b>\n\n"
