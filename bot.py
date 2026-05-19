@@ -409,7 +409,11 @@ def run_web_server():
     port = int(os.getenv("PORT", 10000))
     web_app.run(host="0.0.0.0", port=port, threaded=True)
 
-logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+    stream=sys.stdout         
+)
 logging.getLogger("telegram").setLevel(logging.DEBUG)
 logger = logging.getLogger(__name__)
 # ---------- МАКСИМАЛЬНАЯ ОТЛАДКА ----------
