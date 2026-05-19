@@ -2120,7 +2120,7 @@ def _format_farm_message(earned: int, crit: bool, happy: bool,
         f"<b>⚜️ у тебя:</b> <i>{new_balance} oac 🎉</b>\n\n"
         f"{medal_text}"
         f"<b>🎯 Фарминг: {new_count}/{target}</b>\n"
-        ff"{progress_bar_str}\n\n"
+        f"{progress_bar_str}\n\n"
         f"{rank_progress}"
     )
 
