@@ -4668,6 +4668,16 @@ async def pet_buy_dog_handler(update, context):
             ])
         )
 
+async def shop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🪪 Скидка", callback_data="privilege")],
+        [InlineKeyboardButton("📦 Каталог", callback_data="catalog")],
+        [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
+    ])
+    await query.message.edit_text("<b>🛒 МАГАЗИН</b>", reply_markup=kb, parse_mode='HTML')
+
 @safe_callback
 async def pet_name_skip_handler(update, context):
     query = update.callback_query
