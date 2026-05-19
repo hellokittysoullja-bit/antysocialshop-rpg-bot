@@ -1293,14 +1293,25 @@ async def send_whisper(context, chat_id, text):
     except Exception as e:
         logger.error(f"Whisper error: {e}")
 
+# КОМАНДА УСТАНОВКИ ФОТО БЛАНТА
 async def safe_send_blunt_image(context, chat_id, rarity):
+    """
+    Отправляет фото бланта с максимальной защитой.
+    - Если file_id нет -> сообщение об отсутствии.
+    - Если file_id есть, но невалиден -> автосброс, уведомление админа, сообщение игроку.
+    - Если ошибка Telegram (флуд, таймаут) -> повтор через retry.
+    - При любом другом сбое -> сообщение игроку, лог ошибки.
+    """
     file_id = BLUNT_IMAGES.get(rarity)
     if not file_id:
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text="🖼️ Изображение отсутствует. Админ скоро добавит.",
-            parse_mode='HTML'
-        )
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="🖼️ Изображение отсутствует. Админ скоро добавит.",
+                parse_mode='HTML'
+            )
+        except Exception as e:
+            logger.error("Не удалось отправить сообщение об отсутствии изображения: %s", e)
         return
 
     try:
@@ -1308,21 +1319,45 @@ async def safe_send_blunt_image(context, chat_id, rarity):
     except BadRequest as e:
         if "Wrong file identifier" in str(e):
             logger.warning("Невалидный file_id для %s, сброшен", rarity)
+            # Сброс невалидного ID
             BLUNT_IMAGES.pop(rarity, None)
-            await set_setting(f"blunt_image_{rarity}", "")
+            try:
+                await set_setting(f"blunt_image_{rarity}", "")
+            except Exception as ex:
+                logger.error("Не удалось сбросить file_id в БД: %s", ex)
+            # Уведомление админа
             if ADMIN_ID:
+                try:
+                    await context.bot.send_message(
+                        chat_id=ADMIN_ID,
+                        text=f"⚠️ Изображение для {rarity} недействительно. Обновите: /setbluntpic {rarity}"
+                    )
+                except Exception as ex:
+                    logger.error("Не удалось уведомить админа: %s", ex)
+            # Сообщение игроку
+            try:
                 await context.bot.send_message(
-                    chat_id=ADMIN_ID,
-                    text=f"⚠️ Изображение для {rarity} более недействительно. "
-                         f"Обновите его командой /setbluntpic {rarity}"
+                    chat_id=chat_id,
+                    text=f"🟡 Легендарный бланк создан!\n<i>Изображение временно недоступно.</i>",
+                    parse_mode='HTML'
                 )
+            except Exception as ex:
+                logger.error("Не удалось отправить fallback-сообщение игроку: %s", ex)
+        else:
+            # Другие BadRequest (например, неправильный chat_id) логируем, но не роняем
+            logger.error("BadRequest при отправке фото: %s", e)
+    except RetryAfter as e:
+        logger.warning("RetryAfter при отправке фото: %s сек", e.retry_after)
+    except Exception as e:
+        logger.error("Непредвиденная ошибка при отправке фото: %s", e)
+        try:
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=f"🟡 Легендарный бланк создан!\n<i>Изображение временно недоступно.</i>",
+                text="Произошла ошибка при отправке изображения. Мы уже знаем и чиним.",
                 parse_mode='HTML'
             )
-        else:
-            raise
+        except Exception:
+            pass
 
 async def send_whisper_dm(update, context, text):
     if update.callback_query:
@@ -4793,23 +4828,6 @@ async def handle_pet_name(update, context):
     else:
         await update.message.reply_text(f"Отлично! Теперь твоего питомца зовут «{name}»! 🐕")
     context.user_data.pop('awaiting_pet_name', None)
-
-# Команда установки фото бланта
-async def setbluntpic(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return await update.message.reply_text("⛔ Только для админа.")
-    if not context.args:
-        return await update.message.reply_text("Используй: /setbluntpic <rarity> и прикрепи фото.")
-    rarity = context.args[0].lower()
-    if rarity not in BLUNT_IMAGES:
-        return await update.message.reply_text("Редкость должна быть: common, rare, epic, legendary.")
-    if not update.message.photo:
-        return await update.message.reply_text("Пришли фото вместе с командой.")
-    file_id = update.message.photo[-1].file_id
-    BLUNT_IMAGES[rarity] = file_id
-    await set_setting(f"blunt_image_{rarity}", file_id)
-    names = {"common":"⚪ Обычный","rare":"🔵 Редкий","epic":"🟣 Эпический","legendary":"🟡 Легендарный"}
-    await update.message.reply_text(f"✅ Изображение для {names[rarity]} обновлено и сохранено!", parse_mode='HTML')
     
 async def check_blunt_pics(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
