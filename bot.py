@@ -1991,8 +1991,8 @@ def _format_farm_message(earned: int, crit: bool, happy: bool,
     rank_progress = get_rank_progress(new_balance)
 
     return (
-        f"<b>💎 Ты нафармил: +{earned} OAC</b> 🍬{crit_str}{happy_str}\n\n"
-        f"<b>⚜️ У тебя:</b> <i>{new_balance} OAC 🎉</i>\n\n"
+        f"<b>💎 Ты нафармил: +{earned} oac</b> 🍬{crit_str}{happy_str}\n\n"
+        f"<b>⚜️ у тебя:</b> <i>{new_balance} oac 🎉</b>\n\n"
         f"{medal_text}"
         f"<b>🎯 Фарминг: {new_count}/{target}</b>\n"
         f"<b>{progress_bar_str}</b>\n\n"
@@ -2809,7 +2809,7 @@ async def ritual_callback(update, context):
     text = (
         f"<b>🕯️ РИТУАЛ ЗАВЕРШЁН 🎉</b>\n\n"
         f"Ритуал принёс тебе <b>{reward} OAC</b> 🍬\n"
-        f"<b>⚜️ У тебя:</b> <b>{new_balance} OAC</b>\n\n"
+        f"<b>⚜️ У тебя:</b> <b>{new_balance} OAC 🪽</b>\n\n"
         f"{medal_text}"
         f"<b>🕯️ Ритуалы:</b> {new_count}/{target}\n"
         f"<b>{progress_bar_str}</b>"
@@ -3876,7 +3876,7 @@ async def _process_wheel(update, context, uid, player, cfg, war_service):
 
     uname = html.escape(update.effective_user.username or update.effective_user.first_name)
     if ptype == "jackpot":
-        msg_text = f"<b>🎰 ДЖЕКПОТ!</b>\n\nТы выиграл <b>{prize} OAC</b> 🍬!\n\n<b>⚜️ У тебя:</b> <i>{new_balance} OAC</i>"
+        msg_text = f"<b>🎰 ДЖЕКПОТ!</b>\n\nТы выиграл <b>{prize} OAC</b> 🎉!\n\n<b>⚜️ У тебя:</b> <i>{new_balance} OAC 🍬</i>"
     elif ptype == "oac":
         msg_text = f"<b>🩸 ДАР ИСКАЖЕНИЯ</b>\n\n<b>💎 Ты нафармил +{prize} OAC 🍬!</b>\n⚜️ <b>У тебя:</b> <i>{new_balance} OAC</i>"
     else:
@@ -3889,7 +3889,7 @@ async def _process_wheel(update, context, uid, player, cfg, war_service):
 # ── Берсерк ─────────────────────────────────────────────────
 async def _process_berserk(update, context, uid, player, cfg, war_service):
     if not _check_berserk_availability(player, datetime.now(), cfg["berserk"]["cost"], cfg["berserk"]["cooldown_hours"]):
-        await _notify_user(update, context, "🍀 Берсерк недоступен. Проверь баланс или время.")
+        await _notify_user(update, context, "🍀 Берсерк недоступен! Проверь баланс или время.")
         return
 
     async def _berserk(p, conn):
