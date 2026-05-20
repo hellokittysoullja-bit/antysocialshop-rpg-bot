@@ -2429,16 +2429,14 @@ async def handle_named_name(update, context):
              InlineKeyboardButton("🏰 В меню", callback_data="menu")]
         ])
 
-        file_id = BLUNT_IMAGES.get(item["rarity"])
-        if file_id:
-            await context.bot.send_photo(
-                chat_id=update.effective_chat.id,
-                photo=file_id,
-                caption=caption,
-                reply_markup=kb,
-                parse_mode='HTML'
-            )
-        else:
+        sent = await safe_send_blunt_image(
+            context,
+            update.effective_chat.id,
+            item["rarity"],
+            caption=caption,
+            reply_markup=kb
+        )
+        if not sent:
             await update.message.reply_text(caption, reply_markup=kb, parse_mode='HTML')
 
         # ── Оповещение в канал (закомментировано) ──
@@ -2510,7 +2508,7 @@ async def handle_use_dust(update, context):
     item, name = data
     reaction = item["reaction"]
 
-    await send_blunt_image(context, query.message.chat.id, "legendary")
+    await safe_send_blunt_image(context, query.message.chat.id, "legendary")
     text = _format_dust_message(name, reaction)
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
     await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
@@ -4151,7 +4149,7 @@ async def check_blunt(update, context):
     name = item["name"]; rarity = item.get("rarity","common")
     color = {"legendary":"🟡","epic":"🟣","rare":"🔵"}.get(rarity,"🟢")
     reaction = item.get("reaction",""); hash_code = item.get("hash","0x????...????")
-    await send_blunt_image(context, update.effective_chat.id, rarity)
+    await safe_send_blunt_image(context, query.message.chat.id, "legendary")
     details = f"<b>ДЕТАЛИ NFT БЛАНТА 💎</b>\n\n{color} <b>{name}</b>\n\n<b>Редкость:</b> <i>{rarity}</i> {color}\n\n🩸 <b>Серийный номер:</b> <b>#{rare_number}</b>\n🔗 <b>Хеш:</b> <b>{hash_code}</b>\n📜 <b>Реакция:</b> <i>{reaction}</i>\n"
     if "owner_history" in item:
         details += "\n🔄 История владения:\n"
@@ -5043,16 +5041,18 @@ async def blunt_details_handler(update, context):
          InlineKeyboardButton("🎁 Подарить", callback_data=f"gift_blunt_{blunt_id}")],
         [InlineKeyboardButton("🏆 К списку", callback_data="my_blunts")]
     ])
-    file_id = BLUNT_IMAGES.get(rarity)
-    if file_id:
-        await query.message.delete()
-        await context.bot.send_photo(
-            chat_id=query.message.chat.id,
-            photo=file_id,
-            caption=text,
-            reply_markup=kb,
-            parse_mode='HTML'
-        )
+    sent = await safe_send_blunt_image(
+        context,
+        query.message.chat.id,
+        rarity,
+        caption=text,
+        reply_markup=kb
+    )
+    if sent:
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
     else:
         await query.message.edit_text(text=text, reply_markup=kb, parse_mode='HTML')
 
