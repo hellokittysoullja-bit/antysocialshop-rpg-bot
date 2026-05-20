@@ -1294,70 +1294,170 @@ async def send_whisper(context, chat_id, text):
         logger.error(f"Whisper error: {e}")
 
 # КОМАНДА УСТАНОВКИ ФОТО БЛАНТА
-async def safe_send_blunt_image(context, chat_id, rarity):
-    """
-    Отправляет фото бланта с максимальной защитой.
-    - Если file_id нет -> сообщение об отсутствии.
-    - Если file_id есть, но невалиден -> автосброс, уведомление админа, сообщение игроку.
-    - Если ошибка Telegram (флуд, таймаут) -> повтор через retry.
-    - При любом другом сбое -> сообщение игроку, лог ошибки.
-    """
-    file_id = BLUNT_IMAGES.get(rarity)
-    if not file_id:
-        try:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text="🖼️ Изображение отсутствует. Админ скоро добавит.",
-                parse_mode='HTML'
-            )
-        except Exception as e:
-            logger.error("Не удалось отправить сообщение об отсутствии изображения: %s", e)
-        return
 
+# Блокировка для потокобезопасной работы с BLUNT_IMAGES (asyncio-совместимая)
+_blunt_images_lock = asyncio.Lock()
+
+# ---------------------------------------------------------------------------
+# Вспомогательные функции
+# ---------------------------------------------------------------------------
+
+async def _safe_send_message(context, chat_id, text: str, parse_mode: str = None):
+    """
+    Отправляет текстовое сообщение с автоматическим откатом к plain text,
+    если HTML-разметка сломана. Никогда не роняет исключение наружу.
+    """
     try:
-        await context.bot.send_photo(chat_id=chat_id, photo=file_id)
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            parse_mode=parse_mode,
+        )
+    except BadRequest as e:
+        if parse_mode and "can't parse entities" in str(e).lower():
+            # Пробуем без разметки
+            try:
+                await context.bot.send_message(chat_id=chat_id, text=text)
+            except Exception as ex:
+                logger.error("Не удалось отправить сообщение даже без разметки: %s", ex)
+        else:
+            logger.error("BadRequest при отправке сообщения: %s", e)
+    except Exception as e:
+        logger.error("Ошибка отправки сообщения: %s", e)
+
+
+async def _send_fallback(context, chat_id, caption, default_text):
+    """Отправляет caption как текст, иначе default_text."""
+    text = caption if caption else default_text
+    parse_mode = 'HTML' if caption else None
+    await _safe_send_message(context, chat_id, text, parse_mode)
+
+
+@retry(
+    stop=stop_after_attempt(2),
+    wait=wait_exponential(multiplier=1, min=1, max=3),
+    retry=retry_if_exception_type((RetryAfter, OSError, TimeoutError)),
+    reraise=True
+)
+async def _send_photo_with_retry(context, chat_id, file_id, caption, reply_markup):
+    """Отправка фото с повторными попытками при временных сетевых ошибках."""
+    await context.bot.send_photo(
+        chat_id=chat_id,
+        photo=file_id,
+        caption=caption,
+        reply_markup=reply_markup,
+        parse_mode='HTML' if caption else None
+    )
+
+
+async def _reset_and_notify_broken_id(rarity: str, context, chat_id=None):
+    """
+    Атомарно удаляет file_id из кэша и БД, уведомляет админа.
+    Если передан chat_id – дополнительно шлёт fallback игроку.
+    """
+    async with _blunt_images_lock:
+        BLUNT_IMAGES.pop(rarity, None)
+    try:
+        await set_setting(f"blunt_image_{rarity}", "")
+    except Exception as ex:
+        logger.error("Не удалось очистить file_id в БД для %s: %s", rarity, ex)
+
+    # Админ
+    if ADMIN_ID:
+        await _safe_send_message(
+            context,
+            ADMIN_ID,
+            f"⚠️ Изображение для {rarity} недействительно. Обновите: /setbluntpic {rarity}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Основная функция
+# ---------------------------------------------------------------------------
+
+async def safe_send_blunt_image(
+    context,
+    chat_id: int,
+    rarity: str,
+    caption: str = None,
+    reply_markup=None
+) -> bool:
+    """
+    Отправляет изображение бланта с максимальной надёжностью.
+
+    Алгоритм:
+      1. Пытается отправить file_id из кэша.
+      2. При невалидном file_id – сбрасывает его, пробует «золотой резерв».
+         Если резерв сработал – сохраняет его как основной.
+         Если нет – уведомляет админа и возвращает False, не ломая кэш.
+      3. При временных сетевых ошибках делает 2 попытки.
+      4. В любом неудачном случае отправляет caption (или заглушку) текстом.
+      5. Возвращает True только при успешной отправке фото.
+    """
+    # 1. Проверяем, есть ли file_id в кэше
+    async with _blunt_images_lock:
+        file_id = BLUNT_IMAGES.get(rarity)
+
+    if not file_id:
+        await _send_fallback(context, chat_id, caption, "🖼️ Изображение временно недоступно.")
+        return False
+
+    # 2. Основная попытка с ретраями
+    try:
+        await _send_photo_with_retry(context, chat_id, file_id, caption, reply_markup)
+        return True
+
     except BadRequest as e:
         if "Wrong file identifier" in str(e):
-            logger.warning("Невалидный file_id для %s, сброшен", rarity)
-            # Сброс невалидного ID
-            BLUNT_IMAGES.pop(rarity, None)
-            try:
-                await set_setting(f"blunt_image_{rarity}", "")
-            except Exception as ex:
-                logger.error("Не удалось сбросить file_id в БД: %s", ex)
-            # Уведомление админа
-            if ADMIN_ID:
+            logger.warning("Невалидный file_id для %s: %s", rarity, file_id)
+
+            # Сбрасываем текущий ID
+            await _reset_and_notify_broken_id(rarity, context)
+
+            # Попытка использовать золотой резерв
+            golden = get_golden_file_id(rarity)
+            if golden and golden != file_id:  # не пытаемся слать тот же ID
                 try:
-                    await context.bot.send_message(
-                        chat_id=ADMIN_ID,
-                        text=f"⚠️ Изображение для {rarity} недействительно. Обновите: /setbluntpic {rarity}"
-                    )
-                except Exception as ex:
-                    logger.error("Не удалось уведомить админа: %s", ex)
-            # Сообщение игроку
-            try:
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=f"🟡 Легендарный бланк создан!\n<i>Изображение временно недоступно.</i>",
-                    parse_mode='HTML'
-                )
-            except Exception as ex:
-                logger.error("Не удалось отправить fallback-сообщение игроку: %s", ex)
+                    await _send_photo_with_retry(context, chat_id, golden, caption, reply_markup)
+                    # Успех – сохраняем золотой как основной
+                    async with _blunt_images_lock:
+                        BLUNT_IMAGES[rarity] = golden
+                    await set_setting(f"blunt_image_{rarity}", golden)
+                    logger.info("Золотой резерв для %s успешно применён: %s", rarity, golden)
+                    return True
+                except Exception as golden_exc:
+                    logger.warning("Не удалось отправить золотой резерв для %s: %s", rarity, golden_exc)
+                    # Золотой ID тоже битый – сбрасываем всё, что связано с этим rarity
+                    await _reset_and_notify_broken_id(rarity, context)
+            else:
+                # Золотого резерва нет или он совпадает с упавшим
+                pass
+
+            # Финальный fallback игроку
+            await _send_fallback(context, chat_id, caption, "🖼️ Изображение временно недоступно.")
+            return False
+
         else:
-            # Другие BadRequest (например, неправильный chat_id) логируем, но не роняем
-            logger.error("BadRequest при отправке фото: %s", e)
-    except RetryAfter as e:
-        logger.warning("RetryAfter при отправке фото: %s сек", e.retry_after)
+            # Другие BadRequest (например, проблемы с chat_id)
+            logger.error("BadRequest при отправке фото %s: %s", rarity, e)
+            await _send_fallback(context, chat_id, caption, "❌ Не удалось отправить изображение.")
+            return False
+
+    except (RetryAfter, OSError, TimeoutError) as e:
+        logger.warning("Сетевая ошибка при отправке фото %s: %s", rarity, e)
+        await _send_fallback(context, chat_id, caption, "🌐 Ошибка сети. Попробуйте позже.")
+        return False
+
+    except RetryError as e:
+        # Может быть выброшено tenacity, если ретраи исчерпаны
+        logger.error("Исчерпаны попытки отправки фото %s: %s", rarity, e)
+        await _send_fallback(context, chat_id, caption, "🌐 Превышено время ожидания.")
+        return False
+
     except Exception as e:
-        logger.error("Непредвиденная ошибка при отправке фото: %s", e)
-        try:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text="Произошла ошибка при отправке изображения. Мы уже знаем и чиним.",
-                parse_mode='HTML'
-            )
-        except Exception:
-            pass
+        logger.error("Непредвиденная ошибка при отправке фото %s: %s", rarity, e)
+        await _send_fallback(context, chat_id, caption, "⚠️ Произошла ошибка при отправке изображения.")
+        return False
 
 async def send_whisper_dm(update, context, text):
     if update.callback_query:
