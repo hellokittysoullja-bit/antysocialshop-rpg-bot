@@ -998,29 +998,19 @@ async def init_db_pool():
     if not database_url:
         raise Exception("NEON_DATABASE_URL не установлена!")
 
-    # Шаг 1: Выполняем миграции через временное соединение
     async with asyncpg.create_pool(database_url, min_size=1, max_size=1, command_timeout=15) as migration_pool:
         async with migration_pool.acquire() as conn:
             await create_tables(conn)
             await _run_migrations(conn)
             await init_redis()
 
-    # Создаём файл сертификата из переменной окружения
-    cert_content = os.getenv("CC_CA_CERT")
-    if cert_content:
-        cert_path = "/opt/render/project/src/cc-ca.crt"
-        with open(cert_path, "w") as f:
-            f.write(cert_content)
-
-    # Шаг 2: Основной пул
     db_pool = await asyncpg.create_pool(
         database_url,
         min_size=5,
         max_size=20,
-        command_timeout=15,
-        statement_cache_size=0
+        command_timeout=15
     )
-    logger.info("База данных инициализирована (пул 5-20, таймаут 15с).")
+    logger.info("База данных Aiven инициализирована")
 
 async def _run_migrations(conn):
     """Все миграции, которые необходимо применить перед запуском."""
