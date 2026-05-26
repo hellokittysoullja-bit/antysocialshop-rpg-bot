@@ -1127,6 +1127,11 @@ async def _run_migrations(conn):
             value TEXT NOT NULL
         );
     """)
+    
+    # Питомцы и exists
+    await conn.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS pet TEXT DEFAULT '';")
+    await conn.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS pet_name TEXT DEFAULT '';")
+    await conn.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS \"exists\" BOOLEAN DEFAULT TRUE;")
 
     # === Финальная проверка целостности ===
     try:
