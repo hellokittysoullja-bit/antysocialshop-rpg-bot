@@ -1011,7 +1011,7 @@ async def init_db_pool():
         min_size=5,
         max_size=20,
         command_timeout=15,
-        statement_cache_size=0
+        statement_cache_size=0   # ← обязательно для CockroachDB
     )
     logger.info("База данных инициализирована (пул 5-20, таймаут 15с).")
 
