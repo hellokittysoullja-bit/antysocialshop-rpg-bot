@@ -4854,6 +4854,20 @@ async def shop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ])
     await query.message.edit_text("<b>🛒 МАГАЗИН</b>", reply_markup=kb, parse_mode='HTML')
 
+async def setbluntpic(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return await update.message.reply_text("⛔ Только для админа.")
+    if not context.args:
+        return await update.message.reply_text("Используй: /setbluntpic common (rare, epic, legendary) и прикрепи фото.")
+    rarity = context.args[0].lower()
+    if rarity not in BLUNT_IMAGES:
+        return await update.message.reply_text("Редкость должна быть: common, rare, epic, legendary.")
+    if not update.message.photo:
+        return await update.message.reply_text("Пришли фото вместе с командой.")
+    BLUNT_IMAGES[rarity] = update.message.photo[-1].file_id
+    names = {"common":"⚪ Обычный","rare":"🔵 Редкий","epic":"🟣 Эпический","legendary":"🟡 Легендарный"}
+    await update.message.reply_text(f"✅ Изображение для {names[rarity]} обновлено!", parse_mode='HTML')
+
 @safe_callback
 async def pet_name_skip_handler(update, context):
     query = update.callback_query
