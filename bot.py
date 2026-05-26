@@ -5463,31 +5463,80 @@ if __name__ == "__main__":
     else:
         logger.warning("SENTRY_DSN не задан, Sentry отключён")
 
-    async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        command = update.message.text.split()[0].split('@')[0][1:].lower()
-        mapping = {
-            "start": start,
-            "farm": farm_callback,
-            "craft": craft_callback,
-            "smoke": smoke_callback,
-            "ritual": ritual_callback,
-            "profile": profile_callback,
-            "top": top_callback,
-            "rules": rules_callback,
-            "privilege": privilege_callback,
-            "catalog": catalog_callback,
-            "luck": luck_callback,
-            "collect": collect_callback,
-            "check": check_blunt,
-            "guild": guild_info_callback,
-            "repent": confess_callback,
-            "lab": lab_enter,
-            "pet": pet_preview,
-            "shop": shop_callback,
-            "setbluntpic": setbluntpic,
-        }
-        if command in mapping:
-            await mapping[command](update, context)
+    # Статический маппинг команд (вынесен из функции, создаётся один раз)
+COMMAND_MAP = {
+    "start": start,
+    "farm": farm_callback,
+    "craft": craft_callback,
+    "smoke": smoke_callback,
+    "ritual": ritual_callback,
+    "profile": profile_callback,
+    "top": top_callback,
+    "rules": rules_callback,
+    "privilege": privilege_callback,
+    "catalog": catalog_callback,
+    "luck": luck_callback,
+    "collect": collect_callback,
+    "check": check_blunt,
+    "guild": guild_info_callback,
+    "repent": confess_callback,
+    "lab": lab_enter,
+    "pet": pet_preview,
+    "shop": shop_callback,
+    "setbluntpic": setbluntpic,
+}
+
+async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Обрабатывает текстовые команды.
+    - Игнорирует чужие команды в группах (проверка @username).
+    - Логирует все входящие команды и их аргументы.
+    - Передаёт payload в /start (deep-linking).
+    """
+    msg = update.message
+    if not msg or not msg.text:
+        return
+
+    raw_text = msg.text.strip()
+    # --- 1. Извлекаем команду и проверяем получателя ---
+    first_word = raw_text.split()[0]
+    if '@' in first_word:
+        cmd, _, bot_username = first_word[1:].partition('@')
+        if bot_username.lower() != context.bot.username.lower():
+            return  # команда не нашему боту
+        command = cmd.lower()
+    else:
+        command = first_word[1:].lower()
+
+    if not command:
+        return
+
+    # --- 2. Логируем команду с аргументами ---
+    args = raw_text.split()[1:]
+    logger.info(
+        "Команда: '/%s' аргументы=%s от user_id=%d",
+        command, args, update.effective_user.id
+    )
+
+    # --- 3. Ищем обработчик ---
+    handler = COMMAND_MAP.get(command)
+    if not handler:
+        await update.message.reply_text("❓ Неизвестная команда.")
+        return
+
+    # --- 4. Deep-linking (только для /start) ---
+    if command == "start" and args:
+        context.user_data["start_payload"] = args[0]
+
+    # --- 5. Выполняем обработчик ---
+    try:
+        await handler(update, context)
+    except Exception as e:
+        logger.critical("Ошибка в команде '/%s': %s", command, e, exc_info=True)
+        try:
+            await update.message.reply_text("⚠️ Внутренняя ошибка. Админ уже уведомлён.")
+        except Exception:
+            pass
 
     # Временный блок для получения file_id (можно удалить после настройки картинок)
     async def get_file_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
