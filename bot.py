@@ -998,23 +998,22 @@ async def init_db_pool():
     if not database_url:
         raise Exception("NEON_DATABASE_URL не установлена!")
 
-    # Шаг 1: Выполняем все миграции через временное соединение,
-    # чтобы гарантировать актуальность схемы перед созданием пула.
+    # Шаг 1: Выполняем миграции через временное соединение
     async with asyncpg.create_pool(database_url, min_size=1, max_size=1, command_timeout=15) as migration_pool:
         async with migration_pool.acquire() as conn:
             await create_tables(conn)
             await _run_migrations(conn)
             await init_redis()
 
-    # Шаг 2: Создаём основной пул, который будет использоваться всем ботом.
-    # Кэш подготовленных запросов будет чистым и соответствующим новой схеме.
+    # Шаг 2: Основной пул (statement_cache_size=0 решает проблему с Supabase)
     db_pool = await asyncpg.create_pool(
         database_url,
         min_size=5,
         max_size=20,
-        command_timeout=15
+        command_timeout=15,
+        statement_cache_size=0
     )
-    logger.info("База данных Neon инициализирована (пул 5-20, таймаут 10с).")
+    logger.info("База данных инициализирована (пул 5-20, таймаут 15с).")
 
 async def _run_migrations(conn):
     """Все миграции, которые необходимо применить перед запуском."""
