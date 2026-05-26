@@ -995,6 +995,7 @@ BLUNT_IMAGES = {
 async def init_db_pool():
     global db_pool
     database_url = os.getenv("NEON_DATABASE_URL")
+    logger.info("Подключаюсь к %s", database_url)
     if not database_url:
         raise Exception("NEON_DATABASE_URL не установлена!")
 
