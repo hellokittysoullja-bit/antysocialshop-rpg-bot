@@ -5552,7 +5552,7 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         except Exception:
             pass
 
-    # Временный блок для получения file_id (можно удалить после настройки картинок)
+# Временный блок для получения file_id (можно удалить после настройки картинок)
     async def get_file_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if update.message.photo:
             fid = update.message.photo[-1].file_id
@@ -5563,6 +5563,7 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_chat_shortcut))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_member))
     app.add_handler(CallbackQueryHandler(button_handler))
+    logger.info("Обработчики зарегистрированы")
 
     job = app.job_queue
     # job.run_repeating(update_pulse, interval=900, first=10)
