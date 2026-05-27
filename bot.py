@@ -29,7 +29,6 @@ from tenacity import (
 from telegram.error import RetryAfter
 
 import enum
-from pydantic import BaseModel, Field, 
 
 from pydantic import BaseModel, Field, ConfigDict
 
