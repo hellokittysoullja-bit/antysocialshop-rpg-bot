@@ -5759,7 +5759,7 @@ if __name__ == "__main__":
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(init_db_pool())
-    Thread(target=run_web_server, daemon=True).start()
+   # Thread(target=run_web_server, daemon=True).start()
 
     # Загружаем сохранённые file_id из БД
     async def load_blunt_images():
@@ -5910,7 +5910,6 @@ if __name__ == "__main__":
     async def shutdown():
         logger.info("Получен сигнал остановки, немедленно прекращаем работу...")
         try:
-            # Удаляем вебхук, чтобы следующий запуск не конфликтовал
             await app.bot.delete_webhook(drop_pending_updates=True)
             await app.stop()
             await asyncio.sleep(0.5)
@@ -5926,28 +5925,27 @@ if __name__ == "__main__":
         except NotImplementedError:
             pass
 
-    # === ЗАПУСК ЧЕРЕЗ WEBHOOK (НАВСЕГДА) ===
-    render_url = os.getenv("RENDER_EXTERNAL_URL", "")
-    if not render_url:
-        logger.critical("RENDER_EXTERNAL_URL не задан – невозможно установить вебхук")
-        raise RuntimeError("Невозможно запустить бота без RENDER_EXTERNAL_URL")
+    # === ЗАПУСК WEBHOOK (асинхронная обёртка) ===
+    async def start_webhook():
+        render_url = os.getenv("RENDER_EXTERNAL_URL", "")
+        if not render_url:
+            logger.critical("RENDER_EXTERNAL_URL не задан – невозможно установить вебхук")
+            raise RuntimeError("Невозможно запустить бота без RENDER_EXTERNAL_URL")
 
-    webhook_path = "/webhook"
-    webhook_url = f"{render_url}{webhook_path}"
+        webhook_path = "/webhook"
+        webhook_url = f"{render_url}{webhook_path}"
 
-    logger.info("Устанавливаем вебхук на %s", webhook_url)
-    await app.bot.set_webhook(url=webhook_url, drop_pending_updates=True)
+        logger.info("Устанавливаем вебхук на %s", webhook_url)
+        await app.bot.set_webhook(url=webhook_url, drop_pending_updates=True)
 
-    port = int(os.getenv("PORT", 10000))
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=port,
-        url_path=webhook_path,
-        webhook_url=webhook_url,
-        drop_pending_updates=True,
-        graceful_shutdown_timeout=8,   # даём старому контейнеру время завершить запросы
-        # Health‑check эндпоинт (Render стучится на /, отвечаем 200)
-        allowed_updates=Update.ALL_TYPES,
-    )
+        port = int(os.getenv("PORT", 10000))
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=port,
+            url_path=webhook_path,
+            webhook_url=webhook_url,
+            drop_pending_updates=True,
+            graceful_shutdown_timeout=8,
+        )
 
-    logger.info("Бот запущен через вебхук и готов принимать обновления")
+    loop.run_until_complete(start_webhook())
