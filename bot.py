@@ -5926,5 +5926,7 @@ if __name__ == "__main__":
 
     app.add_error_handler(global_error_handler)
 
+    await app.bot.delete_webhook(drop_pending_updates=True)
+
     print("BOT READY")
     app.run_polling()
