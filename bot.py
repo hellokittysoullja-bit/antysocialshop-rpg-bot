@@ -5896,37 +5896,31 @@ if __name__ == "__main__":
             pass
 
 # ===== ГЛОБАЛЬНЫЙ ОБРАБОТЧИК RetryAfter =====
+    from telegram.error import RetryAfter
+
     async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         error = context.error
+        # Выводим ошибку напрямую в stderr, минуя логгер
+        import traceback
+        traceback.print_exception(type(error), error, error.__traceback__)
+        # Пробуем уведомить админа
         try:
-            if isinstance(error, RetryAfter):
-                logger.warning(f"Telegram попросил подождать {error.retry_after} сек.")
-                await asyncio.sleep(error.retry_after)
-                return
-            logger.critical("Глобальная ошибка:", exc_info=error)
             if ADMIN_ID:
-                try:
-                    provider, host = _extract_provider_info(error)
-                    err_text = str(error)
-                    if "compute time quota exceeded" in err_text.lower():
-                        msg = (
-                            f"❌ <b>Лимит базы данных исчерпан!</b>\n"
-                            f"Провайдер: {provider}\n"
-                            f"Хост: {host}\n"
-                            f"<b>Решение:</b> дождитесь сброса или перенесите базу на Render PostgreSQL."
-                        )
-                    else:
-                        msg = f"⚠️ Глобальная ошибка:\n<code>{html.escape(err_text)}</code>"
-                    await context.bot.send_message(chat_id=ADMIN_ID, text=msg, parse_mode='HTML')
-                except Exception:
-                    pass
+                await context.bot.send_message(
+                    chat_id=ADMIN_ID,
+                    text=f"🚨 Глобальная ошибка: {error}"
+                )
         except Exception:
-            import traceback
-            traceback.print_exc()
+            pass
 
     app.add_error_handler(global_error_handler)
 
-    await app.bot.delete_webhook(drop_pending_updates=True)
+    # Удаляем ожидающие обновления при старте (защита от Conflict)
+    async def clear_pending_updates():
+        await app.bot.delete_webhook(drop_pending_updates=True)
+        logger.info("Ожидающие обновления удалены")
+
+    app.job_queue.run_once(clear_pending_updates, when=0)
 
     print("BOT READY")
     app.run_polling()
