@@ -1206,12 +1206,6 @@ async def init_db_pool():
     )
     logger.info("База данных Aiven инициализирована (пул 5-20, таймаут 15с).")
 
-# Захватываем advisory lock, чтобы гарантировать единственный экземпляр бота
-async def acquire_lock():
-    async with db_pool.acquire() as conn:
-        await conn.execute("SELECT pg_advisory_lock(123456789)")
-loop.run_until_complete(acquire_lock())
-
 async def _run_migrations(conn):
     """Все миграции, которые необходимо применить перед запуском."""
     # Добавление столбца war_active в guild_weekly (если его ещё нет)
