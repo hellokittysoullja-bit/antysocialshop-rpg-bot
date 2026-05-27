@@ -5717,8 +5717,8 @@ if __name__ == "__main__":
 
     if not TOKEN:
         raise RuntimeError("TOKEN не установлен")
-    if not os.getenv("NEON_DATABASE_URL"):
-        raise RuntimeError("NEON_DATABASE_URL не установлена")
+    if not os.getenv("DATABASE_URL_AIVEN"):
+        raise RuntimeError("DATABASE_URL_AIVEN не установлена")
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
