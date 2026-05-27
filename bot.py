@@ -5109,6 +5109,46 @@ async def setbluntpic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     BLUNT_IMAGES[rarity] = update.message.photo[-1].file_id
     names = {"common":"⚪ Обычный","rare":"🔵 Редкий","epic":"🟣 Эпический","legendary":"🟡 Легендарный"}
     await update.message.reply_text(f"✅ Изображение для {names[rarity]} обновлено!", parse_mode='HTML')
+    
+async def give_oas(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Выдаёт OAC игроку. Только для админа."""
+    if update.effective_user.id != ADMIN_ID:
+        return await update.message.reply_text("⛔ Только для админа.")
+    if not context.args or len(context.args) < 2:
+        return await update.message.reply_text("Формат: /give_oas <ID или @username> <сумма>")
+    
+    target_raw = context.args[0]
+    try:
+        amount = int(context.args[1])
+    except ValueError:
+        return await update.message.reply_text("Сумма должна быть целым числом.")
+
+    # Определяем получателя
+    target_id = None
+    if target_raw.startswith("@"):
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT user_id FROM players WHERE LOWER(username) = LOWER($1)", target_raw[1:])
+            if row:
+                target_id = row["user_id"]
+    elif target_raw.isdigit():
+        target_id = int(target_raw)
+    else:
+        return await update.message.reply_text("Укажи числовой ID или @username.")
+
+    if not target_id:
+        return await update.message.reply_text("Игрок не найден.")
+
+    # Атомарно начисляем
+    async def _add(p, conn):
+        p.balance += amount
+        return ("ok", p.balance)
+
+    result = await PlayerRepository.atomic_update(target_id, _add)
+    if result is None:
+        return await update.message.reply_text("Ошибка при обновлении баланса.")
+
+    await update.message.reply_text(f"✅ Игроку {target_id} начислено {amount} OAC. Новый баланс: {result[1]} 🍬")
+    logger.info("Админ %d начислил %d OAC игроку %d", update.effective_user.id, amount, target_id)
 
 @safe_callback
 async def pet_name_skip_handler(update, context):
@@ -5740,6 +5780,7 @@ if __name__ == "__main__":
         "pet": pet_preview,
         "shop": shop_callback,
         "setbluntpic": setbluntpic,
+        "give_oas": give_oas,
     }
 
     async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
