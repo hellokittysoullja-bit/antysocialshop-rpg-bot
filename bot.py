@@ -5829,36 +5829,34 @@ if __name__ == "__main__":
         except NotImplementedError:
             pass
 
-    # ===== ГЛОБАЛЬНЫЙ ОБРАБОТЧИК RetryAfter =====
-    from telegram.error import RetryAfter
-
+# ===== ГЛОБАЛЬНЫЙ ОБРАБОТЧИК RetryAfter =====
     async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    error = context.error
-    try:
-        if isinstance(error, RetryAfter):
-            logger.warning(f"Telegram попросил подождать {error.retry_after} сек.")
-            await asyncio.sleep(error.retry_after)
-            return
-        logger.critical("Глобальная ошибка:", exc_info=error)
-        if ADMIN_ID:
-            try:
-                provider, host = _extract_provider_info(error)
-                err_text = str(error)
-                if "compute time quota exceeded" in err_text.lower():
-                    msg = (
-                        f"❌ <b>Лимит базы данных исчерпан!</b>\n"
-                        f"Провайдер: {provider}\n"
-                        f"Хост: {host}\n"
-                        f"<b>Решение:</b> дождитесь сброса или перенесите базу на Render PostgreSQL."
-                    )
-                else:
-                    msg = f"⚠️ Глобальная ошибка:\n<code>{html.escape(err_text)}</code>"
-                await context.bot.send_message(chat_id=ADMIN_ID, text=msg, parse_mode='HTML')
-            except Exception:
-                pass
-    except Exception:
-        import traceback
-        traceback.print_exc()
+        error = context.error
+        try:
+            if isinstance(error, RetryAfter):
+                logger.warning(f"Telegram попросил подождать {error.retry_after} сек.")
+                await asyncio.sleep(error.retry_after)
+                return
+            logger.critical("Глобальная ошибка:", exc_info=error)
+            if ADMIN_ID:
+                try:
+                    provider, host = _extract_provider_info(error)
+                    err_text = str(error)
+                    if "compute time quota exceeded" in err_text.lower():
+                        msg = (
+                            f"❌ <b>Лимит базы данных исчерпан!</b>\n"
+                            f"Провайдер: {provider}\n"
+                            f"Хост: {host}\n"
+                            f"<b>Решение:</b> дождитесь сброса или перенесите базу на Render PostgreSQL."
+                        )
+                    else:
+                        msg = f"⚠️ Глобальная ошибка:\n<code>{html.escape(err_text)}</code>"
+                    await context.bot.send_message(chat_id=ADMIN_ID, text=msg, parse_mode='HTML')
+                except Exception:
+                    pass
+        except Exception:
+            import traceback
+            traceback.print_exc()
 
     app.add_error_handler(global_error_handler)
 
