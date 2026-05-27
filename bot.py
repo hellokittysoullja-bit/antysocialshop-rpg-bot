@@ -1059,10 +1059,10 @@ db_pool = None
 BLUNTS_PER_PAGE = 3
 
 BLUNT_IMAGES = {
-    "common": "AgACAgIAAxkBAAIRu2n5Hi5JOKJANQjkJhqNgW8zcXfLAAKVFGsbxM_JS3cfFnraoo4lAQADAgADeQADOwQ",
-    "rare": "AgACAgIAAxkBAAIRvWn5HpzDS9213DAVEDp5K6AEbco_AAKWFGsbxM_JS2MGaxcgGQ2jAQADAgADeQADOwQ",
-    "epic": "AgACAgIAAxkBAAIRv2n5Hp89jxsNz8V4uZUDwE1xtC07AAKXFGsbxM_JS6170Njn8cLjAQADAgADeQADOwQ",
-    "legendary": "AgACAgIAAxkBAAIRwWn5HqFzbds_ThN4Pogn9c-VdjsaAAKYFGsbxM_JS6GsI_So0AHxAQADAgADeQADOwQ"
+    "common": "AgACAgIAAxkBAAIDkGoXK23K4y7Oq479b4xk4DN2IjQ-AAIiH2sb4L64SI9XnknrGFb-AQADAgADeAADOwQ",
+    "rare":
+    "epic": 
+    "legendary": 
 }
 
 async def init_db_pool():
