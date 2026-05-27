@@ -5725,22 +5725,13 @@ if __name__ == "__main__":
     loop.run_until_complete(init_db_pool())
     Thread(target=run_web_server, daemon=True).start()
 
-    # --- Загружаем сохранённые file_id из БД ---
+    # Загружаем сохранённые file_id из БД
     async def load_blunt_images():
         for rarity in ("common", "rare", "epic", "legendary"):
             saved = await get_setting(f"blunt_image_{rarity}")
             if saved:
                 BLUNT_IMAGES[rarity] = saved
-
     loop.run_until_complete(load_blunt_images())
-
-    # --- Advisory Lock для единственного экземпляра ---
-    async def acquire_lock():
-        async with db_pool.acquire() as conn:
-            await conn.execute("SELECT pg_advisory_lock(123456789)")
-
-    loop.run_until_complete(acquire_lock())
-    logger.info("Блокировка получена, запускаем бота")
 
     # --- Создание приложения ---
     app = (Application.builder()
@@ -5754,7 +5745,7 @@ if __name__ == "__main__":
     war_service = GuildWarService(db_pool, redis_client=redis, config=war_config, settings=war_settings)
     app.bot_data["war_service"] = war_service
 
-    # Проверка изображений после запуска
+    # Проверка изображений при старте (выполняется до запуска поллинга)
     async def check_all_blunt_images():
         invalid = []
         for rarity in ("common", "rare", "epic", "legendary"):
@@ -5771,22 +5762,129 @@ if __name__ == "__main__":
         if invalid:
             logger.warning("Невалидные изображения: %s", ", ".join(invalid))
             if ADMIN_ID:
-                await app.bot.send_message(
+                try:
+                    await app.bot.send_message(
+                        chat_id=ADMIN_ID,
+                        text=f"⚠️ При запуске обнаружены невалидные изображения: {', '.join(invalid)}.\n"
+                             f"Они сброшены. Обновите через /setbluntpic."
+                    )
+                except Exception as e:
+                    logger.error("Не удалось уведомить админа: %s", e)
+
+    await check_all_blunt_images()
+
+    # ===== ИНИЦИАЛИЗАЦИЯ SENTRY =====
+    import sentry_sdk
+    SENTRY_DSN = os.getenv("SENTRY_DSN")
+    if SENTRY_DSN:
+        sentry_sdk.init(
+            dsn=SENTRY_DSN,
+            traces_sample_rate=1.0,
+            environment=os.getenv("ENV", "production"),
+        )
+        logger.info("Sentry активирован")
+    else:
+        logger.warning("SENTRY_DSN не задан, Sentry отключён")
+
+    async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        msg = update.message
+        if not msg or not msg.text:
+            return
+        raw_text = msg.text.strip()
+        try:
+            logger.debug("Команда получена: '%s' от user_id=%d", raw_text, update.effective_user.id)
+            command = raw_text.split()[0].split('@')[0][1:].lower()
+            if not command:
+                return
+            mapping = {
+                "start": start,
+                "farm": farm_callback,
+                "craft": craft_callback,
+                "smoke": smoke_callback,
+                "ritual": ritual_callback,
+                "profile": profile_callback,
+                "top": top_callback,
+                "rules": rules_callback,
+                "privilege": privilege_callback,
+                "catalog": catalog_callback,
+                "luck": luck_callback,
+                "collect": collect_callback,
+                "check": check_blunt,
+                "guild": guild_info_callback,
+                "repent": confess_callback,
+                "lab": lab_enter,
+                "pet": pet_preview,
+                "shop": shop_callback,
+                "setbluntpic": setbluntpic,
+                "give_oas": give_oas,
+                "debugpet": debug_pet,
+                "checkbluntpics": check_blunt_pics,
+            }
+            handler = mapping.get(command)
+            if handler:
+                await handler(update, context)
+            else:
+                logger.debug("Неизвестная команда проигнорирована: '%s'", command)
+        except Exception as e:
+            logger.critical("КРИТИЧЕСКАЯ ОШИБКА В ОБРАБОТКЕ КОМАНДЫ '%s': %s", raw_text, e, exc_info=True)
+            try:
+                await update.message.reply_text("⚠️ Внутренняя ошибка. Админ уведомлён.")
+            except Exception:
+                pass
+
+    async def get_file_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if update.effective_user.id != ADMIN_ID:
+            return
+        if update.message.photo:
+            fid = update.message.photo[-1].file_id
+            await update.message.reply_text(fid)
+
+    app.add_handler(MessageHandler(filters.PHOTO, get_file_id))
+    app.add_handler(MessageHandler(filters.COMMAND, handle_command))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_chat_shortcut))
+    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_member))
+    app.add_handler(CallbackQueryHandler(button_handler))
+
+    job = app.job_queue
+    # job.run_repeating(update_pulse, interval=900, first=10)
+    # job.run_repeating(happy_hour_trigger, interval=random.randint(14400, 28800), first=random.randint(3600, 10800))
+    # job.run_daily(echo_of_distortion, time=time(hour=18, minute=0))
+    # job.run_repeating(weekly_guild_rating, interval=7*24*3600, first=max(1, (next_saturday - now).total_seconds()))
+    job.run_repeating(keep_db_alive, interval=180, first=10)
+
+    # === GRACEFUL SHUTDOWN ===
+    async def shutdown():
+        logger.info("Завершение работы, закрываю соединения...")
+        if db_pool:
+            await db_pool.close()
+        if redis:
+            await redis.close()
+        logger.info("Бот остановлен.")
+
+    import signal
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, lambda: asyncio.ensure_future(shutdown()))
+        except NotImplementedError:
+            pass
+
+    # ===== ГЛОБАЛЬНЫЙ ОБРАБОТЧИК RetryAfter =====
+    from telegram.error import RetryAfter
+
+    async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        error = context.error
+        import traceback
+        traceback.print_exception(type(error), error, error.__traceback__)
+        try:
+            if ADMIN_ID:
+                await context.bot.send_message(
                     chat_id=ADMIN_ID,
-                    text=f"⚠️ При запуске обнаружены невалидные изображения: {', '.join(invalid)}.\n"
-                         f"Они сброшены. Обновите через /setbluntpic."
+                    text=f"🚨 Глобальная ошибка: {error}"
                 )
+        except Exception:
+            pass
 
-    app.job_queue.run_once(check_all_blunt_images, when=0)
-
-    # ... (остальные хендлеры, джобы, global_error_handler) ...
-
-    # Удаляем ожидающие обновления (защита от Conflict)
-    async def clear_pending_updates():
-        await app.bot.delete_webhook(drop_pending_updates=True)
-        logger.info("Ожидающие обновления удалены")
-
-    app.job_queue.run_once(clear_pending_updates, when=0)
+    app.add_error_handler(global_error_handler)
 
     print("BOT READY")
-    app.run_polling()
+    app.run_polling(drop_pending_updates=True)
