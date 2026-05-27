@@ -494,203 +494,256 @@ async def init_redis():
 
 class PlayerRepository:
     @staticmethod
+    @db_retry()
     async def get_by_id(user_id: int) -> Player:
-        # Пробуем Redis
+        # === ВАЛИДАЦИЯ ===
+        if not user_id or user_id <= 0:
+            raise ValueError("Некорректный user_id при загрузке")
+    
+        # === КЭШ REDIS ===
         if redis:
-            key = f"player:{user_id}"
-            data = await redis.get(key)
-            if data:
-                return Player.parse_raw(data)
-
-        # Fallback – in‑memory кэш (словарь)
+            try:
+                key = f"player:{user_id}"
+                data = await redis.get(key)
+                if data:
+                    logger.debug("Игрок %d загружен из Redis", user_id)
+                    return Player.model_validate_json(data)   # современный Pydantic V2
+            except Exception as e:
+                logger.warning("Ошибка загрузки из Redis для %d: %s", user_id, e)
+    
+        # === IN-MEMORY КЭШ ===
         if user_id in player_cache:
+            logger.debug("Игрок %d загружен из in-memory кэша", user_id)
             p = player_cache[user_id]
             return Player(**p)
-
-        # Запрос к БД
+    
+        # === ЗАПРОС К БД С ТАЙМАУТОМ ===
         async with db_pool.acquire() as conn:
-            row = await conn.fetchrow("SELECT * FROM players WHERE user_id = $1", user_id)
+            try:
+                await conn.set_statement_timeout(10.0)
+            except Exception as e:
+                logger.debug("Не удалось установить statement_timeout для get_by_id: %s", e)
+    
+            # Явный список колонок (единый источник правды)
+            columns = [
+                "user_id", "username", "balance", "blunts", "guild", "last_farm",
+                "last_ritual", "last_daily", "titles", "last_farm_date", "passive_level",
+                "passive_collected", "karma", "inhaled", "smoke_count", "farm_count",
+                "craft_count", "ritual_count", "referral_count", "last_berserk",
+                "inventory", "invited_by", "profile_skins", "login_streak",
+                "last_login_date", "oath", "keys", "check_count", "m_essence",
+                "lab_chests", "lab_deaths", "alchemy_count", "last_lab_attempt",
+                "donated", "pending_transfer", "lab_depth", "pet", "pet_name", "exists",
+            ]
+            cols_sql = ", ".join(f'"{c}"' for c in columns)
+            row = await conn.fetchrow(f"SELECT {cols_sql} FROM players WHERE user_id = $1", user_id)
+    
         if row:
             p = dict(row)
             p["inventory"] = _json_safe_load(p.get("inventory"), [])
             p["profile_skins"] = _json_safe_load(p.get("profile_skins"), {})
+            p["pending_transfer"] = _json_safe_load(p.get("pending_transfer"))
             player = Player(**p)
             player.exists = True
-
+    
             # Кэшируем
-            if redis:
-                await redis.setex(f"player:{user_id}", 10, player.json())
-            else:
-                player_cache[user_id] = player.dict()
+            try:
+                if redis:
+                    await redis.setex(f"player:{user_id}", 10, player.model_dump_json())
+                else:
+                    player_cache[user_id] = player.model_dump()
+            except Exception as e:
+                logger.warning("Не удалось обновить кэш для игрока %d: %s", user_id, e)
+                player_cache.pop(user_id, None)
             return player
-
-        # Игрок не найден – возвращаем новый объект (он создастся в БД при первом save)
+    
+        logger.debug("Игрок %d не найден в БД", user_id)
         return Player(user_id=user_id)
 
-    @staticmethod
-    @db_retry()
-    async def save(player: Player, conn=None) -> None:
-        """Сохраняет игрока с максимальной защитой от сбоев (всё внутри метода)."""
-        # === БАЗОВАЯ ВАЛИДАЦИЯ ===
-        if not player.user_id or player.user_id <= 0:
-            raise ValueError("Некорректный user_id при сохранении")
-        if player.balance < 0:
-            logger.warning(
-                "Попытка сохранить игрока %d с отрицательным балансом", player.user_id
+@staticmethod
+@db_retry()
+async def save(player: Player, conn=None) -> None:
+    """Сохраняет игрока с максимальной защитой от сбоев (всё внутри метода)."""
+    # === БАЗОВАЯ ВАЛИДАЦИЯ ===
+    if not player.user_id or player.user_id <= 0:
+        raise ValueError("Некорректный user_id при сохранении")
+    if player.balance < 0:
+        logger.warning(
+            "Попытка сохранить игрока %d с отрицательным балансом", player.user_id
+        )
+        player.balance = 0
+
+    # === ГАРАНТИЯ ФЛАГА СУЩЕСТВОВАНИЯ ===
+    player.exists = True
+
+    # === ПРОВЕРКА ЖИВОСТИ ПЕРЕДАННОГО СОЕДИНЕНИЯ ===
+    if conn is not None and conn.is_closed():
+        logger.warning(
+            "Переданное соединение закрыто, будет открыто новое для user_id=%d",
+            player.user_id,
+        )
+        conn = None
+
+    # === ПОЛНЫЙ СПИСОК ПОЛЕЙ (единый источник правды) ===
+    columns = [
+        "user_id", "username", "balance", "blunts", "guild", "last_farm",
+        "last_ritual", "last_daily", "titles", "last_farm_date", "passive_level",
+        "passive_collected", "karma", "inhaled", "smoke_count", "farm_count",
+        "craft_count", "ritual_count", "referral_count", "last_berserk",
+        "inventory", "invited_by", "profile_skins", "login_streak",
+        "last_login_date", "oath", "keys", "check_count", "m_essence",
+        "lab_chests", "lab_deaths", "alchemy_count", "last_lab_attempt",
+        "donated", "pending_transfer", "lab_depth", "pet", "pet_name", "exists",
+    ]
+
+    # === JSON-ПОЛЯ (нужна явная сериализация) ===
+    json_columns = ["inventory", "profile_skins", "pending_transfer"]
+
+    # === ДИНАМИЧЕСКАЯ ГЕНЕРАЦИЯ SQL ===
+    cols_sql = ", ".join(f'"{c}"' for c in columns)
+    placeholders = ", ".join(f"${i+1}" for i in range(len(columns)))
+    update_set = ", ".join(
+        f'"{c}" = EXCLUDED."{c}"' for c in columns if c != "user_id"
+    )
+
+    # === ЗНАЧЕНИЯ В ТОМ ЖЕ ПОРЯДКЕ ===
+    values = [getattr(player, col) for col in columns]
+    for col in json_columns:
+        idx = columns.index(col)
+        values[idx] = json.dumps(getattr(player, col), default=str)
+
+    sql = f"""
+        INSERT INTO players ({cols_sql})
+        VALUES ({placeholders})
+        ON CONFLICT (user_id) DO UPDATE SET
+            {update_set}
+    """
+
+    async def _write(c):
+        await c.execute(sql, *values)
+
+    # === ЗАПИСЬ В БД ===
+    if conn is not None:
+        await _write(conn)
+    else:
+        async with db_pool.acquire() as new_conn:
+            try:
+                await new_conn.set_statement_timeout(15.0)
+            except Exception as e:
+                logger.debug("Не удалось установить statement_timeout: %s", e)
+            await _write(new_conn)
+
+    # === ОБНОВЛЕНИЕ КЭША ИГРОКА ===
+    try:
+        if redis:
+            await redis.setex(
+                f"player:{player.user_id}", 10, player.model_dump_json()
             )
-            player.balance = 0
+        else:
+            player_cache[player.user_id] = player.model_dump()
+    except Exception as e:
+        logger.warning("Не удалось обновить кэш игрока %d: %s", player.user_id, e)
+        player_cache.pop(player.user_id, None)
 
-        # === ГАРАНТИЯ ФЛАГА СУЩЕСТВОВАНИЯ ===
-        player.exists = True
-
-        # === ПРОВЕРКА ЖИВОСТИ ПЕРЕДАННОГО СОЕДИНЕНИЯ ===
-        if conn is not None and conn.is_closed():
-            logger.warning(
-                "Переданное соединение закрыто, будет открыто новое для user_id=%d",
-                player.user_id,
-            )
-            conn = None
-
-        # === ПОЛНЫЙ СПИСОК ПОЛЕЙ (единый источник правды) ===
-        columns = [
-            "user_id", "username", "balance", "blunts", "guild", "last_farm",
-            "last_ritual", "last_daily", "titles", "last_farm_date", "passive_level",
-            "passive_collected", "karma", "inhaled", "smoke_count", "farm_count",
-            "craft_count", "ritual_count", "referral_count", "last_berserk",
-            "inventory", "invited_by", "profile_skins", "login_streak",
-            "last_login_date", "oath", "keys", "check_count", "m_essence",
-            "lab_chests", "lab_deaths", "alchemy_count", "last_lab_attempt",
-            "donated", "pending_transfer", "lab_depth", "pet", "pet_name", "exists",
-        ]
-
-        # === JSON-ПОЛЯ (нужна явная сериализация) ===
-        json_columns = ["inventory", "profile_skins", "pending_transfer"]
-
-        # === ДИНАМИЧЕСКАЯ ГЕНЕРАЦИЯ SQL ===
-        cols_sql = ", ".join(f'"{c}"' for c in columns)
-        placeholders = ", ".join(f"${i+1}" for i in range(len(columns)))
-        update_set = ", ".join(
-            f'"{c}" = EXCLUDED."{c}"' for c in columns if c != "user_id"
+    # === ИНВАЛИДАЦИЯ КЭША МЕНЮ ===
+    try:
+        invalidate_menu_cache(player.user_id)
+    except Exception as e:
+        logger.debug(
+            "Инвалидация кэша меню для %d не удалась: %s", player.user_id, e
         )
 
-        # === ЗНАЧЕНИЯ В ТОМ ЖЕ ПОРЯДКЕ ===
-        values = [getattr(player, col) for col in columns]
-        for col in json_columns:
-            idx = columns.index(col)
-            values[idx] = json.dumps(getattr(player, col), default=str)
+    logger.info("Игрок %d успешно сохранён", player.user_id)
 
-        sql = f"""
-            INSERT INTO players ({cols_sql})
-            VALUES ({placeholders})
-            ON CONFLICT (user_id) DO UPDATE SET
-                {update_set}
-        """
+@staticmethod
+@db_retry()
+async def atomic_update(user_id: int, update_func):
+    """
+    Атомарно блокирует игрока (SELECT ... FOR UPDATE),
+    выполняет переданную функцию update_func(player, conn),
+    сохраняет модель и возвращает результат update_func.
+    Если игрок не найден, возвращает None.
+    """
+    if not user_id or user_id <= 0:
+        raise ValueError("Некорректный user_id при атомарном обновлении")
 
-        async def _write(c):
-            await c.execute(sql, *values)
-
-        # === ЗАПИСЬ В БД ===
-        if conn is not None:
-            await _write(conn)
-        else:
-            async with db_pool.acquire() as new_conn:
-                try:
-                    await new_conn.set_statement_timeout(15.0)
-                except Exception as e:
-                    logger.debug("Не удалось установить statement_timeout: %s", e)
-                await _write(new_conn)
-
-        # === ОБНОВЛЕНИЕ КЭША ИГРОКА ===
+    async with db_pool.acquire() as conn:
         try:
-            if redis:
-                await redis.setex(
-                    f"player:{player.user_id}", 10, player.model_dump_json()
-                )
-            else:
-                player_cache[player.user_id] = player.model_dump()
+            await conn.set_statement_timeout(15.0)
         except Exception as e:
-            logger.warning("Не удалось обновить кэш игрока %d: %s", player.user_id, e)
-            player_cache.pop(player.user_id, None)
+            logger.debug("Не удалось установить statement_timeout для atomic_update: %s", e)
 
-        # === ИНВАЛИДАЦИЯ КЭША МЕНЮ ===
-        try:
-            invalidate_menu_cache(player.user_id)
-        except Exception as e:
-            logger.debug(
-                "Инвалидация кэша меню для %d не удалась: %s", player.user_id, e
+        async with conn.transaction():
+            # Явный список колонок (единый источник правды)
+            columns = [
+                "user_id", "username", "balance", "blunts", "guild", "last_farm",
+                "last_ritual", "last_daily", "titles", "last_farm_date", "passive_level",
+                "passive_collected", "karma", "inhaled", "smoke_count", "farm_count",
+                "craft_count", "ritual_count", "referral_count", "last_berserk",
+                "inventory", "invited_by", "profile_skins", "login_streak",
+                "last_login_date", "oath", "keys", "check_count", "m_essence",
+                "lab_chests", "lab_deaths", "alchemy_count", "last_lab_attempt",
+                "donated", "pending_transfer", "lab_depth", "pet", "pet_name", "exists",
+            ]
+            cols_sql = ", ".join(f'"{c}"' for c in columns)
+            row = await conn.fetchrow(
+                f"SELECT {cols_sql} FROM players WHERE user_id = $1 FOR UPDATE",
+                user_id
             )
+            if not row:
+                logger.warning("atomic_update: игрок %d не найден", user_id)
+                return None
 
-        logger.info("Игрок %d успешно сохранён", player.user_id)
+            p = dict(row)
+            p["inventory"] = _json_safe_load(p.get("inventory"), [])
+            p["profile_skins"] = _json_safe_load(p.get("profile_skins"), {})
+            p["pending_transfer"] = _json_safe_load(p.get("pending_transfer"))
+            player = Player(**p)
 
-    @staticmethod
-    async def atomic_update(user_id: int, update_func):
-        """
-        Атомарно блокирует игрока (SELECT ... FOR UPDATE),
-        выполняет переданную функцию update_func(player, conn),
-        сохраняет модель и возвращает результат update_func.
-        Если игрок не найден, возвращает None.
-        """
-        async with db_pool.acquire() as conn:
-            async with conn.transaction():
-                row = await conn.fetchrow(
-                    "SELECT * FROM players WHERE user_id = $1 FOR UPDATE",
-                    user_id
-                )
-                if not row:
-                    return None
+            logger.debug("Начало атомарного обновления для игрока %d", user_id)
+            result = await update_func(player, conn)
 
-                # Строим модель из строки БД
-                p = dict(row)
-                p["inventory"] = _json_safe_load(p.get("inventory"), [])
-                p["profile_skins"] = _json_safe_load(p.get("profile_skins"), {})
-                player = Player(**p)
+            await PlayerRepository.save(player, conn=conn)
+            logger.info("Атомарное обновление для игрока %d успешно завершено", user_id)
+            return result
 
-                # Вызываем игровую логику
-                result = await update_func(player, conn)
+@staticmethod
+async def claim_daily(user_id: int, today: date, streak: int, reward_oac: int,
+                      title: Optional[str], inventory_items: dict) -> bool:
+    """
+    Атомарно начисляет ежедневную награду.
+    Возвращает True, если награда начислена, False – если сегодня уже заходил.
+    """
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                "SELECT * FROM players WHERE user_id = $1 FOR UPDATE", user_id
+            )
+            if not row:
+                return False
+            p = dict(row)
+            p["inventory"] = _json_safe_load(p.get("inventory"), [])
+            p["profile_skins"] = _json_safe_load(p.get("profile_skins"), {})
+            player = Player(**p)
 
-                # Сохраняем модель (передаём соединение, чтобы остаться в транзакции)
-                await PlayerRepository.save(player, conn=conn)
+            if player.last_login_date == today:
+                return False
 
-                # Возвращаем результат (например, данные для сообщения)
-                return result
+            player.balance = (player.balance or 0) + reward_oac
+            player.login_streak = streak
+            player.last_login_date = today
 
-    @staticmethod
-    async def claim_daily(user_id: int, today: date, streak: int, reward_oac: int,
-                          title: Optional[str], inventory_items: dict) -> bool:
-        """
-        Атомарно начисляет ежедневную награду.
-        Возвращает True, если награда начислена, False – если сегодня уже заходил.
-        """
-        async with db_pool.acquire() as conn:
-            async with conn.transaction():
-                row = await conn.fetchrow(
-                    "SELECT * FROM players WHERE user_id = $1 FOR UPDATE", user_id
-                )
-                if not row:
-                    return False
-                p = dict(row)
-                p["inventory"] = _json_safe_load(p.get("inventory"), [])
-                p["profile_skins"] = _json_safe_load(p.get("profile_skins"), {})
-                player = Player(**p)
+            if title:
+                current = (player.titles or "").strip()
+                if title not in current:
+                    player.titles = f"{current} {title}".strip()
 
-                if player.last_login_date == today:
-                    return False
+            for field, amount in inventory_items.items():
+                if hasattr(player, field):
+                    setattr(player, field, (getattr(player, field) or 0) + amount)
 
-                player.balance = (player.balance or 0) + reward_oac
-                player.login_streak = streak
-                player.last_login_date = today
-
-                if title:
-                    current = (player.titles or "").strip()
-                    if title not in current:
-                        player.titles = f"{current} {title}".strip()
-
-                for field, amount in inventory_items.items():
-                    if hasattr(player, field):
-                        setattr(player, field, (getattr(player, field) or 0) + amount)
-
-                await PlayerRepository.save(player, conn=conn)
-                return True
+            await PlayerRepository.save(player, conn=conn)
+            return True
 
 @db_retry()
 async def create_named_blunt(user_id, name, rarity=None, conn=None):
@@ -720,12 +773,28 @@ async def create_named_blunt(user_id, name, rarity=None, conn=None):
         "owner_history": [{"user_id": str(user_id), "since": datetime.utcnow().isoformat()}],
     }
 
+    # Загружаем игрока с проверкой существования
     player = await PlayerRepository.get_by_id(user_id)
+    if not player or not player.exists:
+        logger.warning("Попытка создать блант для несуществующего игрока %d", user_id)
+        player = Player(user_id=user_id)  # создаём пустышку, save сам поставит exists=True
+
     player.inventory = _json_safe_load(player.inventory, [])
     player.inventory.append(item)
-    await PlayerRepository.save(player, conn=conn)
-    return item
 
+    # Если соединение не передано, откроем новое с таймаутом
+    if conn is None:
+        async with db_pool.acquire() as new_conn:
+            try:
+                await new_conn.set_statement_timeout(10.0)
+            except Exception as e:
+                logger.debug("Не удалось установить statement_timeout для создания бланта: %s", e)
+            await PlayerRepository.save(player, conn=new_conn)
+    else:
+        await PlayerRepository.save(player, conn=conn)
+
+    logger.info("Создан именной блант '%s' для игрока %d", clean_name, user_id)
+    return item
 
 async def _award_achievement_rewards(user_id, player, reward_text, context):
     """
