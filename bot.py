@@ -5939,13 +5939,13 @@ if __name__ == "__main__":
         await app.bot.set_webhook(url=webhook_url, drop_pending_updates=True)
 
         port = int(os.getenv("PORT", 10000))
+        # Для ptb 20.8 используем только стандартные параметры (без graceful_shutdown_timeout)
         app.run_webhook(
             listen="0.0.0.0",
             port=port,
             url_path=webhook_path,
             webhook_url=webhook_url,
             drop_pending_updates=True,
-            graceful_shutdown_timeout=8,
         )
 
     loop.run_until_complete(start_webhook())
