@@ -528,92 +528,99 @@ class PlayerRepository:
         return Player(user_id=user_id)
 
     @staticmethod
-    async def save(player: Player, conn=None):
-        inv_json = json.dumps(player.inventory, default=str)
-        skins_json = json.dumps(player.profile_skins, default=str)
+    @db_retry()
+    async def save(player: Player, conn=None) -> None:
+        """Сохраняет игрока с максимальной защитой от сбоев (всё внутри метода)."""
+        # === БАЗОВАЯ ВАЛИДАЦИЯ ===
+        if not player.user_id or player.user_id <= 0:
+            raise ValueError("Некорректный user_id при сохранении")
+        if player.balance < 0:
+            logger.warning(
+                "Попытка сохранить игрока %d с отрицательным балансом", player.user_id
+            )
+            player.balance = 0
+
+        # === ГАРАНТИЯ ФЛАГА СУЩЕСТВОВАНИЯ ===
+        player.exists = True
+
+        # === ПРОВЕРКА ЖИВОСТИ ПЕРЕДАННОГО СОЕДИНЕНИЯ ===
+        if conn is not None and conn.is_closed():
+            logger.warning(
+                "Переданное соединение закрыто, будет открыто новое для user_id=%d",
+                player.user_id,
+            )
+            conn = None
+
+        # === ПОЛНЫЙ СПИСОК ПОЛЕЙ (единый источник правды) ===
+        columns = [
+            "user_id", "username", "balance", "blunts", "guild", "last_farm",
+            "last_ritual", "last_daily", "titles", "last_farm_date", "passive_level",
+            "passive_collected", "karma", "inhaled", "smoke_count", "farm_count",
+            "craft_count", "ritual_count", "referral_count", "last_berserk",
+            "inventory", "invited_by", "profile_skins", "login_streak",
+            "last_login_date", "oath", "keys", "check_count", "m_essence",
+            "lab_chests", "lab_deaths", "alchemy_count", "last_lab_attempt",
+            "donated", "pending_transfer", "lab_depth", "pet", "pet_name", "exists",
+        ]
+
+        # === JSON-ПОЛЯ (нужна явная сериализация) ===
+        json_columns = ["inventory", "profile_skins", "pending_transfer"]
+
+        # === ДИНАМИЧЕСКАЯ ГЕНЕРАЦИЯ SQL ===
+        cols_sql = ", ".join(f'"{c}"' for c in columns)
+        placeholders = ", ".join(f"${i+1}" for i in range(len(columns)))
+        update_set = ", ".join(
+            f'"{c}" = EXCLUDED."{c}"' for c in columns if c != "user_id"
+        )
+
+        # === ЗНАЧЕНИЯ В ТОМ ЖЕ ПОРЯДКЕ ===
+        values = [getattr(player, col) for col in columns]
+        for col in json_columns:
+            idx = columns.index(col)
+            values[idx] = json.dumps(getattr(player, col), default=str)
+
+        sql = f"""
+            INSERT INTO players ({cols_sql})
+            VALUES ({placeholders})
+            ON CONFLICT (user_id) DO UPDATE SET
+                {update_set}
+        """
 
         async def _write(c):
-            await c.execute("""
-                INSERT INTO players (user_id, username, balance, blunts, guild, last_farm,
-                    last_ritual, last_daily, titles, last_farm_date, passive_level,
-                    passive_collected, karma, inhaled, smoke_count, farm_count,
-                    craft_count, ritual_count, referral_count, last_berserk,
-                    inventory, invited_by, profile_skins, login_streak,
-                    last_login_date, oath, keys, check_count, m_essence,
-                    lab_chests, lab_deaths, alchemy_count, last_lab_attempt,
-                    donated, pending_transfer, lab_depth, pet, pet_name, "exists")
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
-                        $17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,
-                        $30,$31,$32,$33,$34,$35,$36,$37,$38,$39)
-                ON CONFLICT (user_id) DO UPDATE SET
-                    username = EXCLUDED.username,
-                    balance = EXCLUDED.balance,
-                    blunts = EXCLUDED.blunts,
-                    guild = EXCLUDED.guild,
-                    last_farm = EXCLUDED.last_farm,
-                    last_ritual = EXCLUDED.last_ritual,
-                    last_daily = EXCLUDED.last_daily,
-                    titles = EXCLUDED.titles,
-                    last_farm_date = EXCLUDED.last_farm_date,
-                    passive_level = EXCLUDED.passive_level,
-                    passive_collected = EXCLUDED.passive_collected,
-                    karma = EXCLUDED.karma,
-                    inhaled = EXCLUDED.inhaled,
-                    smoke_count = EXCLUDED.smoke_count,
-                    farm_count = EXCLUDED.farm_count,
-                    craft_count = EXCLUDED.craft_count,
-                    ritual_count = EXCLUDED.ritual_count,
-                    referral_count = EXCLUDED.referral_count,
-                    last_berserk = EXCLUDED.last_berserk,
-                    inventory = EXCLUDED.inventory,
-                    invited_by = EXCLUDED.invited_by,
-                    profile_skins = EXCLUDED.profile_skins,
-                    login_streak = EXCLUDED.login_streak,
-                    last_login_date = EXCLUDED.last_login_date,
-                    oath = EXCLUDED.oath,
-                    keys = EXCLUDED.keys,
-                    check_count = EXCLUDED.check_count,
-                    m_essence = EXCLUDED.m_essence,
-                    lab_chests = EXCLUDED.lab_chests,
-                    lab_deaths = EXCLUDED.lab_deaths,
-                    alchemy_count = EXCLUDED.alchemy_count,
-                    last_lab_attempt = EXCLUDED.last_lab_attempt,
-                    donated = EXCLUDED.donated,
-                    pending_transfer = EXCLUDED.pending_transfer,
-                    lab_depth = EXCLUDED.lab_depth,
-                    pet = EXCLUDED.pet,
-                    pet_name = EXCLUDED.pet_name,
-                    "exists" = EXCLUDED."exists"
-            """,
-                player.user_id, player.username, player.balance, player.blunts,
-                player.guild, player.last_farm, player.last_ritual, player.last_daily,
-                player.titles, player.last_farm_date, player.passive_level,
-                player.passive_collected, player.karma, player.inhaled,
-                player.smoke_count, player.farm_count, player.craft_count,
-                player.ritual_count, player.referral_count, player.last_berserk,
-                inv_json, player.invited_by, skins_json,
-                player.login_streak, player.last_login_date, player.oath,
-                player.keys, player.check_count, player.m_essence,
-                player.lab_chests, player.lab_deaths, player.alchemy_count,
-                player.last_lab_attempt, player.donated, player.pending_transfer,
-                player.lab_depth, player.pet, player.pet_name, player.exists
-            )
+            await c.execute(sql, *values)
 
+        # === ЗАПИСЬ В БД ===
         if conn is not None:
             await _write(conn)
         else:
             async with db_pool.acquire() as new_conn:
+                try:
+                    await new_conn.set_statement_timeout(15.0)
+                except Exception as e:
+                    logger.debug("Не удалось установить statement_timeout: %s", e)
                 await _write(new_conn)
 
-        # === Умное обновление кэша с защитой от падения Redis ===
+        # === ОБНОВЛЕНИЕ КЭША ИГРОКА ===
         try:
             if redis:
-                await redis.setex(f"player:{player.user_id}", 10, player.model_dump_json())
+                await redis.setex(
+                    f"player:{player.user_id}", 10, player.model_dump_json()
+                )
             else:
                 player_cache[player.user_id] = player.model_dump()
-        except Exception:
-            # Если Redis упал – просто удаляем игрока из кэша и работаем дальше
+        except Exception as e:
+            logger.warning("Не удалось обновить кэш игрока %d: %s", player.user_id, e)
             player_cache.pop(player.user_id, None)
+
+        # === ИНВАЛИДАЦИЯ КЭША МЕНЮ ===
+        try:
+            invalidate_menu_cache(player.user_id)
+        except Exception as e:
+            logger.debug(
+                "Инвалидация кэша меню для %d не удалась: %s", player.user_id, e
+            )
+
+        logger.info("Игрок %d успешно сохранён", player.user_id)
 
     @staticmethod
     async def atomic_update(user_id: int, update_func):
