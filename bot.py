@@ -5110,26 +5110,40 @@ async def setbluntpic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     names = {"common":"⚪ Обычный","rare":"🔵 Редкий","epic":"🟣 Эпический","legendary":"🟡 Легендарный"}
     await update.message.reply_text(f"✅ Изображение для {names[rarity]} обновлено!", parse_mode='HTML')
     
-async def give_oas(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Выдаёт OAC игроку. Только для админа."""
+async def give_oac(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Выдаёт OAC игроку по ID или @username. Только для админа. Создаёт игрока, если его нет."""
     if update.effective_user.id != ADMIN_ID:
         return await update.message.reply_text("⛔ Только для админа.")
     if not context.args or len(context.args) < 2:
-        return await update.message.reply_text("Формат: /give_oas <ID или @username> <сумма>")
-    
+        return await update.message.reply_text("Формат: /give_oac <ID или @username> <сумма>")
+
     target_raw = context.args[0]
     try:
         amount = int(context.args[1])
+        if amount <= 0:
+            return await update.message.reply_text("Сумма должна быть положительной.")
     except ValueError:
         return await update.message.reply_text("Сумма должна быть целым числом.")
 
     # Определяем получателя
     target_id = None
     if target_raw.startswith("@"):
+        # 1. Пробуем найти в базе
         async with db_pool.acquire() as conn:
-            row = await conn.fetchrow("SELECT user_id FROM players WHERE LOWER(username) = LOWER($1)", target_raw[1:])
+            row = await conn.fetchrow(
+                "SELECT user_id FROM players WHERE LOWER(username) = LOWER($1)",
+                target_raw[1:]
+            )
             if row:
                 target_id = row["user_id"]
+        # 2. Если не нашли в базе, получаем ID через Telegram API (работает для всех, с кем бот общался)
+        if not target_id:
+            try:
+                chat = await context.bot.get_chat(target_raw)
+                target_id = chat.id
+            except Exception as e:
+                logger.warning("Не удалось найти пользователя %s: %s", target_raw, e)
+                return await update.message.reply_text(f"Не удалось найти пользователя {target_raw}.")
     elif target_raw.isdigit():
         target_id = int(target_raw)
     else:
@@ -5138,16 +5152,27 @@ async def give_oas(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not target_id:
         return await update.message.reply_text("Игрок не найден.")
 
-    # Атомарно начисляем
+    # Атомарно начисляем (если игрок существует)
     async def _add(p, conn):
-        p.balance += amount
+        p.balance = (p.balance or 0) + amount
         return ("ok", p.balance)
 
     result = await PlayerRepository.atomic_update(target_id, _add)
     if result is None:
-        return await update.message.reply_text("Ошибка при обновлении баланса.")
+        # Игрок не найден – создаём его с указанным балансом
+        try:
+            player = Player(user_id=target_id, balance=amount)
+            await PlayerRepository.save(player)
+            new_balance = amount
+        except Exception as e:
+            logger.error("Ошибка при создании игрока %d: %s", target_id, e)
+            return await update.message.reply_text("Не удалось создать игрока.")
+    else:
+        new_balance = result[1]
 
-    await update.message.reply_text(f"✅ Игроку {target_id} начислено {amount} OAC. Новый баланс: {result[1]} 🍬")
+    await update.message.reply_text(
+        f"✅ Игроку {target_id} начислено {amount} OAC. Новый баланс: {new_balance} 🍬"
+    )
     logger.info("Админ %d начислил %d OAC игроку %d", update.effective_user.id, amount, target_id)
 
 @safe_callback
@@ -5780,7 +5805,7 @@ if __name__ == "__main__":
         "pet": pet_preview,
         "shop": shop_callback,
         "setbluntpic": setbluntpic,
-        "give_oas": give_oas,
+        "give_oac": give_oac,
     }
 
     async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
