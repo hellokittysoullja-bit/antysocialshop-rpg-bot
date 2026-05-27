@@ -981,7 +981,7 @@ LABYRINTH_ROOMS = [
     }
 ]
 
-# ========== БАЗА ДАННЫХ NEON ==========
+# ========== БАЗА ДАННЫХ AIVEN ==========
 db_pool = None
 BLUNTS_PER_PAGE = 3
 
@@ -997,7 +997,7 @@ async def init_db_pool():
     database_url = os.getenv("DATABASE_URL_AIVEN")
     logger.info("Подключаюсь к %s", database_url)
     if not database_url:
-        raise Exception("NEON_DATABASE_URL не установлена!")
+        raise Exception("DATABASE_URL_AIVEN не установлена!")
 
     async with asyncpg.create_pool(database_url, min_size=1, max_size=1, command_timeout=15) as migration_pool:
         async with migration_pool.acquire() as conn:
@@ -1009,7 +1009,8 @@ async def init_db_pool():
         database_url,
         min_size=5,
         max_size=20,
-        command_timeout=15
+        command_timeout=15,                     # Максимальное время выполнения одного SQL-запроса
+        max_inactive_connection_lifetime=300.0  # Каждые 5 минут соединение будет пересоздаваться
     )
     logger.info("База данных Aiven инициализирована")
 
@@ -1254,7 +1255,6 @@ async def create_tables(conn):
             END IF;
         END $$;
     """)
-
 
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 @db_retry()
@@ -5416,8 +5416,8 @@ if __name__ == "__main__":
 
     if not TOKEN:
         raise RuntimeError("TOKEN не установлен")
-    if not os.getenv("NEON_DATABASE_URL"):
-        raise RuntimeError("NEON_DATABASE_URL не установлена")
+    if not os.getenv("DATABASE_URL_AIVEN"):
+        raise RuntimeError("DATABASE_URL_AIVEN не установлена")
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
