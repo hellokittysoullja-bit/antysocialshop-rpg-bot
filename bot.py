@@ -29,7 +29,70 @@ from tenacity import (
 from telegram.error import RetryAfter
 
 import enum
+from pydantic import BaseModel, Field, 
+
 from pydantic import BaseModel, Field, ConfigDict
+
+# ─────────────────────────────────────────────────────────────
+# СВЕРХНАДЁЖНОЕ ЛОГИРОВАНИЕ (SENIOR-УРОВЕНЬ)
+# ─────────────────────────────────────────────────────────────
+import sys
+import logging
+import traceback
+
+class SafeStdoutHandler(logging.StreamHandler):
+    """Обработчик, который никогда не падает."""
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            stream = self.stream
+            stream.write(msg + self.terminator)
+            self.flush()
+        except Exception:
+            traceback.print_exc()
+
+# 1. Корневой логгер с INFO в stdout
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+
+# Удаляем все старые обработчики, чтобы не было конфликтов
+for h in root_logger.handlers[:]:
+    root_logger.removeHandler(h)
+
+handler = SafeStdoutHandler(sys.stdout)
+handler.setFormatter(logging.Formatter(
+    "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+))
+root_logger.addHandler(handler)
+
+# 2. Уровни для библиотек – только важное
+logging.getLogger("telegram").setLevel(logging.DEBUG)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("apscheduler").setLevel(logging.WARNING)
+
+# 3. Глобальный перехват необработанных исключений
+def unhandled_exception_hook(exc_type, exc_value, exc_traceback):
+    """Гарантированно выводит ошибку в stderr."""
+    traceback.print_exception(exc_type, exc_value, exc_traceback)
+sys.excepthook = unhandled_exception_hook
+
+# 4. Логгер проекта
+logger = logging.getLogger(__name__)
+logger.info("===== БОТ ЗАПУСКАЕТСЯ =====")
+logger.info("Python %s", sys.version)
+
+# КОНЕЦ ЛОГИРОВАНИЯ
+
+from enum import Enum, auto
+
+class AlchemyResult(Enum):
+    SUCCESS = auto()
+    NO_RESOURCES = auto()
+
+# ============================================================
+# ДЕКОРАТОРЫ
+# ============================================================
 
 from enum import Enum, auto
 
@@ -439,32 +502,6 @@ async def _check_db():
 def run_web_server():
     port = int(os.getenv("PORT", 10000))
     web_app.run(host="0.0.0.0", port=port, threaded=True)
-
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
-    stream=sys.stdout         
-)
-logging.getLogger("telegram").setLevel(logging.DEBUG)
-logger = logging.getLogger(__name__)
-# ---------- МАКСИМАЛЬНАЯ ОТЛАДКА ----------
-import sys
-import traceback
-
-def log_unhandled_exception(exc_type, exc_value, exc_traceback):
-    logger.critical("НЕОБРАБОТАННОЕ ИСКЛЮЧЕНИЕ:", exc_info=(exc_type, exc_value, exc_traceback))
-    traceback.print_exception(exc_type, exc_value, exc_traceback)
-sys.excepthook = log_unhandled_exception
-
-# Уровни логирования
-logging.getLogger().setLevel(logging.DEBUG)
-logging.getLogger("telegram").setLevel(logging.DEBUG)
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("apscheduler").setLevel(logging.INFO)
-
-logger.info("===== БОТ ЗАПУСКАЕТСЯ =====")
-logger.info(f"Python {sys.version}")
-logger.info(f"Рабочая директория: {os.getcwd()}")
 
 TOKEN = os.getenv("TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
@@ -5771,7 +5808,7 @@ if __name__ == "__main__":
                 except Exception as e:
                     logger.error("Не удалось уведомить админа: %s", e)
 
-    await check_all_blunt_images()
+    loop.run_until_complete(check_all_blunt_images())
 
     # ===== ИНИЦИАЛИЗАЦИЯ SENTRY =====
     import sentry_sdk
