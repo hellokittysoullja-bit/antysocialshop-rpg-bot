@@ -5906,10 +5906,12 @@ if __name__ == "__main__":
 
     app.add_error_handler(global_error_handler)
 
-    # === МГНОВЕННАЯ ОСТАНОВКА ===
+    # === МГНОВЕННАЯ ОСТАНОВКА С ОСВОБОЖДЕНИЕМ ВЕБХУКА ===
     async def shutdown():
         logger.info("Получен сигнал остановки, немедленно прекращаем работу...")
         try:
+            # Удаляем вебхук, чтобы следующий запуск не конфликтовал
+            await app.bot.delete_webhook(drop_pending_updates=True)
             await app.stop()
             await asyncio.sleep(0.5)
         except Exception as e:
@@ -5924,5 +5926,28 @@ if __name__ == "__main__":
         except NotImplementedError:
             pass
 
-    print("BOT READY")
-    app.run_polling(drop_pending_updates=True)
+    # === ЗАПУСК ЧЕРЕЗ WEBHOOK (НАВСЕГДА) ===
+    render_url = os.getenv("RENDER_EXTERNAL_URL", "")
+    if not render_url:
+        logger.critical("RENDER_EXTERNAL_URL не задан – невозможно установить вебхук")
+        raise RuntimeError("Невозможно запустить бота без RENDER_EXTERNAL_URL")
+
+    webhook_path = "/webhook"
+    webhook_url = f"{render_url}{webhook_path}"
+
+    logger.info("Устанавливаем вебхук на %s", webhook_url)
+    await app.bot.set_webhook(url=webhook_url, drop_pending_updates=True)
+
+    port = int(os.getenv("PORT", 10000))
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=port,
+        url_path=webhook_path,
+        webhook_url=webhook_url,
+        drop_pending_updates=True,
+        graceful_shutdown_timeout=8,   # даём старому контейнеру время завершить запросы
+        # Health‑check эндпоинт (Render стучится на /, отвечаем 200)
+        allowed_updates=Update.ALL_TYPES,
+    )
+
+    logger.info("Бот запущен через вебхук и готов принимать обновления")
