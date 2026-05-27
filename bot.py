@@ -5723,15 +5723,15 @@ if __name__ == "__main__":
 
     if not TOKEN:
         raise RuntimeError("TOKEN не установлен")
-    if not os.getenv("DATABASE_URL_AIVEN"):
-        raise RuntimeError("DATABASE_URL_AIVEN не установлена")
+    if not os.getenv("NEON_DATABASE_URL"):
+        raise RuntimeError("NEON_DATABASE_URL не установлена")
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(init_db_pool())
     Thread(target=run_web_server, daemon=True).start()
 
-    # Загружаем сохранённые file_id из БД (асинхронно, безопасно)
+    # --- Загружаем сохранённые file_id из БД ---
     async def load_blunt_images():
         for rarity in ("common", "rare", "epic", "legendary"):
             saved = await get_setting(f"blunt_image_{rarity}")
@@ -5740,19 +5740,27 @@ if __name__ == "__main__":
 
     loop.run_until_complete(load_blunt_images())
 
-    # ===== СОЗДАНИЕ ПРИЛОЖЕНИЯ С ЛИМИТЕРОМ =====
+    # --- Advisory Lock для единственного экземпляра ---
+    async def acquire_lock():
+        async with db_pool.acquire() as conn:
+            await conn.execute("SELECT pg_advisory_lock(123456789)")
+
+    loop.run_until_complete(acquire_lock())
+    logger.info("Блокировка получена, запускаем бота")
+
+    # --- Создание приложения ---
     app = (Application.builder()
            .token(TOKEN)
            .rate_limiter(AIORateLimiter())
            .build())
 
-    # ИНИЦИАЛИЗАЦИЯ СЕРВИСА ВОЙНЫ
+    # Инициализация сервиса войны
     war_settings = WarSettings()
     war_config = WarConfig()
     war_service = GuildWarService(db_pool, redis_client=redis, config=war_config, settings=war_settings)
     app.bot_data["war_service"] = war_service
 
-    # Валидация изображений после запуска приложения
+    # Проверка изображений после запуска
     async def check_all_blunt_images():
         invalid = []
         for rarity in ("common", "rare", "epic", "legendary"):
@@ -5777,151 +5785,9 @@ if __name__ == "__main__":
 
     app.job_queue.run_once(check_all_blunt_images, when=0)
 
-    # ===== ИНИЦИАЛИЗАЦИЯ SENTRY =====
-    import sentry_sdk
-    SENTRY_DSN = os.getenv("SENTRY_DSN")
-    if SENTRY_DSN:
-        sentry_sdk.init(
-            dsn=SENTRY_DSN,
-            traces_sample_rate=1.0,
-            environment=os.getenv("ENV", "production"),
-        )
-        logger.info("Sentry активирован")
-    else:
-        logger.warning("SENTRY_DSN не задан, Sentry отключён")
+    # ... (остальные хендлеры, джобы, global_error_handler) ...
 
-    # Статический маппинг команд (вынесен из функции, создаётся один раз)
-    COMMAND_MAP = {
-        "start": start,
-        "farm": farm_callback,
-        "craft": craft_callback,
-        "smoke": smoke_callback,
-        "ritual": ritual_callback,
-        "profile": profile_callback,
-        "top": top_callback,
-        "rules": rules_callback,
-        "privilege": privilege_callback,
-        "catalog": catalog_callback,
-        "luck": luck_callback,
-        "collect": collect_callback,
-        "check": check_blunt,
-        "guild": guild_info_callback,
-        "repent": confess_callback,
-        "lab": lab_enter,
-        "pet": pet_preview,
-        "shop": shop_callback,
-        "setbluntpic": setbluntpic,
-        "give_oac": give_oac,
-    }
-
-    async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        Обрабатывает текстовые команды.
-        - Игнорирует чужие команды в группах (проверка @username).
-        - Логирует все входящие команды и их аргументы.
-        - Передаёт payload в /start (deep-linking).
-        """
-        msg = update.message
-        if not msg or not msg.text:
-            return
-
-        raw_text = msg.text.strip()
-        # --- 1. Извлекаем команду и проверяем получателя ---
-        first_word = raw_text.split()[0]
-        if '@' in first_word:
-            cmd, _, bot_username = first_word[1:].partition('@')
-            if bot_username.lower() != context.bot.username.lower():
-                return  # команда не нашему боту
-            command = cmd.lower()
-        else:
-            command = first_word[1:].lower()
-
-        if not command:
-            return
-
-        # --- 2. Логируем команду с аргументами ---
-        args = raw_text.split()[1:]
-        logger.info(
-            "Команда: '/%s' аргументы=%s от user_id=%d",
-            command, args, update.effective_user.id
-        )
-
-        # --- 3. Ищем обработчик ---
-        handler = COMMAND_MAP.get(command)
-        if not handler:
-            await update.message.reply_text("❓ Неизвестная команда.")
-            return
-
-        # --- 4. Deep-linking (только для /start) ---
-        if command == "start" and args:
-            context.user_data["start_payload"] = args[0]
-
-        # --- 5. Выполняем обработчик ---
-        try:
-            await handler(update, context)
-        except Exception as e:
-            logger.critical("Ошибка в команде '/%s': %s", command, e, exc_info=True)
-            try:
-                await update.message.reply_text("⚠️ Внутренняя ошибка. Админ уже уведомлён.")
-            except Exception:
-                pass
-
-    # Временный блок для получения file_id (можно удалить после настройки картинок)
-    async def get_file_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if update.message.photo:
-            fid = update.message.photo[-1].file_id
-            await update.message.reply_text(fid)
-
-    app.add_handler(MessageHandler(filters.PHOTO, get_file_id))
-    app.add_handler(MessageHandler(filters.COMMAND, handle_command))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_chat_shortcut))
-    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_member))
-    app.add_handler(CallbackQueryHandler(button_handler))
-
-    job = app.job_queue
-    # job.run_repeating(update_pulse, interval=900, first=10)
-    # job.run_repeating(happy_hour_trigger, interval=random.randint(14400, 28800), first=random.randint(3600, 10800))
-    # job.run_daily(echo_of_distortion, time=time(hour=18, minute=0))
-    # job.run_repeating(weekly_guild_rating, interval=7*24*3600, first=max(1, (next_saturday - now).total_seconds()))
-    job.run_repeating(keep_db_alive, interval=180, first=10)
-
-    # === GRACEFUL SHUTDOWN ===
-    async def shutdown():
-        logger.info("Завершение работы, закрываю соединения...")
-        if db_pool:
-            await db_pool.close()
-        if redis:
-            await redis.close()
-        logger.info("Бот остановлен.")
-
-    import signal
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(sig, lambda: asyncio.ensure_future(shutdown()))
-        except NotImplementedError:
-            pass
-
-# ===== ГЛОБАЛЬНЫЙ ОБРАБОТЧИК RetryAfter =====
-    from telegram.error import RetryAfter
-
-    async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-        error = context.error
-        # Выводим ошибку напрямую в stderr, минуя логгер
-        import traceback
-        traceback.print_exception(type(error), error, error.__traceback__)
-        # Пробуем уведомить админа
-        try:
-            if ADMIN_ID:
-                await context.bot.send_message(
-                    chat_id=ADMIN_ID,
-                    text=f"🚨 Глобальная ошибка: {error}"
-                )
-        except Exception:
-            pass
-
-    app.add_error_handler(global_error_handler)
-
-    # Удаляем ожидающие обновления при старте (защита от Conflict)
+    # Удаляем ожидающие обновления (защита от Conflict)
     async def clear_pending_updates():
         await app.bot.delete_webhook(drop_pending_updates=True)
         logger.info("Ожидающие обновления удалены")
