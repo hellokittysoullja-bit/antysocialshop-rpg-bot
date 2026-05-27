@@ -40,7 +40,7 @@ class AlchemyResult(Enum):
 # ДЕКОРАТОРЫ (объявлены первыми, доступны везде)
 # ============================================================
 def safe_callback(func: Callable):
-    """Декоратор, который логирует ошибки callback-запросов."""
+    """Декоратор, логирует ошибки callback-запросов и уведомляет админа."""
     @functools.wraps(func)
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
@@ -51,11 +51,26 @@ def safe_callback(func: Callable):
                 await update.callback_query.answer(f"❌ Ошибка: {e}", show_alert=True)
             except Exception:
                 pass
+            if ADMIN_ID and "compute time quota exceeded" in str(e).lower():
+                provider, host = _extract_provider_info(e)
+                try:
+                    await context.bot.send_message(
+                        chat_id=ADMIN_ID,
+                        text=(
+                            f"❌ <b>Лимит базы данных исчерпан!</b>\n"
+                            f"Провайдер: {provider}\n"
+                            f"Хост: {host}\n"
+                            f"Callback: {func.__name__}\n"
+                            f"<b>Решение:</b> дождитесь сброса или перенесите базу на Render PostgreSQL."
+                        ),
+                        parse_mode='HTML'
+                    )
+                except Exception:
+                    pass
     return wrapper
 
-
 def error_handler(func):
-    """Middleware: перехватывает исключения в обработчиках."""
+    """Middleware: перехватывает исключения в обработчиках, уведомляет пользователя и админа."""
     @functools.wraps(func)
     async def wrapper(update, context, *args, **kwargs):
         try:
@@ -73,12 +88,23 @@ def error_handler(func):
                 )
             if ADMIN_ID:
                 try:
-                    err_msg = f"🚨 <b>Ошибка в {func.__name__}</b>\n<code>{html.escape(str(e))}</code>"
+                    err_text = str(e)
+                    if "compute time quota exceeded" in err_text.lower():
+                        provider, host = _extract_provider_info(e)
+                        err_msg = (
+                            f"❌ <b>Лимит базы данных исчерпан!</b>\n"
+                            f"Провайдер: {provider}\n"
+                            f"Хост: {host}\n"
+                            f"Функция: {func.__name__}\n"
+                            f"Ошибка: <code>{html.escape(err_text)}</code>\n"
+                            f"<b>Решение:</b> дождитесь сброса или перенесите базу на Render PostgreSQL."
+                        )
+                    else:
+                        err_msg = f"🚨 <b>Ошибка в {func.__name__}</b>\n<code>{html.escape(err_text)}</code>"
                     await context.bot.send_message(chat_id=ADMIN_ID, text=err_msg, parse_mode='HTML')
                 except Exception as notify_err:
                     logger.error(f"Failed to notify admin: {notify_err}")
     return wrapper
-
 
 def rate_limit(seconds: int = 2):
     """Запрещает повторный вызов функции чаще, чем раз в seconds секунд."""
@@ -1460,6 +1486,51 @@ async def send_whisper(context, chat_id, text):
         await context.bot.send_message(chat_id=chat_id, text=text, parse_mode='HTML')
     except Exception as e:
         logger.error(f"Whisper error: {e}")
+        
+def _extract_provider_info(error: Exception) -> tuple[str, str]:
+    """
+    Извлекает название провайдера и хост из любого исключения.
+    Возвращает кортеж (provider, host).
+    """
+    provider = "Неизвестный"
+    host = "неизвестен"
+    error_text = str(error).lower()
+
+    # Список известных доменов
+    domains = {
+        "neon.tech": "Neon",
+        "aivencloud.com": "Aiven",
+        "cockroachlabs.cloud": "CockroachDB",
+        "render.com": "Render PostgreSQL",
+        "oregon-postgres.render.com": "Render PostgreSQL",
+        "supabase.co": "Supabase"
+    }
+
+    # Ищем в самом сообщении об ошибке
+    for domain, name in domains.items():
+        if domain in error_text:
+            provider = name
+            # Пытаемся вытащить полный хост (достаточно грубо, но работает)
+            import re
+            match = re.search(rf"([\w-]+\.{re.escape(domain)})", error_text)
+            if match:
+                host = match.group(1)
+            else:
+                host = domain
+            break
+
+    # Если не нашли, проверяем причину (__cause__)
+    if provider == "Неизвестный" and error.__cause__:
+        cause_text = str(error.__cause__).lower()
+        for domain, name in domains.items():
+            if domain in cause_text:
+                provider = name
+                import re
+                match = re.search(rf"([\w-]+\.{re.escape(domain)})", cause_text)
+                host = match.group(1) if match else domain
+                break
+
+    return provider, host
 
 # КОМАНДА УСТАНОВКИ ФОТО БЛАНТА
 
@@ -5762,16 +5833,32 @@ if __name__ == "__main__":
     from telegram.error import RetryAfter
 
     async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-        error = context.error
-        try:
-            if isinstance(error, RetryAfter):
-                logger.warning(f"Telegram попросил подождать {error.retry_after} сек.")
-                await asyncio.sleep(error.retry_after)
-            else:
-                logger.critical("Глобальная ошибка:", exc_info=True)
-        except Exception:
-            import traceback
-            traceback.print_exc()
+    error = context.error
+    try:
+        if isinstance(error, RetryAfter):
+            logger.warning(f"Telegram попросил подождать {error.retry_after} сек.")
+            await asyncio.sleep(error.retry_after)
+            return
+        logger.critical("Глобальная ошибка:", exc_info=error)
+        if ADMIN_ID:
+            try:
+                provider, host = _extract_provider_info(error)
+                err_text = str(error)
+                if "compute time quota exceeded" in err_text.lower():
+                    msg = (
+                        f"❌ <b>Лимит базы данных исчерпан!</b>\n"
+                        f"Провайдер: {provider}\n"
+                        f"Хост: {host}\n"
+                        f"<b>Решение:</b> дождитесь сброса или перенесите базу на Render PostgreSQL."
+                    )
+                else:
+                    msg = f"⚠️ Глобальная ошибка:\n<code>{html.escape(err_text)}</code>"
+                await context.bot.send_message(chat_id=ADMIN_ID, text=msg, parse_mode='HTML')
+            except Exception:
+                pass
+    except Exception:
+        import traceback
+        traceback.print_exc()
 
     app.add_error_handler(global_error_handler)
 
