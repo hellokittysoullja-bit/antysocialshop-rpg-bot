@@ -541,10 +541,10 @@ class PlayerRepository:
                     inventory, invited_by, profile_skins, login_streak,
                     last_login_date, oath, keys, check_count, m_essence,
                     lab_chests, lab_deaths, alchemy_count, last_lab_attempt,
-                    donated, pending_transfer, lab_depth, pet, pet_name)
+                    donated, pending_transfer, lab_depth, pet, pet_name, "exists")
                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
                         $17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,
-                        $30,$31,$32,$33,$34,$35,$36,$37,$38)
+                        $30,$31,$32,$33,$34,$35,$36,$37,$38,$39)
                 ON CONFLICT (user_id) DO UPDATE SET
                     username = EXCLUDED.username,
                     balance = EXCLUDED.balance,
@@ -582,7 +582,8 @@ class PlayerRepository:
                     pending_transfer = EXCLUDED.pending_transfer,
                     lab_depth = EXCLUDED.lab_depth,
                     pet = EXCLUDED.pet,
-                    pet_name = EXCLUDED.pet_name
+                    pet_name = EXCLUDED.pet_name,
+                    "exists" = EXCLUDED."exists"
             """,
                 player.user_id, player.username, player.balance, player.blunts,
                 player.guild, player.last_farm, player.last_ritual, player.last_daily,
@@ -595,7 +596,7 @@ class PlayerRepository:
                 player.keys, player.check_count, player.m_essence,
                 player.lab_chests, player.lab_deaths, player.alchemy_count,
                 player.last_lab_attempt, player.donated, player.pending_transfer,
-                player.lab_depth, player.pet, player.pet_name
+                player.lab_depth, player.pet, player.pet_name, player.exists
             )
 
         if conn is not None:
@@ -604,11 +605,15 @@ class PlayerRepository:
             async with db_pool.acquire() as new_conn:
                 await _write(new_conn)
 
-        # Инвалидируем кэш
-    if redis:
-        await redis.setex(f"player:{player.user_id}", 10, player.json())
-    else:
-        player_cache[player.user_id] = player.dict()
+        # === Умное обновление кэша с защитой от падения Redis ===
+        try:
+            if redis:
+                await redis.setex(f"player:{player.user_id}", 10, player.model_dump_json())
+            else:
+                player_cache[player.user_id] = player.model_dump()
+        except Exception:
+            # Если Redis упал – просто удаляем игрока из кэша и работаем дальше
+            player_cache.pop(player.user_id, None)
 
     @staticmethod
     async def atomic_update(user_id: int, update_func):
