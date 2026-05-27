@@ -1060,9 +1060,9 @@ BLUNTS_PER_PAGE = 3
 
 BLUNT_IMAGES = {
     "common": "AgACAgIAAxkBAAIDkGoXK23K4y7Oq479b4xk4DN2IjQ-AAIiH2sb4L64SI9XnknrGFb-AQADAgADeAADOwQ",
-    "rare":
-    "epic": 
-    "legendary": 
+    "rare": "",
+    "epic": "",
+    "legendary": ""
 }
 
 async def init_db_pool():
