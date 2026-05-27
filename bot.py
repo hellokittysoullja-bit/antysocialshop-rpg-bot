@@ -605,10 +605,10 @@ class PlayerRepository:
                 await _write(new_conn)
 
         # Инвалидируем кэш
-        if redis:
-            await redis.delete(f"player:{player.user_id}")
-        else:
-            player_cache.pop(player.user_id, None)
+    if redis:
+        await redis.setex(f"player:{player.user_id}", 10, player.json())
+    else:
+        player_cache[player.user_id] = player.dict()
 
     @staticmethod
     async def atomic_update(user_id: int, update_func):
@@ -1198,11 +1198,11 @@ async def create_tables(conn):
     """)
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS guild_weekly (
-            guild TEXT PRIMARY KEY,
-            total_farmed INTEGER DEFAULT 0,
-            total_donated INTEGER DEFAULT 0,
+            guild TEXT,
             week_start DATE,
-            war_active BOOLEAN DEFAULT FALSE
+            total_score INTEGER DEFAULT 0,
+            total_donated INTEGER DEFAULT 0,
+            PRIMARY KEY (guild, week_start)
         )
     """)
     await conn.execute("""
@@ -1967,11 +1967,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _create_new_player(update, context, uid, username)
         return
 
-    # 4. Ежедневный вход
-    await process_daily_login(uid, context)
-
-    # 5. Показываем главное меню
-    await _show_main_menu(update, context, player, user)
+    await asyncio.gather(
+    process_daily_login(uid, context),
+    _show_main_menu(update, context, player, user)
+)
     
 # ---------------------------------------------------------------------------
 # Конфигурация (все правила в одном месте)
