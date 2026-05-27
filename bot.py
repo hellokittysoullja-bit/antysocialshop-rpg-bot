@@ -5888,22 +5888,6 @@ if __name__ == "__main__":
     # job.run_repeating(weekly_guild_rating, interval=7*24*3600, first=max(1, (next_saturday - now).total_seconds()))
     job.run_repeating(keep_db_alive, interval=180, first=10)
 
-    # === GRACEFUL SHUTDOWN ===
-    async def shutdown():
-        logger.info("Завершение работы, закрываю соединения...")
-        if db_pool:
-            await db_pool.close()
-        if redis:
-            await redis.close()
-        logger.info("Бот остановлен.")
-
-    import signal
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(sig, lambda: asyncio.ensure_future(shutdown()))
-        except NotImplementedError:
-            pass
-
     # ===== ГЛОБАЛЬНЫЙ ОБРАБОТЧИК RetryAfter =====
     from telegram.error import RetryAfter
 
@@ -5921,6 +5905,24 @@ if __name__ == "__main__":
             pass
 
     app.add_error_handler(global_error_handler)
+
+    # === МГНОВЕННАЯ ОСТАНОВКА ===
+    async def shutdown():
+        logger.info("Получен сигнал остановки, немедленно прекращаем работу...")
+        try:
+            await app.stop()
+            await asyncio.sleep(0.5)
+        except Exception as e:
+            logger.error("Ошибка при остановке приложения: %s", e)
+        finally:
+            sys.exit(0)
+
+    import signal
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, lambda: asyncio.ensure_future(shutdown()))
+        except NotImplementedError:
+            pass
 
     print("BOT READY")
     app.run_polling(drop_pending_updates=True)
