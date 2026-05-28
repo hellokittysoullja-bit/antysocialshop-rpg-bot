@@ -5352,7 +5352,7 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "collect": collect_callback, "check": check_blunt,
         "guild": guild_info_callback, "repent": confess_callback,
         "lab": lab_enter, "pet": pet_preview, "shop": shop_callback,
-        "setbluntpic": setbluntpic, "give_oas": give_oac,
+        "setbluntpic": setbluntpic, "give_oac": give_oac,
         "debugpet": debug_pet, "checkbluntpics": check_blunt_pics,
     }
     handler = mapping.get(command)
