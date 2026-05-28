@@ -5023,29 +5023,27 @@ async def welcome_new_member(update, context):
             f"<b><i>🕯️ ДОБРО ПОЖАЛОВАТЬ</i></b>\n\n⚜️ <b>{html.escape(member.username or member.first_name)}</b>, добро пожаловать в <b><i>Гильдию</i></b>\n<i>Твой первый /farm уже ждёт</i>"
         )
 
-# Текстовые сокращения
-async def handle_chat_shortcut(update, context):
+# ТЕКСТОВЫЕ СОКРАЩЕНИЯ
+async def handle_chat_shortcut(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
-    # Имя питомца – САМОЕ ПЕРВОЕ
-    if context.user_data.get('awaiting_pet_name'):
-        await handle_pet_name(update, context)
-        return
-    if context.user_data.get('awaiting_named_blunt'):
-        await handle_named_name(update, context)
-        return
-    if context.user_data.get('gifting_blunt_id'):
-        await handle_gift_username(update, context)
-        return
-    # ... остальные сокращения ...
 
+    # 1. Приоритетные состояния ввода (именование питомца, бланта, передача)
+    if context.user_data.get('awaiting_pet_name'):
+        return await handle_pet_name(update, context)
+    if context.user_data.get('awaiting_named_blunt'):
+        return await handle_named_name(update, context)
+    if context.user_data.get('gifting_blunt_id'):
+        return await handle_gift_username(update, context)
+
+    # 2. Сопоставление текстовых команд и обработчиков
     text = update.message.text.strip().lower()
-    mapping = {
-        "фарм": farm_callback, "farm": farm_callback,
-        "дунуть": smoke_callback, "smoke": smoke_callback,
-        "крафт": craft_callback, "craft": craft_callback,
-        "топ": top_callback, "top": top_callback,
-        "удача": luck_callback, "luck": luck_callback,
+    handler = {
+        "фарм": farm_callback,       "farm": farm_callback,
+        "дунуть": smoke_callback,    "smoke": smoke_callback,
+        "крафт": craft_callback,     "craft": craft_callback,
+        "топ": top_callback,         "top": top_callback,
+        "удача": luck_callback,      "luck": luck_callback,
         "профиль": profile_callback, "profile": profile_callback,
         "сбор": collect_callback,
         "правила": rules_callback,
@@ -5058,9 +5056,20 @@ async def handle_chat_shortcut(update, context):
         "лабиринт": lab_enter,
         "питомец": pet_preview,
         "магазин": shop_callback
-    }
-    if text in mapping:
-        await mapping[text](update, context)
+    }.get(text)
+
+    if not handler:
+        return  # просто игнорируем неизвестный текст
+
+    # 3. Защита от падения бота при ошибке внутри игровой функции
+    try:
+        await handler(update, context)
+    except Exception as e:
+        logger.error(
+            "Ошибка в текстовой команде '%s' от пользователя %d: %s",
+            text, update.effective_user.id, e, exc_info=True
+        )
+        await update.message.reply_text("⚠️ Внутренняя ошибка. Попробуйте позже 🍃.")
 
 # ============================================================
 # ПИТОМЦЫ (полная версия без багов)
@@ -5701,39 +5710,140 @@ async def echo_of_distortion(context):
     # except Exception as e:
     #     logger.error(f"Echo of distortion error: {e}")
 
-async def weekly_guild_rating(context):
-    async with db_pool.acquire() as conn:
-        war = await conn.fetchrow("SELECT war_active FROM guild_weekly WHERE war_active = TRUE LIMIT 1")
-        if not war:
-            await conn.execute("UPDATE guild_weekly SET total_farmed = 0, war_active = TRUE")
-            # try:
-            #     await context.bot.send_message(chat_id="@guild_antysocial",
-            #         text="⚔️ <b>ВОЙНА ГИЛЬДИЙ НАЧАЛАСЬ! 🎉</b>...", parse_mode='HTML')
-            # except Exception as e:
-            #     logger.error(f"War start announce error: {e}")
-        else:
-            await conn.execute("UPDATE guild_weekly SET war_active = FALSE")
-            rows = await conn.fetch("SELECT guild, total_farmed FROM guild_weekly")
-            black = next((r["total_farmed"] for r in rows if r["guild"] == "BLACK"), 0)
-            white = next((r["total_farmed"] for r in rows if r["guild"] == "WHITE"), 0)
-            if black != white:
-                winner = "BLACK" if black > white else "WHITE"
+# ЕЖЕНЕДЕЛЬНЫЙ РЕЙТИНГ ГИЛЬДИЙ (HIGHLOAD / NEAR-GOD TIER)
+async def weekly_guild_rating(context: ContextTypes.DEFAULT_TYPE):
+    """
+    Завершает текущую войну гильдий (если активна) и начисляет награды,
+    затем запускает новую. Полностью атомарно, с защитой от сбоев.
+    """
+    job_name = "weekly_guild_rating"
+    try:
+        async with db_pool.acquire() as conn:
+            async with conn.transaction():
+                # 1. Проверяем, идёт ли война
+                war = await conn.fetchrow(
+                    "SELECT guild, total_farmed FROM guild_weekly WHERE war_active = TRUE LIMIT 1"
+                )
+
+                if not war:
+                    # Война не активна – запускаем новую (сбрасываем очки)
+                    await conn.execute(
+                        "UPDATE guild_weekly SET total_farmed = 0, war_active = TRUE"
+                    )
+                    logger.info("%s: Новая война гильдий начата.", job_name)
+
+                    # Отправляем объявление с ретраями
+                    await _safe_send_guild_message(
+                        context,
+                        "⚔️ <b>ВОЙНА ГИЛЬДИЙ НАЧАЛАСЬ!</b>\n\n"
+                        "🕯️ Тёмные vs ⚜️ Светлые\n"
+                        "Зарабатывай OAC, крафти, проходи лабиринт — всё идёт в зачёт гильдии!\n"
+                        "Победители получат сундук с ресурсами! 🎁"
+                    )
+                    return
+
+                # 2. Война активна – завершаем её
+                # Обнуляем флаг и получаем очки обеих гильдий
+                await conn.execute(
+                    "UPDATE guild_weekly SET war_active = FALSE"
+                )
+
+                rows = await conn.fetch(
+                    "SELECT guild, total_farmed FROM guild_weekly"
+                )
+                black_score = next(
+                    (r["total_farmed"] for r in rows if r["guild"] == "BLACK"), 0
+                )
+                white_score = next(
+                    (r["total_farmed"] for r in rows if r["guild"] == "WHITE"), 0
+                )
+
+                # 3. Определяем победителя (только если счёт не равный)
+                if black_score == white_score:
+                    logger.info("%s: Война завершилась вничью (%d - %d). Награды не выданы.",
+                                job_name, black_score, white_score)
+                    await _safe_send_guild_message(
+                        context,
+                        "🤝 <b>ВОЙНА ГИЛЬДИЙ ЗАВЕРШИЛАСЬ ВНИЧЬЮ!</b>\n"
+                        f"🕯️ Тёмные: {black_score} | ⚜️ Светлые: {white_score}\n"
+                        "Ничья — награды не выданы. Следующая война скоро!"
+                    )
+                    return
+
+                winner = "BLACK" if black_score > white_score else "WHITE"
+                loser_score = white_score if winner == "BLACK" else black_score
+                winner_score = black_score if winner == "BLACK" else white_score
+
+                # 4. Начисляем награды ВСЕМ участникам победившей гильдии
                 oac = random.randint(200, 500)
                 blunts = random.randint(3, 7)
                 dust = random.randint(1, 3)
-                async with db_pool.acquire() as conn:
-                    await conn.execute("""
-                        UPDATE players SET
-                            balance = balance + $1,
-                            blunts = blunts + $2,
-                            m_essence = m_essence + $3
-                        WHERE guild = $4
-                    """, oac, blunts, dust, winner)
-                # try:
-                #     await context.bot.send_message(chat_id="@guild_antysocial",
-                #         text=f"🎉 <b>ВОЙНА ГИЛЬДИЙ ЗАВЕРШЕНА!</b>...", parse_mode='HTML')
-                # except Exception as e:
-                #     logger.error(f"War end announce error: {e}")
+
+                # Атомарный UPDATE внутри той же транзакции – если упадёт,
+                # откатится и завершение войны, что безопасно
+                result = await conn.execute(
+                    """
+                    UPDATE players SET
+                        balance = balance + $1,
+                        blunts = blunts + $2,
+                        m_essence = m_essence + $3
+                    WHERE guild = $4
+                    """,
+                    oac, blunts, dust, winner
+                )
+                winners_count = int(result.split()[-1])  # количество обновлённых строк
+
+                logger.info(
+                    "%s: Война завершена. Победитель: %s (%d vs %d). "
+                    "Начислено %d OAC, %d блантов, %d пыли %d игрокам.",
+                    job_name, winner, winner_score, loser_score,
+                    oac, blunts, dust, winners_count
+                )
+
+                # 5. Отправляем объявление о победе
+                winner_emoji = "🕯️" if winner == "BLACK" else "⚜️"
+                await _safe_send_guild_message(
+                    context,
+                    f"🎉 <b>ВОЙНА ГИЛЬДИЙ ЗАВЕРШЕНА!</b>\n\n"
+                    f"{winner_emoji} <b>Победила {winner} гильдия!</b>\n"
+                    f"🕯️ Тёмные: {black_score} | ⚜️ Светлые: {white_score}\n\n"
+                    f"Каждый участник победившей гильдии получает:\n"
+                    f"• {oac} OAC 🍬\n"
+                    f"• {blunts} блантов 🌿\n"
+                    f"• {dust} кристальной пыли 💠"
+                )
+
+    except Exception as e:
+        logger.critical("%s: КРИТИЧЕСКАЯ ОШИБКА: %s", job_name, e, exc_info=True)
+        # Если транзакция откатилась, война осталась в состоянии "активна",
+        # что безопасно – её можно будет завершить при следующем запуске.
+        # Тем не менее, уведомим админа.
+        if ADMIN_ID:
+            try:
+                await context.bot.send_message(
+                    chat_id=ADMIN_ID,
+                    text=f"🚨 Ошибка в weekly_guild_rating:\n{e}"
+                )
+            except Exception:
+                pass
+
+
+async def _safe_send_guild_message(context, text: str):
+    """Отправляет сообщение в гильдейский чат с 3 ретраями."""
+    for attempt in range(3):
+        try:
+            await context.bot.send_message(
+                chat_id="@guild_antysocial",
+                text=text,
+                parse_mode="HTML"
+            )
+            return
+        except Exception as e:
+            logger.warning(
+                "Не удалось отправить сообщение в @guild_antysocial (попытка %d): %s",
+                attempt + 1, e
+            )
+            await asyncio.sleep(2 ** attempt)
 
 async def keep_db_alive(context):
     if db_pool:
