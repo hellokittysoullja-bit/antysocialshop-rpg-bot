@@ -5744,13 +5744,13 @@ async def keep_db_alive(context):
             logger.error(f"Keep-alive error: {e}")
 
 # ============================================================
-# ЗАПУСК (ГИБРИДНЫЙ, БЕЗ КОНФЛИКТОВ EVENT LOOP)
+# ФИНАЛЬНЫЙ ЗАПУСК (ГИБРИДНЫЙ, БЕЗ ОШИБОК)
 # ============================================================
 import signal
 import sys
 
 async def async_init(app):
-    """Асинхронная инициализация всего, что требует await."""
+    """Асинхронная инициализация: БД, проверка изображений, Sentry, сигналы."""
     # Инициализация БД и Redis
     await init_db_pool()
 
@@ -5785,7 +5785,7 @@ async def async_init(app):
             except Exception:
                 pass
 
-    # Инициализация Sentry (если нужно)
+    # Инициализация Sentry
     import sentry_sdk
     SENTRY_DSN = os.getenv("SENTRY_DSN")
     if SENTRY_DSN:
@@ -5798,23 +5798,7 @@ async def async_init(app):
     else:
         logger.warning("SENTRY_DSN не задан, Sentry отключён")
 
-    # Все хендлеры, джобы и обработчики ошибок
-    app.add_handler(MessageHandler(filters.PHOTO, get_file_id))
-    app.add_handler(MessageHandler(filters.COMMAND, handle_command))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_chat_shortcut))
-    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_member))
-    app.add_handler(CallbackQueryHandler(button_handler))
-
-    job = app.job_queue
-    # job.run_repeating(update_pulse, interval=900, first=10)
-    # job.run_repeating(happy_hour_trigger, interval=random.randint(14400, 28800), first=random.randint(3600, 10800))
-    # job.run_daily(echo_of_distortion, time=time(hour=18, minute=0))
-    # job.run_repeating(weekly_guild_rating, interval=7*24*3600, first=max(1, (next_saturday - now).total_seconds()))
-    job.run_repeating(keep_db_alive, interval=180, first=10)
-
-    app.add_error_handler(global_error_handler)
-
-    # Регистрация мгновенной остановки
+    # Регистрация сигналов для мгновенной остановки
     async def shutdown():
         logger.info("Получен сигнал остановки, немедленно прекращаем работу...")
         try:
@@ -5835,7 +5819,7 @@ async def async_init(app):
 
 
 def main():
-    # Синхронная часть: создание приложения и сервисов
+    # --- Синхронная часть: создание приложения, сервисов, регистрация хендлеров ---
     if not TOKEN:
         raise RuntimeError("TOKEN не установлен")
     if not os.getenv("DATABASE_URL_AIVEN"):
@@ -5846,16 +5830,33 @@ def main():
            .rate_limiter(AIORateLimiter())
            .build())
 
-    # Инициализация сервиса войны (глобальные db_pool и redis уже должны быть инициализированы)
+    # Инициализация сервиса войны (глобальные db_pool и redis будут инициализированы внутри async_init)
     war_settings = WarSettings()
     war_config = WarConfig()
     war_service = GuildWarService(db_pool, redis_client=redis, config=war_config, settings=war_settings)
     app.bot_data["war_service"] = war_service
 
-    # Запускаем асинхронную инициализацию (БД, проверка изображений, хендлеры)
+    # Регистрируем все хендлеры (они глобальные, видны из main())
+    app.add_handler(MessageHandler(filters.PHOTO, get_file_id))
+    app.add_handler(MessageHandler(filters.COMMAND, handle_command))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_chat_shortcut))
+    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_member))
+    app.add_handler(CallbackQueryHandler(button_handler))
+
+    # Джобы
+    job = app.job_queue
+    # job.run_repeating(update_pulse, interval=900, first=10)
+    # job.run_repeating(happy_hour_trigger, interval=random.randint(14400, 28800), first=random.randint(3600, 10800))
+    # job.run_daily(echo_of_distortion, time=time(hour=18, minute=0))
+    # job.run_repeating(weekly_guild_rating, interval=7*24*3600, first=max(1, (next_saturday - now).total_seconds()))
+    job.run_repeating(keep_db_alive, interval=180, first=10)
+
+    app.add_error_handler(global_error_handler)
+
+    # --- Асинхронная инициализация (БД, проверка изображений, сигналы) ---
     asyncio.run(async_init(app))
 
-    # После инициализации – синхронный запуск вебхука
+    # --- Запуск Webhook (синхронный, создаёт свой event loop) ---
     render_url = os.getenv("RENDER_EXTERNAL_URL", "")
     if not render_url:
         logger.critical("RENDER_EXTERNAL_URL не задан")
