@@ -191,6 +191,52 @@ def rate_limit(seconds: int = 2):
             return await func(update, context, *args, **kwargs)
         return wrapper
     return decorator
+    
+def divine_command(command_name: str):
+    """Делает обработчик 'Божественным': request ID, логи, асинхронный алерт админу."""
+    def decorator(func):
+        @functools.wraps(func)
+        async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+            request_id = uuid.uuid4().hex[:8]
+            user_id = update.effective_user.id
+            try:
+                logger.info("[%s] /%s от user=%d", request_id, command_name, user_id)
+            except Exception:
+                print(f"[{request_id}] CMD /{command_name} from {user_id}", file=sys.stderr)
+
+            try:
+                return await func(update, context)
+            except Exception as e:
+                import traceback
+                err_msg = traceback.format_exc()
+                try:
+                    logger.error("[%s] Ошибка /%s: %s", request_id, command_name, e, exc_info=True)
+                except Exception:
+                    print(f"[{request_id}] ERROR /{command_name}: {err_msg}", file=sys.stderr)
+
+                async def _alert():
+                    for attempt in range(3):
+                        try:
+                            await context.bot.send_message(
+                                chat_id=ADMIN_ID,
+                                text=f"🚨 [{request_id}] Ошибка /{command_name} от {user_id}: {html.escape(str(e)[:500])}"
+                            )
+                            break
+                        except Exception:
+                            await asyncio.sleep(2 ** attempt)
+                asyncio.create_task(_alert())
+
+                try:
+                    await update.message.reply_text("⚠️ Внутренняя ошибка. Админ уже уведомлён.")
+                except Exception:
+                    pass
+            finally:
+                try:
+                    logger.debug("[%s] /%s обработана", request_id, command_name)
+                except Exception:
+                    pass
+        return wrapper
+    return decorator
 
 # ============================================================
 # КОНЕЦ БЛОКА ДЕКОРАТОРОВ
@@ -5336,6 +5382,37 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.debug("[%s] Команда /%s обработана", request_id, command)
         except Exception:
             pass
+            
+async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    error = context.error
+    import traceback
+    traceback.print_exception(type(error), error, error.__traceback__)
+
+    if ADMIN_ID:
+        async def _alert():
+            for attempt in range(3):
+                try:
+                    await context.bot.send_message(
+                        chat_id=ADMIN_ID,
+                        text=f"🚨 Глобальная ошибка: {error}"
+                    )
+                    break
+                except Exception:
+                    await asyncio.sleep(2 ** attempt)
+        asyncio.create_task(_alert())
+        
+@divine_command("debugpet")
+async def debug_pet(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Проверка питомца (только админ)."""
+    if update.effective_user.id != ADMIN_ID:
+        return
+    player = await PlayerRepository.get_by_id(update.effective_user.id)
+    if not player or not player.exists:
+        await update.message.reply_text("Профиль не найден.")
+        return
+    pet = player.pet or "нет"
+    name = player.pet_name or "без имени"
+    await update.message.reply_text(f"🐾 Питомец: {pet}\n🎉 Имя: {name}")
             
 # ========== ВСПОМОГАТЕЛЬНЫЕ ОБРАБОТЧИКИ КНОПОК =========
 @safe_callback
