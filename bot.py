@@ -5747,6 +5747,9 @@ async def keep_db_alive(context):
 # ФИНАЛЬНЫЙ ЗАПУСК (WEBHOOK + ASYNC MAIN) – без багов
 # ============================================================
 
+import signal
+import sys
+
 async def main():
     # --- uvloop ускоряет event loop, если доступен ---
     try:
@@ -5763,7 +5766,7 @@ async def main():
     # Инициализация БД и Redis
     await init_db_pool()
 
-    # Загружаем сохранённые file_id из БД
+    # --- Загружаем и сразу проверяем file_id из БД ---
     for rarity in ("common", "rare", "epic", "legendary"):
         saved = await get_setting(f"blunt_image_{rarity}")
         if saved:
@@ -5781,33 +5784,30 @@ async def main():
     war_service = GuildWarService(db_pool, redis_client=redis, config=war_config, settings=war_settings)
     app.bot_data["war_service"] = war_service
 
-    # --- Проверка валидности изображений (восстановлено) ---
-    async def check_all_blunt_images():
-        invalid = []
-        for rarity in ("common", "rare", "epic", "legendary"):
-            file_id = BLUNT_IMAGES.get(rarity)
-            if not file_id:
-                invalid.append(rarity)
-                continue
+    # --- Проверка валидности изображений (один раз, после загрузки) ---
+    invalid = []
+    for rarity in ("common", "rare", "epic", "legendary"):
+        file_id = BLUNT_IMAGES.get(rarity)
+        if not file_id:
+            invalid.append(rarity)
+            continue
+        try:
+            await app.bot.get_file(file_id)
+        except Exception:
+            invalid.append(rarity)
+            BLUNT_IMAGES.pop(rarity, None)
+            await set_setting(f"blunt_image_{rarity}", "")
+    if invalid:
+        logger.warning("Невалидные изображения: %s", ", ".join(invalid))
+        if ADMIN_ID:
             try:
-                await app.bot.get_file(file_id)
+                await app.bot.send_message(
+                    chat_id=ADMIN_ID,
+                    text=f"⚠️ При запуске обнаружены невалидные изображения: {', '.join(invalid)}.\n"
+                         f"Они сброшены. Обновите через /setbluntpic."
+                )
             except Exception:
-                invalid.append(rarity)
-                BLUNT_IMAGES.pop(rarity, None)
-                await set_setting(f"blunt_image_{rarity}", "")
-        if invalid:
-            logger.warning("Невалидные изображения: %s", ", ".join(invalid))
-            if ADMIN_ID:
-                try:
-                    await app.bot.send_message(
-                        chat_id=ADMIN_ID,
-                        text=f"⚠️ При запуске обнаружены невалидные изображения: {', '.join(invalid)}.\n"
-                             f"Они сброшены. Обновите через /setbluntpic."
-                    )
-                except Exception as e:
-                    logger.error("Не удалось уведомить админа о невалидных изображениях: %s", e)
-
-    await check_all_blunt_images()
+                pass   # не спамим лог ошибкой отправки админу
 
     # Инициализация Sentry
     import sentry_sdk
@@ -5870,7 +5870,7 @@ async def main():
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_member))
     app.add_handler(CallbackQueryHandler(button_handler))
 
-    # Джобы (оставлены только нужные, остальные закомментированы)
+    # Джобы
     job = app.job_queue
     # job.run_repeating(update_pulse, interval=900, first=10)
     # job.run_repeating(happy_hour_trigger, interval=random.randint(14400, 28800), first=random.randint(3600, 10800))
