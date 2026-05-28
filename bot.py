@@ -6129,23 +6129,24 @@ async def on_shutdown(app: Application):
 # Главная функция
 # ------------------------------------------------------------
 def main():
-    # Активируем uvloop для максимальной производительности asyncio
     asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+    # Явно создаём и устанавливаем текущий event loop
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
 
     if not TOKEN:
         raise RuntimeError("TOKEN не установлен")
     if not os.getenv("DATABASE_URL_AIVEN"):
         raise RuntimeError("DATABASE_URL_AIVEN не установлена")
 
-    app = (
-        Application.builder()
-        .token(TOKEN)
-        .rate_limiter(AIORateLimiter())
-        .post_init(on_startup)
-        .post_shutdown(on_shutdown)
-        .build()
-    )
+    app = (Application.builder()
+           .token(TOKEN)
+           .rate_limiter(AIORateLimiter())
+           .post_init(on_startup)
+           .post_shutdown(on_shutdown)
+           .build())
 
+    # Регистрация всех хендлеров
     app.add_handler(MessageHandler(filters.PHOTO, get_file_id))
     app.add_handler(MessageHandler(filters.COMMAND, handle_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_chat_shortcut))
@@ -6153,26 +6154,28 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_error_handler(global_error_handler)
 
+    # Джобы
     job = app.job_queue
     job.run_repeating(keep_db_alive, interval=180, first=10)
 
-    # Запуск Webhook
+    # Webhook
     render_url = os.getenv("RENDER_EXTERNAL_URL", "")
     if not render_url:
-        logger.critical("RENDER_EXTERNAL_URL не задан")
-        raise RuntimeError("Невозможно запустить бота без RENDER_EXTERNAL_URL")
-
+        raise RuntimeError("RENDER_EXTERNAL_URL не задан")
     webhook_path = "/webhook"
     webhook_url = f"{render_url}{webhook_path}"
 
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=int(os.getenv("PORT", 10000)),
-        url_path=webhook_path,
-        webhook_url=webhook_url,
-        secret_token=os.getenv("WEBHOOK_SECRET"),
-        drop_pending_updates=True,
-    )
+    try:
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=int(os.getenv("PORT", 10000)),
+            url_path=webhook_path,
+            webhook_url=webhook_url,
+            secret_token=os.getenv("WEBHOOK_SECRET"),
+            drop_pending_updates=True,
+        )
+    finally:
+        loop.close()
 
 if __name__ == "__main__":
     main()
