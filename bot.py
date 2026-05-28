@@ -5906,6 +5906,10 @@ if __name__ == "__main__":
 
     app.add_error_handler(global_error_handler)
 
+    # === СОЗДАЁМ ЦИКЛ ===
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
     # === МГНОВЕННАЯ ОСТАНОВКА ===
     async def shutdown():
         logger.info("Получен сигнал остановки, немедленно прекращаем работу...")
@@ -5934,9 +5938,10 @@ if __name__ == "__main__":
     webhook_path = "/webhook"
     webhook_url = f"{render_url}{webhook_path}"
 
-    logger.info("Устанавливаем вебхук на %s", webhook_url)
-    # Устанавливаем вебхук до старта сервера
+    # Гарантированно удаляем старый вебхук перед установкой нового
+    loop.run_until_complete(app.bot.delete_webhook(drop_pending_updates=True))
     loop.run_until_complete(app.bot.set_webhook(url=webhook_url, drop_pending_updates=True))
+    logger.info("Вебхук установлен на %s", webhook_url)
 
     port = int(os.getenv("PORT", 10000))
     app.run_webhook(
