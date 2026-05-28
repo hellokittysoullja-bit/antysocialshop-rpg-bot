@@ -5252,6 +5252,13 @@ async def give_oac(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Игрок не найден.")
         return
 
+    # Получаем имя получателя (для красивого ответа)
+    try:
+        target_player = await PlayerRepository.get_by_id(target_id)
+        target_name = target_player.username or f"ID{target_id}"
+    except Exception:
+        target_name = f"ID{target_id}"
+
     # 4. Начисление (атомарно)
     try:
         async def _add(p, conn):
@@ -5267,9 +5274,12 @@ async def give_oac(update: Update, context: ContextTypes.DEFAULT_TYPE):
             new_balance = result[1]
 
         await update.message.reply_text(
-            f"✅ Игроку {target_id} начислено {amount} OAC. Новый баланс: {new_balance} 🍬"
+            f"✅ Игроку <b>{html.escape(target_name)}</b> начислено <b>{amount}</b> OAC 🍬. "
+            f"Новый баланс: <b>{new_balance}</b> 🍬",
+            parse_mode='HTML'
         )
-        logger.info("Админ %d начислил %d OAC игроку %d", update.effective_user.id, amount, target_id)
+        logger.info("Админ %d начислил %d OAC игроку %d (%s)", 
+                    update.effective_user.id, amount, target_id, target_name)
     except Exception as e:
         logger.error("Ошибка начисления OAC: %s", e, exc_info=True)
         await update.message.reply_text("⚠️ Не удалось начислить OAC 🍬. Попробуй позже. 🍃")
