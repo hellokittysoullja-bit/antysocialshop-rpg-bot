@@ -5906,7 +5906,7 @@ if __name__ == "__main__":
 
     app.add_error_handler(global_error_handler)
 
-    # === МГНОВЕННАЯ ОСТАНОВКА С ОСВОБОЖДЕНИЕМ ВЕБХУКА ===
+    # === МГНОВЕННАЯ ОСТАНОВКА ===
     async def shutdown():
         logger.info("Получен сигнал остановки, немедленно прекращаем работу...")
         try:
@@ -5925,27 +5925,24 @@ if __name__ == "__main__":
         except NotImplementedError:
             pass
 
-    # === ЗАПУСК WEBHOOK (асинхронная обёртка) ===
-    async def start_webhook():
-        render_url = os.getenv("RENDER_EXTERNAL_URL", "")
-        if not render_url:
-            logger.critical("RENDER_EXTERNAL_URL не задан – невозможно установить вебхук")
-            raise RuntimeError("Невозможно запустить бота без RENDER_EXTERNAL_URL")
+    # === ЗАПУСК ЧЕРЕЗ WEBHOOK ===
+    render_url = os.getenv("RENDER_EXTERNAL_URL", "")
+    if not render_url:
+        logger.critical("RENDER_EXTERNAL_URL не задан")
+        raise RuntimeError("Невозможно запустить бота без RENDER_EXTERNAL_URL")
 
-        webhook_path = "/webhook"
-        webhook_url = f"{render_url}{webhook_path}"
+    webhook_path = "/webhook"
+    webhook_url = f"{render_url}{webhook_path}"
 
-        logger.info("Устанавливаем вебхук на %s", webhook_url)
-        await app.bot.set_webhook(url=webhook_url, drop_pending_updates=True)
+    logger.info("Устанавливаем вебхук на %s", webhook_url)
+    # Устанавливаем вебхук до старта сервера
+    loop.run_until_complete(app.bot.set_webhook(url=webhook_url, drop_pending_updates=True))
 
-        port = int(os.getenv("PORT", 10000))
-        # Для ptb 20.8 используем только стандартные параметры (без graceful_shutdown_timeout)
-        app.run_webhook(
-            listen="0.0.0.0",
-            port=port,
-            url_path=webhook_path,
-            webhook_url=webhook_url,
-            drop_pending_updates=True,
-        )
-
-    loop.run_until_complete(start_webhook())
+    port = int(os.getenv("PORT", 10000))
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=port,
+        url_path=webhook_path,
+        webhook_url=webhook_url,
+        drop_pending_updates=True,
+    )
