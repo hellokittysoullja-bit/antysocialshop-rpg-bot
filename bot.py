@@ -5923,14 +5923,13 @@ async def on_startup(app: Application):
             BLUNT_IMAGES.pop(rarity, None)
             await set_setting(f"blunt_image_{rarity}", "")
     if invalid:
-    logger.warning("Невалидные изображения: %s", ", ".join(invalid))
-    if ADMIN_ID:
-        try:
-            # Используем твою существующую safe_send, передав app и chat_id
-            await safe_send(app, ADMIN_ID, 
-                f"⚠️ Невалидные изображения: {', '.join(invalid)}. Обновите через /setbluntpic.")
-        except Exception:
-            pass
+        logger.warning("Невалидные изображения: %s", ", ".join(invalid))
+        if ADMIN_ID:
+            try:
+                await safe_send(app, ADMIN_ID,
+                    text=f"⚠️ Невалидные изображения: {', '.join(invalid)}. Обновите через /setbluntpic.")
+            except Exception:
+                pass
 
     # 4. Инициализация Sentry
     import sentry_sdk
