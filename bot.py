@@ -5334,6 +5334,7 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     command = raw_text.split()[0].split('@')[0][1:].lower()
     if not command:
         return
+    context.args = raw_text.split()[1:]
 
     mapping = {
         "start": start, "farm": farm_callback, "craft": craft_callback,
