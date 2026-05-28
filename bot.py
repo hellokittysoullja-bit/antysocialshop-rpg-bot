@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from threading import Thread
 import time
 import sys
+import uuid
 import asyncpg
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -5270,6 +5271,72 @@ async def get_file_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
         fid = update.message.photo[-1].file_id
         await update.message.reply_text(fid)
 
+async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    if not msg or not msg.text:
+        return
+
+    raw_text = msg.text.strip()
+    request_id = uuid.uuid4().hex[:8]
+    user_id = update.effective_user.id
+
+    try:
+        logger.info("[%s] Команда '%s' от user=%d", request_id, raw_text, user_id)
+    except Exception:
+        print(f"[{request_id}] CMD {raw_text} from {user_id}", file=sys.stderr)
+
+    command = raw_text.split()[0].split('@')[0][1:].lower()
+    if not command:
+        return
+
+    mapping = {
+        "start": start, "farm": farm_callback, "craft": craft_callback,
+        "smoke": smoke_callback, "ritual": ritual_callback,
+        "profile": profile_callback, "top": top_callback,
+        "rules": rules_callback, "privilege": privilege_callback,
+        "catalog": catalog_callback, "luck": luck_callback,
+        "collect": collect_callback, "check": check_blunt,
+        "guild": guild_info_callback, "repent": confess_callback,
+        "lab": lab_enter, "pet": pet_preview, "shop": shop_callback,
+        "setbluntpic": setbluntpic, "give_oas": give_oac,
+        "debugpet": debug_pet, "checkbluntpics": check_blunt_pics,
+    }
+    handler = mapping.get(command)
+    if not handler:
+        return
+
+    try:
+        await handler(update, context)
+    except Exception as e:
+        import traceback
+        err_msg = traceback.format_exc()
+        try:
+            logger.error("[%s] Ошибка в команде /%s: %s", request_id, command, e, exc_info=True)
+        except Exception:
+            print(f"[{request_id}] ERROR /{command}: {err_msg}", file=sys.stderr)
+
+        async def _alert_admin():
+            for attempt in range(3):
+                try:
+                    await context.bot.send_message(
+                        chat_id=ADMIN_ID,
+                        text=f"🚨 [{request_id}] Ошибка /{command} от {user_id}: {html.escape(str(e)[:500])}"
+                    )
+                    break
+                except Exception:
+                    await asyncio.sleep(2 ** attempt)
+        asyncio.create_task(_alert_admin())
+
+        try:
+            await update.message.reply_text("⚠️ Внутренняя ошибка. Админ уже уведомлён.")
+        except Exception:
+            pass
+    finally:
+        try:
+            logger.debug("[%s] Команда /%s обработана", request_id, command)
+        except Exception:
+            pass
+            
 # ========== ВСПОМОГАТЕЛЬНЫЕ ОБРАБОТЧИКИ КНОПОК =========
 @safe_callback
 async def menu_handler(update, context):
