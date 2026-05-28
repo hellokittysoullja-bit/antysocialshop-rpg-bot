@@ -5262,6 +5262,14 @@ async def check_blunt_pics(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 status.append(f"⚠️ {rarity}: невалидный file_id")
     await update.message.reply_text("\n".join(status))
 
+async def get_file_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отправляет админу file_id фотографии. Только для ADMIN_ID."""
+    if update.effective_user.id != ADMIN_ID:
+        return
+    if update.message.photo:
+        fid = update.message.photo[-1].file_id
+        await update.message.reply_text(fid)
+
 # ========== ВСПОМОГАТЕЛЬНЫЕ ОБРАБОТЧИКИ КНОПОК =========
 @safe_callback
 async def menu_handler(update, context):
