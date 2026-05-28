@@ -5768,12 +5768,6 @@ handler.setFormatter(JsonFormatter())
 logging.basicConfig(level=logging.INFO, handlers=[handler])
 logger = logging.getLogger(__name__)
 
-# ------------------------------------------------------------
-# Утилиты
-# ------------------------------------------------------------
-    def __init__(self, pool, redis_client, config, settings):
-        pass
-
 # Retry для сообщений админу (уже было)
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=10))
 async def safe_send_message(bot, chat_id: int, text: str, **kwargs):
