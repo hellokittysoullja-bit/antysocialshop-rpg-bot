@@ -5743,8 +5743,12 @@ async def keep_db_alive(context):
         except Exception as e:
             logger.error(f"Keep-alive error: {e}")
 
-# ========== ЗАПУСК ==========
-if __name__ == "__main__":
+# ============================================================
+# ФИНАЛЬНЫЙ ЗАПУСК (WEBHOOK + ASYNC MAIN) – без багов
+# ============================================================
+
+async def main():
+    # --- uvloop ускоряет event loop, если доступен ---
     try:
         import uvloop
         uvloop.install()
@@ -5756,18 +5760,14 @@ if __name__ == "__main__":
     if not os.getenv("DATABASE_URL_AIVEN"):
         raise RuntimeError("DATABASE_URL_AIVEN не установлена")
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(init_db_pool())
-   # Thread(target=run_web_server, daemon=True).start()
+    # Инициализация БД и Redis
+    await init_db_pool()
 
     # Загружаем сохранённые file_id из БД
-    async def load_blunt_images():
-        for rarity in ("common", "rare", "epic", "legendary"):
-            saved = await get_setting(f"blunt_image_{rarity}")
-            if saved:
-                BLUNT_IMAGES[rarity] = saved
-    loop.run_until_complete(load_blunt_images())
+    for rarity in ("common", "rare", "epic", "legendary"):
+        saved = await get_setting(f"blunt_image_{rarity}")
+        if saved:
+            BLUNT_IMAGES[rarity] = saved
 
     # --- Создание приложения ---
     app = (Application.builder()
@@ -5781,7 +5781,7 @@ if __name__ == "__main__":
     war_service = GuildWarService(db_pool, redis_client=redis, config=war_config, settings=war_settings)
     app.bot_data["war_service"] = war_service
 
-    # Проверка изображений при старте (выполняется до запуска поллинга)
+    # --- Проверка валидности изображений (восстановлено) ---
     async def check_all_blunt_images():
         invalid = []
         for rarity in ("common", "rare", "epic", "legendary"):
@@ -5805,11 +5805,11 @@ if __name__ == "__main__":
                              f"Они сброшены. Обновите через /setbluntpic."
                     )
                 except Exception as e:
-                    logger.error("Не удалось уведомить админа: %s", e)
+                    logger.error("Не удалось уведомить админа о невалидных изображениях: %s", e)
 
-    loop.run_until_complete(check_all_blunt_images())
+    await check_all_blunt_images()
 
-    # ===== ИНИЦИАЛИЗАЦИЯ SENTRY =====
+    # Инициализация Sentry
     import sentry_sdk
     SENTRY_DSN = os.getenv("SENTRY_DSN")
     if SENTRY_DSN:
@@ -5822,6 +5822,7 @@ if __name__ == "__main__":
     else:
         logger.warning("SENTRY_DSN не задан, Sentry отключён")
 
+    # --- Хендлеры команд ---
     async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = update.message
         if not msg or not msg.text:
@@ -5833,28 +5834,16 @@ if __name__ == "__main__":
             if not command:
                 return
             mapping = {
-                "start": start,
-                "farm": farm_callback,
-                "craft": craft_callback,
-                "smoke": smoke_callback,
-                "ritual": ritual_callback,
-                "profile": profile_callback,
-                "top": top_callback,
-                "rules": rules_callback,
-                "privilege": privilege_callback,
-                "catalog": catalog_callback,
-                "luck": luck_callback,
-                "collect": collect_callback,
-                "check": check_blunt,
-                "guild": guild_info_callback,
-                "repent": confess_callback,
-                "lab": lab_enter,
-                "pet": pet_preview,
-                "shop": shop_callback,
-                "setbluntpic": setbluntpic,
-                "give_oas": give_oas,
-                "debugpet": debug_pet,
-                "checkbluntpics": check_blunt_pics,
+                "start": start, "farm": farm_callback, "craft": craft_callback,
+                "smoke": smoke_callback, "ritual": ritual_callback,
+                "profile": profile_callback, "top": top_callback,
+                "rules": rules_callback, "privilege": privilege_callback,
+                "catalog": catalog_callback, "luck": luck_callback,
+                "collect": collect_callback, "check": check_blunt,
+                "guild": guild_info_callback, "repent": confess_callback,
+                "lab": lab_enter, "pet": pet_preview, "shop": shop_callback,
+                "setbluntpic": setbluntpic, "give_oas": give_oas,
+                "debugpet": debug_pet, "checkbluntpics": check_blunt_pics,
             }
             handler = mapping.get(command)
             if handler:
@@ -5881,6 +5870,7 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_member))
     app.add_handler(CallbackQueryHandler(button_handler))
 
+    # Джобы (оставлены только нужные, остальные закомментированы)
     job = app.job_queue
     # job.run_repeating(update_pulse, interval=900, first=10)
     # job.run_repeating(happy_hour_trigger, interval=random.randint(14400, 28800), first=random.randint(3600, 10800))
@@ -5888,9 +5878,7 @@ if __name__ == "__main__":
     # job.run_repeating(weekly_guild_rating, interval=7*24*3600, first=max(1, (next_saturday - now).total_seconds()))
     job.run_repeating(keep_db_alive, interval=180, first=10)
 
-    # ===== ГЛОБАЛЬНЫЙ ОБРАБОТЧИК RetryAfter =====
-    from telegram.error import RetryAfter
-
+    # --- Глобальный обработчик ошибок ---
     async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         error = context.error
         import traceback
@@ -5906,11 +5894,7 @@ if __name__ == "__main__":
 
     app.add_error_handler(global_error_handler)
 
-    # === СОЗДАЁМ ЦИКЛ ===
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
-    # === МГНОВЕННАЯ ОСТАНОВКА ===
+    # --- Мгновенная остановка ---
     async def shutdown():
         logger.info("Получен сигнал остановки, немедленно прекращаем работу...")
         try:
@@ -5922,14 +5906,15 @@ if __name__ == "__main__":
         finally:
             sys.exit(0)
 
-    import signal
+    # Регистрация сигналов
+    loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
-            loop.add_signal_handler(sig, lambda: asyncio.ensure_future(shutdown()))
+            loop.add_signal_handler(sig, lambda: asyncio.create_task(shutdown()))
         except NotImplementedError:
             pass
 
-    # === ЗАПУСК ЧЕРЕЗ WEBHOOK ===
+    # --- Запуск Webhook ---
     render_url = os.getenv("RENDER_EXTERNAL_URL", "")
     if not render_url:
         logger.critical("RENDER_EXTERNAL_URL не задан")
@@ -5938,16 +5923,20 @@ if __name__ == "__main__":
     webhook_path = "/webhook"
     webhook_url = f"{render_url}{webhook_path}"
 
-    # Гарантированно удаляем старый вебхук перед установкой нового
-    loop.run_until_complete(app.bot.delete_webhook(drop_pending_updates=True))
-    loop.run_until_complete(app.bot.set_webhook(url=webhook_url, drop_pending_updates=True))
+    # Удаляем старый вебхук и устанавливаем новый
+    await app.bot.delete_webhook(drop_pending_updates=True)
+    await app.bot.set_webhook(url=webhook_url, drop_pending_updates=True)
     logger.info("Вебхук установлен на %s", webhook_url)
 
     port = int(os.getenv("PORT", 10000))
-    app.run_webhook(
+    await app.run_webhook(
         listen="0.0.0.0",
         port=port,
         url_path=webhook_path,
         webhook_url=webhook_url,
         drop_pending_updates=True,
     )
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
