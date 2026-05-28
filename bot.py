@@ -2186,25 +2186,35 @@ async def _handle_referral(update, context, uid, player):
 
 
 async def _create_new_player(update, context, uid, username):
-    """Создаёт нового игрока и отправляет приветствие с выбором гильдии."""
-    player = Player(user_id=uid, username=username, balance=800)
+    player = Player(user_id=uid, username=username, balance=800, onboarding_step=0)
+    await PlayerRepository.save(player)
     new_name = random.choice(["Крик Бездны","Пепел Короля","Шёпот Склепа"])
     await create_named_blunt(uid, new_name)
-    await PlayerRepository.save(player)
 
-    bonus = "🎁 Смотритель дарует тебе <code>800</code> 🍬 и твой первый именной блант!\n\n"
-    welcome = (
-        "<b><i>🎉 Добро пожаловать в Гильдию Antysocialshop!</i></b>\n\n"
-        "🕯️ <b>Тёмная Гильдия</b> — стабильность, ритуалы, тёмное благословение.\n"
-        "⚜️ <b>Светлая Гильдия</b> — азарт, удача, танец на лезвии.\n\n"
-        "▸ <i>Выбери свой путь:</i>"
+    welcome_text = (
+        "🎁 Смотритель дарует тебе <code>800</code> 🍬 и твой первый именной блант!\n\n"
+        "<b>🎉 Добро пожаловать в Гильдию Antysocialshop!</b>\n\n"
+        "<b>🎓 Обучение (шаг 1 из 3)</b>\n\n"
+        "<b>⚔️ Выбери фракцию</b>\n"
+        "Твой выбор определит твои дальнейшие возможности.\n\n"
+        "🕯️ <b>Тёмная Гильдия</b>\n"
+        "• Особое умение: Ритуал (+150 OAC раз в 24 ч)\n"
+        "• Стиль: Стабильность и тёмная магия\n\n"
+        "⚜️ <b>Светлая Гильдия</b>\n"
+        "• Особое умение: 20% шанс сохранить блант при активации\n"
+        "• Стиль: Азарт и благосклонность удачи"
     )
+
     guild_kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🕯️ Тёмная Гильдия", callback_data="guild_join_BLACK"),
          InlineKeyboardButton("⚜️ Светлая Гильдия", callback_data="guild_join_WHITE")]
     ])
-    await update.effective_message.reply_text(bonus + welcome, reply_markup=guild_kb, parse_mode='HTML')
 
+    await update.effective_message.reply_text(
+        welcome_text,
+        reply_markup=guild_kb,
+        parse_mode='HTML'
+    )
 
 async def _show_main_menu(update, context, player, user):
     """Формирует и отправляет главное меню."""
@@ -2575,6 +2585,25 @@ async def farm_callback(update, context):
     await check_rank_up(context, uid, uname, old_balance, new_balance)
     await check_achievements(uid, context)
     
+    if player and player.onboarding_step == 1:
+        player.onboarding_step = 2
+        await PlayerRepository.save(player)
+        kb2 = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🌿 Крафт", callback_data="craft")],
+            [InlineKeyboardButton("⏭️ Пропустить обучение", callback_data="skip_onboarding")]
+        ])
+        await context.bot.send_message(
+            chat_id=uid,
+            text=(
+                "<b>🎓 Обучение (шаг 3 из 3)</b>\n\n"
+                "<b>🌿 Отлично! Теперь создай свой первый блант.</b>\n\n"
+                "Нажми «Крафт» и выбери «Обычный блант».\n\n"
+                "<i>💡 Бланты нужны, чтобы активировать случайный эффект.</i>"
+            ),
+            reply_markup=kb2,
+            parse_mode='HTML'
+        )
+    
 # ============================================================
 # КРАФТ ОБЫЧНЫХ И ИМЕННЫХ БЛАНТОВ – атомарное создание блантов
 # ============================================================
@@ -2727,7 +2756,17 @@ async def handle_craft_normal(update, context):
         await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=kb, parse_mode='HTML')
 
     await check_achievements(uid, context)
-
+    
+    if player and player.onboarding_step == 2:
+        player.onboarding_step = -1
+        await PlayerRepository.save(player)
+        await context.bot.send_message(
+            chat_id=uid,
+            text=(
+                "<b>🎉 Поздравляю! Ты освоил основы.</b>\n\n"
+                "Теперь ты можешь исследовать другие разделы меню."
+            )
+        )
 
 @error_handler
 async def handle_craft_named(update, context):
@@ -3249,6 +3288,14 @@ async def do_smoke(update, context):
     ])
     await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
     await check_achievements(uid, context)
+    
+    if player and player.onboarding_step == 3:
+        player.onboarding_step = -1
+        await PlayerRepository.save(player)
+        await context.bot.send_message(
+            chat_id=uid,
+            text="<b>🎉 Поздравляю! Ты освоил основы.</b>\n\nТеперь ты можешь исследовать другие разделы меню."
+        )
 
 # Ритуал (с защитой от None)
 @error_handler
@@ -3431,14 +3478,13 @@ async def profile_callback(update, context):
 
     rank_progress = get_rank_progress(bal)
 
-    # --- Питомец (добавлено) ---
+    # --- Питомец
     pet_line = ""
     if player.pet:
         pet_line = f"🐾 <b>Питомец:</b> {player.pet}"
         if player.pet_name:
             pet_line += f" «{player.pet_name}»"
         pet_line += "\n"
-    # --------------------------
 
     text = (
         f"<b>⚜️ ПРОФИЛЬ</b>\n"
@@ -3637,7 +3683,6 @@ async def achievements_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await query.answer("Профиль не найден.", show_alert=True)
         return
 
-    # Получаем список выданных достижений (можно вынести в PlayerRepository, но для простоты оставим так)
     async with db_pool.acquire() as conn:
         awarded = await conn.fetch("SELECT ach_id FROM achievements_awarded WHERE user_id = $1", uid)
     awarded_ids = {r["ach_id"] for r in awarded}
@@ -3652,9 +3697,21 @@ async def achievements_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
     text = f"<b>🏆 ДОСТИЖЕНИЯ</b> ({page+1}/{total_pages})\n\n"
     for ach in chunk:
-        unlocked = ach["id"] in awarded_ids
+        ach_id = ach["id"]
+        unlocked = ach_id in awarded_ids
         mark = "✅" if unlocked else "🔒"
-        text += f"{mark} {ach['emoji']} <b>{ach['name']}</b>\n<i>{ach['desc']}</i>\nНаграда: {ach['reward']}\n\n"
+        text += f"{mark} {ach['emoji']} <b>{ach['name']}</b>\n"
+        text += f"<i>{ach['desc']}</i>\n"
+
+        if not unlocked and ach_id != "lunar_lord" and ach_id in ACHIEVEMENT_CONDITIONS:
+            field, target = ACHIEVEMENT_CONDITIONS[ach_id]
+            current = getattr(player, field, 0)
+            progress = min(100, int(current / target * 100)) if target > 0 else 0
+            bar = "▓" * (progress // 10) + "░" * (10 - progress // 10)
+            text += f"<b>{bar} {progress}%</b> ({current}/{target})\n"
+        else:
+            text += "\n"
+        text += "\n"
 
     kb_rows = []
     nav = []
@@ -3666,7 +3723,6 @@ async def achievements_callback(update: Update, context: ContextTypes.DEFAULT_TY
         kb_rows.append(nav)
     kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="profile")])
     await edit_or_reply(update, context, text, reply_markup=InlineKeyboardMarkup(kb_rows))
-
 
 @error_handler
 async def top_callback(update, context):
@@ -5698,13 +5754,51 @@ async def guild_join_handler(update, context):
     uid = query.from_user.id
     player = await PlayerRepository.get_by_id(uid)
     player.guild = guild
+
+    if player.onboarding_step == 0:
+        player.onboarding_step = 1
+        await PlayerRepository.save(player)
+
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+
+        # Шаг 2 — фарм
+        kb1 = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🍬 Фармить", callback_data="farm")],
+            [InlineKeyboardButton("⏭️ Пропустить обучение", callback_data="skip_onboarding")]
+        ])
+        await context.bot.send_message(
+            chat_id=uid,
+            text=(
+                "<b>🎓 Обучение (шаг 2 из 3)</b>\n\n"
+                "<b>🍬 Твой первый шаг — фарм!</b>\n\n"
+                "Нажми кнопку ниже, чтобы получить <b>OAC</b>.\n\n"
+                "<i>💡 OAC — главная валюта. Трать её на крафт, питомцев и свитки.</i>"
+            ),
+            reply_markup=kb1,
+            parse_mode='HTML'
+        )
+
+        g_emoji = "🕯️" if guild == "BLACK" else "⚜️"
+        g_name = "Тёмная" if guild == "BLACK" else "Светлая"
+        uname = html.escape(query.from_user.username or query.from_user.first_name)
+        await query.message.edit_text(
+            f"<b><i>🕋 ГИЛЬДИЯ ТЕБЯ ПРИНЯЛА</i></b>\n\n"
+            f"✅ Теперь <b>ты</b> — {g_emoji} <b>{g_name} Гильдия</b> ·\n\n"
+            f"<i>🩸 Искажение стало плотнее...</i>",
+            parse_mode='HTML'
+        )
+        return
+
     await PlayerRepository.save(player)
     g_emoji = "🕯️" if guild == "BLACK" else "⚜️"
     g_name = "Тёмная" if guild == "BLACK" else "Светлая"
     uname = html.escape(query.from_user.username or query.from_user.first_name)
     await query.message.edit_text(
         f"<b><i>🕋 ГИЛЬДИЯ ТЕБЯ ПРИНЯЛА</i></b>\n\n"
-        f"✅ Теперь <b>ты</b> — {g_emoji} <b>{g_name} Гильдия</b> ·\n\n"
+        f"✅ Теперь <b>ты</b> — в {g_emoji} <b>{g_name} Гильдия</b> ·\n\n"
         f"<i>🩸 Искажение стало плотнее...</i>",
         parse_mode='HTML'
     )
