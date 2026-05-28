@@ -84,8 +84,6 @@ logger = logging.getLogger(__name__)
 logger.info("===== БОТ ЗАПУСКАЕТСЯ =====")
 logger.info("Python %s", sys.version)
 
-# КОНЕЦ ЛОГИРОВАНИЯ
-
 from enum import Enum, auto
 
 class AlchemyResult(Enum):
