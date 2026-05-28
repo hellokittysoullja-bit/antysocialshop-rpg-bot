@@ -5878,11 +5878,6 @@ handler.setFormatter(JsonFormatter())
 logging.basicConfig(level=logging.INFO, handlers=[handler])
 logger = logging.getLogger(__name__)
 
-# Retry для сообщений админу (уже было)
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=10))
-async def safe_send_message(bot, chat_id: int, text: str, **kwargs):
-    return await bot.send_message(chat_id=chat_id, text=text, **kwargs)
-
 # Кэширование профиля (уже было)
 async def cached_profile(user_id: int) -> dict | None:
     if not redis:
@@ -5899,6 +5894,10 @@ async def cached_profile(user_id: int) -> dict | None:
 # ------------------------------------------------------------
 # Основная асинхронная инициализация (post_init)
 # ------------------------------------------------------------
+@retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=1, max=10))
+async def _init_redis_safe():
+    await init_redis()
+
 async def on_startup(app: Application):
     # 1. БД и Redis (с ретраями)
     await init_db_pool()
@@ -5924,17 +5923,14 @@ async def on_startup(app: Application):
             BLUNT_IMAGES.pop(rarity, None)
             await set_setting(f"blunt_image_{rarity}", "")
     if invalid:
-        logger.warning("Невалидные изображения: %s", ", ".join(invalid))
-        if ADMIN_ID:
-            try:
-                await safe_send_message(
-                    app.bot,
-                    chat_id=ADMIN_ID,
-                    text=f"⚠️ При запуске обнаружены невалидные изображения: {', '.join(invalid)}.\n"
-                         "Они сброшены. Обновите через /setbluntpic.",
-                )
-            except Exception:
-                pass
+    logger.warning("Невалидные изображения: %s", ", ".join(invalid))
+    if ADMIN_ID:
+        try:
+            # Используем твою существующую safe_send, передав app и chat_id
+            await safe_send(app, ADMIN_ID, 
+                f"⚠️ Невалидные изображения: {', '.join(invalid)}. Обновите через /setbluntpic.")
+        except Exception:
+            pass
 
     # 4. Инициализация Sentry
     import sentry_sdk
@@ -5990,27 +5986,24 @@ def main():
     if not os.getenv("DATABASE_URL_AIVEN"):
         raise RuntimeError("DATABASE_URL_AIVEN не установлена")
 
-    # 🔥 Создаём переиспользуемую HTTP‑сессию с большим пулом соединений
-    connector = TCPConnector(limit=100, limit_per_host=50, ttl_dns_cache=300)
-    session = ClientSession(connector=connector)
-
     app = (
         Application.builder()
         .token(TOKEN)
         .rate_limiter(AIORateLimiter())
-        .request(session)               # ← передаём сессию
         .post_init(on_startup)
         .post_shutdown(on_shutdown)
         .build()
     )
 
-    # Регистрация хендлеров (замените на свои)
-    # app.add_handler(MessageHandler(filters.PHOTO, get_file_id))
-    # ...
+    app.add_handler(MessageHandler(filters.PHOTO, get_file_id))
+    app.add_handler(MessageHandler(filters.COMMAND, handle_command))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_chat_shortcut))
+    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_member))
+    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_error_handler(global_error_handler)
 
-    # Джобы
-    # job = app.job_queue
-    # job.run_repeating(keep_db_alive, interval=180, first=10)
+    job = app.job_queue
+    job.run_repeating(keep_db_alive, interval=180, first=10)
 
     # Запуск Webhook
     render_url = os.getenv("RENDER_EXTERNAL_URL", "")
