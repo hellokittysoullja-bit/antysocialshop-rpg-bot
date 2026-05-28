@@ -5747,13 +5747,8 @@ async def keep_db_alive(context):
 # ФИНАЛЬНЫЙ ЗАПУСК – УРОВЕНЬ "UNSTOPPABLE"
 # ============================================================
 import json
-
 import redis.asyncio as aioredis
-import uvloop
 from aiohttp import ClientSession, TCPConnector
-from tenacity import retry, stop_after_attempt, wait_exponential
-)
-
 # ------------------------------------------------------------
 # Структурированное логирование одной строчкой (JSON)
 # ------------------------------------------------------------
