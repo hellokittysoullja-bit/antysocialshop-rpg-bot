@@ -2549,6 +2549,7 @@ async def farm_callback(update, context):
     uid = user.id
     uname = user.username or user.first_name
     now = datetime.now()
+    player = await PlayerRepository.get_by_id(uid)
 
     # --- Атомарная бизнес-логика ---
     async def _farm(player, conn):
