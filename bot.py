@@ -5789,17 +5789,6 @@ logger = logging.getLogger(__name__)
 # ------------------------------------------------------------
 # Утилиты
 # ------------------------------------------------------------
-async def get_setting(key: str) -> str:
-    # Заглушка – реальную реализацию нужно импортировать
-    return None
-
-async def set_setting(key: str, value: str):
-    pass
-
-async def fetch_profile_from_db(user_id: int):
-    # Заглушка
-    return None
-
     def __init__(self, pool, redis_client, config, settings):
         pass
 
