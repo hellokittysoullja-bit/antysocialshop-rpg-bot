@@ -6,6 +6,13 @@ from threading import Thread
 import time
 import sys
 import uuid
+import functools
+try:
+    import uvloop
+    uvloop.install()
+except ImportError:
+    pass
+
 import asyncpg
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -13,12 +20,11 @@ from telegram.ext import (
     Application, CallbackQueryHandler,
     ContextTypes, MessageHandler, filters
 )
-from telegram.error import BadRequest, Forbidden
+from telegram.error import BadRequest, Forbidden, RetryAfter
 
 from telegram.ext import AIORateLimiter
 
 from typing import Optional, List, Any, Dict, NamedTuple, Callable
-import functools
 
 from tenacity import (
     retry,
@@ -27,19 +33,13 @@ from tenacity import (
     retry_if_exception_type,
     before_sleep_log
 )
-from telegram.error import RetryAfter
 
 import enum
-
 from pydantic import BaseModel, Field, ConfigDict
 
 # ─────────────────────────────────────────────────────────────
 # СВЕРХНАДЁЖНОЕ ЛОГИРОВАНИЕ (SENIOR-УРОВЕНЬ)
 # ─────────────────────────────────────────────────────────────
-import sys
-import logging
-import traceback
-
 class SafeStdoutHandler(logging.StreamHandler):
     """Обработчик, который никогда не падает."""
     def emit(self, record):
@@ -49,6 +49,7 @@ class SafeStdoutHandler(logging.StreamHandler):
             stream.write(msg + self.terminator)
             self.flush()
         except Exception:
+            import traceback
             traceback.print_exc()
 
 # 1. Корневой логгер с INFO в stdout
@@ -74,6 +75,7 @@ logging.getLogger("apscheduler").setLevel(logging.WARNING)
 # 3. Глобальный перехват необработанных исключений
 def unhandled_exception_hook(exc_type, exc_value, exc_traceback):
     """Гарантированно выводит ошибку в stderr."""
+    import traceback
     traceback.print_exception(exc_type, exc_value, exc_traceback)
 sys.excepthook = unhandled_exception_hook
 
@@ -237,10 +239,6 @@ def divine_command(command_name: str):
                     pass
         return wrapper
     return decorator
-
-# ============================================================
-# КОНЕЦ БЛОКА ДЕКОРАТОРОВ
-# ============================================================
 
 # Проверка: если retry – модуль, а не функция, будет ошибка
 assert callable(retry), "retry должен быть функцией, а не модулем!"
@@ -452,6 +450,40 @@ class GuildWarService:
                 await self.redis.delete(self.CACHE_KEY)
         except Exception:
             pass
+            
+class PetService:
+    """Сервис управления питомцами (атомарные операции)."""
+    def __init__(self, config: dict = None):
+        self.config = config or PET_CONFIG
+
+    async def buy(self, user_id: int, pet_type: str) -> dict | None:
+        """Покупка питомца. Возвращает {"status": "ok"/"already_have"/"no_money"} или None при ошибке БД."""
+        async def _buy(p, conn):
+            if p.pet:
+                return {"status": "already_have"}
+            price = self.config[pet_type]["price"]
+            if p.balance < price:
+                return {"status": "no_money"}
+            p.balance -= price
+            p.pet = self.config[pet_type]["name"]
+            p.pet_name = ""
+            return {"status": "ok"}
+
+        return await PlayerRepository.atomic_update(user_id, _buy)
+
+    async def set_name(self, user_id: int, name: str) -> bool:
+        """Установка имени питомца. Возвращает True при успехе, False при ошибке."""
+        async def _set(p, conn):
+            p.pet_name = name[:self.config["dog"]["max_name_len"]]
+            return True
+
+        result = await PlayerRepository.atomic_update(user_id, _set)
+        return result is not None
+
+    async def has_pet(self, user_id: int) -> bool:
+        """Проверяет, есть ли у игрока питомец."""
+        player = await PlayerRepository.get_by_id(user_id)
+        return player is not None and bool(player.pet)
 
 class Player(BaseModel):
     user_id: int
@@ -492,13 +524,10 @@ class Player(BaseModel):
     lab_depth: int = 1
     pet: str = ""           # 🐕 Песик
     pet_name: str = ""      # кличка
+    onboarding_step: int = 0
     exists: bool = False   # True, если игрок загружен из БД
 
     model_config = ConfigDict(populate_by_name=True)
-
-import functools
-import asyncio
-import uvloop
 
 def db_retry(max_retries=3, delay=0.2):
     """Автоматически повторяет запрос к БД при временных сбоях соединения."""
@@ -5175,7 +5204,7 @@ async def handle_chat_shortcut(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("⚠️ Внутренняя ошибка. Попробуйте позже 🍃.")
 
 # ============================================================
-# ПИТОМЦЫ (полная версия без багов)
+# ПИТОМЦЫ (финальная версия)
 # ============================================================
 @safe_callback
 async def pet_preview(update, context):
@@ -5183,12 +5212,13 @@ async def pet_preview(update, context):
     await query.answer()
     uid = query.from_user.id
     player = await PlayerRepository.get_by_id(uid)
+
     if player and player.pet:
         name_str = f" по кличке «{player.pet_name}»" if player.pet_name else ""
         await query.message.edit_text(f"Твой питомец: {player.pet}{name_str}")
     else:
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🐕 Купить Песика (3000 🍬)", callback_data="pet_buy_dog")],
+            [InlineKeyboardButton(f"🐕 Купить Песика ({PET_CONFIG['dog']['price']} 🍬)", callback_data="pet_buy_dog")],
             [InlineKeyboardButton("🔙 Назад", callback_data="menu")]
         ])
         await query.message.edit_text(
@@ -5203,36 +5233,59 @@ async def pet_buy_dog_handler(update, context):
     await query.answer()
     uid = query.from_user.id
 
-    async def _buy(p, conn):
-        if p.pet:
-            return ("already_have",)
-        if p.balance < 3000:
-            return ("no_money",)
-        p.balance -= 3000
-        p.pet = "🐕 Песик"
-        p.pet_name = ""
-        return ("ok",)
+    pet_service = PetService()
+    result = await pet_service.buy(uid, "dog")
 
-    result = await PlayerRepository.atomic_update(uid, _buy)
     if result is None:
         await query.answer("Ошибка.")
         return
-    status = result[0]
+
+    status = result["status"]
     if status == "already_have":
         await query.answer("У тебя уже есть питомец!")
     elif status == "no_money":
-        await query.answer("Недостаточно OAC. Нужно 3000 🍬")
+        await query.answer(f"Недостаточно OAC. Нужно {PET_CONFIG['dog']['price']} 🍬")
     else:
         context.user_data['awaiting_pet_name'] = True
         await query.message.edit_text(
             "<b>🐕 Песик ждёт имя!</b>\n\n"
-            "Введи имя для своего питомца (до 15 символов).\n"
+            f"Введи имя для своего питомца (до {PET_CONFIG['dog']['max_name_len']} символов).\n"
             "Для отмены нажми кнопку ниже.",
             parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("❌ Пропустить (без имени)", callback_data="pet_name_skip")]
             ])
         )
+
+@safe_callback
+async def pet_name_skip_handler(update, context):
+    query = update.callback_query
+    await query.answer()
+    context.user_data.pop('awaiting_pet_name', None)
+    await query.message.edit_text("Питомец останется без имени.")
+
+async def handle_pet_name(update, context):
+    name = update.message.text.strip()[:PET_CONFIG["dog"]["max_name_len"]]
+    if not name:
+        await update.message.reply_text("❌ Имя не может быть пустым.")
+        return
+    if len(update.message.text.strip()) > PET_CONFIG["dog"]["max_name_len"]:
+        await update.message.reply_text(f"⚠️ Имя обрезано до {PET_CONFIG['dog']['max_name_len']} символов.")
+
+    uid = update.effective_user.id
+    pet_service = PetService()
+    success = await pet_service.set_name(uid, name)
+
+    if not success:
+        await update.message.reply_text("Ошибка сохранения имени.")
+    else:
+        await update.message.reply_text(f"Отлично! Теперь твоего питомца зовут «{name}»! 🐕")
+    context.user_data.pop('awaiting_pet_name', None)
+
+@safe_callback
+async def pet_locked_handler(update, context):
+    query = update.callback_query
+    await query.answer("❌ Доступно с ранга ⚔️ Ветеран (5000 OAC 🍬)", show_alert=True)
 
 async def shop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -5339,32 +5392,6 @@ async def give_oac(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error("Ошибка начисления OAC: %s", e, exc_info=True)
         await update.message.reply_text("⚠️ Не удалось начислить OAC 🍬. Попробуй позже. 🍃")
-
-@safe_callback
-async def pet_name_skip_handler(update, context):
-    query = update.callback_query
-    await query.answer()
-    context.user_data.pop('awaiting_pet_name', None)
-    await query.message.edit_text("Питомец останется без имени.")
-
-async def handle_pet_name(update, context):
-    """Обработчик ввода имени питомца."""
-    name = update.message.text.strip()[:15]
-    if not name:
-        await update.message.reply_text("❌ Имя не может быть пустым.")
-        return
-
-    uid = update.effective_user.id
-    async def _set_name(p, conn):
-        p.pet_name = name
-        return ("ok",)
-
-    result = await PlayerRepository.atomic_update(uid, _set_name)
-    if result is None:
-        await update.message.reply_text("Ошибка при сохранении имени.")
-    else:
-        await update.message.reply_text(f"Отлично! Теперь твоего питомца зовут «{name}»! 🐕")
-    context.user_data.pop('awaiting_pet_name', None)
     
 async def check_blunt_pics(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
@@ -5868,6 +5895,7 @@ CALLBACKS: Dict[str, Callable] = {
     "pet_preview": pet_preview,
     "pet_buy_dog": pet_buy_dog_handler,
     "pet_name_skip": pet_name_skip_handler,
+    "pet_locked": pet_locked_handler,
 }
 
 # ========== ТОЧНЫЕ КОЛБЭКИ (без префиксов) ==========
