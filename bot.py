@@ -5744,23 +5744,98 @@ async def keep_db_alive(context):
             logger.error(f"Keep-alive error: {e}")
 
 # ============================================================
-# ФИНАЛЬНЫЙ ЗАПУСК (ГИБРИДНЫЙ, БЕЗ ОШИБОК)
+# ФИНАЛЬНЫЙ ЗАПУСК – УРОВЕНЬ "UNSTOPPABLE"
 # ============================================================
-import signal
+import asyncio
+import json
+import logging
+import os
 import sys
+import time
 
-async def async_init(app):
-    """Асинхронная инициализация: БД, проверка изображений, Sentry, сигналы."""
-    # Инициализация БД и Redis
+import asyncpg
+import redis.asyncio as aioredis
+import uvloop
+from aiohttp import ClientSession, TCPConnector
+from tenacity import retry, stop_after_attempt, wait_exponential
+from telegram.ext import (
+    Application,
+    AIORateLimiter,
+    MessageHandler,
+    CallbackQueryHandler,
+    filters,
+)
+
+# ------------------------------------------------------------
+# Структурированное логирование одной строчкой (JSON)
+# ------------------------------------------------------------
+class JsonFormatter(logging.Formatter):
+    def format(self, record):
+        log_record = {
+            "timestamp": self.formatTime(record),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+        if record.exc_info:
+            log_record["exception"] = self.formatException(record.exc_info)
+        return json.dumps(log_record, ensure_ascii=False)
+
+handler = logging.StreamHandler(sys.stdout)
+handler.setFormatter(JsonFormatter())
+logging.basicConfig(level=logging.INFO, handlers=[handler])
+logger = logging.getLogger(__name__)
+
+# ------------------------------------------------------------
+# Утилиты
+# ------------------------------------------------------------
+async def get_setting(key: str) -> str:
+    # Заглушка – реальную реализацию нужно импортировать
+    return None
+
+async def set_setting(key: str, value: str):
+    pass
+
+async def fetch_profile_from_db(user_id: int):
+    # Заглушка
+    return None
+
+    def __init__(self, pool, redis_client, config, settings):
+        pass
+
+# Retry для сообщений админу (уже было)
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=10))
+async def safe_send_message(bot, chat_id: int, text: str, **kwargs):
+    return await bot.send_message(chat_id=chat_id, text=text, **kwargs)
+
+# Кэширование профиля (уже было)
+async def cached_profile(user_id: int) -> dict | None:
+    if not redis:
+        return await fetch_profile_from_db(user_id)
+    cache_key = f"profile:{user_id}"
+    cached = await redis.get(cache_key)
+    if cached:
+        return json.loads(cached)
+    profile = await fetch_profile_from_db(user_id)
+    if profile:
+        await redis.set(cache_key, json.dumps(profile), ex=20)
+    return profile
+
+# ------------------------------------------------------------
+# Основная асинхронная инициализация (post_init)
+# ------------------------------------------------------------
+async def on_startup(app: Application):
+    # 1. БД и Redis (с ретраями)
     await init_db_pool()
+    await init_redis()
 
-    # Загружаем сохранённые file_id из БД
+    # 2. Загружаем сохранённые file_id из БД
     for rarity in ("common", "rare", "epic", "legendary"):
         saved = await get_setting(f"blunt_image_{rarity}")
         if saved:
             BLUNT_IMAGES[rarity] = saved
 
-    # Проверка валидности изображений
+    # 3. Проверка валидности изображений
     invalid = []
     for rarity in ("common", "rare", "epic", "legendary"):
         file_id = BLUNT_IMAGES.get(rarity)
@@ -5777,15 +5852,16 @@ async def async_init(app):
         logger.warning("Невалидные изображения: %s", ", ".join(invalid))
         if ADMIN_ID:
             try:
-                await app.bot.send_message(
+                await safe_send_message(
+                    app.bot,
                     chat_id=ADMIN_ID,
                     text=f"⚠️ При запуске обнаружены невалидные изображения: {', '.join(invalid)}.\n"
-                         f"Они сброшены. Обновите через /setbluntpic."
+                         "Они сброшены. Обновите через /setbluntpic.",
                 )
             except Exception:
                 pass
 
-    # Инициализация Sentry
+    # 4. Инициализация Sentry
     import sentry_sdk
     SENTRY_DSN = os.getenv("SENTRY_DSN")
     if SENTRY_DSN:
@@ -5794,69 +5870,74 @@ async def async_init(app):
             traces_sample_rate=1.0,
             environment=os.getenv("ENV", "production"),
         )
-        logger.info("Sentry активирован")
+        logger.info("✅ Sentry активирован")
     else:
         logger.warning("SENTRY_DSN не задан, Sentry отключён")
 
-    # Регистрация сигналов для мгновенной остановки
-    async def shutdown():
-        logger.info("Получен сигнал остановки, немедленно прекращаем работу...")
-        try:
-            await app.bot.delete_webhook(drop_pending_updates=True)
-            await app.stop()
-            await asyncio.sleep(0.5)
-        except Exception as e:
-            logger.error("Ошибка при остановке приложения: %s", e)
-        finally:
-            sys.exit(0)
+    # 5. Инициализация сервиса войны
+    war_settings = WarSettings()
+    war_config = WarConfig()
+    war_service = GuildWarService(
+        db_pool, redis_client=redis, config=war_config, settings=war_settings
+    )
+    app.bot_data["war_service"] = war_service
 
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(sig, lambda: asyncio.create_task(shutdown()))
-        except NotImplementedError:
-            pass
+    logger.info("🚀 Инициализация завершена, бот готов к работе.")
 
+# ------------------------------------------------------------
+# Корректное закрытие ресурсов (post_shutdown)
+# ------------------------------------------------------------
+async def on_shutdown(app: Application):
+    logger.info("🛑 Получен сигнал остановки, освобождаем ресурсы...")
+    if db_pool:
+        await db_pool.close()
+        logger.info("Пул БД закрыт")
+    if redis:
+        await redis.close()
+        logger.info("Redis закрыт")
 
+    # Закрываем HTTP‑сессию, которую мы передали боту
+    if hasattr(app.bot, "request") and isinstance(app.bot.request, ClientSession):
+        await app.bot.request.close()
+        logger.info("HTTP-сессия закрыта")
+
+    logger.info("✅ Все ресурсы освобождены, завершение работы.")
+
+# ------------------------------------------------------------
+# Главная функция
+# ------------------------------------------------------------
 def main():
-    # --- Синхронная часть: создание приложения, сервисов, регистрация хендлеров ---
+    # Активируем uvloop для максимальной производительности asyncio
+    asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+
     if not TOKEN:
         raise RuntimeError("TOKEN не установлен")
     if not os.getenv("DATABASE_URL_AIVEN"):
         raise RuntimeError("DATABASE_URL_AIVEN не установлена")
 
-    app = (Application.builder()
-           .token(TOKEN)
-           .rate_limiter(AIORateLimiter())
-           .build())
+    # 🔥 Создаём переиспользуемую HTTP‑сессию с большим пулом соединений
+    connector = TCPConnector(limit=100, limit_per_host=50, ttl_dns=300)
+    session = ClientSession(connector=connector)
 
-    # Инициализация сервиса войны (глобальные db_pool и redis будут инициализированы внутри async_init)
-    war_settings = WarSettings()
-    war_config = WarConfig()
-    war_service = GuildWarService(db_pool, redis_client=redis, config=war_config, settings=war_settings)
-    app.bot_data["war_service"] = war_service
+    app = (
+        Application.builder()
+        .token(TOKEN)
+        .rate_limiter(AIORateLimiter())
+        .request(session)               # ← передаём сессию
+        .post_init(on_startup)
+        .post_shutdown(on_shutdown)
+        .build()
+    )
 
-    # Регистрируем все хендлеры (они глобальные, видны из main())
-    app.add_handler(MessageHandler(filters.PHOTO, get_file_id))
-    app.add_handler(MessageHandler(filters.COMMAND, handle_command))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_chat_shortcut))
-    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_member))
-    app.add_handler(CallbackQueryHandler(button_handler))
+    # Регистрация хендлеров (замените на свои)
+    # app.add_handler(MessageHandler(filters.PHOTO, get_file_id))
+    # ...
 
     # Джобы
-    job = app.job_queue
-    # job.run_repeating(update_pulse, interval=900, first=10)
-    # job.run_repeating(happy_hour_trigger, interval=random.randint(14400, 28800), first=random.randint(3600, 10800))
-    # job.run_daily(echo_of_distortion, time=time(hour=18, minute=0))
-    # job.run_repeating(weekly_guild_rating, interval=7*24*3600, first=max(1, (next_saturday - now).total_seconds()))
-    job.run_repeating(keep_db_alive, interval=180, first=10)
+    # job = app.job_queue
+    # job.run_repeating(keep_db_alive, interval=180, first=10)
 
-    app.add_error_handler(global_error_handler)
-
-    # --- Асинхронная инициализация (БД, проверка изображений, сигналы) ---
-    asyncio.run(async_init(app))
-
-    # --- Запуск Webhook (синхронный, создаёт свой event loop) ---
+    # Запуск Webhook
     render_url = os.getenv("RENDER_EXTERNAL_URL", "")
     if not render_url:
         logger.critical("RENDER_EXTERNAL_URL не задан")
@@ -5870,9 +5951,9 @@ def main():
         port=int(os.getenv("PORT", 10000)),
         url_path=webhook_path,
         webhook_url=webhook_url,
+        secret_token=os.getenv("WEBHOOK_SECRET"),
         drop_pending_updates=True,
     )
-
 
 if __name__ == "__main__":
     main()
