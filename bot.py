@@ -5991,7 +5991,7 @@ def main():
         raise RuntimeError("DATABASE_URL_AIVEN не установлена")
 
     # 🔥 Создаём переиспользуемую HTTP‑сессию с большим пулом соединений
-    connector = TCPConnector(limit=100, limit_per_host=50, ttl_dns=300)
+    connector = TCPConnector(limit=100, limit_per_host=50, ttl_dns_cache=300)
     session = ClientSession(connector=connector)
 
     app = (
