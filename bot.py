@@ -5746,24 +5746,12 @@ async def keep_db_alive(context):
 # ============================================================
 # ФИНАЛЬНЫЙ ЗАПУСК – УРОВЕНЬ "UNSTOPPABLE"
 # ============================================================
-import asyncio
 import json
-import logging
-import os
-import sys
-import time
 
-import asyncpg
 import redis.asyncio as aioredis
 import uvloop
 from aiohttp import ClientSession, TCPConnector
 from tenacity import retry, stop_after_attempt, wait_exponential
-from telegram.ext import (
-    Application,
-    AIORateLimiter,
-    MessageHandler,
-    CallbackQueryHandler,
-    filters,
 )
 
 # ------------------------------------------------------------
