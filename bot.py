@@ -5402,7 +5402,7 @@ async def handle_gift_username(update: Update, context: ContextTypes.DEFAULT_TYP
 # ============================================================
 # ПИТОМЦЫ
 # ============================================================
-@cb()
+@cb
 async def pet_preview(update, context, ctx):
     query = update.callback_query
     uid = query.from_user.id
@@ -5421,7 +5421,7 @@ async def pet_preview(update, context, ctx):
             reply_markup=kb, parse_mode='HTML'
         )
 
-@cb()
+@cb
 async def pet_buy_dog_handler(update, context, ctx):
     query = update.callback_query
     uid = query.from_user.id
@@ -5443,7 +5443,7 @@ async def pet_buy_dog_handler(update, context, ctx):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Пропустить", callback_data="pet_name_skip")]])
         )
 
-@cb()
+@cb
 async def pet_name_skip_handler(update, context, ctx):
     query = update.callback_query
     context.user_data.pop('awaiting_pet_name', None)
@@ -5475,7 +5475,7 @@ async def pet_locked_handler(update, context):
 # ============================================================
 # МАГАЗИН, АДМИН-КОМАНДЫ
 # ============================================================
-@cb()
+@cb
 async def shop_callback(update, context, ctx):
     query = update.callback_query
     kb = InlineKeyboardMarkup([
@@ -5485,7 +5485,7 @@ async def shop_callback(update, context, ctx):
     ])
     await query.message.edit_text("<b>🛒 МАГАЗИН</b>", reply_markup=kb, parse_mode='HTML')
 
-@cb(need_ctx=True, show_alert_on_error=False)
+@cb
 async def setbluntpic(update, context, ctx):
     if update.effective_user.id != ctx.settings.admin_id:
         await update.message.reply_text("⛔ Только для админа.")
@@ -5505,7 +5505,7 @@ async def setbluntpic(update, context, ctx):
     names = {"common":"⚪ Обычный","rare":"🔵 Редкий","epic":"🟣 Эпический","legendary":"🟡 Легендарный"}
     await update.message.reply_text(f"✅ Изображение для {names[rarity]} обновлено!", parse_mode='HTML')
 
-@cb()
+@cb
 async def give_oac(update, context, ctx):
     if update.effective_user.id != ctx.settings.admin_id:
         await update.message.reply_text("⛔ Только для админа.")
@@ -5577,7 +5577,7 @@ async def give_oac(update, context, ctx):
         logger.error("Ошибка начисления OAC: %s", e, exc_info=True)
         await update.message.reply_text("⚠️ Не удалось начислить OAC 🍬. Попробуй позже. 🍃")
 
-@cb()
+@cb
 async def check_blunt_pics(update, context, ctx):
     if update.effective_user.id != ctx.settings.admin_id:
         return
@@ -5661,7 +5661,7 @@ async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYP
         except Exception:
             pass
 
-@cb()
+@cb
 async def debug_pet(update, context, ctx):
     if update.effective_user.id != ctx.settings.admin_id:
         return
@@ -5676,7 +5676,7 @@ async def debug_pet(update, context, ctx):
 # ============================================================
 # ВСПОМОГАТЕЛЬНЫЕ ОБРАБОТЧИКИ КНОПОК
 # ============================================================
-@cb()
+@cb
 async def menu_handler(update, context, ctx):
     query = update.callback_query
     uid = query.from_user.id
@@ -5691,7 +5691,7 @@ async def bush_preview_handler(update, context):
     query = update.callback_query
     await query.answer("❌ Доступно с ранга ⚔️ Ветеран (5000 OAC 🍬)", show_alert=True)
 
-@cb()
+@cb
 async def activate_menu_handler(update, context, ctx):
     query = update.callback_query
     user = query.from_user
@@ -5718,7 +5718,7 @@ async def activate_menu_handler(update, context, ctx):
     ])
     await query.message.edit_text(bonus + welcome, reply_markup=guild_kb, parse_mode='HTML')
 
-@cb()
+@cb
 async def skins_menu_handler(update, context, ctx):
     query = update.callback_query
     kb = InlineKeyboardMarkup([
@@ -5733,7 +5733,7 @@ async def skins_menu_handler(update, context, ctx):
             return
         await query.message.reply_text("<b>🎨 СКИНЫ</b>\n\nВыбери, что хочешь изменить.", reply_markup=kb, parse_mode='HTML')
 
-@cb()
+@cb
 async def choose_title_handler(update, context, ctx):
     query = update.callback_query
     uid = query.from_user.id
@@ -5753,7 +5753,7 @@ async def choose_title_handler(update, context, ctx):
     kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="skins_menu")])
     await query.message.edit_text("<b>🎨 ВЫБОР ТИТУЛА</b>\n\nВыбери титул:", reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode='HTML')
 
-@cb()
+@cb
 async def choose_bg_handler(update, context, ctx):
     query = update.callback_query
     uid = query.from_user.id
@@ -5773,7 +5773,7 @@ async def choose_bg_handler(update, context, ctx):
     kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="skins_menu")])
     await query.message.edit_text("<b>🖼️ ВЫБОР ФОНА</b>\n\nВыбери фон:", reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode='HTML')
 
-@cb()
+@cb
 async def handle_set_title(update, context, ctx):
     query = update.callback_query
     uid = query.from_user.id
@@ -5790,7 +5790,7 @@ async def handle_set_title(update, context, ctx):
     await context.bot.send_message(chat_id=query.message.chat.id, text=f"✨ Титул «{new_title}» активирован!")
     await skins_menu_handler(update, context)
 
-@cb()
+@cb
 async def handle_set_bg(update, context, ctx):
     query = update.callback_query
     uid = query.from_user.id
@@ -5807,7 +5807,7 @@ async def handle_set_bg(update, context, ctx):
     await context.bot.send_message(chat_id=query.message.chat.id, text=f"✨ Фон «{new_bg}» активирован!")
     await skins_menu_handler(update, context)
 
-@cb()
+@cb
 async def blunt_details_handler(update, context, ctx):
     query = update.callback_query
     uid = query.from_user.id
@@ -5853,7 +5853,7 @@ async def blunt_details_handler(update, context, ctx):
     else:
         await query.message.edit_text(text=text, reply_markup=kb, parse_mode='HTML')
 
-@cb()
+@cb
 async def share_blunt_handler(update, context, ctx):
     query = update.callback_query
     uid = query.from_user.id
@@ -5877,7 +5877,7 @@ async def share_blunt_handler(update, context, ctx):
         text = f"Блант не найден.\n{ref_link}"
     await context.bot.send_message(chat_id=query.message.chat.id, text=text, parse_mode='HTML')
 
-@cb()
+@cb
 async def shrine_donate_handler(update, context, ctx):
     query = update.callback_query
     amount = 100 if query.data == "shrine_donate_100" else 500
@@ -5891,7 +5891,7 @@ async def shrine_donate_handler(update, context, ctx):
     await ctx.repo.save(player)
     await send_whisper_dm(update, context, f"💎 Ты внёс {amount} OAC в Храм. Спасибо, Странник!")
 
-@cb()
+@cb
 async def guild_join_handler(update, context, ctx):
     query = update.callback_query
     guild = "BLACK" if query.data == "guild_join_BLACK" else "WHITE"
