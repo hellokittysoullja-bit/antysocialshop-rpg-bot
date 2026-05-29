@@ -24,6 +24,10 @@ from telegram.request import HTTPXRequest
 import redis.asyncio as aioredis
 from functools import wraps
 
+import pybreaker
+from cachetools import TTLCache
+from prometheus_client import Counter, Histogram
+
 # ─────────────────────────────────────────────────────────────
 # СВЕРХНАДЁЖНОЕ ЛОГИРОВАНИЕ (SENIOR-УРОВЕНЬ)
 # ─────────────────────────────────────────────────────────────
@@ -238,103 +242,150 @@ class Player(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     
 class PlayerRepository:
-    def __init__(self, db_pool, redis_client, cache):
+    """Репозиторий игроков с Circuit Breaker, кэшем и автоматическими ретраями."""
+
+    def __init__(self, db_pool, redis_client, cache: TTLCache):
         self.db_pool = db_pool
         self.redis = redis_client
         self.cache = cache
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5))
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=5))
     async def get_by_id(self, user_id: int) -> Player:
+        """Возвращает игрока из Redis → in‑memory → БД."""
         if not user_id or user_id <= 0:
-            raise ValueError("Invalid user_id")
-        # Попытка из Redis
+            raise ValueError("Некорректный user_id при загрузке")
+
+        # Redis с Circuit Breaker
         if self.redis:
             try:
                 data = await redis_breaker.call(self.redis.get, f"player:{user_id}")
                 if data:
                     return Player.model_validate_json(data)
             except pybreaker.CircuitBreakerError:
-                pass
+                logger.warning("Circuit breaker открыт для Redis при загрузке %d", user_id)
+            except Exception as e:
+                logger.warning("Ошибка загрузки из Redis для %d: %s", user_id, e)
+
         # In‑memory кэш
         if user_id in self.cache:
+            logger.debug("Игрок %d загружен из in‑memory кэша", user_id)
             return Player(**self.cache[user_id])
-        # Основной запрос в БД
-        columns = [
-            "user_id","username","balance","blunts","guild","last_farm","last_ritual",
-            "last_daily","titles","last_farm_date","passive_level","passive_collected",
-            "karma","inhaled","smoke_count","farm_count","craft_count","ritual_count",
-            "referral_count","last_berserk","inventory","invited_by","profile_skins",
-            "login_streak","last_login_date","oath","keys","check_count","m_essence",
-            "lab_chests","lab_deaths","alchemy_count","last_lab_attempt","donated",
-            "pending_transfer","lab_depth","pet","pet_name","exists"
-        ]
-        cols_sql = ", ".join(f'"{c}"' for c in columns)
+
+        # БД
         async with self.db_pool.acquire() as conn:
+            try:
+                await db_breaker.call(conn.set_statement_timeout, 10.0)
+            except pybreaker.CircuitBreakerError:
+                logger.warning("Circuit breaker открыт для БД при загрузке %d", user_id)
+                raise
+            except Exception:
+                pass  # таймаут не критичен
+
+            columns = [
+                "user_id", "username", "balance", "blunts", "guild", "last_farm",
+                "last_ritual", "last_daily", "titles", "last_farm_date", "passive_level",
+                "passive_collected", "karma", "inhaled", "smoke_count", "farm_count",
+                "craft_count", "ritual_count", "referral_count", "last_berserk",
+                "inventory", "invited_by", "profile_skins", "login_streak",
+                "last_login_date", "oath", "keys", "check_count", "m_essence",
+                "lab_chests", "lab_deaths", "alchemy_count", "last_lab_attempt",
+                "donated", "pending_transfer", "lab_depth", "pet", "pet_name", "exists",
+            ]
+            cols_sql = ", ".join(f'"{c}"' for c in columns)
             row = await db_breaker.call(
                 conn.fetchrow,
                 f"SELECT {cols_sql} FROM players WHERE user_id = $1",
                 user_id
             )
-        if not row:
-            return Player(user_id=user_id)
-        p = dict(row)
-        p["inventory"] = _json_safe_load(p.get("inventory"), [])
-        p["profile_skins"] = _json_safe_load(p.get("profile_skins"), {})
-        p["pending_transfer"] = _json_safe_load(p.get("pending_transfer"), None)
-        player = Player(**p)
-        player.exists = True
-        await self._cache_put(user_id, player)
-        return player
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5))
+        if row:
+            p = dict(row)
+            p["inventory"] = _json_safe_load(p.get("inventory"), [])
+            p["profile_skins"] = _json_safe_load(p.get("profile_skins"), {})
+            p["pending_transfer"] = _json_safe_load(p.get("pending_transfer"), None)
+            player = Player(**p)
+            player.exists = True
+            await self._cache_put(user_id, player)
+            return player
+
+        logger.debug("Игрок %d не найден в БД", user_id)
+        return Player(user_id=user_id)
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=5))
     async def save(self, player: Player, conn=None) -> None:
+        """Сохраняет игрока в БД и обновляет кэш."""
         if player.balance < 0:
+            logger.warning("Попытка сохранить игрока %d с отрицательным балансом", player.user_id)
             player.balance = 0
         player.exists = True
+        if conn and conn.is_closed():
+            conn = None
+
         columns = [
-            "user_id","username","balance","blunts","guild","last_farm","last_ritual",
-            "last_daily","titles","last_farm_date","passive_level","passive_collected",
-            "karma","inhaled","smoke_count","farm_count","craft_count","ritual_count",
-            "referral_count","last_berserk","inventory","invited_by","profile_skins",
-            "login_streak","last_login_date","oath","keys","check_count","m_essence",
-            "lab_chests","lab_deaths","alchemy_count","last_lab_attempt","donated",
-            "pending_transfer","lab_depth","pet","pet_name","exists"
+            "user_id", "username", "balance", "blunts", "guild", "last_farm",
+            "last_ritual", "last_daily", "titles", "last_farm_date", "passive_level",
+            "passive_collected", "karma", "inhaled", "smoke_count", "farm_count",
+            "craft_count", "ritual_count", "referral_count", "last_berserk",
+            "inventory", "invited_by", "profile_skins", "login_streak",
+            "last_login_date", "oath", "keys", "check_count", "m_essence",
+            "lab_chests", "lab_deaths", "alchemy_count", "last_lab_attempt",
+            "donated", "pending_transfer", "lab_depth", "pet", "pet_name", "exists",
         ]
-        json_cols = {"inventory","profile_skins","pending_transfer"}
+        json_cols = {"inventory", "profile_skins", "pending_transfer"}
         cols_sql = ", ".join(f'"{c}"' for c in columns)
         placeholders = ", ".join(f"${i+1}" for i in range(len(columns)))
         update_set = ", ".join(f'"{c}" = EXCLUDED."{c}"' for c in columns if c != "user_id")
+
         values = [getattr(player, col) for col in columns]
         for idx, col in enumerate(columns):
             if col in json_cols:
                 values[idx] = json.dumps(getattr(player, col), default=str)
+
         sql = f"""
             INSERT INTO players ({cols_sql})
             VALUES ({placeholders})
             ON CONFLICT (user_id) DO UPDATE SET
                 {update_set}
         """
+
         async def _write(c):
             await c.execute(sql, *values)
+
         if conn:
             await _write(conn)
         else:
             async with self.db_pool.acquire() as new_conn:
                 await _write(new_conn)
+
         await self._cache_put(player.user_id, player)
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5))
+        # Инвалидация кэша меню (если функция существует)
+        try:
+            invalidate_menu_cache(player.user_id)
+        except NameError:
+            pass
+        except Exception as e:
+            logger.debug("Инвалидация кэша меню для %d не удалась: %s", player.user_id, e)
+
+        logger.info("Игрок %d успешно сохранён", player.user_id)
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=5))
     async def atomic_update(self, user_id: int, update_func):
+        """Атомарно блокирует игрока, выполняет update_func и сохраняет."""
+        if not user_id or user_id <= 0:
+            raise ValueError("Некорректный user_id при атомарном обновлении")
+
         async with self.db_pool.acquire() as conn:
             async with conn.transaction():
                 columns = [
-                    "user_id","username","balance","blunts","guild","last_farm","last_ritual",
-                    "last_daily","titles","last_farm_date","passive_level","passive_collected",
-                    "karma","inhaled","smoke_count","farm_count","craft_count","ritual_count",
-                    "referral_count","last_berserk","inventory","invited_by","profile_skins",
-                    "login_streak","last_login_date","oath","keys","check_count","m_essence",
-                    "lab_chests","lab_deaths","alchemy_count","last_lab_attempt","donated",
-                    "pending_transfer","lab_depth","pet","pet_name","exists"
+                    "user_id", "username", "balance", "blunts", "guild", "last_farm",
+                    "last_ritual", "last_daily", "titles", "last_farm_date", "passive_level",
+                    "passive_collected", "karma", "inhaled", "smoke_count", "farm_count",
+                    "craft_count", "ritual_count", "referral_count", "last_berserk",
+                    "inventory", "invited_by", "profile_skins", "login_streak",
+                    "last_login_date", "oath", "keys", "check_count", "m_essence",
+                    "lab_chests", "lab_deaths", "alchemy_count", "last_lab_attempt",
+                    "donated", "pending_transfer", "lab_depth", "pet", "pet_name", "exists",
                 ]
                 cols_sql = ", ".join(f'"{c}"' for c in columns)
                 row = await conn.fetchrow(
@@ -342,17 +393,22 @@ class PlayerRepository:
                     user_id
                 )
                 if not row:
+                    logger.warning("atomic_update: игрок %d не найден", user_id)
                     return None
+
                 p = dict(row)
                 p["inventory"] = _json_safe_load(p.get("inventory"), [])
                 p["profile_skins"] = _json_safe_load(p.get("profile_skins"), {})
                 p["pending_transfer"] = _json_safe_load(p.get("pending_transfer"), None)
                 player = Player(**p)
+
                 result = await update_func(player, conn)
                 await self.save(player, conn=conn)
+                logger.info("Атомарное обновление для игрока %d успешно завершено", user_id)
                 return result
 
     async def _cache_put(self, user_id: int, player: Player):
+        """Сохраняет игрока в Redis или in‑memory кэш."""
         try:
             if self.redis:
                 await redis_breaker.call(
@@ -364,7 +420,10 @@ class PlayerRepository:
             else:
                 self.cache[user_id] = player.model_dump()
         except pybreaker.CircuitBreakerError:
-            pass
+            logger.warning("Circuit breaker открыт при кэшировании игрока %d", user_id)
+        except Exception as e:
+            logger.warning("Не удалось обновить кэш для игрока %d: %s", user_id, e)
+            self.cache.pop(user_id, None)
 
 from pydantic import Field
 class Settings(BaseSettings):
@@ -830,26 +889,6 @@ def cb(show_alert_on_error=False):
         return wrapper
     return decorator
 
-def db_retry(max_retries=3, delay=0.2):
-    """Автоматически повторяет запрос к БД при временных сбоях соединения."""
-    def decorator(func):
-        @functools.wraps(func)
-        async def wrapper(*args, **kwargs):
-            for attempt in range(max_retries):
-                try:
-                    return await func(*args, **kwargs)
-                except (asyncpg.exceptions.ConnectionDoesNotExistError,
-                        asyncpg.exceptions.InterfaceError,
-                        asyncpg.exceptions.PostgresConnectionError) as e:
-                    if attempt == max_retries - 1:
-                        raise
-                    logger.warning(f"DB retry {attempt+1}/{max_retries} for {func.__name__}: {e}")
-                    await asyncio.sleep(delay * (attempt + 1))
-        return wrapper
-    return decorator
-
-top_cache = {"data": None, "timestamp": 0, "ttl": 60}
-
 def _json_safe_load(value, default):
     if isinstance(value, (list, dict)):
         return value
@@ -892,327 +931,77 @@ async def init_redis():
     else:
         logger.info("REDIS_URL не задан – используется in-memory кэш")
 
-
-class PlayerRepository:
-    @staticmethod
-    @db_retry()
-    async def get_by_id(user_id: int) -> Player:
-        if not user_id or user_id <= 0:
-            raise ValueError("Некорректный user_id при загрузке")
-    
-        # Redis
-        if redis:
-            try:
-                key = f"player:{user_id}"
-                data = await redis.get(key)
-                if data:
-                    logger.debug("Игрок %d загружен из Redis", user_id)
-                    return Player.parse_raw(data)   # совместимо со старым .json() и новым .model_dump_json()
-            except Exception as e:
-                logger.warning("Ошибка загрузки из Redis для %d: %s", user_id, e)
-    
-        # In‑memory
-        if user_id in player_cache:
-            logger.debug("Игрок %d загружен из in-memory кэша", user_id)
-            p = player_cache[user_id]
-            return Player(**p)
-    
-        # БД
-        async with db_pool.acquire() as conn:
-            try:
-                await conn.set_statement_timeout(10.0)
-            except Exception as e:
-                logger.debug("Не удалось установить statement_timeout для get_by_id: %s", e)
-    
-            columns = [
-                "user_id", "username", "balance", "blunts", "guild", "last_farm",
-                "last_ritual", "last_daily", "titles", "last_farm_date", "passive_level",
-                "passive_collected", "karma", "inhaled", "smoke_count", "farm_count",
-                "craft_count", "ritual_count", "referral_count", "last_berserk",
-                "inventory", "invited_by", "profile_skins", "login_streak",
-                "last_login_date", "oath", "keys", "check_count", "m_essence",
-                "lab_chests", "lab_deaths", "alchemy_count", "last_lab_attempt",
-                "donated", "pending_transfer", "lab_depth", "pet", "pet_name", "exists",
-            ]
-            cols_sql = ", ".join(f'"{c}"' for c in columns)
-            row = await conn.fetchrow(f"SELECT {cols_sql} FROM players WHERE user_id = $1", user_id)
-    
-        if row:
-            p = dict(row)
-            p["inventory"] = _json_safe_load(p.get("inventory"), [])
-            p["profile_skins"] = _json_safe_load(p.get("profile_skins"), {})
-            p["pending_transfer"] = _json_safe_load(p.get("pending_transfer"), None)   # ← default=None
-            player = Player(**p)
-            player.exists = True
-    
-            # Кэшируем
-            try:
-                if redis:
-                    await redis.setex(f"player:{user_id}", 10, player.model_dump_json())
-                else:
-                    player_cache[user_id] = player.model_dump()
-            except Exception as e:
-                logger.warning("Не удалось обновить кэш для игрока %d: %s", user_id, e)
-                player_cache.pop(user_id, None)
-            return player
-    
-        logger.debug("Игрок %d не найден в БД", user_id)
-        return Player(user_id=user_id)
-
-    @staticmethod
-    @db_retry()
-    async def save(player: Player, conn=None) -> None:
-        """Сохраняет игрока с максимальной защитой от сбоев (всё внутри метода)."""
-        # === БАЗОВАЯ ВАЛИДАЦИЯ ===
-        if not player.user_id or player.user_id <= 0:
-            raise ValueError("Некорректный user_id при сохранении")
-        if player.balance < 0:
-            logger.warning(
-                "Попытка сохранить игрока %d с отрицательным балансом", player.user_id
-            )
-            player.balance = 0
-    
-        # === ГАРАНТИЯ ФЛАГА СУЩЕСТВОВАНИЯ ===
-        player.exists = True
-    
-        # === ПРОВЕРКА ЖИВОСТИ ПЕРЕДАННОГО СОЕДИНЕНИЯ ===
-        if conn is not None and conn.is_closed():
-            logger.warning(
-                "Переданное соединение закрыто, будет открыто новое для user_id=%d",
-                player.user_id,
-            )
-            conn = None
-    
-        # === ПОЛНЫЙ СПИСОК ПОЛЕЙ (единый источник правды) ===
-        columns = [
-            "user_id", "username", "balance", "blunts", "guild", "last_farm",
-            "last_ritual", "last_daily", "titles", "last_farm_date", "passive_level",
-            "passive_collected", "karma", "inhaled", "smoke_count", "farm_count",
-            "craft_count", "ritual_count", "referral_count", "last_berserk",
-            "inventory", "invited_by", "profile_skins", "login_streak",
-            "last_login_date", "oath", "keys", "check_count", "m_essence",
-            "lab_chests", "lab_deaths", "alchemy_count", "last_lab_attempt",
-            "donated", "pending_transfer", "lab_depth", "pet", "pet_name", "exists",
-        ]
-    
-        # === JSON-ПОЛЯ (нужна явная сериализация) ===
-        json_columns = ["inventory", "profile_skins", "pending_transfer"]
-    
-        # === ДИНАМИЧЕСКАЯ ГЕНЕРАЦИЯ SQL ===
-        cols_sql = ", ".join(f'"{c}"' for c in columns)
-        placeholders = ", ".join(f"${i+1}" for i in range(len(columns)))
-        update_set = ", ".join(
-            f'"{c}" = EXCLUDED."{c}"' for c in columns if c != "user_id"
-        )
-    
-        # === ЗНАЧЕНИЯ В ТОМ ЖЕ ПОРЯДКЕ ===
-        values = [getattr(player, col) for col in columns]
-        for col in json_columns:
-            idx = columns.index(col)
-            values[idx] = json.dumps(getattr(player, col), default=str)
-    
-        sql = f"""
-            INSERT INTO players ({cols_sql})
-            VALUES ({placeholders})
-            ON CONFLICT (user_id) DO UPDATE SET
-                {update_set}
-        """
-    
-        async def _write(c):
-            await c.execute(sql, *values)
-    
-        # === ЗАПИСЬ В БД ===
-        if conn is not None:
-            await _write(conn)
-        else:
-            async with db_pool.acquire() as new_conn:
-                try:
-                    await new_conn.set_statement_timeout(15.0)
-                except Exception as e:
-                    logger.debug("Не удалось установить statement_timeout: %s", e)
-                await _write(new_conn)
-    
-        # === ОБНОВЛЕНИЕ КЭША ИГРОКА ===
-        try:
-            if redis:
-                await redis.setex(
-                    f"player:{player.user_id}", 10, player.model_dump_json()
-                )
-            else:
-                player_cache[player.user_id] = player.model_dump()
-        except Exception as e:
-            logger.warning("Не удалось обновить кэш игрока %d: %s", player.user_id, e)
-            player_cache.pop(player.user_id, None)
-    
-        # === ИНВАЛИДАЦИЯ КЭША МЕНЮ ===
-        try:
-            invalidate_menu_cache(player.user_id)
-        except Exception as e:
-            logger.debug(
-                "Инвалидация кэша меню для %d не удалась: %s", player.user_id, e
-            )
-    
-        logger.info("Игрок %d успешно сохранён", player.user_id)
-    
-    @staticmethod
-    @db_retry()
-    async def atomic_update(user_id: int, update_func):
-        """Атомарно блокирует игрока, выполняет update_func, сохраняет модель."""
-        if not user_id or user_id <= 0:
-            raise ValueError("Некорректный user_id при атомарном обновлении")
-    
-        async with db_pool.acquire() as conn:
-            try:
-                await conn.set_statement_timeout(15.0)
-            except Exception as e:
-                logger.debug("Не удалось установить statement_timeout для atomic_update: %s", e)
-    
-            async with conn.transaction():
-                columns = [
-                    "user_id", "username", "balance", "blunts", "guild", "last_farm",
-                    "last_ritual", "last_daily", "titles", "last_farm_date", "passive_level",
-                    "passive_collected", "karma", "inhaled", "smoke_count", "farm_count",
-                    "craft_count", "ritual_count", "referral_count", "last_berserk",
-                    "inventory", "invited_by", "profile_skins", "login_streak",
-                    "last_login_date", "oath", "keys", "check_count", "m_essence",
-                    "lab_chests", "lab_deaths", "alchemy_count", "last_lab_attempt",
-                    "donated", "pending_transfer", "lab_depth", "pet", "pet_name", "exists",
-                ]
-                cols_sql = ", ".join(f'"{c}"' for c in columns)
-                row = await conn.fetchrow(
-                    f"SELECT {cols_sql} FROM players WHERE user_id = $1 FOR UPDATE",
-                    user_id
-                )
-                if not row:
-                    logger.warning("atomic_update: игрок %d не найден", user_id)
-                    return None
-    
-                p = dict(row)
-                p["inventory"] = _json_safe_load(p.get("inventory"), [])
-                p["profile_skins"] = _json_safe_load(p.get("profile_skins"), {})
-                p["pending_transfer"] = _json_safe_load(p.get("pending_transfer"), None)   # ← default=None
-                player = Player(**p)
-    
-                logger.debug("Начало атомарного обновления для игрока %d", user_id)
-                result = await update_func(player, conn)
-    
-                await PlayerRepository.save(player, conn=conn)
-                logger.info("Атомарное обновление для игрока %d успешно завершено", user_id)
-                return result
-
-@staticmethod
 async def claim_daily(user_id: int, today: date, streak: int, reward_oac: int,
-                      title: Optional[str], inventory_items: dict) -> bool:
-    """
-    Атомарно начисляет ежедневную награду.
-    Возвращает True, если награда начислена, False – если сегодня уже заходил.
-    """
-    async with db_pool.acquire() as conn:
-        async with conn.transaction():
-            row = await conn.fetchrow(
-                "SELECT * FROM players WHERE user_id = $1 FOR UPDATE", user_id
-            )
-            if not row:
-                return False
-            p = dict(row)
-            p["inventory"] = _json_safe_load(p.get("inventory"), [])
-            p["profile_skins"] = _json_safe_load(p.get("profile_skins"), {})
-            player = Player(**p)
+                      title: Optional[str], inventory_items: dict, ctx: AppContext) -> bool:
+    """Атомарно начисляет ежедневную награду (использует AppContext)."""
+    async def _apply(p, conn):
+        if p.last_login_date == today:
+            return False
+        p.balance = (p.balance or 0) + reward_oac
+        p.login_streak = streak
+        p.last_login_date = today
+        if title:
+            cur = (p.titles or "").strip()
+            if title not in cur:
+                p.titles = f"{cur} {title}".strip()
+        for field, amount in inventory_items.items():
+            if hasattr(p, field):
+                setattr(p, field, (getattr(p, field) or 0) + amount)
+        return True
+    return await ctx.repo.atomic_update(user_id, _apply)
 
-            if player.last_login_date == today:
-                return False
-
-            player.balance = (player.balance or 0) + reward_oac
-            player.login_streak = streak
-            player.last_login_date = today
-
-            if title:
-                current = (player.titles or "").strip()
-                if title not in current:
-                    player.titles = f"{current} {title}".strip()
-
-            for field, amount in inventory_items.items():
-                if hasattr(player, field):
-                    setattr(player, field, (getattr(player, field) or 0) + amount)
-
-            await PlayerRepository.save(player, conn=conn)
-            return True
-
-@db_retry()
-async def create_named_blunt(user_id, name, rarity=None, conn=None):
+async def create_named_blunt(user_id: int, name: str, rarity: str = None, conn=None, ctx: AppContext = None) -> dict:
+    """Создаёт именной блант (использует репозиторий из ctx)."""
+    if ctx is None:
+        raise ValueError("AppContext is required")
+    
     if rarity not in ("common", "rare", "epic", "legendary"):
         r = random.random()
         if r < 0.02: rarity = "legendary"
         elif r < 0.15: rarity = "epic"
         elif r < 0.45: rarity = "rare"
         else: rarity = "common"
-
+    
     clean_name = str(name or "").strip()[:25] or "Безымянный"
     reaction = random.choice(FUNNY_REACTIONS)
     blunt_id = f"blunt_{user_id}_{int(datetime.utcnow().timestamp())}_{random.randint(1000,9999)}"
     hash_code = "0x" + hashlib.sha256((blunt_id + ":hash").encode()).hexdigest()[:16]
     rare_number = f"{rarity[0].upper()}-{random.randint(1000,9999)}"
-
+    
     item = {
-        "id": blunt_id,
-        "type": "named",
-        "name": clean_name,
-        "rarity": rarity,
-        "serial": None,
-        "rare_number": rare_number,
-        "hash": hash_code,
-        "reaction": reaction,
-        "created_at": datetime.utcnow().isoformat(),
+        "id": blunt_id, "type": "named", "name": clean_name, "rarity": rarity,
+        "serial": None, "rare_number": rare_number, "hash": hash_code,
+        "reaction": reaction, "created_at": datetime.utcnow().isoformat(),
         "owner_history": [{"user_id": str(user_id), "since": datetime.utcnow().isoformat()}],
     }
-
-    # Загружаем игрока с проверкой существования
-    player = await PlayerRepository.get_by_id(user_id)
+    
+    player = await ctx.repo.get_by_id(user_id)
     if not player or not player.exists:
-        logger.warning("Попытка создать блант для несуществующего игрока %d", user_id)
-        player = Player(user_id=user_id)  # создаём пустышку, save сам поставит exists=True
-
+        player = Player(user_id=user_id)
+    
     player.inventory = _json_safe_load(player.inventory, [])
     player.inventory.append(item)
-
-    # Если соединение не передано, откроем новое с таймаутом
-    if conn is None:
-        async with db_pool.acquire() as new_conn:
-            try:
-                await new_conn.set_statement_timeout(10.0)
-            except Exception as e:
-                logger.debug("Не удалось установить statement_timeout для создания бланта: %s", e)
-            await PlayerRepository.save(player, conn=new_conn)
-    else:
-        await PlayerRepository.save(player, conn=conn)
-
+    await ctx.repo.save(player, conn=conn)
     logger.info("Создан именной блант '%s' для игрока %d", clean_name, user_id)
     return item
 
-async def _award_achievement_rewards(user_id, player, reward_text, context):
-    """
-    Выдаёт награды за достижения, работая напрямую с моделью Player.
-    player – это уже объект Player (не словарь), но для обратной совместимости
-    поддерживается и старый вызов со словарём (тогда преобразуем).
-    """
+async def _award_achievement_rewards(user_id: int, player: Player, reward_text: str, context, ctx: AppContext) -> None:
+    """Выдаёт награды за достижения (использует репозиторий из ctx)."""
     if not reward_text:
         return
-
-    # Универсально получаем модель Player (если передали словарь – загружаем)
+    
     if isinstance(player, dict):
-        player = await PlayerRepository.get_by_id(user_id)
+        player = await ctx.repo.get_by_id(user_id)
     if not player or not player.user_id:
         return
-
+    
     parts = [p.strip() for p in reward_text.split(",") if p.strip()]
     for part in parts:
         if part.startswith("+") and "OAC" in part:
             clean = part.replace(" ", "")
             m = re.search(r"\+(\d+)", clean)
             if m:
-                amount = int(m.group(1))
-                player.balance = (player.balance or 0) + amount
-
+                player.balance = (player.balance or 0) + int(m.group(1))
         elif part.startswith("Титул "):
             title = part.replace("Титул ", "").strip()
             if title:
@@ -1220,113 +1009,115 @@ async def _award_achievement_rewards(user_id, player, reward_text, context):
                 if title not in titles:
                     titles.append(title)
                     player.titles = " ".join(titles).strip()
-
         elif part.startswith("Фон "):
             bg = part.replace("Фон ", "").strip()
             skins = player.profile_skins or {}
-            if not isinstance(skins, dict):
-                skins = {}
+            if not isinstance(skins, dict): skins = {}
             unlocked = skins.get("unlocked_backgrounds", [])
-            if bg and bg not in unlocked:
-                unlocked.append(bg)
+            if bg and bg not in unlocked: unlocked.append(bg)
             skins["unlocked_backgrounds"] = unlocked
             player.profile_skins = skins
-
         elif part.startswith("Рамка "):
             frame = part.replace("Рамка ", "").strip()
             skins = player.profile_skins or {}
-            if not isinstance(skins, dict):
-                skins = {}
+            if not isinstance(skins, dict): skins = {}
             unlocked = skins.get("unlocked_frames", [])
-            if frame and frame not in unlocked:
-                unlocked.append(frame)
+            if frame and frame not in unlocked: unlocked.append(frame)
             skins["unlocked_frames"] = unlocked
             player.profile_skins = skins
-
         else:
             logger.warning(f"Неизвестный формат награды: {part} для пользователя {user_id}")
-
-    # Сохраняем все изменения разом
-    await PlayerRepository.save(player)
-
-async def check_achievements(user_id, context):
-    player = await PlayerRepository.get_by_id(user_id)
+    
+    await ctx.repo.save(player)
+    
+async def check_achievements(user_id: int, context, ctx: AppContext = None) -> None:
+    """Проверяет и выдаёт достижения (использует репозиторий из ctx)."""
+    if ctx is None:
+        ctx = context.application.bot_data.get("ctx")
+    if not ctx:
+        return
+    
+    player = await ctx.repo.get_by_id(user_id)
     if not player or not player.user_id:
         return
-
-    # Кэш полученных ачивок
+    
     awarded_key = f"ach:{user_id}"
     awarded = set()
-    if redis:
-        cached = await redis.get(awarded_key)
-        if cached:
-            awarded = set(json.loads(cached))
-
+    if ctx.redis:
+        try:
+            cached = await redis_breaker.call(ctx.redis.get, awarded_key)
+            if cached:
+                awarded = set(json.loads(cached))
+        except pybreaker.CircuitBreakerError:
+            pass
+    
     if not awarded:
-        async with db_pool.acquire() as conn:
+        async with ctx.db_pool.acquire() as conn:
             rows = await conn.fetch("SELECT ach_id FROM achievements_awarded WHERE user_id=$1", user_id)
             awarded = {r["ach_id"] for r in rows}
-            if redis:
-                await redis.setex(awarded_key, 60, json.dumps(list(awarded)))
-
-    async with db_pool.acquire() as conn:
-        for ach in ACHIEVEMENTS:
-            ach_id = ach["id"]
-            if ach_id == "lunar_lord":
-                continue
-
-            condition_met = False
-            if ach_id in ACHIEVEMENT_CONDITIONS:
-                field, threshold = ACHIEVEMENT_CONDITIONS[ach_id]
-                if getattr(player, field, 0) >= threshold:
-                    condition_met = True
-
-            if condition_met and ach_id not in awarded:
+            if ctx.redis:
+                try:
+                    await redis_breaker.call(ctx.redis.setex, awarded_key, 60, json.dumps(list(awarded)))
+                except pybreaker.CircuitBreakerError:
+                    pass
+    
+    messages_to_send = []
+    async with ctx.db_pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("LOCK TABLE achievements_awarded IN EXCLUSIVE MODE")
+            rows = await conn.fetch("SELECT ach_id FROM achievements_awarded WHERE user_id=$1", user_id)
+            current_awarded = {r["ach_id"] for r in rows}
+    
+            for ach in ACHIEVEMENTS:
+                ach_id = ach["id"]
+                if ach_id == "lunar_lord":
+                    continue
+                cond = ACHIEVEMENT_CONDITIONS.get(ach_id)
+                if cond and ach_id not in current_awarded:
+                    field, threshold = cond
+                    if getattr(player, field, 0) >= threshold:
+                        await conn.execute(
+                            "INSERT INTO achievements_awarded(user_id, ach_id, awarded_at) VALUES($1, $2, NOW()) ON CONFLICT DO NOTHING",
+                            user_id, ach_id
+                        )
+                        await _award_achievement_rewards(user_id, player, ach.get("reward", ""), context, ctx)
+                        current_awarded.add(ach_id)
+                        messages_to_send.append(
+                            f"<b>🕊️ СВИТОК ДОСТИЖЕНИЙ 🏆</b>\n\n"
+                            f"<b>🎉 Достижение разблокировано!</b>\n\n"
+                            f"<i>{ach['emoji']} «{ach['name']}» {ach['emoji']}</i>\n\n"
+                            f"<b>📜 Запись добавлена! 💎</b>"
+                        )
+    
+            # lunar_lord
+            rows2 = await conn.fetch("SELECT ach_id FROM achievements_awarded WHERE user_id=$1", user_id)
+            awarded_ids = {r["ach_id"] for r in rows2}
+            all_other = {a["id"] for a in ACHIEVEMENTS if a["id"] != "lunar_lord"}
+            if "lunar_lord" not in awarded_ids and all_other.issubset(awarded_ids):
+                lunar = ACHIEVEMENTS_DICT["lunar_lord"]
                 await conn.execute(
                     "INSERT INTO achievements_awarded(user_id, ach_id, awarded_at) VALUES($1, $2, NOW()) ON CONFLICT DO NOTHING",
-                    user_id, ach_id
+                    user_id, "lunar_lord"
                 )
-                # Награду адаптируем – используем player.username из модели
-                await _award_achievement_rewards(user_id, {"username": player.username, "profile_skins": player.profile_skins, "balance": player.balance}, ach.get("reward", ""), context)
-                try:
-                    text = (
-                        f"<b>🕊️ СВИТОК ДОСТИЖЕНИЙ 🏆</b>\n\n"
-                        f"<b>🎉 Достижение разблокировано!</b>\n\n"
-                        f"<i>{ach['emoji']} «{ach['name']}» {ach['emoji']}</i>\n\n"
-                        f"<b>📜 Запись добавлена! 💎</b>"
-                    )
-                    await context.bot.send_message(chat_id=user_id, text=text, parse_mode='HTML')
-                except Exception as e:
-                    logger.error(f"Achievement notify error: {e}")
-
-                # Сбрасываем кэш, потому что список изменился
-                if redis:
-                    await redis.delete(awarded_key)
-                awarded.add(ach_id)
-
-        # lunar_lord отдельно
-        rows2 = await conn.fetch("SELECT ach_id FROM achievements_awarded WHERE user_id=$1", user_id)
-        awarded_ids = {r["ach_id"] for r in rows2}
-        all_other_ids = {a["id"] for a in ACHIEVEMENTS if a["id"] != "lunar_lord"}
-        if "lunar_lord" not in awarded_ids and all_other_ids.issubset(awarded_ids):
-            lunar = ACHIEVEMENTS_DICT["lunar_lord"]
-            await conn.execute(
-                "INSERT INTO achievements_awarded(user_id, ach_id, awarded_at) VALUES($1, $2, NOW()) ON CONFLICT DO NOTHING",
-                user_id, "lunar_lord"
-            )
-            await _award_achievement_rewards(user_id, {"username": player.username, "profile_skins": player.profile_skins, "balance": player.balance}, lunar.get("reward", ""), context)
-            try:
-                text = (
+                await _award_achievement_rewards(user_id, player, lunar.get("reward", ""), context, ctx)
+                messages_to_send.append(
                     f"<b>🕊️ СВИТОК ДОСТИЖЕНИЙ 🏆</b>\n\n"
                     f"<b>🎉 Достижение разблокировано!</b>\n\n"
                     f"<i>{lunar['emoji']} «{lunar['name']}» {lunar['emoji']}</i>\n\n"
                     f"<b>📜 Запись добавлена! 💎</b>"
                 )
-                await context.bot.send_message(chat_id=user_id, text=text, parse_mode='HTML')
-            except Exception as e:
-                logger.error(f"Achievement notify error (lunar): {e}")
-            if redis:
-                await redis.delete(awarded_key)
+    
+            if ctx.redis:
+                try:
+                    await redis_breaker.call(ctx.redis.delete, awarded_key)
+                except pybreaker.CircuitBreakerError:
+                    pass
+    
+    for msg in messages_to_send:
+        try:
+            await context.bot.send_message(chat_id=user_id, text=msg, parse_mode='HTML')
+        except Exception as e:
+            logger.error(f"Achievement notify error: {e}")
                 
 async def check_rank_up(context, user_id, username, old_balance, new_balance):
     old_idx = 0
@@ -1823,35 +1614,87 @@ async def create_tables(conn):
     """)
 
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
-@db_retry()
-async def get_top(limit=10):
-    async with db_pool.acquire() as conn:
-        rows = await conn.fetch(
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5))
+async def get_top(limit: int = 10, ctx: AppContext = None) -> list[dict]:
+    """Возвращает топ игроков с кэшированием (через AppContext)."""
+    if ctx is None:
+        return []  # или загрузить из глобального db_pool, если контекст недоступен
+
+    cache_key = f"top:{limit}"
+    # Проверяем кэш (если Redis доступен)
+    if ctx.redis:
+        try:
+            cached = await redis_breaker.call(ctx.redis.get, cache_key)
+            if cached:
+                return json.loads(cached)
+        except pybreaker.CircuitBreakerError:
+            pass
+
+    # Основной запрос
+    async with ctx.db_pool.acquire() as conn:
+        rows = await db_breaker.call(
+            conn.fetch,
             "SELECT user_id, username, balance, guild FROM players ORDER BY balance DESC LIMIT $1",
             limit
         )
-    return [dict(row) for row in rows]
+    result = [dict(row) for row in rows]
 
-@db_retry()
-async def count_guilds():
-    async with db_pool.acquire() as conn:
-        rows = await conn.fetch("SELECT guild, COUNT(*) as cnt FROM players WHERE guild IS NOT NULL GROUP BY guild")
-    cnt = {"BLACK":0, "WHITE":0}
+    # Кэшируем на 60 секунд
+    if ctx.redis:
+        try:
+            await redis_breaker.call(ctx.redis.setex, cache_key, 60, json.dumps(result, default=str))
+        except pybreaker.CircuitBreakerError:
+            pass
+
+    return result
+
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5))
+async def count_guilds(ctx: AppContext = None) -> dict:
+    """Возвращает количество игроков в гильдиях (с кэшем на 5 минут)."""
+    if ctx is None:
+        return {"BLACK": 0, "WHITE": 0}
+
+    cache_key = "guild_counts"
+    if ctx.redis:
+        try:
+            cached = await redis_breaker.call(ctx.redis.get, cache_key)
+            if cached:
+                return json.loads(cached)
+        except pybreaker.CircuitBreakerError:
+            pass
+
+    async with ctx.db_pool.acquire() as conn:
+        rows = await db_breaker.call(
+            conn.fetch,
+            "SELECT guild, COUNT(*) as cnt FROM players WHERE guild IS NOT NULL GROUP BY guild"
+        )
+    cnt = {"BLACK": 0, "WHITE": 0}
     for r in rows:
         if r["guild"] in cnt:
             cnt[r["guild"]] = r["cnt"]
+
+    if ctx.redis:
+        try:
+            await redis_breaker.call(ctx.redis.setex, cache_key, 300, json.dumps(cnt))
+        except pybreaker.CircuitBreakerError:
+            pass
+
     return cnt
    
-async def get_setting(key: str, default: str = "") -> str:
-    async with db_pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT value FROM bot_settings WHERE key=$1", key)
+async def get_setting(key: str, default: str = "", ctx: AppContext = None) -> str:
+    if ctx is None:
+        return default
+    async with ctx.db_pool.acquire() as conn:
+        row = await db_breaker.call(conn.fetchrow, "SELECT value FROM bot_settings WHERE key=$1", key)
         return row["value"] if row else default
 
-async def set_setting(key: str, value: str) -> None:
-    async with db_pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO bot_settings (key, value) VALUES ($1, $2) "
-            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+async def set_setting(key: str, value: str, ctx: AppContext = None) -> None:
+    if ctx is None:
+        return
+    async with ctx.db_pool.acquire() as conn:
+        await db_breaker.call(
+            conn.execute,
+            "INSERT INTO bot_settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
             key, value
         )
 
