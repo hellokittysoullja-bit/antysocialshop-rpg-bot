@@ -6251,18 +6251,27 @@ async def keep_db_alive(context: ContextTypes.DEFAULT_TYPE):
 # ИНИЦИАЛИЗАЦИЯ И ЗАПУСК
 # ============================================================
 async def load_blunt_images(ctx: AppContext):
-    """Загружает изображения из настроек (через ctx)."""
+    """Загружает file_id изображений из БД или Redis."""
+    if not ctx.redis:
+        logger.warning("Redis not available, blunt images will not be cached")
+        return
+
     for rarity in ("common", "rare", "epic", "legendary"):
-        file_id = await get_setting(f"blunt_image_{rarity}", ctx=ctx)
-        if file_id:
-            BLUNT_IMAGES[rarity] = file_id
-    logger.info("Blunt images loaded")
+        cached = await redis_breaker.call(ctx.redis.get, f"blunt_image:{rarity}")
+        if cached:
+            BLUNT_IMAGES[rarity] = cached
+            continue
+
+        saved = await get_setting(f"blunt_image_{rarity}", ctx=ctx)
+        if saved:
+            BLUNT_IMAGES[rarity] = saved
+            await redis_breaker.call(ctx.redis.setex, f"blunt_image:{rarity}", 86400, saved)
 
 async def on_startup(app: Application):
     """Инициализация всех сервисов и контекста (уровень 4-5)."""
     logger.info("Starting bot initialization...")
 
-    # --- База данных ---
+    # 1. База данных
     pool = None
     try:
         pool = await asyncpg.create_pool(
@@ -6273,38 +6282,35 @@ async def on_startup(app: Application):
         logger.info("Database pool created")
     except Exception as e:
         logger.critical("Failed to create database pool: %s", e)
-        # Сообщаем в бота, чтобы healthcheck мог вернуть 503
         app.bot_data["db_error"] = str(e)
-        return   # <-- просто выходим, healthcheck будет отдавать 503
+        return
 
-    # --- Redis ---
+    # 2. Redis (опционально)
     redis_client = None
-    try:
-        if hasattr(settings, 'redis_url') and settings.redis_url:
+    if settings.redis_url:
+        try:
             redis_client = await aioredis.from_url(settings.redis_url)
             logger.info("Redis connected")
-    except Exception as e:
-        logger.warning("Redis not available: %s. Continuing without it.", e)
+        except Exception as e:
+            logger.warning("Redis unavailable: %s", e)
 
-    # --- In-memory cache ---
+    # 3. In‑memory cache
     cache = TTLCache(maxsize=2000, ttl=600)
 
-    # --- Repository ---
+    # 4. Репозиторий
     repo = PlayerRepository(pool, redis_client, cache)
 
-    # --- Services ---
+    # 5. Сервисы
     war_config = WarConfig()
     war_settings = WarSettings()
     war_service = GuildWarService(pool, redis_client, war_config, war_settings)
 
-    pet_config = {
-        "dog": {"name": "🐕 Песик", "price": 3000, "max_name_len": 15}
-    }
+    pet_config = {"dog": {"name": "🐕 Песик", "price": 3000, "max_name_len": 15}}
     pet_service = PetService(repo, pet_config)
 
     achievement_service = AchievementService(pool, redis_client, repo)
 
-    # --- Application Context ---
+    # 6. Контекст приложения
     ctx = AppContext(
         db_pool=pool,
         redis_client=redis_client,
@@ -6317,27 +6323,32 @@ async def on_startup(app: Application):
     )
     app.bot_data["ctx"] = ctx
 
-    # --- Загрузка изображений блантов (исправлено: передаём ctx) ---
+    # 7. Загрузка изображений
     try:
         await load_blunt_images(ctx)
     except Exception as e:
         logger.error("Failed to load blunt images: %s", e)
 
-    # --- Sentry ---
+    # 8. Sentry
     if settings.sentry_dsn:
         try:
             import sentry_sdk
-            sentry_sdk.init(
-                dsn=settings.sentry_dsn,
-                traces_sample_rate=1.0,
-                environment=settings.environment
-            )
-            logger.info("Sentry activated")
+            sentry_sdk.init(dsn=settings.sentry_dsn, traces_sample_rate=1.0, environment=settings.environment)
+            logger.info("✅ Sentry activated")
         except Exception as e:
             logger.error("Sentry init failed: %s", e)
 
-    # Healthcheck и метрики теперь будут в main(), здесь не нужны
-    logger.info("🚀 Services ready (Level 4-5 Core)")
+    # 9. Prometheus (опционально)
+    try:
+        from prometheus_client import generate_latest
+        async def metrics_handler(request):
+            return web.Response(body=generate_latest(), content_type='text/plain')
+        # Маршрут /metrics будет доступен, если ты передашь это приложение в main()
+        # app._app.router.add_get('/metrics', metrics_handler)
+    except ImportError:
+        pass
+
+    logger.info("🚀 Bot ready (Level 4-5 Core)")
 
     async def healthcheck_handler(request):
         return web.Response(text="OK")
@@ -6380,59 +6391,130 @@ async def setup_webhook(app: Application):
     logger.info("Вебхук установлен на %s", settings.webhook_url)
 
 def main():
+    # 1. Ускоряем event loop
     try:
+        import uvloop
         uvloop.install()
     except Exception:
         pass
 
-    if not settings.bot_token or not settings.database_url or not settings.render_url:
-        raise RuntimeError("Не все переменные окружения заданы")
+    if not settings.bot_token or not settings.database_url:
+        raise RuntimeError("BOT_TOKEN and DATABASE_URL must be set")
 
-    # Создаём свой aiohttp-сервер для healthcheck и метрик
+    # 2. HTTP‑клиент с пулом
+    request = HTTPXRequest(connection_pool_size=50, read_timeout=10, write_timeout=10)
+
+    # 3. Приложение Telegram
+    tg_app = (Application.builder()
+              .token(settings.bot_token)
+              .request(request)
+              .rate_limiter(AIORateLimiter())
+              .post_init(on_startup)
+              .post_shutdown(on_shutdown)
+              .build())
+
+    # 4. Регистрируем обработчики
+    tg_app.add_handler(MessageHandler(filters.PHOTO, get_file_id))
+    tg_app.add_handler(MessageHandler(filters.COMMAND, handle_command))
+    tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_chat_shortcut))
+    tg_app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_member))
+    tg_app.add_handler(CallbackQueryHandler(button_handler))
+    tg_app.add_error_handler(global_error_handler)
+
+    # 5. Инициализация и вебхук (с ретраями)
+    async def init_bot():
+        await tg_app.initialize()
+        for attempt in range(5):
+            try:
+                await tg_app.bot.delete_webhook(drop_pending_updates=True)
+                await tg_app.bot.set_webhook(
+                    url=settings.webhook_url,
+                    allowed_updates=["message", "callback_query"],
+                    secret_token=settings.webhook_secret,
+                )
+                logger.info("Webhook set to %s", settings.webhook_url)
+                return
+            except Exception as e:
+                logger.warning("Webhook attempt %d failed: %s", attempt + 1, e)
+                await asyncio.sleep(2 ** attempt)
+        raise RuntimeError("Could not set webhook after 5 attempts")
+
+    asyncio.run(init_bot())
+
+    # 6. Свой aiohttp‑сервер с защитой от потерь
     from aiohttp import web
-    web_app = web.Application()
+
+    # Счётчики для мониторинга (можно заменить на Prometheus, если нужно)
+    webhook_timeouts = 0
+    webhook_errors = 0
+
+    async def handle_webhook(request):
+        nonlocal webhook_timeouts, webhook_errors
+
+        # Проверяем секретный токен
+        if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != settings.webhook_secret:
+            raise web.HTTPForbidden()
+
+        try:
+            data = await request.json()
+            update = Update.de_json(data, tg_app.bot)
+
+            # ★ Главное изменение: ждём обработку с таймаутом ★
+            await asyncio.wait_for(
+                tg_app.process_update(update),
+                timeout=25.0
+            )
+            # Всё хорошо → отвечаем 200
+            return web.Response(text="OK")
+
+        except asyncio.TimeoutError:
+            # Обработка зависла – пусть Telegram повторит
+            webhook_timeouts += 1
+            logger.error("Webhook timeout after 25s – returning 503")
+            return web.Response(text="Service Unavailable", status=503)
+
+        except Exception as e:
+            # Любая ошибка в хендлере – тоже возвращаем 503
+            webhook_errors += 1
+            logger.error("Webhook processing error: %s – returning 503", e)
+            return web.Response(text="Service Unavailable", status=503)
 
     async def healthcheck(request):
         return web.Response(text="OK")
 
-    web_app.router.add_get('/healthz', healthcheck)
+    # Добавляем маршрут для статистики (удобно для отладки)
+    async def stats_handler(request):
+        return web.json_response({
+            "timeouts": webhook_timeouts,
+            "errors": webhook_errors,
+        })
 
-    # Если prometheus доступен, добавляем метрики
-    try:
-        from prometheus_client import generate_latest
-        async def metrics_handler(request):
-            return web.Response(body=generate_latest(), content_type='text/plain')
-        web_app.router.add_get('/metrics', metrics_handler)
-    except ImportError:
-        pass
+    app = web.Application()
+    app.router.add_post(settings.webhook_path, handle_webhook)
+    app.router.add_get("/healthz", healthcheck)
+    app.router.add_get("/stats", stats_handler)
 
-    request = HTTPXRequest(connection_pool_size=50, read_timeout=10, write_timeout=10)
-    app = (Application.builder()
-           .token(settings.bot_token)
-           .request(request)
-           .rate_limiter(AIORateLimiter())
-           .post_init(on_startup)
-           .post_shutdown(on_shutdown)
-           .build())
+    # 7. Graceful shutdown с удалением вебхука
+    async def on_shutdown_webhook(app):
+        logger.info("Shutting down, deleting webhook...")
+        try:
+            await tg_app.bot.delete_webhook(drop_pending_updates=False)
+        except Exception as e:
+            logger.error("Failed to delete webhook: %s", e)
+        try:
+            await tg_app.shutdown()
+        except Exception as e:
+            logger.error("Error during tg_app shutdown: %s", e)
 
-    # Регистрируем хендлеры
-    app.add_handler(MessageHandler(filters.PHOTO, get_file_id))
-    app.add_handler(MessageHandler(filters.COMMAND, handle_command))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_chat_shortcut))
-    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_member))
-    app.add_handler(CallbackQueryHandler(button_handler))
-    app.add_error_handler(global_error_handler)
+    app.on_shutdown.append(on_shutdown_webhook)
 
-    # Запускаем вебхук с нашим web_app
-    app.run_webhook(
-        listen="0.0.0.0",
+    # 8. Запуск
+    web.run_app(
+        app,
+        host="0.0.0.0",
         port=settings.port,
-        url_path=settings.webhook_path,
-        webhook_url=settings.webhook_url,
-        secret_token=settings.webhook_secret,
-        allowed_updates=["message", "callback_query"],
-        web_app=web_app,   
+        access_log=None,
+        handle_signals=True,
+        reuse_port=True,
+        tcp_nodelay=True,
     )
-
-if __name__ == "__main__":
-    main()
