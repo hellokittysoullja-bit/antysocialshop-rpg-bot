@@ -22,7 +22,7 @@ from telegram.error import BadRequest, Forbidden, RetryAfter
 from telegram.request import HTTPXRequest
 
 import redis.asyncio as aioredis
-import functools
+from functools import wraps
 
 # ─────────────────────────────────────────────────────────────
 # СВЕРХНАДЁЖНОЕ ЛОГИРОВАНИЕ (SENIOR-УРОВЕНЬ)
