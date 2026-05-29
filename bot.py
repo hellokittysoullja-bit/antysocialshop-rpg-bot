@@ -28,8 +28,6 @@ import pybreaker
 from cachetools import TTLCache
 from prometheus_client import Counter, Histogram
 
-from aiohttp import web
-
 # ─────────────────────────────────────────────────────────────
 # СВЕРХНАДЁЖНОЕ ЛОГИРОВАНИЕ (SENIOR-УРОВЕНЬ)
 # ─────────────────────────────────────────────────────────────
@@ -6297,7 +6295,8 @@ async def on_startup(app: Application):
 
     # --- Services ---
     war_config = WarConfig()
-    war_service = GuildWarService(pool, redis_client, war_config, settings)
+    war_settings = WarSettings()
+    war_service = GuildWarService(pool, redis_client, war_config, war_settings)
 
     # Pet config теперь может быть отдельным словарём, а не полем settings
     pet_config = {
