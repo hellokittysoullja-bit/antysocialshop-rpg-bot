@@ -1855,20 +1855,20 @@ async def process_daily_login(user_id: int, context) -> None:
 MAIN_MENU_COOLDOWNS = {
     "farm": {
         "text": "🍬 Фармить",
-        "cooldown_hours": FARM_COOLDOWN_HOURS,
+        "cooldown_hours": settings.farm_cooldown_hours,   # ← раньше было FARM_COOLDOWN_HOURS
         "last_attr": "last_farm",
         "format": "min",
     },
     "ritual": {
         "text": "🕯️ Ритуал",
-        "cooldown_hours": 24,
+        "cooldown_hours": settings.ritual_cooldown_hours, # ← было 24
         "last_attr": "last_ritual",
         "format": "hrs",
-        "guild_only": "BLACK",        # <-- убрать, если нужна всем
+        "guild_only": "BLACK",
     },
     "lab": {
         "text": "🏛️ Лабиринт",
-        "cooldown_hours": 12,
+        "cooldown_hours": settings.lab_cooldown_hours,    # ← было 12
         "last_attr": "last_lab_attempt",
         "format": "full",
     },
