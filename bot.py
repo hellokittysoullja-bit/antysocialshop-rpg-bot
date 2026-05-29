@@ -1982,8 +1982,8 @@ async def get_main_menu_keyboard(user_id):
     )
     pet_btn = (
         InlineKeyboardButton("🐾 Питомец", callback_data="pet_preview")
-        if balance >= 5000
-        else InlineKeyboardButton("🐾 Питомец 🔒", callback_data="pet_preview")
+        if has_rank(balance, "Ветеран")
+        else InlineKeyboardButton("🐾 Питомец 🔒", callback_data="pet_locked")
     )
 
     # ── Сборка клавиатуры ──
@@ -5281,8 +5281,10 @@ async def handle_pet_name(update, context):
         await update.message.reply_text(f"Отлично! Теперь твоего питомца зовут «{name}»! 🐕")
     context.user_data.pop('awaiting_pet_name', None)
 
+# Обработчик заблокированной кнопки (показывает всплывашку)
 @safe_callback
 async def pet_locked_handler(update, context):
+    """Показывает всплывающее окно, если ранг ниже Ветерана."""
     query = update.callback_query
     await query.answer("❌ Доступно с ранга ⚔️ Ветеран (5000 OAC 🍬)", show_alert=True)
 
