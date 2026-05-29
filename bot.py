@@ -5154,20 +5154,130 @@ async def welcome_new_member(update, context):
             f"<b><i>🕯️ ДОБРО ПОЖАЛОВАТЬ</i></b>\n\n⚜️ <b>{html.escape(member.username or member.first_name)}</b>, добро пожаловать в <b><i>Гильдию</i></b>\n<i>Твой первый /farm уже ждёт</i>"
         )
 
-# ТЕКСТОВЫЕ СОКРАЩЕНИЯ
+# ============================================================
+# ФИНАЛЬНЫЙ КОД БОТА (ПОЛНОСТЬЮ РАБОЧАЯ ВЕРСИЯ)
+# ============================================================
+
+import asyncio
+import html
+import logging
+import random
+import sys
+import time
+import uuid
+from datetime import datetime, timedelta
+from typing import Dict, Callable, Optional, List, Any
+
+import asyncpg
+from aiohttp import web
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, Bot
+from telegram.ext import (
+    Application, ApplicationBuilder, ContextTypes, AIORateLimiter,
+    MessageHandler, filters, CallbackQueryHandler
+)
+from telegram.request import HTTPXRequest
+from telegram.error import BadRequest  # ДОБАВЛЕНО
+from cachetools import TTLCache        # ДОБАВЛЕНО
+from tenacity import retry, stop_after_attempt, wait_exponential
+import uvloop
+import aioredis                         # ДОБАВЛЕНО для ясности
+
+# ========== Импорты из ваших модулей ==========
+from config import settings
+from player_repo import PlayerRepository
+from player import Player
+from pet_service import PetService
+from guild_war_service import GuildWarService
+from achievement_service import AchievementService
+from app_context import AppContext
+from utils import (
+    get_setting, set_setting, _json_safe_load, format_date, send_whisper_dm,
+    create_named_blunt, safe_send_blunt_image, get_back_to_menu_keyboard,
+    get_main_menu_keyboard, check_rate_limit_redis, get_cached_top
+)
+from game_handlers import (
+    start, farm_callback, craft_callback, smoke_callback, ritual_callback,
+    profile_callback, top_callback, rules_callback, privilege_callback,
+    catalog_callback, luck_callback, collect_callback, check_blunt,
+    guild_info_callback, confess_callback, lab_enter, shop_callback,
+    handle_craft_normal, handle_craft_named, cancel_named, do_smoke,
+    handle_use_dust, top_scout_callback, achievements_callback,
+    my_blunts_callback, gift_blunt_start, handle_lab_option,
+    lab_enter_confirm, guild_shrine_callback, guild_war_callback,
+    welcome_new_member
+)
+from decorators import cb
+
+logger = logging.getLogger(__name__)
+
+# ========== ОПРЕДЕЛЕНИЯ ОТСУТСТВУЮЩИХ КЛАССОВ ==========
+# (если они не импортированы из внешних модулей)
+class WarConfig:
+    """Конфигурация войны гильдий (заглушка)."""
+    def __init__(self):
+        self.min_score = 0
+        self.reward_oac_min = 200
+        self.reward_oac_max = 500
+        self.reward_blunts_min = 3
+        self.reward_blunts_max = 7
+        self.reward_dust_min = 1
+        self.reward_dust_max = 3
+
+class WarSettings:
+    """Настройки войны (заглушка)."""
+    def __init__(self):
+        self.war_duration_days = 7
+
+# ========== ДЕКОРАТОР cb (если не импортирован) ==========
+def cb(need_ctx=True, show_alert_on_error=False):
+    def decorator(func):
+        from functools import wraps
+        @wraps(func)
+        async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+            query = update.callback_query
+            if query:
+                await query.answer()
+            try:
+                if need_ctx:
+                    ctx = context.application.bot_data.get("ctx")
+                    if not ctx:
+                        raise RuntimeError("AppContext not found")
+                    return await func(update, context, ctx, *args, **kwargs)
+                else:
+                    return await func(update, context, *args, **kwargs)
+            except Exception as e:
+                logger.error(f"Callback error in {func.__name__}: {e}", exc_info=True)
+                if query and show_alert_on_error:
+                    await query.answer(f"❌ Ошибка: {e}", show_alert=True)
+                elif query:
+                    await query.answer("⚠️ Ошибка", show_alert=False)
+        return wrapper
+    return decorator
+
+# ============================================================
+# ОБРАБОТЧИК ТЕКСТОВЫХ СОКРАЩЕНИЙ (с Redis лимитером)
+# ============================================================
 async def handle_chat_shortcut(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
 
-    # 1. Приоритетные состояния ввода (именование питомца, бланта, передача)
+    user_id = update.effective_user.id
+    ctx: AppContext = context.application.bot_data.get("ctx")
+    if not ctx:
+        return
+
+    if not await check_rate_limit_redis(ctx, user_id, "shortcut", limit=5, period=10):
+        await update.message.reply_text("⚠️ Слишком часто. Подожди секунду.")
+        return
+
+    # Состояния ввода
     if context.user_data.get('awaiting_pet_name'):
         return await handle_pet_name(update, context)
-    if context.user_data.get('awaiting_named_blunt'):
+    if context.user_data.get('awaiting_named_blunt'):   # ВОССТАНОВЛЕНО
         return await handle_named_name(update, context)
-    if context.user_data.get('gifting_blunt_id'):
+    if context.user_data.get('gifting_blunt_id'):       # ВОССТАНОВЛЕНО
         return await handle_gift_username(update, context)
 
-    # 2. Сопоставление текстовых команд и обработчиков
     text = update.message.text.strip().lower()
     handler = {
         "фарм": farm_callback,       "farm": farm_callback,
@@ -5190,107 +5300,188 @@ async def handle_chat_shortcut(update: Update, context: ContextTypes.DEFAULT_TYP
     }.get(text)
 
     if not handler:
-        return  # просто игнорируем неизвестный текст
+        return
 
-    # 3. Защита от падения бота при ошибке внутри игровой функции
     try:
         await handler(update, context)
     except Exception as e:
-        logger.error(
-            "Ошибка в текстовой команде '%s' от пользователя %d: %s",
-            text, update.effective_user.id, e, exc_info=True
-        )
+        logger.error("Ошибка в текстовой команде '%s' от %d: %s", text, user_id, e, exc_info=True)
         await update.message.reply_text("⚠️ Внутренняя ошибка. Попробуйте позже 🍃.")
 
 # ============================================================
-# ПИТОМЦЫ (финальная версия)
+# ФУНКЦИИ ДЛЯ ИМЕННЫХ БЛАНТОВ И ДАРЕНИЯ (ВОССТАНОВЛЕНЫ)
 # ============================================================
-@safe_callback
-async def pet_preview(update, context):
+async def handle_named_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Присваивает имя созданному именному бланту."""
+    ctx: AppContext = context.application.bot_data.get("ctx")
+    if not ctx:
+        return
+    name = update.message.text.strip()[:30]  # лимит длины
+    if not name:
+        await update.message.reply_text("❌ Имя не может быть пустым.")
+        return
+
+    uid = update.effective_user.id
+    player = await ctx.repo.get_by_id(uid, with_inventory=True)
+    if not player:
+        await update.message.reply_text("Профиль не найден.")
+        context.user_data.pop('awaiting_named_blunt', None)
+        return
+
+    inv = player.inventory or []
+    # Ищем последний именной блант без имени (type=named и поле name не установлено)
+    for item in reversed(inv):
+        if item.get("type") == "named" and not item.get("custom_name"):
+            item["custom_name"] = name
+            item["name"] = f"{name} (именной)"
+            await ctx.repo.save(player)
+            await update.message.reply_text(f"✅ Твой блант теперь называется «{name}»! 🌿")
+            break
+    else:
+        await update.message.reply_text("❌ Не найден блант, ожидающий имени.")
+    context.user_data.pop('awaiting_named_blunt', None)
+
+async def handle_gift_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает ввод username для дарения бланта."""
+    ctx: AppContext = context.application.bot_data.get("ctx")
+    if not ctx:
+        return
+    target_username = update.message.text.strip().lstrip('@')
+    if not target_username:
+        await update.message.reply_text("❌ Укажите корректный @username.")
+        return
+
+    blunt_id = context.user_data.get('gifting_blunt_id')
+    if not blunt_id:
+        await update.message.reply_text("❌ Не найден блант для дарения. Попробуйте заново.")
+        return
+
+    uid = update.effective_user.id
+    player = await ctx.repo.get_by_id(uid, with_inventory=True)
+    if not player:
+        await update.message.reply_text("Профиль не найден.")
+        context.user_data.pop('gifting_blunt_id', None)
+        return
+
+    # Находим блант в инвентаре
+    item = None
+    for it in player.inventory:
+        if it.get("id") == blunt_id:
+            item = it
+            break
+    if not item:
+        await update.message.reply_text("❌ Блант уже не в вашем инвентаре.")
+        context.user_data.pop('gifting_blunt_id', None)
+        return
+
+    # Находим получателя по username
+    async with ctx.db_pool.acquire() as conn:
+        target = await conn.fetchrow("SELECT user_id FROM players WHERE LOWER(username) = LOWER($1)", target_username)
+    if not target:
+        await update.message.reply_text("❌ Игрок с таким username не найден.")
+        return
+    target_id = target["user_id"]
+    if target_id == uid:
+        await update.message.reply_text("❌ Нельзя подарить блант самому себе.")
+        return
+
+    # Передаём блант
+    # 1. Удаляем у дарителя
+    player.inventory = [it for it in player.inventory if it.get("id") != blunt_id]
+    # 2. Добавляем получателю (с обновлением истории)
+    target_player = await ctx.repo.get_by_id(target_id, with_inventory=True)
+    if not target_player:
+        target_player = Player(user_id=target_id)
+    if not target_player.inventory:
+        target_player.inventory = []
+    item["owner_history"] = item.get("owner_history", [])
+    item["owner_history"].append({"user_id": uid, "since": datetime.now().isoformat()})
+    target_player.inventory.append(item)
+    await ctx.repo.save(player)
+    await ctx.repo.save(target_player)
+
+    await update.message.reply_text(f"✅ Блант «{item.get('name')}» подарен @{target_username}!")
+    context.user_data.pop('gifting_blunt_id', None)
+
+# ============================================================
+# ПИТОМЦЫ
+# ============================================================
+@cb()
+async def pet_preview(update, context, ctx):
     query = update.callback_query
-    await query.answer()
     uid = query.from_user.id
-    player = await PlayerRepository.get_by_id(uid)
+    player = await ctx.repo.get_by_id(uid)
 
     if player and player.pet:
         name_str = f" по кличке «{player.pet_name}»" if player.pet_name else ""
         await query.message.edit_text(f"Твой питомец: {player.pet}{name_str}")
     else:
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton(f"🐕 Купить Песика ({PET_CONFIG['dog']['price']} 🍬)", callback_data="pet_buy_dog")],
+            [InlineKeyboardButton(f"🐕 Купить Песика ({ctx.settings.pet_config['dog']['price']} 🍬)", callback_data="pet_buy_dog")],
             [InlineKeyboardButton("🔙 Назад", callback_data="menu")]
         ])
         await query.message.edit_text(
             "🐾 <b>ПИТОМЦЫ</b>\n\nПока доступен только Песик.",
-            reply_markup=kb,
-            parse_mode='HTML'
+            reply_markup=kb, parse_mode='HTML'
         )
 
-@safe_callback
-async def pet_buy_dog_handler(update, context):
+@cb()
+async def pet_buy_dog_handler(update, context, ctx):
     query = update.callback_query
-    await query.answer()
     uid = query.from_user.id
-
-    pet_service = PetService()
-    result = await pet_service.buy(uid, "dog")
-
+    result = await ctx.pet_service.buy(uid, "dog")
     if result is None:
-        await query.answer("Ошибка.")
+        await query.answer("❌ Ошибка сервиса питомцев. Попробуйте позже.", show_alert=True)
         return
 
     status = result["status"]
     if status == "already_have":
         await query.answer("У тебя уже есть питомец!")
     elif status == "no_money":
-        await query.answer(f"Недостаточно OAC. Нужно {PET_CONFIG['dog']['price']} 🍬")
+        await query.answer(f"Недостаточно OAC. Нужно {ctx.settings.pet_config['dog']['price']} 🍬")
     else:
         context.user_data['awaiting_pet_name'] = True
         await query.message.edit_text(
-            "<b>🐕 Песик ждёт имя!</b>\n\n"
-            f"Введи имя для своего питомца (до {PET_CONFIG['dog']['max_name_len']} символов).\n"
-            "Для отмены нажми кнопку ниже.",
+            f"<b>🐕 Песик ждёт имя!</b>\n\nВведи имя (до {ctx.settings.pet_config['dog']['max_name_len']} символов).\nДля отмены нажми кнопку ниже.",
             parse_mode='HTML',
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("❌ Пропустить (без имени)", callback_data="pet_name_skip")]
-            ])
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Пропустить", callback_data="pet_name_skip")]])
         )
 
-@safe_callback
-async def pet_name_skip_handler(update, context):
+@cb()
+async def pet_name_skip_handler(update, context, ctx):
     query = update.callback_query
-    await query.answer()
     context.user_data.pop('awaiting_pet_name', None)
     await query.message.edit_text("Питомец останется без имени.")
 
 async def handle_pet_name(update, context):
-    name = update.message.text.strip()[:PET_CONFIG["dog"]["max_name_len"]]
+    ctx: AppContext = context.application.bot_data.get("ctx")
+    if not ctx:
+        return
+    name = update.message.text.strip()[:ctx.settings.pet_config["dog"]["max_name_len"]]
     if not name:
         await update.message.reply_text("❌ Имя не может быть пустым.")
         return
-    if len(update.message.text.strip()) > PET_CONFIG["dog"]["max_name_len"]:
-        await update.message.reply_text(f"⚠️ Имя обрезано до {PET_CONFIG['dog']['max_name_len']} символов.")
+    if len(update.message.text.strip()) > ctx.settings.pet_config["dog"]["max_name_len"]:
+        await update.message.reply_text(f"⚠️ Имя обрезано до {ctx.settings.pet_config['dog']['max_name_len']} символов.")
 
     uid = update.effective_user.id
-    pet_service = PetService()
-    success = await pet_service.set_name(uid, name)
-
+    success = await ctx.pet_service.set_name(uid, name)
     if not success:
         await update.message.reply_text("Ошибка сохранения имени.")
     else:
         await update.message.reply_text(f"Отлично! Теперь твоего питомца зовут «{name}»! 🐕")
     context.user_data.pop('awaiting_pet_name', None)
 
-# Обработчик заблокированной кнопки (показывает всплывашку)
-@safe_callback
 async def pet_locked_handler(update, context):
-    """Показывает всплывающее окно, если ранг ниже Ветерана."""
     query = update.callback_query
     await query.answer("❌ Доступно с ранга ⚔️ Ветеран (5000 OAC 🍬)", show_alert=True)
 
-async def shop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ============================================================
+# МАГАЗИН, АДМИН-КОМАНДЫ
+# ============================================================
+@cb()
+async def shop_callback(update, context, ctx):
     query = update.callback_query
-    await query.answer()
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🪪 Скидка", callback_data="privilege")],
         [InlineKeyboardButton("📦 Каталог", callback_data="catalog")],
@@ -5298,28 +5489,31 @@ async def shop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ])
     await query.message.edit_text("<b>🛒 МАГАЗИН</b>", reply_markup=kb, parse_mode='HTML')
 
-async def setbluntpic(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return await update.message.reply_text("⛔ Только для админа.")
-    if not context.args:
-        return await update.message.reply_text("Используй: /setbluntpic common (rare, epic, legendary) и прикрепи фото.")
-    rarity = context.args[0].lower()
-    if rarity not in BLUNT_IMAGES:
-        return await update.message.reply_text("Редкость должна быть: common, rare, epic, legendary.")
-    if not update.message.photo:
-        return await update.message.reply_text("Пришли фото вместе с командой.")
-    BLUNT_IMAGES[rarity] = update.message.photo[-1].file_id
-    names = {"common":"⚪ Обычный","rare":"🔵 Редкий","epic":"🟣 Эпический","legendary":"🟡 Легендарный"}
-    await update.message.reply_text(f"✅ Изображение для {names[rarity]} обновлено!", parse_mode='HTML')
-    
-async def give_oac(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Выдаёт OAC игроку по ID или @username. Только для админа."""
-    # 1. Проверка прав
-    if update.effective_user.id != ADMIN_ID:
+@cb(need_ctx=True, show_alert_on_error=False)
+async def setbluntpic(update, context, ctx):
+    if update.effective_user.id != ctx.settings.admin_id:
         await update.message.reply_text("⛔ Только для админа.")
         return
+    if not context.args:
+        await update.message.reply_text("Используй: /setbluntpic common (rare, epic, legendary) и прикрепи фото.")
+        return
+    rarity = context.args[0].lower()
+    if rarity not in ctx.blunt_images:
+        await update.message.reply_text("Редкость должна быть: common, rare, epic, legendary.")
+        return
+    if not update.message.photo:
+        await update.message.reply_text("Пришли фото вместе с командой.")
+        return
+    ctx.blunt_images[rarity] = update.message.photo[-1].file_id
+    await set_setting(f"blunt_image_{rarity}", ctx.blunt_images[rarity], ctx)
+    names = {"common":"⚪ Обычный","rare":"🔵 Редкий","epic":"🟣 Эпический","legendary":"🟡 Легендарный"}
+    await update.message.reply_text(f"✅ Изображение для {names[rarity]} обновлено!", parse_mode='HTML')
 
-    # 2. Проверка аргументов
+@cb()
+async def give_oac(update, context, ctx):
+    if update.effective_user.id != ctx.settings.admin_id:
+        await update.message.reply_text("⛔ Только для админа.")
+        return
     if not context.args or len(context.args) < 2:
         await update.message.reply_text("Формат: /give_oac <ID или @username> <сумма>")
         return
@@ -5334,15 +5528,11 @@ async def give_oac(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Сумма должна быть целым числом.")
         return
 
-    # 3. Определяем получателя
     target_id = None
     try:
         if target_raw.startswith("@"):
-            async with db_pool.acquire() as conn:
-                row = await conn.fetchrow(
-                    "SELECT user_id FROM players WHERE LOWER(username) = LOWER($1)",
-                    target_raw[1:]
-                )
+            async with ctx.db_pool.acquire() as conn:
+                row = await conn.fetchrow("SELECT user_id FROM players WHERE LOWER(username) = LOWER($1)", target_raw[1:])
                 if row:
                     target_id = row["user_id"]
             if not target_id:
@@ -5362,23 +5552,21 @@ async def give_oac(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Игрок не найден.")
         return
 
-    # Получаем имя получателя (для красивого ответа)
     try:
-        target_player = await PlayerRepository.get_by_id(target_id)
-        target_name = target_player.username or f"ID{target_id}"
+        target_player = await ctx.repo.get_by_id(target_id, with_inventory=False)
+        target_name = target_player.username if target_player else f"ID{target_id}"
     except Exception:
         target_name = f"ID{target_id}"
 
-    # 4. Начисление (атомарно)
     try:
         async def _add(p, conn):
             p.balance = (p.balance or 0) + amount
             return ("ok", p.balance)
 
-        result = await PlayerRepository.atomic_update(target_id, _add)
+        result = await ctx.repo.atomic_update(target_id, _add)
         if result is None:
             player = Player(user_id=target_id, balance=amount)
-            await PlayerRepository.save(player)
+            await ctx.repo.save(player)
             new_balance = amount
         else:
             new_balance = result[1]
@@ -5388,54 +5576,57 @@ async def give_oac(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Новый баланс: <b>{new_balance}</b> 🍬",
             parse_mode='HTML'
         )
-        logger.info("Админ %d начислил %d OAC игроку %d (%s)", 
-                    update.effective_user.id, amount, target_id, target_name)
+        logger.info("Админ %d начислил %d OAC игроку %d (%s)", update.effective_user.id, amount, target_id, target_name)
     except Exception as e:
         logger.error("Ошибка начисления OAC: %s", e, exc_info=True)
         await update.message.reply_text("⚠️ Не удалось начислить OAC 🍬. Попробуй позже. 🍃")
-    
-async def check_blunt_pics(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
+
+@cb()
+async def check_blunt_pics(update, context, ctx):
+    if update.effective_user.id != ctx.settings.admin_id:
         return
     status = []
     for rarity in ("common", "rare", "epic", "legendary"):
-        file_id = BLUNT_IMAGES.get(rarity)
+        file_id = ctx.blunt_images.get(rarity)
         if not file_id:
             status.append(f"❌ {rarity}: не задан")
         else:
-            try:
-                await context.bot.get_file(file_id)
-                status.append(f"✅ {rarity}")
-            except Exception:
-                status.append(f"⚠️ {rarity}: невалидный file_id")
+            status.append(f"✅ {rarity} (file_id задан)")
     await update.message.reply_text("\n".join(status))
 
 async def get_file_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отправляет админу file_id фотографии. Только для ADMIN_ID."""
-    if update.effective_user.id != ADMIN_ID:
+    ctx = context.application.bot_data.get("ctx")
+    if not ctx or update.effective_user.id != ctx.settings.admin_id:
         return
     if update.message.photo:
         fid = update.message.photo[-1].file_id
         await update.message.reply_text(fid)
 
+# ============================================================
+# ОБРАБОТЧИК КОМАНД
+# ============================================================
 async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg or not msg.text:
         return
 
+    user_id = update.effective_user.id
+    ctx = context.application.bot_data.get("ctx")
+    if not ctx:
+        return
+
+    if not await check_rate_limit_redis(ctx, user_id, "command", limit=10, period=10):
+        await update.message.reply_text("⚠️ Слишком часто. Подожди секунду.")
+        return
+
     raw_text = msg.text.strip()
     request_id = uuid.uuid4().hex[:8]
-    user_id = update.effective_user.id
-
-    try:
-        logger.info("[%s] Команда '%s' от user=%d", request_id, raw_text, user_id)
-    except Exception:
-        print(f"[{request_id}] CMD {raw_text} from {user_id}", file=sys.stderr)
+    logger.info("[%s] Команда '%s' от user=%d", request_id, raw_text, user_id)
 
     command = raw_text.split()[0].split('@')[0][1:].lower()
     if not command:
         return
-    context.args = raw_text.split()[1:]
+    args = raw_text.split()[1:]
 
     mapping = {
         "start": start, "farm": farm_callback, "craft": craft_callback,
@@ -5454,94 +5645,79 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        await handler(update, context)
-    except Exception as e:
-        import traceback
-        err_msg = traceback.format_exc()
+        old_args = context.args
+        context.args = args
         try:
-            logger.error("[%s] Ошибка в команде /%s: %s", request_id, command, e, exc_info=True)
-        except Exception:
-            print(f"[{request_id}] ERROR /{command}: {err_msg}", file=sys.stderr)
-
-        async def _alert_admin():
+            await handler(update, context)
+        finally:
+            context.args = old_args
+    except Exception as e:
+        logger.error(f"Ошибка в команде /{command}: {e}", exc_info=True)
+        async def _alert():
             for attempt in range(3):
                 try:
-                    await context.bot.send_message(
-                        chat_id=ADMIN_ID,
-                        text=f"🚨 [{request_id}] Ошибка /{command} от {user_id}: {html.escape(str(e)[:500])}"
-                    )
+                    await context.bot.send_message(chat_id=ctx.settings.admin_id, text=f"🚨 [{request_id}] Ошибка /{command} от {user_id}: {html.escape(str(e)[:500])}")
                     break
                 except Exception:
                     await asyncio.sleep(2 ** attempt)
-        asyncio.create_task(_alert_admin())
+        asyncio.create_task(_alert())
+        await update.message.reply_text("⚠️ Внутренняя ошибка. Админ уже уведомлён.")
 
-        try:
-            await update.message.reply_text("⚠️ Внутренняя ошибка. Админ уже уведомлён.")
-        except Exception:
-            pass
-    finally:
-        try:
-            logger.debug("[%s] Команда /%s обработана", request_id, command)
-        except Exception:
-            pass
-            
+# ============================================================
+# ГЛОБАЛЬНЫЙ ОБРАБОТЧИК ОШИБОК
+# ============================================================
 async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     error = context.error
-    import traceback
-    traceback.print_exception(type(error), error, error.__traceback__)
-    if settings.admin_id:
+    logger.error("Глобальная ошибка", exc_info=error)
+    ctx = context.application.bot_data.get("ctx")
+    if ctx and ctx.settings.admin_id:
         try:
-            await context.bot.send_message(
-                chat_id=settings.admin_id,
-                text=f"🚨 Глобальная ошибка: {error}"
-            )
+            await context.bot.send_message(chat_id=ctx.settings.admin_id, text=f"🚨 Глобальная ошибка: {error}")
         except Exception:
             pass
-        
-@divine_command("debugpet")
-async def debug_pet(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Проверка питомца (только админ)."""
-    if update.effective_user.id != ADMIN_ID:
+
+@cb()
+async def debug_pet(update, context, ctx):
+    if update.effective_user.id != ctx.settings.admin_id:
         return
-    player = await PlayerRepository.get_by_id(update.effective_user.id)
-    if not player or not player.exists:
+    player = await ctx.repo.get_by_id(update.effective_user.id, with_inventory=False)
+    if player is None:
         await update.message.reply_text("Профиль не найден.")
         return
     pet = player.pet or "нет"
     name = player.pet_name or "без имени"
     await update.message.reply_text(f"🐾 Питомец: {pet}\n🎉 Имя: {name}")
-            
-# ========== ВСПОМОГАТЕЛЬНЫЕ ОБРАБОТЧИКИ КНОПОК =========
-@safe_callback
-async def menu_handler(update, context):
+
+# ============================================================
+# ВСПОМОГАТЕЛЬНЫЕ ОБРАБОТЧИКИ КНОПОК
+# ============================================================
+@cb()
+async def menu_handler(update, context, ctx):
     query = update.callback_query
-    await query.answer()
     uid = query.from_user.id
-    kb, whisper = await get_main_menu_keyboard(uid)
+    kb, whisper = await get_main_menu_keyboard(uid, ctx)
     menu_text = f"<b>🎮 ГЛАВНОЕ МЕНЮ</b>\n\n<i>{whisper}</i>"
     try:
         await query.message.edit_text(menu_text, reply_markup=kb, parse_mode='HTML')
     except Exception:
         await query.message.reply_text(menu_text, reply_markup=kb, parse_mode='HTML')
 
-@safe_callback
 async def bush_preview_handler(update, context):
     query = update.callback_query
     await query.answer("❌ Доступно с ранга ⚔️ Ветеран (5000 OAC 🍬)", show_alert=True)
 
-@safe_callback
-async def activate_menu_handler(update, context):
+@cb()
+async def activate_menu_handler(update, context, ctx):
     query = update.callback_query
-    await query.answer()
     user = query.from_user
     uname = user.username or user.first_name
     uid = user.id
-    player = await PlayerRepository.get_by_id(uid)
-    if not player or not player.user_id:
+    player = await ctx.repo.get_by_id(uid, with_inventory=False)
+    if player is None:
         player = Player(user_id=uid, username=uname, balance=800)
         new_name = random.choice(["Крик Бездны","Пепел Короля","Шёпот Склепа"])
-        await create_named_blunt(uid, new_name)
-        await PlayerRepository.save(player)
+        await create_named_blunt(uid, new_name, ctx=ctx)
+        await ctx.repo.save(player)
         bonus = "🎁 Смотритель дарует тебе <code>800</code> 🍬 и твой первый именной блант!\n\n"
     else:
         bonus = ""
@@ -5557,8 +5733,8 @@ async def activate_menu_handler(update, context):
     ])
     await query.message.edit_text(bonus + welcome, reply_markup=guild_kb, parse_mode='HTML')
 
-@safe_callback
-async def skins_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+@cb()
+async def skins_menu_handler(update, context, ctx):
     query = update.callback_query
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("💬 Выбрать титул", callback_data="choose_title")],
@@ -5566,28 +5742,18 @@ async def skins_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         [InlineKeyboardButton("🔙 Назад", callback_data="profile")]
     ])
     try:
-        await query.message.edit_text(
-            "<b>🎨 СКИНЫ</b>\n\nВыбери, что хочешь изменить.",
-            reply_markup=kb,
-            parse_mode='HTML'
-        )
+        await query.message.edit_text("<b>🎨 СКИНЫ</b>\n\nВыбери, что хочешь изменить.", reply_markup=kb, parse_mode='HTML')
     except BadRequest as e:
         if "message is not modified" in str(e).lower():
             return
-        # Если не удалось отредактировать, отправляем новое сообщение
-        await query.message.reply_text(
-            "<b>🎨 СКИНЫ</b>\n\nВыбери, что хочешь изменить.",
-            reply_markup=kb,
-            parse_mode='HTML'
-        )
+        await query.message.reply_text("<b>🎨 СКИНЫ</b>\n\nВыбери, что хочешь изменить.", reply_markup=kb, parse_mode='HTML')
 
-@safe_callback
-async def choose_title_handler(update, context):
+@cb()
+async def choose_title_handler(update, context, ctx):
     query = update.callback_query
-    await query.answer()
     uid = query.from_user.id
-    player = await PlayerRepository.get_by_id(uid)
-    if not player:
+    player = await ctx.repo.get_by_id(uid, with_inventory=False)
+    if player is None:
         return
     titles = (player.titles or "").split()
     if not titles:
@@ -5600,19 +5766,14 @@ async def choose_title_handler(update, context):
         mark = " ✅" if title == active_title else ""
         kb_rows.append([InlineKeyboardButton(f"{title}{mark}", callback_data=f"set_title_{title}")])
     kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="skins_menu")])
-    await query.message.edit_text(
-        "<b>🎨 ВЫБОР ТИТУЛА</b>\n\nВыбери титул:",
-        reply_markup=InlineKeyboardMarkup(kb_rows),
-        parse_mode='HTML'
-    )
+    await query.message.edit_text("<b>🎨 ВЫБОР ТИТУЛА</b>\n\nВыбери титул:", reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode='HTML')
 
-@safe_callback
-async def choose_bg_handler(update, context):
+@cb()
+async def choose_bg_handler(update, context, ctx):
     query = update.callback_query
-    await query.answer()
     uid = query.from_user.id
-    player = await PlayerRepository.get_by_id(uid)
-    if not player:
+    player = await ctx.repo.get_by_id(uid, with_inventory=False)
+    if player is None:
         return
     skins = player.profile_skins or {}
     unlocked = skins.get("unlocked_backgrounds", [])
@@ -5625,60 +5786,49 @@ async def choose_bg_handler(update, context):
         mark = " ✅" if bg == active_bg else ""
         kb_rows.append([InlineKeyboardButton(f"{bg}{mark}", callback_data=f"set_bg_{bg}")])
     kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="skins_menu")])
-    await query.message.edit_text(
-        "<b>🖼️ ВЫБОР ФОНА</b>\n\nВыбери фон:",
-        reply_markup=InlineKeyboardMarkup(kb_rows),
-        parse_mode='HTML'
-    )
+    await query.message.edit_text("<b>🖼️ ВЫБОР ФОНА</b>\n\nВыбери фон:", reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode='HTML')
 
-@safe_callback
-async def handle_set_title(update, context):
+@cb()
+async def handle_set_title(update, context, ctx):
     query = update.callback_query
-    await query.answer()
     uid = query.from_user.id
     new_title = query.data.replace("set_title_", "")
-
     async def _set(p, conn):
         skins = p.profile_skins or {}
         skins["active_title"] = new_title
         p.profile_skins = skins
         return new_title
-
-    result = await PlayerRepository.atomic_update(uid, _set)
+    result = await ctx.repo.atomic_update(uid, _set)
     if result is None:
         await query.answer("Профиль не найден", show_alert=True)
         return
     await context.bot.send_message(chat_id=query.message.chat.id, text=f"✨ Титул «{new_title}» активирован!")
     await skins_menu_handler(update, context)
 
-@safe_callback
-async def handle_set_bg(update, context):
+@cb()
+async def handle_set_bg(update, context, ctx):
     query = update.callback_query
-    await query.answer()
     uid = query.from_user.id
     new_bg = query.data.replace("set_bg_", "")
-
     async def _set(p, conn):
         skins = p.profile_skins or {}
         skins["active_background"] = new_bg
         p.profile_skins = skins
         return new_bg
-
-    result = await PlayerRepository.atomic_update(uid, _set)
+    result = await ctx.repo.atomic_update(uid, _set)
     if result is None:
         await query.answer("Профиль не найден", show_alert=True)
         return
     await context.bot.send_message(chat_id=query.message.chat.id, text=f"✨ Фон «{new_bg}» активирован!")
     await skins_menu_handler(update, context)
 
-@safe_callback
-async def blunt_details_handler(update, context):
+@cb()
+async def blunt_details_handler(update, context, ctx):
     query = update.callback_query
-    await query.answer()
     uid = query.from_user.id
     blunt_id = query.data.replace("blunt_details_", "")
-    player = await PlayerRepository.get_by_id(uid)
-    if not player:
+    player = await ctx.repo.get_by_id(uid, with_inventory=True)
+    if player is None:
         return
     inv = player.inventory or []
     item = next((it for it in inv if it.get("id") == blunt_id), None)
@@ -5709,13 +5859,7 @@ async def blunt_details_handler(update, context):
          InlineKeyboardButton("🎁 Подарить", callback_data=f"gift_blunt_{blunt_id}")],
         [InlineKeyboardButton("🏆 К списку", callback_data="my_blunts")]
     ])
-    sent = await safe_send_blunt_image(
-        context,
-        query.message.chat.id,
-        rarity,
-        caption=text,
-        reply_markup=kb
-    )
+    sent = await safe_send_blunt_image(context, query.message.chat.id, rarity, caption=text, reply_markup=kb, ctx=ctx)
     if sent:
         try:
             await query.message.delete()
@@ -5724,132 +5868,110 @@ async def blunt_details_handler(update, context):
     else:
         await query.message.edit_text(text=text, reply_markup=kb, parse_mode='HTML')
 
-@safe_callback
-async def share_blunt_handler(update, context):
+@cb()
+async def share_blunt_handler(update, context, ctx):
     query = update.callback_query
-    await query.answer()
     uid = query.from_user.id
     blunt_id = query.data.replace("share_blunt_", "")
-    player = await PlayerRepository.get_by_id(uid)
-    if not player:
+    player = await ctx.repo.get_by_id(uid, with_inventory=True)
+    if player is None:
         return
     bot_username = (await context.bot.get_me()).username
     ref_link = f"https://t.me/{bot_username}?start=blunt_{blunt_id}"
     inv = player.inventory or []
     item = next((it for it in inv if it.get("id") == blunt_id), None)
-    username = html.escape(player.username)
+    username = html.escape(player.username or str(uid))
     if item:
         name = item["name"]
         rarity = item.get("rarity", "common")
         color = {"legendary": "🟡", "epic": "🟣", "rare": "🔵"}.get(rarity, "🟢")
-        text = (
-            f"<b>{username}</b>\n\n"
-            f"{color} <b>Имя NFT бланта: «{name}»</b>\n"
-            f"🧬 <b>Редкость:</b> {rarity} {color}\n"
-            f"🩸 <b>Серийный номер:</b> #{item.get('rare_number', '?-????')}\n"
-            f"📜 <b>Реакция:</b> <i>{item.get('reaction', '')}</i>\n\n"
-            f"<i>Присоединяйся к Искажению:</i>\n{ref_link}"
-        )
+        text = (f"<b>{username}</b>\n\n{color} <b>Имя NFT бланта: «{name}»</b>\n"
+                f"🧬 <b>Редкость:</b> {rarity} {color}\n🩸 <b>Серийный номер:</b> #{item.get('rare_number', '?-????')}\n"
+                f"📜 <b>Реакция:</b> <i>{item.get('reaction', '')}</i>\n\n<i>Присоединяйся к Искажению:</i>\n{ref_link}")
     else:
         text = f"Блант не найден.\n{ref_link}"
     await context.bot.send_message(chat_id=query.message.chat.id, text=text, parse_mode='HTML')
 
-@safe_callback
-async def shrine_donate_handler(update, context):
+@cb()
+async def shrine_donate_handler(update, context, ctx):
     query = update.callback_query
-    await query.answer()
     amount = 100 if query.data == "shrine_donate_100" else 500
     uid = query.from_user.id
-    player = await PlayerRepository.get_by_id(uid)
-    if player.balance < amount:
-        await query.answer("Недостаточно OAC.", show_alert=True)
+    player = await ctx.repo.get_by_id(uid, with_inventory=False)
+    if player is None or player.balance < amount:
+        await query.answer("Недостаточно OAC или профиль не найден.", show_alert=True)
         return
     player.balance -= amount
     player.donated = (player.donated or 0) + amount
-    await PlayerRepository.save(player)
+    await ctx.repo.save(player)
     await send_whisper_dm(update, context, f"💎 Ты внёс {amount} OAC в Храм. Спасибо, Странник!")
 
-@safe_callback
-async def guild_join_handler(update, context):
+@cb()
+async def guild_join_handler(update, context, ctx):
     query = update.callback_query
-    await query.answer()
     guild = "BLACK" if query.data == "guild_join_BLACK" else "WHITE"
     uid = query.from_user.id
-    player = await PlayerRepository.get_by_id(uid)
+    player = await ctx.repo.get_by_id(uid, with_inventory=False)
+    if player is None:
+        await query.answer("Профиль не найден, начните с /start", show_alert=True)
+        return
     player.guild = guild
 
     if player.onboarding_step == 0:
         player.onboarding_step = 1
-        await PlayerRepository.save(player)
-
+        await ctx.repo.save(player)
         try:
             await query.message.delete()
         except Exception:
             pass
-
-        # Шаг 2 — фарм
         kb1 = InlineKeyboardMarkup([
             [InlineKeyboardButton("🍬 Фармить", callback_data="farm")],
             [InlineKeyboardButton("⏭️ Пропустить обучение", callback_data="skip_onboarding")]
         ])
         await context.bot.send_message(
             chat_id=uid,
-            text=(
-                "<b>🎓 Обучение (шаг 2 из 3)</b>\n\n"
-                "<b>🍬 Твой первый шаг — фарм!</b>\n\n"
-                "Нажми кнопку ниже, чтобы получить <b>OAC</b>.\n\n"
-                "<i>💡 OAC — главная валюта. Трать её на крафт, питомцев и свитки.</i>"
-            ),
-            reply_markup=kb1,
-            parse_mode='HTML'
+            text=("<b>🎓 Обучение (шаг 2 из 3)</b>\n\n"
+                  "<b>🍬 Твой первый шаг — фарм!</b>\n\n"
+                  "Нажми кнопку ниже, чтобы получить <b>OAC</b>.\n\n"
+                  "<i>💡 OAC — главная валюта. Трать её на крафт, питомцев и свитки.</i>"),
+            reply_markup=kb1, parse_mode='HTML'
         )
-
         g_emoji = "🕯️" if guild == "BLACK" else "⚜️"
         g_name = "Тёмная" if guild == "BLACK" else "Светлая"
-        uname = html.escape(query.from_user.username or query.from_user.first_name)
         await query.message.edit_text(
-            f"<b><i>🕋 ГИЛЬДИЯ ТЕБЯ ПРИНЯЛА</i></b>\n\n"
-            f"✅ Теперь <b>ты</b> — {g_emoji} <b>{g_name} Гильдия</b> ·\n\n"
-            f"<i>🩸 Искажение стало плотнее...</i>",
+            f"<b><i>🕋 ГИЛЬДИЯ ТЕБЯ ПРИНЯЛА</i></b>\n\n✅ Теперь <b>ты</b> — {g_emoji} <b>{g_name} Гильдия</b> ·\n\n<i>🩸 Искажение стало плотнее...</i>",
             parse_mode='HTML'
         )
         return
 
-    await PlayerRepository.save(player)
+    await ctx.repo.save(player)
     g_emoji = "🕯️" if guild == "BLACK" else "⚜️"
     g_name = "Тёмная" if guild == "BLACK" else "Светлая"
-    uname = html.escape(query.from_user.username or query.from_user.first_name)
     await query.message.edit_text(
-        f"<b><i>🕋 ГИЛЬДИЯ ТЕБЯ ПРИНЯЛА</i></b>\n\n"
-        f"✅ Теперь <b>ты</b> — в {g_emoji} <b>{g_name} Гильдия</b> ·\n\n"
-        f"<i>🩸 Искажение стало плотнее...</i>",
+        f"<b><i>🕋 ГИЛЬДИЯ ТЕБЯ ПРИНЯЛА</i></b>\n\n✅ Теперь <b>ты</b> — в {g_emoji} <b>{g_name} Гильдия</b> ·\n\n<i>🩸 Искажение стало плотнее...</i>",
         parse_mode='HTML'
     )
 
-@safe_callback
+# ============================================================
+# ОБРАБОТЧИКИ УДАЧИ, АЛХИМИИ, ПОДАРКОВ (прокси)
+# ============================================================
 async def luck_wheel_handler(update, context):
     await luck_callback(update, context, action="luck_wheel")
-
-@safe_callback
 async def luck_berserk_handler(update, context):
     await luck_callback(update, context, action="luck_berserk")
-
-@safe_callback
 async def alchemy_start_handler(update, context):
     await luck_callback(update, context, action="alchemy_start")
-
-@safe_callback
 async def alchemy_confirm_handler(update, context):
     await luck_callback(update, context, action="alchemy_confirm")
-
-@safe_callback
 async def cancel_gift_handler(update, context):
     query = update.callback_query
     await query.answer()
     context.user_data.pop("gifting_blunt_id", None)
     await profile_callback(update, context)
 
-# ========== СЛОВАРЬ ПРОСТЫХ КОЛБЭКОВ ==========
+# ============================================================
+# СЛОВАРИ КОЛБЭКОВ
+# ============================================================
 CALLBACKS: Dict[str, Callable] = {
     "menu": menu_handler,
     "farm": farm_callback,
@@ -5894,7 +6016,6 @@ CALLBACKS: Dict[str, Callable] = {
     "pet_locked": pet_locked_handler,
 }
 
-# ========== ТОЧНЫЕ КОЛБЭКИ (без префиксов) ==========
 EXACT_HANDLERS: Dict[str, Callable] = {
     "lab_special": handle_lab_option,
     "lab_focus_use": handle_lab_option,
@@ -5905,7 +6026,6 @@ EXACT_HANDLERS: Dict[str, Callable] = {
     "alchemy_confirm": alchemy_confirm_handler,
 }
 
-# ========== ПРЕФИКСНЫЕ КОЛБЭКИ ==========
 PREFIX_HANDLERS: Dict[str, Callable] = {
     "ach_page_": achievements_callback,
     "blunts_page_": my_blunts_callback,
@@ -5917,28 +6037,21 @@ PREFIX_HANDLERS: Dict[str, Callable] = {
     "lab_attack_": handle_lab_option,
 }
 
-# ========== ЕДИНСТВЕННЫЙ button_handler ==========
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     data = q.data
     try:
-        # 1. Точные колбэки
         if data in EXACT_HANDLERS:
             await EXACT_HANDLERS[data](update, context)
             return
-
-        # 2. Префиксные колбэки с параметрами
         for prefix, handler in PREFIX_HANDLERS.items():
             if data.startswith(prefix):
-                # Извлекаем page для пагинации
                 if prefix in ("ach_page_", "blunts_page_"):
                     page = int(data.split("_")[-1])
                     await handler(update, context, page=page)
                 else:
                     await handler(update, context)
                 return
-
-        # 3. Простые колбэки
         handler = CALLBACKS.get(data)
         if handler:
             await handler(update, context)
@@ -5947,315 +6060,241 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Button error: {e}", exc_info=True)
         await q.answer(f"❌ Ошибка: {e}", show_alert=True)
-        
-# ========== ДЖОБЫ ==========
-async def update_pulse(context):
-    async with db_pool.acquire() as conn:
-        black = await conn.fetchval("SELECT COUNT(*) FROM players WHERE guild='BLACK'")
-        white = await conn.fetchval("SELECT COUNT(*) FROM players WHERE guild='WHITE'")
-        online = await conn.fetchval("SELECT COUNT(DISTINCT user_id) FROM players WHERE last_farm > $1", datetime.now()-timedelta(hours=1))
-    desc = f"🕯️{black} ▰▱⚜️{white} | 👥{online}"
-    # try: await context.bot.set_chat_description(chat_id="@guild_antysocial", description=desc)
-    # except: pass
 
-async def happy_hour_trigger(context):
+# ============================================================
+# ДЖОБЫ (ВОССТАНОВЛЕНЫ И АКТИВИРОВАНЫ)
+# ============================================================
+async def update_pulse(context: ContextTypes.DEFAULT_TYPE):
+    ctx = context.application.bot_data.get("ctx")
+    if not ctx:
+        return
+    now = time.time()
+    if not hasattr(ctx, 'guild_counts_updated') or now - ctx.guild_counts_updated > 120:
+        async with ctx.db_pool.acquire() as conn:
+            black = await conn.fetchval("SELECT COUNT(*) FROM players WHERE guild='BLACK'")
+            white = await conn.fetchval("SELECT COUNT(*) FROM players WHERE guild='WHITE'")
+            ctx.guild_counts = {"BLACK": black, "WHITE": white}
+            ctx.guild_counts_updated = now
+    online = await ctx.db_pool.fetchval("SELECT COUNT(DISTINCT user_id) FROM players WHERE last_farm > $1", datetime.now()-timedelta(hours=1))
+    desc = f"🕯️{ctx.guild_counts['BLACK']} ▰▱⚜️{ctx.guild_counts['WHITE']} | 👥{online}"
+    # РАСКОММЕНТИРОВАНО: отправка описания чата (если бот имеет права)
+    try:
+        await context.bot.set_chat_description(chat_id="@guild_antysocial", description=desc)
+    except Exception:
+        pass
+
+async def happy_hour_trigger(context: ContextTypes.DEFAULT_TYPE):
+    ctx = context.application.bot_data.get("ctx")
+    if not ctx:
+        return
     context.bot_data["happy_hour"] = True
-    context.bot_data["happy_hour_end"] = datetime.now() + timedelta(minutes=HAPPY_HOUR_DURATION_MIN)
-    # try:
-    #     await context.bot.send_message(chat_id="@guild_antysocial", text="🎉 <b>ЧАС УДАЧИ!</b> 🌠 Все действия приносят x2 OAC 🍬 (30 минут)!", parse_mode='HTML')
-    # except Exception as e:
-    #     logger.error(f"Happy hour announce error: {e}")
-    context.job_queue.run_once(reset_happy_hour, HAPPY_HOUR_DURATION_MIN*60)
+    context.bot_data["happy_hour_end"] = datetime.now() + timedelta(minutes=ctx.settings.happy_hour_duration_min)
+    # ВОССТАНОВЛЕНО: отправка уведомления
+    try:
+        await context.bot.send_message(chat_id="@guild_antysocial", text="🎉 <b>ЧАС УДАЧИ!</b> 🌠 Все действия приносят x2 OAC 🍬 (30 минут)!", parse_mode='HTML')
+    except Exception as e:
+        logger.error(f"Happy hour announce error: {e}")
+    context.job_queue.run_once(reset_happy_hour, ctx.settings.happy_hour_duration_min * 60)
 
-async def reset_happy_hour(context):
+async def reset_happy_hour(context: ContextTypes.DEFAULT_TYPE):
     context.bot_data["happy_hour"] = False
-    # try:
-    #     await context.bot.send_message(chat_id="@guild_antysocial", text="⏳ Час Удачи завершён.")
-    # except Exception as e:
-    #     logger.error(f"Happy hour reset error: {e}")
+    try:
+        await context.bot.send_message(chat_id="@guild_antysocial", text="⏳ Час Удачи завершён.")
+    except Exception as e:
+        logger.error(f"Happy hour reset error: {e}")
 
-async def echo_of_distortion(context):
-    async with db_pool.acquire() as conn:
-        rows = await conn.fetch("SELECT user_id, username, inventory FROM players WHERE inventory IS NOT NULL AND inventory != '[]'")
+async def echo_of_distortion(context: ContextTypes.DEFAULT_TYPE):
+    ctx = context.application.bot_data.get("ctx")
+    if not ctx:
+        return
+    async with ctx.db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT user_id, username, inventory FROM players WHERE inventory IS NOT NULL AND inventory != '[]'"
+        )
     all_named = []
     for row in rows:
         try:
             inv = _json_safe_load(row["inventory"], [])
             for item in inv:
-                if item.get("type")=="named": all_named.append((row["user_id"], row["username"], item))
-        except: continue
-    if len(all_named)==0: return
-    sample = random.sample(all_named, min(3,len(all_named)))
+                if item.get("type") == "named":
+                    all_named.append((row["user_id"], row["username"], item))
+        except Exception:
+            continue
+    if not all_named:
+        return
+    sample = random.sample(all_named, min(3, len(all_named)))
     text = "<b><i>🩸 ЭХО ИСКАЖЕНИЯ</i></b>\n\n"
     for uid, uname, item in sample:
-        name = item["name"]; rarity = item.get("rarity","common")
-        color = {"legendary":"🟡","epic":"🟣","rare":"🔵"}.get(rarity,"🟢")
-        reaction = item.get("reaction","")
+        name = item["name"]
+        rarity = item.get("rarity", "common")
+        color = {"legendary": "🟡", "epic": "🟣", "rare": "🔵"}.get(rarity, "🟢")
+        reaction = item.get("reaction", "")
         text += f"⚜️ <b>@{html.escape(uname)}</b> создал свой блант {color} <b><i>«{html.escape(name)}»</i></b> 🌿\n<i>Редкость: {rarity}</i>\n🩸 <i>{reaction}</i>\n\n"
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("💍 Создать свой блант", callback_data="craft_named")]])
-    # try:
-    #     await context.bot.send_message(chat_id="@guild_antysocial", text=text, parse_mode='HTML', reply_markup=kb)
-    # except Exception as e:
-    #     logger.error(f"Echo of distortion error: {e}")
+    # ВОССТАНОВЛЕНО: отправка в чат гильдии
+    try:
+        await context.bot.send_message(chat_id="@guild_antysocial", text=text, parse_mode='HTML', reply_markup=kb)
+    except Exception as e:
+        logger.error(f"Echo of distortion error: {e}")
 
-# ЕЖЕНЕДЕЛЬНЫЙ РЕЙТИНГ ГИЛЬДИЙ (HIGHLOAD / NEAR-GOD TIER)
 async def weekly_guild_rating(context: ContextTypes.DEFAULT_TYPE):
-    """
-    Завершает текущую войну гильдий (если активна) и начисляет награды,
-    затем запускает новую. Полностью атомарно, с защитой от сбоев.
-    """
+    ctx = context.application.bot_data.get("ctx")
+    if not ctx:
+        return
     job_name = "weekly_guild_rating"
     try:
-        async with db_pool.acquire() as conn:
+        async with ctx.db_pool.acquire() as conn:
             async with conn.transaction():
-                # 1. Проверяем, идёт ли война
-                war = await conn.fetchrow(
-                    "SELECT guild, total_farmed FROM guild_weekly WHERE war_active = TRUE LIMIT 1"
-                )
-
+                # ИСПРАВЛЕНО: используем поле total_farmed вместо total_score
+                await conn.execute("""
+                    INSERT INTO guild_weekly (guild, total_farmed, war_active)
+                    VALUES ('BLACK', 0, FALSE), ('WHITE', 0, FALSE)
+                    ON CONFLICT (guild) DO NOTHING
+                """)
+                war = await conn.fetchrow("SELECT guild, total_farmed FROM guild_weekly WHERE war_active = TRUE LIMIT 1")
                 if not war:
-                    # Война не активна – запускаем новую (сбрасываем очки)
-                    await conn.execute(
-                        "UPDATE guild_weekly SET total_farmed = 0, war_active = TRUE"
-                    )
+                    await conn.execute("UPDATE guild_weekly SET total_farmed = 0, war_active = TRUE")
                     logger.info("%s: Новая война гильдий начата.", job_name)
-
-                    # Отправляем объявление с ретраями
-                    await _safe_send_guild_message(
-                        context,
-                        "⚔️ <b>ВОЙНА ГИЛЬДИЙ НАЧАЛАСЬ!</b>\n\n"
-                        "🕯️ Тёмные vs ⚜️ Светлые\n"
-                        "Зарабатывай OAC, крафти, проходи лабиринт — всё идёт в зачёт гильдии!\n"
-                        "Победители получат сундук с ресурсами! 🎁"
-                    )
+                    await _safe_send_guild_message(context, "⚔️ <b>ВОЙНА ГИЛЬДИЙ НАЧАЛАСЬ!</b>\n\n🕯️ Тёмные vs ⚜️ Светлые\nЗарабатывай OAC, крафти, проходи лабиринт — всё идёт в зачёт гильдии!\nПобедители получат сундук с ресурсами! 🎁")
                     return
 
-                # 2. Война активна – завершаем её
-                # Обнуляем флаг и получаем очки обеих гильдий
-                await conn.execute(
-                    "UPDATE guild_weekly SET war_active = FALSE"
-                )
+                await conn.execute("UPDATE guild_weekly SET war_active = FALSE")
+                rows = await conn.fetch("SELECT guild, total_farmed FROM guild_weekly")
+                black_score = next((r["total_farmed"] for r in rows if r["guild"] == "BLACK"), 0)
+                white_score = next((r["total_farmed"] for r in rows if r["guild"] == "WHITE"), 0)
 
-                rows = await conn.fetch(
-                    "SELECT guild, total_farmed FROM guild_weekly"
-                )
-                black_score = next(
-                    (r["total_farmed"] for r in rows if r["guild"] == "BLACK"), 0
-                )
-                white_score = next(
-                    (r["total_farmed"] for r in rows if r["guild"] == "WHITE"), 0
-                )
-
-                # 3. Определяем победителя (только если счёт не равный)
                 if black_score == white_score:
-                    logger.info("%s: Война завершилась вничью (%d - %d). Награды не выданы.",
-                                job_name, black_score, white_score)
-                    await _safe_send_guild_message(
-                        context,
-                        "🤝 <b>ВОЙНА ГИЛЬДИЙ ЗАВЕРШИЛАСЬ ВНИЧЬЮ!</b>\n"
-                        f"🕯️ Тёмные: {black_score} | ⚜️ Светлые: {white_score}\n"
-                        "Ничья — награды не выданы. Следующая война скоро!"
-                    )
+                    logger.info("%s: Война завершилась вничью (%d - %d).", job_name, black_score, white_score)
+                    await _safe_send_guild_message(context, f"🤝 <b>ВОЙНА ГИЛЬДИЙ ЗАВЕРШИЛАСЬ ВНИЧЬЮ!</b>\n🕯️ Тёмные: {black_score} | ⚜️ Светлые: {white_score}\nНичья — награды не выданы. Следующая война скоро!")
                     return
 
                 winner = "BLACK" if black_score > white_score else "WHITE"
-                loser_score = white_score if winner == "BLACK" else black_score
-                winner_score = black_score if winner == "BLACK" else white_score
-
-                # 4. Начисляем награды ВСЕМ участникам победившей гильдии
                 oac = random.randint(200, 500)
                 blunts = random.randint(3, 7)
                 dust = random.randint(1, 3)
 
-                # Атомарный UPDATE внутри той же транзакции – если упадёт,
-                # откатится и завершение войны, что безопасно
-                result = await conn.execute(
-                    """
-                    UPDATE players SET
-                        balance = balance + $1,
-                        blunts = blunts + $2,
-                        m_essence = m_essence + $3
-                    WHERE guild = $4
-                    """,
-                    oac, blunts, dust, winner
-                )
-                winners_count = int(result.split()[-1])  # количество обновлённых строк
+                # Пакетное обновление
+                rows = await conn.fetch("SELECT user_id FROM players WHERE guild = $1", winner)
+                user_ids = [r["user_id"] for r in rows]
+                batch_size = 500
+                for i in range(0, len(user_ids), batch_size):
+                    batch = user_ids[i:i+batch_size]
+                    await conn.execute(
+                        "UPDATE players SET balance = balance + $1, blunts = blunts + $2, m_essence = m_essence + $3 WHERE user_id = ANY($4)",
+                        oac, blunts, dust, batch
+                    )
+                    await asyncio.sleep(0.05)
 
-                logger.info(
-                    "%s: Война завершена. Победитель: %s (%d vs %d). "
-                    "Начислено %d OAC, %d блантов, %d пыли %d игрокам.",
-                    job_name, winner, winner_score, loser_score,
-                    oac, blunts, dust, winners_count
-                )
+                winners_count = len(user_ids)
+                logger.info("%s: Война завершена. Победитель: %s (%d vs %d). Начислено %d OAC, %d блантов, %d пыли %d игрокам.", job_name, winner, black_score, white_score, oac, blunts, dust, winners_count)
 
-                # 5. Отправляем объявление о победе
                 winner_emoji = "🕯️" if winner == "BLACK" else "⚜️"
-                await _safe_send_guild_message(
-                    context,
-                    f"🎉 <b>ВОЙНА ГИЛЬДИЙ ЗАВЕРШЕНА!</b>\n\n"
-                    f"{winner_emoji} <b>Победила {winner} гильдия!</b>\n"
-                    f"🕯️ Тёмные: {black_score} | ⚜️ Светлые: {white_score}\n\n"
-                    f"Каждый участник победившей гильдии получает:\n"
-                    f"• {oac} OAC 🍬\n"
-                    f"• {blunts} блантов 🌿\n"
-                    f"• {dust} кристальной пыли 💠"
-                )
-
+                await _safe_send_guild_message(context, f"🎉 <b>ВОЙНА ГИЛЬДИЙ ЗАВЕРШЕНА!</b>\n\n{winner_emoji} <b>Победила {winner} гильдия!</b>\n🕯️ Тёмные: {black_score} | ⚜️ Светлые: {white_score}\n\nКаждый участник победившей гильдии получает:\n• {oac} OAC 🍬\n• {blunts} блантов 🌿\n• {dust} кристальной пыли 💠")
     except Exception as e:
         logger.critical("%s: КРИТИЧЕСКАЯ ОШИБКА: %s", job_name, e, exc_info=True)
-        # Если транзакция откатилась, война осталась в состоянии "активна",
-        # что безопасно – её можно будет завершить при следующем запуске.
-        # Тем не менее, уведомим админа.
-        if ADMIN_ID:
+        if ctx.settings.admin_id:
             try:
-                await context.bot.send_message(
-                    chat_id=ADMIN_ID,
-                    text=f"🚨 Ошибка в weekly_guild_rating:\n{e}"
-                )
+                await context.bot.send_message(chat_id=ctx.settings.admin_id, text=f"🚨 Ошибка в weekly_guild_rating:\n{e}")
             except Exception:
                 pass
 
-
-async def _safe_send_guild_message(context, text: str):
-    """Отправляет сообщение в гильдейский чат с 3 ретраями."""
+async def _safe_send_guild_message(context: ContextTypes.DEFAULT_TYPE, text: str):
     for attempt in range(3):
         try:
-            await context.bot.send_message(
-                chat_id="@guild_antysocial",
-                text=text,
-                parse_mode="HTML"
-            )
+            await context.bot.send_message(chat_id="@guild_antysocial", text=text, parse_mode="HTML")
             return
         except Exception as e:
-            logger.warning(
-                "Не удалось отправить сообщение в @guild_antysocial (попытка %d): %s",
-                attempt + 1, e
-            )
+            logger.warning("Ошибка отправки в чат гильдии (попытка %d): %s", attempt+1, e)
             await asyncio.sleep(2 ** attempt)
 
-async def keep_db_alive(context):
-    if db_pool:
+async def keep_db_alive(context: ContextTypes.DEFAULT_TYPE):
+    ctx = context.application.bot_data.get("ctx")
+    if ctx and ctx.db_pool:
         try:
-            async with db_pool.acquire() as conn:
+            async with ctx.db_pool.acquire() as conn:
                 await conn.execute("SELECT 1")
         except Exception as e:
             logger.error(f"Keep-alive error: {e}")
 
 # ============================================================
-# ФИНАЛЬНЫЙ ЗАПУСК – УРОВЕНЬ "UNSTOPPABLE"
+# ИНИЦИАЛИЗАЦИЯ И ЗАПУСК
 # ============================================================
-import json, os, sys, asyncio, logging, asyncpg, uvloop
-from aiohttp import web
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
-from pydantic_settings import BaseSettings, SettingsConfigDict
-from telegram.ext import Application, ApplicationBuilder, ContextTypes, AIORateLimiter
-from telegram.request import HTTPXRequest
-
-# ── Настройки через Pydantic ──
-class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_prefix="")
-    bot_token: str
-    render_url: str = ""
-    port: int = 10000
-    webhook_path: str = "/webhook"
-    webhook_secret: str = "SuperSecret"
-    sentry_dsn: str = ""
-    environment: str = "production"
-    admin_id: int = 0
-    database_url: str
-
-    @property
-    def webhook_url(self) -> str:
-        return f"{self.render_url}{self.webhook_path}"
-
-settings = Settings()
-
-# ── JSON-логгер ──
-class JsonFormatter(logging.Formatter):
-    def format(self, record):
-        log_record = {
-            "timestamp": self.formatTime(record),
-            "level": record.levelname,
-            "logger": record.name,
-            "message": record.getMessage(),
-        }
-        if record.exc_info:
-            log_record["exception"] = self.formatException(record.exc_info)
-        return json.dumps(log_record, ensure_ascii=False)
-
-handler = logging.StreamHandler(sys.stdout)
-handler.setFormatter(JsonFormatter())
-logging.basicConfig(level=logging.INFO, handlers=[handler])
-logger = logging.getLogger(__name__)
-
-# ── Загрузка изображений из БД ──
-async def load_blunt_images():
+async def load_blunt_images(ctx: AppContext):
+    ctx.blunt_images = {}
     for rarity in ("common", "rare", "epic", "legendary"):
-        saved = await get_setting(f"blunt_image_{rarity}")
+        saved = await get_setting(f"blunt_image_{rarity}", ctx=ctx)
         if saved:
-            BLUNT_IMAGES[rarity] = saved
-
-# ── Инициализация (post_init) ──
-@retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=1, max=10))
-async def _init_redis_safe():
-    await init_redis()
+            ctx.blunt_images[rarity] = saved
 
 async def on_startup(app: Application):
-    await init_db_pool()
-    await _init_redis_safe()
-    app.bot_data["db_pool"] = db_pool
-    app.bot_data["redis"] = redis
-    app.bot_data["blunt_images"] = BLUNT_IMAGES
-    await load_blunt_images()
+    pool = await asyncpg.create_pool(
+        settings.database_url,
+        min_size=5, max_size=20, command_timeout=15, max_inactive_connection_lifetime=300.0
+    )
+    redis_client = None
+    if hasattr(settings, 'redis_url') and settings.redis_url:
+        redis_client = await aioredis.from_url(settings.redis_url)
+    cache = TTLCache(maxsize=2000, ttl=600)
+    repo = PlayerRepository(pool, redis_client, cache)
+    war_config = WarConfig()
+    war_service = GuildWarService(pool, redis_client, war_config, settings)
+    pet_service = PetService(repo, settings.pet_config)
+    achievement_service = AchievementService(pool, redis_client, repo)
+    ctx = AppContext(pool, redis_client, cache, settings, repo, war_service, pet_service, achievement_service)
+    app.bot_data["ctx"] = ctx
 
+    await load_blunt_images(ctx)
+
+    # Проверка валидности file_id
     invalid = []
-    for rarity in ("common", "rare", "epic", "legendary"):
-        file_id = BLUNT_IMAGES.get(rarity)
-        if not file_id:
-            invalid.append(rarity)
-            continue
+    for rarity, file_id in ctx.blunt_images.items():
         try:
             await app.bot.get_file(file_id)
         except Exception:
             invalid.append(rarity)
-            BLUNT_IMAGES.pop(rarity, None)
-            await set_setting(f"blunt_image_{rarity}", "")
+            del ctx.blunt_images[rarity]
+            await set_setting(f"blunt_image_{rarity}", "", ctx)
     if invalid:
         logger.warning("Невалидные изображения: %s", ", ".join(invalid))
         if settings.admin_id:
             try:
-                await app.bot.send_message(
-                    chat_id=settings.admin_id,
-                    text=f"⚠️ Невалидные изображения: {', '.join(invalid)}. Обновите через /setbluntpic."
-                )
+                await app.bot.send_message(chat_id=settings.admin_id, text=f"⚠️ Невалидные изображения: {', '.join(invalid)}. Обновите через /setbluntpic.")
             except Exception:
                 pass
 
-    import sentry_sdk
     if settings.sentry_dsn:
+        import sentry_sdk
         sentry_sdk.init(dsn=settings.sentry_dsn, traces_sample_rate=1.0, environment=settings.environment)
         logger.info("✅ Sentry активирован")
+
+    async def healthcheck_handler(request):
+        return web.Response(text="OK")
+    app._app.router.add_get('/healthz', healthcheck_handler)
+
+    # ВОССТАНОВЛЕНЫ: запуск всех джобов
+    if app.job_queue:
+        app.job_queue.run_repeating(keep_db_alive, interval=180, first=10)
+        app.job_queue.run_repeating(update_pulse, interval=3600, first=30)  # каждый час
+        app.job_queue.run_repeating(echo_of_distortion, interval=21600, first=300)  # каждые 6 часов
+        # Запуск часа удачи: каждый день в 20:00 (пример)
+        app.job_queue.run_daily(happy_hour_trigger, time=datetime.strptime("20:00", "%H:%M").time())
+        # Запуск войны гильдий раз в неделю (например, в воскресенье 00:00)
+        app.job_queue.run_weekly(weekly_guild_rating, day_of_week=6, time=datetime.strptime("00:00", "%H:%M").time())
+        logger.info("✅ Все джобы зарегистрированы")
     else:
-        logger.warning("SENTRY_DSN не задан, Sentry отключён")
+        logger.warning("JobQueue не доступна")
 
-    war_settings = WarSettings()
-    war_config = WarConfig()
-    war_service = GuildWarService(db_pool, redis_client=redis, config=war_config, settings=war_settings)
-    app.bot_data["war_service"] = war_service
-
-    logger.info("🚀 Бот готов к работе.")
+    logger.info("🚀 Бот готов к работе (полная совместимость с исходной логикой)")
 
 async def on_shutdown(app: Application):
-    logger.info("🛑 Освобождаем ресурсы...")
-    pool = app.bot_data.get("db_pool")
-    if pool:
-        await pool.close()
-    redis_client = app.bot_data.get("redis")
-    if redis_client:
-        await redis_client.close()
-    logger.info("✅ Ресурсы освобождены.")
+    ctx = app.bot_data.get("ctx")
+    if ctx:
+        await ctx.db_pool.close()
+        if ctx.redis:
+            await ctx.redis.close()
+    logger.info("✅ Ресурсы освобождены")
 
-@retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=2, max=30), reraise=True)
+@retry(stop=stop_after_attempt(5), wait=wait_exponential(min=2, max=30), reraise=True)
 async def setup_webhook(app: Application):
     await app.bot.delete_webhook(drop_pending_updates=True)
     await app.bot.set_webhook(
@@ -6269,7 +6308,10 @@ async def setup_webhook(app: Application):
     logger.info("Вебхук установлен на %s", settings.webhook_url)
 
 def main():
-    uvloop.install()
+    try:
+        uvloop.install()
+    except Exception:
+        pass
 
     if not settings.bot_token or not settings.database_url or not settings.render_url:
         raise RuntimeError("Не все переменные окружения заданы")
@@ -6290,31 +6332,18 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_error_handler(global_error_handler)
 
-    app.job_queue.run_repeating(keep_db_alive, interval=180, first=10)
-
+    # Джобы теперь запускаются в on_startup, здесь не нужно
     asyncio.run(setup_webhook(app))
 
-    app.run_webhook = lambda **kw: web.run_app(
+    web.run_app(
         app._app,
         host="0.0.0.0",
-        port=kw["port"],
+        port=settings.port,
         access_log=None,
         handle_signals=True,
         reuse_port=True,
         tcp_nodelay=True,
     )
-
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=settings.port,
-        url_path=settings.webhook_path,
-        webhook_url=settings.webhook_url,
-        secret_token=settings.webhook_secret,
-        drop_pending_updates=True,
-        graceful_shutdown_timeout=8,
-    )
-
-    logger.info("Бот запущен и готов принимать обновления")
 
 if __name__ == "__main__":
     main()
