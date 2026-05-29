@@ -3,13 +3,14 @@ import asyncio, json, logging, os, sys, time, random, re, hashlib, html, enum, u
 from datetime import datetime, timedelta, date, time as time_module
 from threading import Thread
 from typing import Optional, List, Any, Dict, NamedTuple, Callable
+from dataclasses import dataclass, field   # <-- должно быть здесь, до использования
 
 import asyncpg
 from tenacity import (
     retry, stop_after_attempt, wait_exponential,
     retry_if_exception_type, before_sleep_log
 )
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field   # <-- добавлен Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
