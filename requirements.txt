@@ -10,3 +10,4 @@ uvloop>=0.17
 aiohttp>=3.9,<4
 cachetools>=5.0
 pybreaker
+prometheus_client
