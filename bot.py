@@ -71,11 +71,6 @@ logger = logging.getLogger(__name__)
 logger.info("===== БОТ ЗАПУСКАЕТСЯ =====")
 logger.info("Python %s", sys.version)
 
-from enum import Enum, auto
-
-class AlchemyResult(Enum):
-    SUCCESS = auto()
-    NO_RESOURCES = auto()
 # ============================================================
 # ДЕКОРАТОРЫ (объявлены первыми, доступны везде)
 # ============================================================
@@ -199,6 +194,178 @@ assert callable(retry), "retry должен быть функцией, а не �
 # НАСТРОЙКИ (ENTERPRISE-READY)
 # ============================================================
 # ── Настройки через Pydantic ──
+
+class Player(BaseModel):
+    user_id: int
+    username: str = ""
+    balance: int = 0
+    blunts: int = 0
+    guild: Optional[str] = None
+    last_farm: Optional[datetime] = None
+    last_ritual: Optional[datetime] = None
+    last_daily: Optional[datetime] = None
+    titles: str = ""
+    last_farm_date: Optional[date] = None
+    passive_level: int = 0
+    passive_collected: Optional[datetime] = None
+    karma: int = 0
+    inhaled: int = 0
+    smoke_count: int = 0
+    farm_count: int = 0
+    craft_count: int = 0
+    ritual_count: int = 0
+    referral_count: int = 0
+    last_berserk: Optional[datetime] = None
+    inventory: List[Any] = Field(default_factory=list)
+    invited_by: Optional[int] = None
+    profile_skins: dict = Field(default_factory=dict)
+    login_streak: int = 0
+    last_login_date: Optional[date] = None
+    oath: str = ""
+    keys: int = 0
+    check_count: int = 0
+    m_essence: int = 0
+    lab_chests: int = 0
+    lab_deaths: int = 0
+    alchemy_count: int = 0
+    last_lab_attempt: Optional[datetime] = None
+    donated: int = 0
+    pending_transfer: Optional[dict] = None
+    lab_depth: int = 1
+    pet: str = ""
+    pet_name: str = ""
+    exists: bool = False
+    model_config = ConfigDict(populate_by_name=True)
+    
+class PlayerRepository:
+    def __init__(self, db_pool, redis_client, cache):
+        self.db_pool = db_pool
+        self.redis = redis_client
+        self.cache = cache
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5))
+    async def get_by_id(self, user_id: int) -> Player:
+        if not user_id or user_id <= 0:
+            raise ValueError("Invalid user_id")
+        # Попытка из Redis
+        if self.redis:
+            try:
+                data = await redis_breaker.call(self.redis.get, f"player:{user_id}")
+                if data:
+                    return Player.model_validate_json(data)
+            except pybreaker.CircuitBreakerError:
+                pass
+        # In‑memory кэш
+        if user_id in self.cache:
+            return Player(**self.cache[user_id])
+        # Основной запрос в БД
+        columns = [
+            "user_id","username","balance","blunts","guild","last_farm","last_ritual",
+            "last_daily","titles","last_farm_date","passive_level","passive_collected",
+            "karma","inhaled","smoke_count","farm_count","craft_count","ritual_count",
+            "referral_count","last_berserk","inventory","invited_by","profile_skins",
+            "login_streak","last_login_date","oath","keys","check_count","m_essence",
+            "lab_chests","lab_deaths","alchemy_count","last_lab_attempt","donated",
+            "pending_transfer","lab_depth","pet","pet_name","exists"
+        ]
+        cols_sql = ", ".join(f'"{c}"' for c in columns)
+        async with self.db_pool.acquire() as conn:
+            row = await db_breaker.call(
+                conn.fetchrow,
+                f"SELECT {cols_sql} FROM players WHERE user_id = $1",
+                user_id
+            )
+        if not row:
+            return Player(user_id=user_id)
+        p = dict(row)
+        p["inventory"] = _json_safe_load(p.get("inventory"), [])
+        p["profile_skins"] = _json_safe_load(p.get("profile_skins"), {})
+        p["pending_transfer"] = _json_safe_load(p.get("pending_transfer"), None)
+        player = Player(**p)
+        player.exists = True
+        await self._cache_put(user_id, player)
+        return player
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5))
+    async def save(self, player: Player, conn=None) -> None:
+        if player.balance < 0:
+            player.balance = 0
+        player.exists = True
+        columns = [
+            "user_id","username","balance","blunts","guild","last_farm","last_ritual",
+            "last_daily","titles","last_farm_date","passive_level","passive_collected",
+            "karma","inhaled","smoke_count","farm_count","craft_count","ritual_count",
+            "referral_count","last_berserk","inventory","invited_by","profile_skins",
+            "login_streak","last_login_date","oath","keys","check_count","m_essence",
+            "lab_chests","lab_deaths","alchemy_count","last_lab_attempt","donated",
+            "pending_transfer","lab_depth","pet","pet_name","exists"
+        ]
+        json_cols = {"inventory","profile_skins","pending_transfer"}
+        cols_sql = ", ".join(f'"{c}"' for c in columns)
+        placeholders = ", ".join(f"${i+1}" for i in range(len(columns)))
+        update_set = ", ".join(f'"{c}" = EXCLUDED."{c}"' for c in columns if c != "user_id")
+        values = [getattr(player, col) for col in columns]
+        for idx, col in enumerate(columns):
+            if col in json_cols:
+                values[idx] = json.dumps(getattr(player, col), default=str)
+        sql = f"""
+            INSERT INTO players ({cols_sql})
+            VALUES ({placeholders})
+            ON CONFLICT (user_id) DO UPDATE SET
+                {update_set}
+        """
+        async def _write(c):
+            await c.execute(sql, *values)
+        if conn:
+            await _write(conn)
+        else:
+            async with self.db_pool.acquire() as new_conn:
+                await _write(new_conn)
+        await self._cache_put(player.user_id, player)
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5))
+    async def atomic_update(self, user_id: int, update_func):
+        async with self.db_pool.acquire() as conn:
+            async with conn.transaction():
+                columns = [
+                    "user_id","username","balance","blunts","guild","last_farm","last_ritual",
+                    "last_daily","titles","last_farm_date","passive_level","passive_collected",
+                    "karma","inhaled","smoke_count","farm_count","craft_count","ritual_count",
+                    "referral_count","last_berserk","inventory","invited_by","profile_skins",
+                    "login_streak","last_login_date","oath","keys","check_count","m_essence",
+                    "lab_chests","lab_deaths","alchemy_count","last_lab_attempt","donated",
+                    "pending_transfer","lab_depth","pet","pet_name","exists"
+                ]
+                cols_sql = ", ".join(f'"{c}"' for c in columns)
+                row = await conn.fetchrow(
+                    f"SELECT {cols_sql} FROM players WHERE user_id = $1 FOR UPDATE",
+                    user_id
+                )
+                if not row:
+                    return None
+                p = dict(row)
+                p["inventory"] = _json_safe_load(p.get("inventory"), [])
+                p["profile_skins"] = _json_safe_load(p.get("profile_skins"), {})
+                p["pending_transfer"] = _json_safe_load(p.get("pending_transfer"), None)
+                player = Player(**p)
+                result = await update_func(player, conn)
+                await self.save(player, conn=conn)
+                return result
+
+    async def _cache_put(self, user_id: int, player: Player):
+        try:
+            if self.redis:
+                await redis_breaker.call(
+                    self.redis.setex,
+                    f"player:{user_id}",
+                    10,
+                    player.model_dump_json()
+                )
+            else:
+                self.cache[user_id] = player.model_dump()
+        except pybreaker.CircuitBreakerError:
+            pass
+
 from pydantic import Field
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_prefix="")
@@ -448,13 +615,18 @@ class GuildWarService:
         except Exception:
             pass
             
+from enum import Enum, auto
+
+class AlchemyResult(Enum):
+    SUCCESS = auto()
+    NO_RESOURCES = auto()
+            
 class PetService:
-    """Сервис управления питомцами (атомарные операции)."""
-    def __init__(self, config: dict = None):
-        self.config = config or PET_CONFIG
+    def __init__(self, repo: PlayerRepository, config: dict):
+        self.repo = repo
+        self.config = config
 
     async def buy(self, user_id: int, pet_type: str) -> dict | None:
-        """Покупка питомца. Возвращает {"status": "ok"/"already_have"/"no_money"} или None при ошибке БД."""
         async def _buy(p, conn):
             if p.pet:
                 return {"status": "already_have"}
@@ -465,66 +637,198 @@ class PetService:
             p.pet = self.config[pet_type]["name"]
             p.pet_name = ""
             return {"status": "ok"}
-
-        return await PlayerRepository.atomic_update(user_id, _buy)
+        return await self.repo.atomic_update(user_id, _buy)
 
     async def set_name(self, user_id: int, name: str) -> bool:
-        """Установка имени питомца. Возвращает True при успехе, False при ошибке."""
         async def _set(p, conn):
             p.pet_name = name[:self.config["dog"]["max_name_len"]]
             return True
-
-        result = await PlayerRepository.atomic_update(user_id, _set)
+        result = await self.repo.atomic_update(user_id, _set)
         return result is not None
 
     async def has_pet(self, user_id: int) -> bool:
-        """Проверяет, есть ли у игрока питомец."""
-        player = await PlayerRepository.get_by_id(user_id)
+        player = await self.repo.get_by_id(user_id)
         return player is not None and bool(player.pet)
+        
+class AchievementService:
+    def __init__(self, db_pool, redis_client, repo: PlayerRepository):
+        self.db_pool = db_pool
+        self.redis = redis_client
+        self.repo = repo
 
-class Player(BaseModel):
-    user_id: int
-    username: str = ""
-    balance: int = 0
-    blunts: int = 0
-    guild: Optional[str] = None
-    last_farm: Optional[datetime] = None
-    last_ritual: Optional[datetime] = None
-    last_daily: Optional[datetime] = None
-    titles: str = ""
-    last_farm_date: Optional[date] = None
-    passive_level: int = 0
-    passive_collected: Optional[datetime] = None
-    karma: int = 0
-    inhaled: int = 0
-    smoke_count: int = 0
-    farm_count: int = 0
-    craft_count: int = 0
-    ritual_count: int = 0
-    referral_count: int = 0
-    last_berserk: Optional[datetime] = None
-    inventory: List[Any] = Field(default_factory=list)
-    invited_by: Optional[int] = None
-    profile_skins: dict = Field(default_factory=dict)
-    login_streak: int = 0
-    last_login_date: Optional[date] = None
-    oath: str = ""
-    keys: int = 0
-    check_count: int = 0
-    m_essence: int = 0
-    lab_chests: int = 0
-    lab_deaths: int = 0
-    alchemy_count: int = 0
-    last_lab_attempt: Optional[datetime] = None
-    donated: int = 0
-    pending_transfer: Optional[dict] = None
-    lab_depth: int = 1
-    pet: str = ""           # 🐕 Песик
-    pet_name: str = ""      # кличка
-    onboarding_step: int = 0
-    exists: bool = False   # True, если игрок загружен из БД
+    async def check_and_award(self, user_id: int, context):
+        player = await self.repo.get_by_id(user_id)
+        if not player.exists:
+            return
+        awarded = set()
+        if self.redis:
+            try:
+                cached = await redis_breaker.call(self.redis.get, f"ach:{user_id}")
+                if cached:
+                    awarded = set(json.loads(cached))
+            except pybreaker.CircuitBreakerError:
+                pass
+        if not awarded:
+            async with self.db_pool.acquire() as conn:
+                rows = await conn.fetch(
+                    "SELECT ach_id FROM achievements_awarded WHERE user_id=$1", user_id
+                )
+                awarded = {r["ach_id"] for r in rows}
+            if self.redis:
+                try:
+                    await redis_breaker.call(
+                        self.redis.setex, f"ach:{user_id}", 60, json.dumps(list(awarded))
+                    )
+                except pybreaker.CircuitBreakerError:
+                    pass
+        async with self.db_pool.acquire() as conn:
+            for ach in ACHIEVEMENTS:
+                ach_id = ach["id"]
+                if ach_id == "lunar_lord":
+                    continue
+                cond = ACHIEVEMENT_CONDITIONS.get(ach_id)
+                if cond:
+                    field, threshold = cond
+                    if getattr(player, field, 0) >= threshold and ach_id not in awarded:
+                        await conn.execute(
+                            "INSERT INTO achievements_awarded(user_id, ach_id, awarded_at) "
+                            "VALUES($1, $2, NOW()) ON CONFLICT DO NOTHING",
+                            user_id, ach_id,
+                        )
+                        await self._give_reward(player, ach.get("reward", ""), context)
+                        awarded.add(ach_id)
+                        if self.redis:
+                            try:
+                                await redis_breaker.call(self.redis.delete, f"ach:{user_id}")
+                            except pybreaker.CircuitBreakerError:
+                                pass
+                        try:
+                            text = (
+                                f"<b>🕊️ СВИТОК ДОСТИЖЕНИЙ 🏆</b>\n\n"
+                                f"<b>🎉 Достижение разблокировано!</b>\n\n"
+                                f"<i>{ach['emoji']} «{ach['name']}» {ach['emoji']}</i>\n\n"
+                                f"<b>📜 Запись добавлена! 💎</b>"
+                            )
+                            await context.bot.send_message(chat_id=user_id, text=text, parse_mode='HTML')
+                        except Exception as e:
+                            logger.error(f"Achievement notify error: {e}")
+            # lunar_lord
+            rows = await conn.fetch("SELECT ach_id FROM achievements_awarded WHERE user_id=$1", user_id)
+            awarded_ids = {r["ach_id"] for r in rows}
+            all_other = {a["id"] for a in ACHIEVEMENTS if a["id"] != "lunar_lord"}
+            if "lunar_lord" not in awarded_ids and all_other.issubset(awarded_ids):
+                lunar = ACHIEVEMENTS_DICT["lunar_lord"]
+                await conn.execute(
+                    "INSERT INTO achievements_awarded(user_id, ach_id, awarded_at) "
+                    "VALUES($1, $2, NOW()) ON CONFLICT DO NOTHING",
+                    user_id, "lunar_lord",
+                )
+                await self._give_reward(player, lunar.get("reward", ""), context)
+                if self.redis:
+                    try:
+                        await redis_breaker.call(self.redis.delete, f"ach:{user_id}")
+                    except pybreaker.CircuitBreakerError:
+                        pass
+                try:
+                    text = (
+                        f"<b>🕊️ СВИТОК ДОСТИЖЕНИЙ 🏆</b>\n\n"
+                        f"<b>🎉 Достижение разблокировано!</b>\n\n"
+                        f"<i>{lunar['emoji']} «{lunar['name']}» {lunar['emoji']}</i>\n\n"
+                        f"<b>📜 Запись добавлена! 💎</b>"
+                    )
+                    await context.bot.send_message(chat_id=user_id, text=text, parse_mode='HTML')
+                except Exception as e:
+                    logger.error(f"Achievement notify error (lunar): {e}")
 
-    model_config = ConfigDict(populate_by_name=True)
+    async def _give_reward(self, player, reward_text, context):
+        if not reward_text:
+            return
+        parts = [p.strip() for p in reward_text.split(",") if p.strip()]
+        for part in parts:
+            if part.startswith("+") and "OAC" in part:
+                clean = part.replace(" ", "")
+                m = re.search(r"\+(\d+)", clean)
+                if m:
+                    amount = int(m.group(1))
+                    player.balance = (player.balance or 0) + amount
+            elif part.startswith("Титул "):
+                title = part.replace("Титул ", "").strip()
+                if title:
+                    titles = (player.titles or "").split()
+                    if title not in titles:
+                        titles.append(title)
+                        player.titles = " ".join(titles).strip()
+            elif part.startswith("Фон "):
+                bg = part.replace("Фон ", "").strip()
+                skins = player.profile_skins or {}
+                if not isinstance(skins, dict):
+                    skins = {}
+                unlocked = skins.get("unlocked_backgrounds", [])
+                if bg and bg not in unlocked:
+                    unlocked.append(bg)
+                skins["unlocked_backgrounds"] = unlocked
+                player.profile_skins = skins
+            elif part.startswith("Рамка "):
+                frame = part.replace("Рамка ", "").strip()
+                skins = player.profile_skins or {}
+                if not isinstance(skins, dict):
+                    skins = {}
+                unlocked = skins.get("unlocked_frames", [])
+                if frame and frame not in unlocked:
+                    unlocked.append(frame)
+                skins["unlocked_frames"] = unlocked
+                player.profile_skins = skins
+        await self.repo.save(player)
+        
+class AppContext:
+    def __init__(self, db_pool, redis_client, cache, settings, repo, war_service, pet_service, achievement_service):
+        self.db_pool = db_pool
+        self.redis = redis_client
+        self.cache = cache
+        self.settings = settings
+        self.repo = repo
+        self.war_service = war_service
+        self.pet_service = pet_service
+        self.achievement_service = achievement_service
+
+# Redis Rate Limiter
+async def check_rate_limit_redis(ctx: AppContext, user_id: int, action: str, limit=5, period=10) -> bool:
+    if not ctx.redis:
+        return True
+    key = f"rate:{action}:{user_id}"
+    try:
+        current = await redis_breaker.call(ctx.redis.incr, key)
+        if current == 1:
+            await redis_breaker.call(ctx.redis.expire, key, period)
+        if current > limit:
+            rate_limited_requests.inc()
+            return False
+        return True
+    except pybreaker.CircuitBreakerError:
+        return True
+
+# Декоратор cb
+def cb(show_alert_on_error=False):
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+            query = update.callback_query
+            if query:
+                await query.answer()
+            ctx = context.application.bot_data.get("ctx")
+            if not ctx:
+                logger.error("AppContext not found")
+                return
+            try:
+                callback_requests.inc()
+                with callback_duration.time():
+                    return await func(update, context, ctx, *args, **kwargs)
+            except Exception as e:
+                logger.error(f"Callback error in {func.__name__}: {e}", exc_info=True)
+                if query and show_alert_on_error:
+                    await query.answer(f"❌ Ошибка: {e}", show_alert=True)
+        return wrapper
+    return decorator
 
 def db_retry(max_retries=3, delay=0.2):
     """Автоматически повторяет запрос к БД при временных сбоях соединения."""
@@ -5120,60 +5424,7 @@ async def welcome_new_member(update, context):
             f"<b><i>🕯️ ДОБРО ПОЖАЛОВАТЬ</i></b>\n\n⚜️ <b>{html.escape(member.username or member.first_name)}</b>, добро пожаловать в <b><i>Гильдию</i></b>\n<i>Твой первый /farm уже ждёт</i>"
         )
 
-# ============================================================
-# ФИНАЛЬНЫЙ КОД БОТА (ПОЛНОСТЬЮ РАБОЧАЯ ВЕРСИЯ)
-# ===========================================================
-from player_repo import PlayerRepository
-from player import Player
-from pet_service import PetService
-from guild_war_service import GuildWarService
-from achievement_service import AchievementService
-from app_context import AppContext
-from utils import (
-    get_setting, set_setting, _json_safe_load, format_date, send_whisper_dm,
-    create_named_blunt, safe_send_blunt_image, get_back_to_menu_keyboard,
-    get_main_menu_keyboard, check_rate_limit_redis, get_cached_top
-)
-from game_handlers import (
-    start, farm_callback, craft_callback, smoke_callback, ritual_callback,
-    profile_callback, top_callback, rules_callback, privilege_callback,
-    catalog_callback, luck_callback, collect_callback, check_blunt,
-    guild_info_callback, confess_callback, lab_enter, shop_callback,
-    handle_craft_normal, handle_craft_named, cancel_named, do_smoke,
-    handle_use_dust, top_scout_callback, achievements_callback,
-    my_blunts_callback, gift_blunt_start, handle_lab_option,
-    lab_enter_confirm, guild_shrine_callback, guild_war_callback,
-    welcome_new_member
-)
-from decorators import cb
-
 logger = logging.getLogger(__name__)
-
-# ========== ДЕКОРАТОР cb (если не импортирован) ==========
-def cb(need_ctx=True, show_alert_on_error=False):
-    def decorator(func):
-        from functools import wraps
-        @wraps(func)
-        async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
-            query = update.callback_query
-            if query:
-                await query.answer()
-            try:
-                if need_ctx:
-                    ctx = context.application.bot_data.get("ctx")
-                    if not ctx:
-                        raise RuntimeError("AppContext not found")
-                    return await func(update, context, ctx, *args, **kwargs)
-                else:
-                    return await func(update, context, *args, **kwargs)
-            except Exception as e:
-                logger.error(f"Callback error in {func.__name__}: {e}", exc_info=True)
-                if query and show_alert_on_error:
-                    await query.answer(f"❌ Ошибка: {e}", show_alert=True)
-                elif query:
-                    await query.answer("⚠️ Ошибка", show_alert=False)
-        return wrapper
-    return decorator
 
 # ============================================================
 # ОБРАБОТЧИК ТЕКСТОВЫХ СОКРАЩЕНИЙ (с Redis лимитером)
