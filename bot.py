@@ -543,44 +543,6 @@ def db_retry(max_retries=3, delay=0.2):
         return wrapper
     return decorator
 
-# === ВЕБ-СЕРВЕР (Flask в отдельном потоке) ===
-import threading
-
-web_app = Flask(__name__)
-
-@web_app.route("/")
-def home():
-    return "Antysocialshop RPG Bot is alive!"
-
-@web_app.route("/healthz")
-def healthz():
-    """Проверяет, жив ли бот и подключена ли БД."""
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_closed():
-            return "Event loop closed", 500
-        if db_pool is None:
-            return "No DB pool", 503
-        loop.run_until_complete(_check_db())
-        return "OK", 200
-    except Exception as e:
-        return str(e), 500
-
-async def _check_db():
-    async with db_pool.acquire() as conn:
-        await conn.execute("SELECT 1")
-
-def run_web_server():
-    port = int(os.getenv("PORT", 10000))
-    web_app.run(host="0.0.0.0", port=port, threaded=True)
-
-TOKEN = settings.bot_token
-ADMIN_ID = settings.admin_id
-FARM_COOLDOWN_HOURS = 0.5
-FARM_MIN, FARM_MAX = 45, 100
-HAPPY_HOUR_MULTIPLIER = 2
-HAPPY_HOUR_DURATION_MIN = 30
-
 top_cache = {"data": None, "timestamp": 0, "ttl": 60}
 
 def _json_safe_load(value, default):
@@ -611,10 +573,10 @@ def emoji_to_name(emoji: str) -> str:
     return parts[1] if len(parts) > 1 else parts[0]
 
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
-import redis.asyncio as aioredis
 
+# Устаревшие глобальные переменные (заменены на AppContext, но оставлены для совместимости)
 redis = None
-player_cache = {}  # fallback-словарь, если Redis не подключён
+player_cache = {}
 
 async def init_redis():
     global redis
