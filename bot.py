@@ -1,5 +1,5 @@
 # bot.py — ANTY SOCIAL SHOP RPG v8.0 ENTERPRISE
-import asyncio, json, os, sys, time, random, re, hashlib, html, enum, uuid, copy
+import asyncio, json, logging, os, sys, time, random, re, hashlib, html, enum, uuid, copy
 from datetime import datetime, timedelta, date, time as time_module
 from threading import Thread
 from typing import Optional, List, Any, Dict, NamedTuple, Callable
