@@ -1,41 +1,27 @@
-# bot.py — ANTY SOCIAL SHOP RPG v7.6.6.6 FINAL FIXED
-import asyncio, logging, os, random, re, json, hashlib, html
-from datetime import datetime, timedelta, date, time
-from dataclasses import dataclass, field
+# bot.py — ANTY SOCIAL SHOP RPG v8.0 ENTERPRISE
+import asyncio, json, os, sys, time, random, re, hashlib, html, enum, uuid, copy
+from datetime import datetime, timedelta, date, time as time_module
 from threading import Thread
-import time
-import sys
-import uuid
-import functools
-try:
-    import uvloop
-    uvloop.install()
-except ImportError:
-    pass
-
-import asyncpg
-from flask import Flask
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Application, CallbackQueryHandler,
-    ContextTypes, MessageHandler, filters
-)
-from telegram.error import BadRequest, Forbidden, RetryAfter
-
-from telegram.ext import AIORateLimiter
-
 from typing import Optional, List, Any, Dict, NamedTuple, Callable
 
+import asyncpg
 from tenacity import (
-    retry,
-    stop_after_attempt,
-    wait_exponential,
-    retry_if_exception_type,
-    before_sleep_log
+    retry, stop_after_attempt, wait_exponential,
+    retry_if_exception_type, before_sleep_log
 )
-
-import enum
 from pydantic import BaseModel, Field, ConfigDict
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application, ApplicationBuilder, CallbackQueryHandler,
+    ContextTypes, MessageHandler, filters, AIORateLimiter
+)
+from telegram.error import BadRequest, Forbidden, RetryAfter
+from telegram.request import HTTPXRequest
+
+import redis.asyncio as aioredis
+import functools
 
 # ─────────────────────────────────────────────────────────────
 # СВЕРХНАДЁЖНОЕ ЛОГИРОВАНИЕ (SENIOR-УРОВЕНЬ)
@@ -89,21 +75,10 @@ from enum import Enum, auto
 class AlchemyResult(Enum):
     SUCCESS = auto()
     NO_RESOURCES = auto()
-
-# ============================================================
-# ДЕКОРАТОРЫ
-# ============================================================
-
-from enum import Enum, auto
-
-class AlchemyResult(Enum):
-    SUCCESS = auto()
-    NO_RESOURCES = auto()
 # ============================================================
 # ДЕКОРАТОРЫ (объявлены первыми, доступны везде)
 # ============================================================
 def safe_callback(func: Callable):
-    """Декоратор, логирует ошибки callback-запросов и уведомляет админа."""
     @functools.wraps(func)
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
@@ -114,26 +89,17 @@ def safe_callback(func: Callable):
                 await update.callback_query.answer(f"❌ Ошибка: {e}", show_alert=True)
             except Exception:
                 pass
-            if ADMIN_ID and "compute time quota exceeded" in str(e).lower():
-                provider, host = _extract_provider_info(e)
+            if settings.admin_id and "compute time quota exceeded" in str(e).lower():
                 try:
                     await context.bot.send_message(
-                        chat_id=ADMIN_ID,
-                        text=(
-                            f"❌ <b>Лимит базы данных исчерпан!</b>\n"
-                            f"Провайдер: {provider}\n"
-                            f"Хост: {host}\n"
-                            f"Callback: {func.__name__}\n"
-                            f"<b>Решение:</b> дождитесь сброса или перенесите базу на Render PostgreSQL."
-                        ),
-                        parse_mode='HTML'
+                        chat_id=settings.admin_id,
+                        text=f"❌ <b>Лимит базы данных!</b>\nCallback: {func.__name__}\nРешение: дождитесь сброса."
                     )
                 except Exception:
                     pass
     return wrapper
 
 def error_handler(func):
-    """Middleware: перехватывает исключения в обработчиках, уведомляет пользователя и админа."""
     @functools.wraps(func)
     async def wrapper(update, context, *args, **kwargs):
         try:
@@ -149,28 +115,15 @@ def error_handler(func):
                     chat_id=update.effective_chat.id,
                     text="⚠️ Что-то пошло не так. Попробуйте позже."
                 )
-            if ADMIN_ID:
+            if settings.admin_id:
                 try:
-                    err_text = str(e)
-                    if "compute time quota exceeded" in err_text.lower():
-                        provider, host = _extract_provider_info(e)
-                        err_msg = (
-                            f"❌ <b>Лимит базы данных исчерпан!</b>\n"
-                            f"Провайдер: {provider}\n"
-                            f"Хост: {host}\n"
-                            f"Функция: {func.__name__}\n"
-                            f"Ошибка: <code>{html.escape(err_text)}</code>\n"
-                            f"<b>Решение:</b> дождитесь сброса или перенесите базу на Render PostgreSQL."
-                        )
-                    else:
-                        err_msg = f"🚨 <b>Ошибка в {func.__name__}</b>\n<code>{html.escape(err_text)}</code>"
-                    await context.bot.send_message(chat_id=ADMIN_ID, text=err_msg, parse_mode='HTML')
-                except Exception as notify_err:
-                    logger.error(f"Failed to notify admin: {notify_err}")
+                    err_msg = f"🚨 <b>Ошибка в {func.__name__}</b>\n<code>{html.escape(str(e))}</code>"
+                    await context.bot.send_message(chat_id=settings.admin_id, text=err_msg, parse_mode='HTML')
+                except Exception:
+                    pass
     return wrapper
 
 def rate_limit(seconds: int = 2):
-    """Запрещает повторный вызов функции чаще, чем раз в seconds секунд."""
     def decorator(func):
         @functools.wraps(func)
         async def wrapper(update, context, *args, **kwargs):
@@ -241,29 +194,73 @@ def divine_command(command_name: str):
 # Проверка: если retry – модуль, а не функция, будет ошибка
 assert callable(retry), "retry должен быть функцией, а не модулем!"
 
+# # ============================================================
+# НАСТРОЙКИ (ENTERPRISE-READY)
 # ============================================================
-# ГЛОБАЛЬНЫЙ КОНФИГ ИГРЫ (редактируй здесь, не трогая код)
-# ============================================================
+# ── Настройки через Pydantic ──
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", env_prefix="")
+    bot_token: str
+    render_url: str = ""
+    port: int = 10000
+    webhook_path: str = "/webhook"
+    webhook_secret: str = "SuperSecret"
+    sentry_dsn: str = ""
+    environment: str = "production"
+    admin_id: int = 0
+    database_url: str
+    # Игровые конфиги
+    farm_cooldown_hours: float = 0.5
+    farm_min: int = 45
+    farm_max: int = 100
+    happy_hour_multiplier: int = 2
+    happy_hour_duration_min: int = 30
+    veteran_threshold: int = 5000
+    phantom_threshold: int = 20000
+    necromant_threshold: int = 50000
+    lab_cooldown_hours: int = 12
+    ritual_cooldown_hours: int = 24
+
+    @property
+    def webhook_url(self) -> str:
+        return f"{self.render_url}{self.webhook_path}"
+
+settings = Settings()
+
+# ── JSON-логгер ──
+class JsonFormatter(logging.Formatter):
+    def format(self, record):
+        log_record = {
+            "timestamp": self.formatTime(record),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+        if record.exc_info:
+            log_record["exception"] = self.formatException(record.exc_info)
+        return json.dumps(log_record, ensure_ascii=False)
+
+handler = logging.StreamHandler(sys.stdout)
+handler.setFormatter(JsonFormatter())
+logging.basicConfig(level=logging.INFO, handlers=[handler])
+logger = logging.getLogger(__name__)
+
+# ── Глобальные конфиги игры ──
 GAME_CONFIG = {
-    "craft_cost": 15,                # стоимость обычного бланта
-    "named_blunt_cost": 50,          # стоимость именного бланта
-    "farm_cooldown_hours": 0.5,      # кулдаун фарма в часах
-    "ritual_cooldown_hours": 24,     # кулдаун ритуала в часах
-    "lab_cooldown_hours": 12,        # кулдаун лабиринта в часах
-    "veteran_threshold": 5000,       # порог ранга "Ветеран"
-    "phantom_threshold": 20000,      # порог ранга "Призрак"
-    "necromant_threshold": 50000,    # порог ранга "Некромант"
+    "craft_cost": 15,
+    "named_blunt_cost": 50,
+    "farm_cooldown_hours": settings.farm_cooldown_hours,
+    "ritual_cooldown_hours": settings.ritual_cooldown_hours,
+    "lab_cooldown_hours": settings.lab_cooldown_hours,
+    "veteran_threshold": settings.veteran_threshold,
+    "phantom_threshold": settings.phantom_threshold,
+    "necromant_threshold": settings.necromant_threshold,
 }
-
 PET_CONFIG = {
-    "dog": {
-        "name": "🐕 Песик",
-        "price": 3000,
-        "max_name_len": 15,
-    },
+    "dog": {"name": "🐕 Песик", "price": 3000, "max_name_len": 15},
 }
 
-# ── Хелпер проверки ранга (чтобы не дублировать if balance >= 5000) ──
+# ── Хелперы ──
 def has_rank(balance: int, rank_name: str = "Ветеран") -> bool:
     thresholds = {
         "Ветеран": GAME_CONFIG["veteran_threshold"],
@@ -272,9 +269,7 @@ def has_rank(balance: int, rank_name: str = "Ветеран") -> bool:
     }
     return balance >= thresholds.get(rank_name, 0)
 
-# ── Хелпер проверки существования игрока ──
 def ensure_player_exists(player) -> bool:
-    """True, если игрок реально сохранён в БД."""
     return player is not None and getattr(player, 'exists', False)
 
 # ── Исключения ──────────────────────────────────────────────
@@ -576,8 +571,8 @@ def run_web_server():
     port = int(os.getenv("PORT", 10000))
     web_app.run(host="0.0.0.0", port=port, threaded=True)
 
-TOKEN = os.getenv("TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+TOKEN = settings.bot_token
+ADMIN_ID = settings.admin_id
 FARM_COOLDOWN_HOURS = 0.5
 FARM_MIN, FARM_MAX = 45, 100
 HAPPY_HOUR_MULTIPLIER = 2
@@ -5494,19 +5489,14 @@ async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYP
     error = context.error
     import traceback
     traceback.print_exception(type(error), error, error.__traceback__)
-
-    if ADMIN_ID:
-        async def _alert():
-            for attempt in range(3):
-                try:
-                    await context.bot.send_message(
-                        chat_id=ADMIN_ID,
-                        text=f"🚨 Глобальная ошибка: {error}"
-                    )
-                    break
-                except Exception:
-                    await asyncio.sleep(2 ** attempt)
-        asyncio.create_task(_alert())
+    if settings.admin_id:
+        try:
+            await context.bot.send_message(
+                chat_id=settings.admin_id,
+                text=f"🚨 Глобальная ошибка: {error}"
+            )
+        except Exception:
+            pass
         
 @divine_command("debugpet")
 async def debug_pet(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -6154,11 +6144,33 @@ async def keep_db_alive(context):
 # ============================================================
 # ФИНАЛЬНЫЙ ЗАПУСК – УРОВЕНЬ "UNSTOPPABLE"
 # ============================================================
-import json
-from aiohttp import ClientSession, TCPConnector
-# ------------------------------------------------------------
-# Структурированное логирование одной строчкой (JSON)
-# ------------------------------------------------------------
+import json, os, sys, asyncio, logging, asyncpg, uvloop
+from aiohttp import web
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from telegram.ext import Application, ApplicationBuilder, ContextTypes, AIORateLimiter
+from telegram.request import HTTPXRequest
+
+# ── Настройки через Pydantic ──
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", env_prefix="")
+    bot_token: str
+    render_url: str = ""
+    port: int = 10000
+    webhook_path: str = "/webhook"
+    webhook_secret: str = "SuperSecret"
+    sentry_dsn: str = ""
+    environment: str = "production"
+    admin_id: int = 0
+    database_url: str
+
+    @property
+    def webhook_url(self) -> str:
+        return f"{self.render_url}{self.webhook_path}"
+
+settings = Settings()
+
+# ── JSON-логгер ──
 class JsonFormatter(logging.Formatter):
     def format(self, record):
         log_record = {
@@ -6176,38 +6188,26 @@ handler.setFormatter(JsonFormatter())
 logging.basicConfig(level=logging.INFO, handlers=[handler])
 logger = logging.getLogger(__name__)
 
-# Кэширование профиля (уже было)
-async def cached_profile(user_id: int) -> dict | None:
-    if not redis:
-        return await fetch_profile_from_db(user_id)
-    cache_key = f"profile:{user_id}"
-    cached = await redis.get(cache_key)
-    if cached:
-        return json.loads(cached)
-    profile = await fetch_profile_from_db(user_id)
-    if profile:
-        await redis.set(cache_key, json.dumps(profile), ex=20)
-    return profile
-
-# ------------------------------------------------------------
-# Основная асинхронная инициализация (post_init)
-# ------------------------------------------------------------
-@retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=1, max=10))
-async def _init_redis_safe():
-    await init_redis()
-
-async def on_startup(app: Application):
-    # 1. БД и Redis (с ретраями)
-    await init_db_pool()
-    await init_redis()
-
-    # 2. Загружаем сохранённые file_id из БД
+# ── Загрузка изображений из БД ──
+async def load_blunt_images():
     for rarity in ("common", "rare", "epic", "legendary"):
         saved = await get_setting(f"blunt_image_{rarity}")
         if saved:
             BLUNT_IMAGES[rarity] = saved
 
-    # 3. Проверка валидности изображений
+# ── Инициализация (post_init) ──
+@retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=1, max=10))
+async def _init_redis_safe():
+    await init_redis()
+
+async def on_startup(app: Application):
+    await init_db_pool()
+    await _init_redis_safe()
+    app.bot_data["db_pool"] = db_pool
+    app.bot_data["redis"] = redis
+    app.bot_data["blunt_images"] = BLUNT_IMAGES
+    await load_blunt_images()
+
     invalid = []
     for rarity in ("common", "rare", "epic", "legendary"):
         file_id = BLUNT_IMAGES.get(rarity)
@@ -6222,77 +6222,67 @@ async def on_startup(app: Application):
             await set_setting(f"blunt_image_{rarity}", "")
     if invalid:
         logger.warning("Невалидные изображения: %s", ", ".join(invalid))
-        if ADMIN_ID:
+        if settings.admin_id:
             try:
-                await safe_send(app, ADMIN_ID,
-                    text=f"⚠️ Невалидные изображения: {', '.join(invalid)}. Обновите через /setbluntpic.")
+                await app.bot.send_message(
+                    chat_id=settings.admin_id,
+                    text=f"⚠️ Невалидные изображения: {', '.join(invalid)}. Обновите через /setbluntpic."
+                )
             except Exception:
                 pass
 
-    # 4. Инициализация Sentry
     import sentry_sdk
-    SENTRY_DSN = os.getenv("SENTRY_DSN")
-    if SENTRY_DSN:
-        sentry_sdk.init(
-            dsn=SENTRY_DSN,
-            traces_sample_rate=1.0,
-            environment=os.getenv("ENV", "production"),
-        )
+    if settings.sentry_dsn:
+        sentry_sdk.init(dsn=settings.sentry_dsn, traces_sample_rate=1.0, environment=settings.environment)
         logger.info("✅ Sentry активирован")
     else:
         logger.warning("SENTRY_DSN не задан, Sentry отключён")
 
-    # 5. Инициализация сервиса войны
     war_settings = WarSettings()
     war_config = WarConfig()
-    war_service = GuildWarService(
-        db_pool, redis_client=redis, config=war_config, settings=war_settings
-    )
+    war_service = GuildWarService(db_pool, redis_client=redis, config=war_config, settings=war_settings)
     app.bot_data["war_service"] = war_service
 
-    logger.info("🚀 Инициализация завершена, бот готов к работе.")
+    logger.info("🚀 Бот готов к работе.")
 
-# ------------------------------------------------------------
-# Корректное закрытие ресурсов (post_shutdown)
-# ------------------------------------------------------------
 async def on_shutdown(app: Application):
-    logger.info("🛑 Получен сигнал остановки, освобождаем ресурсы...")
-    if db_pool:
-        await db_pool.close()
-        logger.info("Пул БД закрыт")
-    if redis:
-        await redis.close()
-        logger.info("Redis закрыт")
+    logger.info("🛑 Освобождаем ресурсы...")
+    pool = app.bot_data.get("db_pool")
+    if pool:
+        await pool.close()
+    redis_client = app.bot_data.get("redis")
+    if redis_client:
+        await redis_client.close()
+    logger.info("✅ Ресурсы освобождены.")
 
-    # Закрываем HTTP‑сессию, которую мы передали боту
-    if hasattr(app.bot, "request") and isinstance(app.bot.request, ClientSession):
-        await app.bot.request.close()
-        logger.info("HTTP-сессия закрыта")
+@retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=2, max=30), reraise=True)
+async def setup_webhook(app: Application):
+    await app.bot.delete_webhook(drop_pending_updates=True)
+    await app.bot.set_webhook(
+        url=settings.webhook_url,
+        secret_token=settings.webhook_secret,
+        allowed_updates=["message", "callback_query"]
+    )
+    info = await app.bot.get_webhook_info()
+    if info.url != settings.webhook_url:
+        raise RuntimeError(f"URL mismatch: {info.url}")
+    logger.info("Вебхук установлен на %s", settings.webhook_url)
 
-    logger.info("✅ Все ресурсы освобождены, завершение работы.")
-
-# ------------------------------------------------------------
-# Главная функция
-# ------------------------------------------------------------
 def main():
-    asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-    # Явно создаём и устанавливаем текущий event loop
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    uvloop.install()
 
-    if not TOKEN:
-        raise RuntimeError("TOKEN не установлен")
-    if not os.getenv("DATABASE_URL_AIVEN"):
-        raise RuntimeError("DATABASE_URL_AIVEN не установлена")
+    if not settings.bot_token or not settings.database_url or not settings.render_url:
+        raise RuntimeError("Не все переменные окружения заданы")
 
+    request = HTTPXRequest(connection_pool_size=50, read_timeout=10, write_timeout=10)
     app = (Application.builder()
-           .token(TOKEN)
+           .token(settings.bot_token)
+           .request(request)
            .rate_limiter(AIORateLimiter())
            .post_init(on_startup)
            .post_shutdown(on_shutdown)
            .build())
 
-    # Регистрация всех хендлеров
     app.add_handler(MessageHandler(filters.PHOTO, get_file_id))
     app.add_handler(MessageHandler(filters.COMMAND, handle_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_chat_shortcut))
@@ -6300,39 +6290,26 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_error_handler(global_error_handler)
 
-    # Джобы
-    job = app.job_queue
-    job.run_repeating(keep_db_alive, interval=180, first=10)
+    app.job_queue.run_repeating(keep_db_alive, interval=180, first=10)
 
-    # === ЗАПУСК ЧЕРЕЗ WEBHOOK (ENTERPRISE-READY) ===
-    render_url = os.getenv("RENDER_EXTERNAL_URL", "")
-    if not render_url:
-        logger.critical("RENDER_EXTERNAL_URL не задан")
-        raise RuntimeError("Невозможно запустить бота: RENDER_EXTERNAL_URL не задан")
+    asyncio.run(setup_webhook(app))
 
-    webhook_path = "/webhook"
-    webhook_url = f"{render_url}{webhook_path}"
-    port = int(os.getenv("PORT", "10000"))
-
-    # Удаляем старый вебхук (без лишних sleep — drop_pending_updates=True делает всё сам)
-    await app.bot.delete_webhook(drop_pending_updates=True)
-
-    # Устанавливаем новый вебхук
-    await app.bot.set_webhook(url=webhook_url)
-
-    # Проверяем, что вебхук реально установлен
-    webhook_info = await app.bot.get_webhook_info()
-    if webhook_info.url != webhook_url:
-        logger.critical("Вебхук не установлен! URL: %s", webhook_info.url)
-        raise RuntimeError("Не удалось установить вебхук")
-
-    logger.info("Вебхук установлен на %s", webhook_url)
+    app.run_webhook = lambda **kw: web.run_app(
+        app._app,
+        host="0.0.0.0",
+        port=kw["port"],
+        access_log=None,
+        handle_signals=True,
+        reuse_port=True,
+        tcp_nodelay=True,
+    )
 
     app.run_webhook(
         listen="0.0.0.0",
-        port=port,
-        url_path=webhook_path,
-        webhook_url=webhook_url,
+        port=settings.port,
+        url_path=settings.webhook_path,
+        webhook_url=settings.webhook_url,
+        secret_token=settings.webhook_secret,
         drop_pending_updates=True,
         graceful_shutdown_timeout=8,
     )
