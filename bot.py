@@ -5146,7 +5146,7 @@ from telegram.error import BadRequest  # ДОБАВЛЕНО
 from cachetools import TTLCache        # ДОБАВЛЕНО
 from tenacity import retry, stop_after_attempt, wait_exponential
 import uvloop
-import aioredis                         # ДОБАВЛЕНО для ясности
+import redis.asyncio as aioredis
 
 # ========== Импорты из ваших модулей ==========
 from config import settings
