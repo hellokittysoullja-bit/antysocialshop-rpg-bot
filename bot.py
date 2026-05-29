@@ -2729,6 +2729,12 @@ async def handle_craft_normal(update, context):
     await query.answer()
     uid = query.from_user.id
 
+    # Загружаем игрока для проверки онбординга и баланса
+    player = await PlayerRepository.get_by_id(uid)
+    if not player or not player.exists:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="Сначала активируйся: /start")
+        return
+
     async def _craft(player, conn):
         if player.balance < GAME_CONFIG["craft_cost"]:
             return ("no_money",)
@@ -2771,7 +2777,6 @@ async def handle_craft_normal(update, context):
     target = get_medal_target(new_count, CRAFT_MEDALS)
     text = _format_normal_craft_message(medal_text, new_count, target, blunts, new_balance)
 
-    # Кнопки «Скрафтить ещё» и «Назад»
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🌿 Скрафтить ещё", callback_data="craft_normal")],
         [InlineKeyboardButton("🔙 Назад", callback_data="craft")]
@@ -2784,7 +2789,8 @@ async def handle_craft_normal(update, context):
         await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=kb, parse_mode='HTML')
 
     await check_achievements(uid, context)
-    
+
+    # Онбординг: после первого крафта завершаем обучение (шаг 3 из 3)
     if player and player.onboarding_step == 2:
         player.onboarding_step = -1
         await PlayerRepository.save(player)
@@ -2792,7 +2798,7 @@ async def handle_craft_normal(update, context):
             chat_id=uid,
             text=(
                 "<b>🎉 Поздравляю! Ты освоил основы.</b>\n\n"
-                "Теперь ты можешь исследовать другие разделы меню."
+                "💎 Теперь ты можешь исследовать другие разделы меню."
             )
         )
 
