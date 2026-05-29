@@ -79,7 +79,7 @@ logger.info("Python %s", sys.version)
 # ДЕКОРАТОРЫ (объявлены первыми, доступны везде)
 # ============================================================
 def safe_callback(func: Callable):
-    @functools.wraps(func)
+    @wraps(func)
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             return await func(update, context)
@@ -100,7 +100,7 @@ def safe_callback(func: Callable):
     return wrapper
 
 def error_handler(func):
-    @functools.wraps(func)
+    @wraps(func)
     async def wrapper(update, context, *args, **kwargs):
         try:
             return await func(update, context, *args, **kwargs)
@@ -125,7 +125,7 @@ def error_handler(func):
 
 def rate_limit(seconds: int = 2):
     def decorator(func):
-        @functools.wraps(func)
+        @wraps(func)
         async def wrapper(update, context, *args, **kwargs):
             user_id = update.effective_user.id
             key = f"rate_{func.__name__}_{user_id}"
@@ -148,7 +148,7 @@ def rate_limit(seconds: int = 2):
 def divine_command(command_name: str):
     """Делает обработчик 'Божественным': request ID, логи, асинхронный алерт админу."""
     def decorator(func):
-        @functools.wraps(func)
+        @wraps(func)
         async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
             request_id = uuid.uuid4().hex[:8]
             user_id = update.effective_user.id
