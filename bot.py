@@ -1004,31 +1004,6 @@ async def check_achievements(user_id, context):
             if redis:
                 await redis.setex(awarded_key, 60, json.dumps(list(awarded)))
 
-    # Словарь условий: ach_id -> (поле_модели, порог)
-    ACHIEVEMENT_CONDITIONS = {
-        "farm_1": ("farm_count", 1),
-        "craft_1": ("craft_count", 1),
-        "smoke_1": ("smoke_count", 1),
-        "balance_1000": ("balance", 1000),
-        "smoke_10": ("smoke_count", 10),
-        "craft_15": ("craft_count", 15),
-        "ritual_5": ("ritual_count", 5),
-        "craft_50": ("craft_count", 50),
-        "smoke_25": ("smoke_count", 25),
-        "lab_first": ("lab_chests", 1),
-        "referral_1": ("referral_count", 1),
-        "streak_7": ("login_streak", 7),
-        "balance_20000": ("balance", 20000),
-        "lab_chest_3": ("lab_chests", 3),
-        "rank_phantom": ("balance", 20000),
-        "balance_50000": ("balance", 50000),
-        "check_10": ("check_count", 10),
-        "lab_death_5": ("lab_deaths", 5),
-        "lab_chest_10": ("lab_chests", 10),
-        "craft_250": ("craft_count", 250),
-        "alchemy_15": ("alchemy_count", 15),
-    }
-
     async with db_pool.acquire() as conn:
         for ach in ACHIEVEMENTS:
             ach_id = ach["id"]
@@ -1150,6 +1125,30 @@ ACHIEVEMENTS = [
     {"id": "lunar_lord", "name": "Лунный лорд", "emoji": "🌀", "desc": "Выполнить все остальные достижения", "reward": "Уникальный фон 🌀"}
 ]
 ACHIEVEMENTS_DICT = {a["id"]: a for a in ACHIEVEMENTS}
+
+ACHIEVEMENT_CONDITIONS = {
+    "farm_1": ("farm_count", 1),
+    "craft_1": ("craft_count", 1),
+    "smoke_1": ("smoke_count", 1),
+    "balance_1000": ("balance", 1000),
+    "smoke_10": ("smoke_count", 10),
+    "craft_15": ("craft_count", 15),
+    "ritual_5": ("ritual_count", 5),
+    "craft_50": ("craft_count", 50),
+    "smoke_25": ("smoke_count", 25),
+    "lab_first": ("lab_chests", 1),
+    "referral_1": ("referral_count", 1),
+    "streak_7": ("login_streak", 7),
+    "balance_20000": ("balance", 20000),
+    "lab_chest_3": ("lab_chests", 3),
+    "rank_phantom": ("balance", 20000),
+    "balance_50000": ("balance", 50000),
+    "check_10": ("check_count", 10),
+    "lab_death_5": ("lab_deaths", 5),
+    "lab_chest_10": ("lab_chests", 10),
+    "craft_250": ("craft_count", 250),
+    "alchemy_15": ("alchemy_count", 15),
+}
 
 LABYRINTH_ROOMS = [
     {
