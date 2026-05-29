@@ -5262,7 +5262,7 @@ async def handle_chat_shortcut(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     user_id = update.effective_user.id
-    ctx: AppContext = context.application.bot_data.get("ctx")
+    ctx = context.application.bot_data.get("ctx")
     if not ctx:
         return
 
@@ -5273,32 +5273,13 @@ async def handle_chat_shortcut(update: Update, context: ContextTypes.DEFAULT_TYP
     # Состояния ввода
     if context.user_data.get('awaiting_pet_name'):
         return await handle_pet_name(update, context)
-    if context.user_data.get('awaiting_named_blunt'):   # ВОССТАНОВЛЕНО
+    if context.user_data.get('awaiting_named_blunt'):
         return await handle_named_name(update, context)
-    if context.user_data.get('gifting_blunt_id'):       # ВОССТАНОВЛЕНО
+    if context.user_data.get('gifting_blunt_id'):
         return await handle_gift_username(update, context)
 
     text = update.message.text.strip().lower()
-    handler = {
-        "фарм": farm_callback,       "farm": farm_callback,
-        "дунуть": smoke_callback,    "smoke": smoke_callback,
-        "крафт": craft_callback,     "craft": craft_callback,
-        "топ": top_callback,         "top": top_callback,
-        "удача": luck_callback,      "luck": luck_callback,
-        "профиль": profile_callback, "profile": profile_callback,
-        "сбор": collect_callback,
-        "правила": rules_callback,
-        "исповедь": confess_callback, "repent": confess_callback,
-        "гильдия": guild_info_callback,
-        "привилегия": privilege_callback,
-        "каталог": catalog_callback,
-        "проверка": check_blunt,
-        "ритуал": ritual_callback,
-        "лабиринт": lab_enter,
-        "питомец": pet_preview,
-        "магазин": shop_callback
-    }.get(text)
-
+    handler = TEXT_COMMAND_HANDLERS.get(text)
     if not handler:
         return
 
@@ -5628,19 +5609,8 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     args = raw_text.split()[1:]
 
-    mapping = {
-        "start": start, "farm": farm_callback, "craft": craft_callback,
-        "smoke": smoke_callback, "ritual": ritual_callback,
-        "profile": profile_callback, "top": top_callback,
-        "rules": rules_callback, "privilege": privilege_callback,
-        "catalog": catalog_callback, "luck": luck_callback,
-        "collect": collect_callback, "check": check_blunt,
-        "guild": guild_info_callback, "repent": confess_callback,
-        "lab": lab_enter, "pet": pet_preview, "shop": shop_callback,
-        "setbluntpic": setbluntpic, "give_oac": give_oac,
-        "debugpet": debug_pet, "checkbluntpics": check_blunt_pics,
-    }
-    handler = mapping.get(command)
+    # ===== ВОТ ЭТУ СТРОКУ ЗАМЕНИЛ =====
+    handler = TEXT_COMMAND_HANDLERS.get(command)
     if not handler:
         return
 
@@ -5968,6 +5938,52 @@ async def cancel_gift_handler(update, context):
     await query.answer()
     context.user_data.pop("gifting_blunt_id", None)
     await profile_callback(update, context)
+    
+# ========== ЕДИНЫЙ РЕЕСТР КОМАНД ДЛЯ / И ТЕКСТА ==========
+TEXT_COMMAND_HANDLERS = {
+    # Команды с / (без слеша)
+    "start": start,
+    "farm": farm_callback,
+    "craft": craft_callback,
+    "smoke": smoke_callback,
+    "ritual": ritual_callback,
+    "profile": profile_callback,
+    "top": top_callback,
+    "rules": rules_callback,
+    "privilege": privilege_callback,
+    "catalog": catalog_callback,
+    "luck": luck_callback,
+    "collect": collect_callback,
+    "check": check_blunt,
+    "guild": guild_info_callback,
+    "repent": confess_callback,
+    "lab": lab_enter,
+    "pet": pet_preview,
+    "shop": shop_callback,
+    "setbluntpic": setbluntpic,
+    "give_oac": give_oac,
+    "debugpet": debug_pet,
+    "checkbluntpics": check_blunt_pics,
+    # Текстовые сокращения (без слеша)
+    "фарм": farm_callback,
+    "дунуть": smoke_callback,
+    "крафт": craft_callback,
+    "топ": top_callback,
+    "удача": luck_callback,
+    "профиль": profile_callback,
+    "сбор": collect_callback,
+    "правила": rules_callback,
+    "исповедь": confess_callback,
+    "repent": confess_callback,       # повтор, но не страшно
+    "гильдия": guild_info_callback,
+    "привилегия": privilege_callback,
+    "каталог": catalog_callback,
+    "проверка": check_blunt,
+    "ритуал": ritual_callback,
+    "лабиринт": lab_enter,
+    "питомец": pet_preview,
+    "магазин": shop_callback,
+}
 
 # ============================================================
 # СЛОВАРИ КОЛБЭКОВ
