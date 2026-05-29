@@ -4,6 +4,7 @@ asyncpg
 redis==5.0.1
 sentry-sdk[flask]
 pydantic>=2.0
+pydantic-settings>=2.0
 tenacity>=8.0
 uvloop>=0.17
 aiohttp>=3.9,<4
