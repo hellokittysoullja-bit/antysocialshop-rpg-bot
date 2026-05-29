@@ -28,6 +28,8 @@ import pybreaker
 from cachetools import TTLCache
 from prometheus_client import Counter, Histogram
 
+from aiohttp import web
+
 # ─────────────────────────────────────────────────────────────
 # СВЕРХНАДЁЖНОЕ ЛОГИРОВАНИЕ (SENIOR-УРОВЕНЬ)
 # ─────────────────────────────────────────────────────────────
