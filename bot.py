@@ -5122,34 +5122,7 @@ async def welcome_new_member(update, context):
 
 # ============================================================
 # ФИНАЛЬНЫЙ КОД БОТА (ПОЛНОСТЬЮ РАБОЧАЯ ВЕРСИЯ)
-# ============================================================
-
-import asyncio
-import html
-import logging
-import random
-import sys
-import time
-import uuid
-from datetime import datetime, timedelta
-from typing import Dict, Callable, Optional, List, Any
-
-import asyncpg
-from aiohttp import web
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, Bot
-from telegram.ext import (
-    Application, ApplicationBuilder, ContextTypes, AIORateLimiter,
-    MessageHandler, filters, CallbackQueryHandler
-)
-from telegram.request import HTTPXRequest
-from telegram.error import BadRequest  # ДОБАВЛЕНО
-from cachetools import TTLCache        # ДОБАВЛЕНО
-from tenacity import retry, stop_after_attempt, wait_exponential
-import uvloop
-import redis.asyncio as aioredis
-
-# ========== Импорты из ваших модулей ==========
-from config import settings
+# ===========================================================
 from player_repo import PlayerRepository
 from player import Player
 from pet_service import PetService
@@ -5175,24 +5148,6 @@ from game_handlers import (
 from decorators import cb
 
 logger = logging.getLogger(__name__)
-
-# ========== ОПРЕДЕЛЕНИЯ ОТСУТСТВУЮЩИХ КЛАССОВ ==========
-# (если они не импортированы из внешних модулей)
-class WarConfig:
-    """Конфигурация войны гильдий (заглушка)."""
-    def __init__(self):
-        self.min_score = 0
-        self.reward_oac_min = 200
-        self.reward_oac_max = 500
-        self.reward_blunts_min = 3
-        self.reward_blunts_max = 7
-        self.reward_dust_min = 1
-        self.reward_dust_max = 3
-
-class WarSettings:
-    """Настройки войны (заглушка)."""
-    def __init__(self):
-        self.war_duration_days = 7
 
 # ========== ДЕКОРАТОР cb (если не импортирован) ==========
 def cb(need_ctx=True, show_alert_on_error=False):
