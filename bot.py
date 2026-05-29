@@ -6304,24 +6304,40 @@ def main():
     job = app.job_queue
     job.run_repeating(keep_db_alive, interval=180, first=10)
 
-    # Webhook
+    # === ЗАПУСК ЧЕРЕЗ WEBHOOK (ENTERPRISE-READY) ===
     render_url = os.getenv("RENDER_EXTERNAL_URL", "")
     if not render_url:
-        raise RuntimeError("RENDER_EXTERNAL_URL не задан")
+        logger.critical("RENDER_EXTERNAL_URL не задан")
+        raise RuntimeError("Невозможно запустить бота: RENDER_EXTERNAL_URL не задан")
+
     webhook_path = "/webhook"
     webhook_url = f"{render_url}{webhook_path}"
+    port = int(os.getenv("PORT", "10000"))
 
-    try:
-        app.run_webhook(
-            listen="0.0.0.0",
-            port=int(os.getenv("PORT", 10000)),
-            url_path=webhook_path,
-            webhook_url=webhook_url,
-            secret_token=os.getenv("WEBHOOK_SECRET"),
-            drop_pending_updates=True,
-        )
-    finally:
-        loop.close()
+    # Удаляем старый вебхук (без лишних sleep — drop_pending_updates=True делает всё сам)
+    await app.bot.delete_webhook(drop_pending_updates=True)
+
+    # Устанавливаем новый вебхук
+    await app.bot.set_webhook(url=webhook_url)
+
+    # Проверяем, что вебхук реально установлен
+    webhook_info = await app.bot.get_webhook_info()
+    if webhook_info.url != webhook_url:
+        logger.critical("Вебхук не установлен! URL: %s", webhook_info.url)
+        raise RuntimeError("Не удалось установить вебхук")
+
+    logger.info("Вебхук установлен на %s", webhook_url)
+
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=port,
+        url_path=webhook_path,
+        webhook_url=webhook_url,
+        drop_pending_updates=True,
+        graceful_shutdown_timeout=8,
+    )
+
+    logger.info("Бот запущен и готов принимать обновления")
 
 if __name__ == "__main__":
     main()
