@@ -431,7 +431,7 @@ class Settings(BaseSettings):
 
     bot_token: str = Field(..., alias="TOKEN")
     database_url: str = Field(..., alias="DATABASE_URL_AIVEN")
-
+    render_url: str = Field("", alias="RENDER_URL")
     port: int = 10000
     webhook_path: str = "/webhook"
     webhook_secret: str = "SuperSecret"
