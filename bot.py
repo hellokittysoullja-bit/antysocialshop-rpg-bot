@@ -6251,11 +6251,12 @@ async def keep_db_alive(context: ContextTypes.DEFAULT_TYPE):
 # ИНИЦИАЛИЗАЦИЯ И ЗАПУСК
 # ============================================================
 async def load_blunt_images(ctx: AppContext):
-    ctx.blunt_images = {}
+    """Загружает изображения из настроек (через ctx)."""
     for rarity in ("common", "rare", "epic", "legendary"):
-        saved = await get_setting(f"blunt_image_{rarity}", ctx=ctx)
-        if saved:
-            ctx.blunt_images[rarity] = saved
+        file_id = await get_setting(f"blunt_image_{rarity}", ctx=ctx)
+        if file_id:
+            BLUNT_IMAGES[rarity] = file_id
+    logger.info("Blunt images loaded")
 
 async def on_startup(app: Application):
     """Инициализация всех сервисов и контекста (уровень 4-5)."""
@@ -6272,11 +6273,9 @@ async def on_startup(app: Application):
         logger.info("Database pool created")
     except Exception as e:
         logger.critical("Failed to create database pool: %s", e)
+        # Сообщаем в бота, чтобы healthcheck мог вернуть 503
         app.bot_data["db_error"] = str(e)
-        async def healthcheck_failed(request):
-            return web.Response(text="Unhealthy", status=503)
-        app._app.router.add_get('/healthz', healthcheck_failed)
-        return
+        return   # <-- просто выходим, healthcheck будет отдавать 503
 
     # --- Redis ---
     redis_client = None
@@ -6298,7 +6297,6 @@ async def on_startup(app: Application):
     war_settings = WarSettings()
     war_service = GuildWarService(pool, redis_client, war_config, war_settings)
 
-    # Pet config теперь может быть отдельным словарём, а не полем settings
     pet_config = {
         "dog": {"name": "🐕 Песик", "price": 3000, "max_name_len": 15}
     }
@@ -6316,13 +6314,12 @@ async def on_startup(app: Application):
         war_service=war_service,
         pet_service=pet_service,
         achievement_service=achievement_service,
-        # blunt_images храним отдельно, не в ctx, чтобы не ломать совместимость
     )
     app.bot_data["ctx"] = ctx
 
-    # --- Загрузка изображений блантов ---
+    # --- Загрузка изображений блантов (исправлено: передаём ctx) ---
     try:
-        await load_blunt_images(app)  # передаём app, чтобы использовать его bot
+        await load_blunt_images(ctx)
     except Exception as e:
         logger.error("Failed to load blunt images: %s", e)
 
@@ -6339,23 +6336,8 @@ async def on_startup(app: Application):
         except Exception as e:
             logger.error("Sentry init failed: %s", e)
 
-    # --- Healthcheck (всегда OK после успешной инициализации) ---
-    from aiohttp import web
-    async def healthcheck_handler(request):
-        return web.Response(text="OK")
-    app._app.router.add_get('/healthz', healthcheck_handler)
-
-    # --- Prometheus metrics endpoint (если библиотека установлена) ---
-    try:
-        from prometheus_client import generate_latest
-        async def metrics_handler(request):
-            return web.Response(body=generate_latest(), content_type='text/plain')
-        app._app.router.add_get('/metrics', metrics_handler)
-        logger.info("Metrics endpoint enabled")
-    except ImportError:
-        logger.info("Prometheus not installed, metrics disabled")
-
-    logger.info("🚀 Bot ready (Level 4-5 Core)")
+    # Healthcheck и метрики теперь будут в main(), здесь не нужны
+    logger.info("🚀 Services ready (Level 4-5 Core)")
 
     async def healthcheck_handler(request):
         return web.Response(text="OK")
@@ -6406,12 +6388,30 @@ def main():
     if not settings.bot_token or not settings.database_url or not settings.render_url:
         raise RuntimeError("Не все переменные окружения заданы")
 
+    # Создаём свой aiohttp-сервер для healthcheck и метрик
+    from aiohttp import web
+    web_app = web.Application()
+
+    async def healthcheck(request):
+        return web.Response(text="OK")
+
+    web_app.router.add_get('/healthz', healthcheck)
+
+    # Если prometheus доступен, добавляем метрики
+    try:
+        from prometheus_client import generate_latest
+        async def metrics_handler(request):
+            return web.Response(body=generate_latest(), content_type='text/plain')
+        web_app.router.add_get('/metrics', metrics_handler)
+    except ImportError:
+        pass
+
     request = HTTPXRequest(connection_pool_size=50, read_timeout=10, write_timeout=10)
     app = (Application.builder()
            .token(settings.bot_token)
            .request(request)
            .rate_limiter(AIORateLimiter())
-           .post_init(on_startup)        # <-- здесь создаётся ctx и сервисы
+           .post_init(on_startup)
            .post_shutdown(on_shutdown)
            .build())
 
@@ -6423,7 +6423,7 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_error_handler(global_error_handler)
 
-    # Запуск вебхука (без ручного web.run_app)
+    # Запускаем вебхук с нашим web_app
     app.run_webhook(
         listen="0.0.0.0",
         port=settings.port,
@@ -6431,6 +6431,7 @@ def main():
         webhook_url=settings.webhook_url,
         secret_token=settings.webhook_secret,
         allowed_updates=["message", "callback_query"],
+        web_app=web_app,   
     )
 
 if __name__ == "__main__":
