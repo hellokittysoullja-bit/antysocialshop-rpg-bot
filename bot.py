@@ -6260,45 +6260,103 @@ async def load_blunt_images(ctx: AppContext):
             ctx.blunt_images[rarity] = saved
 
 async def on_startup(app: Application):
-    pool = await asyncpg.create_pool(
-        settings.database_url,
-        min_size=5, max_size=20, command_timeout=15, max_inactive_connection_lifetime=300.0
-    )
+    """Инициализация всех сервисов и контекста (уровень 4-5)."""
+    logger.info("Starting bot initialization...")
+
+    # --- База данных ---
+    pool = None
+    try:
+        pool = await asyncpg.create_pool(
+            settings.database_url,
+            min_size=5, max_size=20, command_timeout=15,
+            max_inactive_connection_lifetime=300.0
+        )
+        logger.info("Database pool created")
+    except Exception as e:
+        logger.critical("Failed to create database pool: %s", e)
+        app.bot_data["db_error"] = str(e)
+        async def healthcheck_failed(request):
+            return web.Response(text="Unhealthy", status=503)
+        app._app.router.add_get('/healthz', healthcheck_failed)
+        return
+
+    # --- Redis ---
     redis_client = None
-    if hasattr(settings, 'redis_url') and settings.redis_url:
-        redis_client = await aioredis.from_url(settings.redis_url)
+    try:
+        if hasattr(settings, 'redis_url') and settings.redis_url:
+            redis_client = await aioredis.from_url(settings.redis_url)
+            logger.info("Redis connected")
+    except Exception as e:
+        logger.warning("Redis not available: %s. Continuing without it.", e)
+
+    # --- In-memory cache ---
     cache = TTLCache(maxsize=2000, ttl=600)
+
+    # --- Repository ---
     repo = PlayerRepository(pool, redis_client, cache)
+
+    # --- Services ---
     war_config = WarConfig()
     war_service = GuildWarService(pool, redis_client, war_config, settings)
-    pet_service = PetService(repo, settings.pet_config)
+
+    # Pet config теперь может быть отдельным словарём, а не полем settings
+    pet_config = {
+        "dog": {"name": "🐕 Песик", "price": 3000, "max_name_len": 15}
+    }
+    pet_service = PetService(repo, pet_config)
+
     achievement_service = AchievementService(pool, redis_client, repo)
-    ctx = AppContext(pool, redis_client, cache, settings, repo, war_service, pet_service, achievement_service)
+
+    # --- Application Context ---
+    ctx = AppContext(
+        db_pool=pool,
+        redis_client=redis_client,
+        cache=cache,
+        settings=settings,
+        repo=repo,
+        war_service=war_service,
+        pet_service=pet_service,
+        achievement_service=achievement_service,
+        # blunt_images храним отдельно, не в ctx, чтобы не ломать совместимость
+    )
     app.bot_data["ctx"] = ctx
 
-    await load_blunt_images(ctx)
+    # --- Загрузка изображений блантов ---
+    try:
+        await load_blunt_images(app)  # передаём app, чтобы использовать его bot
+    except Exception as e:
+        logger.error("Failed to load blunt images: %s", e)
 
-    # Проверка валидности file_id
-    invalid = []
-    for rarity, file_id in ctx.blunt_images.items():
-        try:
-            await app.bot.get_file(file_id)
-        except Exception:
-            invalid.append(rarity)
-            del ctx.blunt_images[rarity]
-            await set_setting(f"blunt_image_{rarity}", "", ctx)
-    if invalid:
-        logger.warning("Невалидные изображения: %s", ", ".join(invalid))
-        if settings.admin_id:
-            try:
-                await app.bot.send_message(chat_id=settings.admin_id, text=f"⚠️ Невалидные изображения: {', '.join(invalid)}. Обновите через /setbluntpic.")
-            except Exception:
-                pass
-
+    # --- Sentry ---
     if settings.sentry_dsn:
-        import sentry_sdk
-        sentry_sdk.init(dsn=settings.sentry_dsn, traces_sample_rate=1.0, environment=settings.environment)
-        logger.info("✅ Sentry активирован")
+        try:
+            import sentry_sdk
+            sentry_sdk.init(
+                dsn=settings.sentry_dsn,
+                traces_sample_rate=1.0,
+                environment=settings.environment
+            )
+            logger.info("Sentry activated")
+        except Exception as e:
+            logger.error("Sentry init failed: %s", e)
+
+    # --- Healthcheck (всегда OK после успешной инициализации) ---
+    from aiohttp import web
+    async def healthcheck_handler(request):
+        return web.Response(text="OK")
+    app._app.router.add_get('/healthz', healthcheck_handler)
+
+    # --- Prometheus metrics endpoint (если библиотека установлена) ---
+    try:
+        from prometheus_client import generate_latest
+        async def metrics_handler(request):
+            return web.Response(body=generate_latest(), content_type='text/plain')
+        app._app.router.add_get('/metrics', metrics_handler)
+        logger.info("Metrics endpoint enabled")
+    except ImportError:
+        logger.info("Prometheus not installed, metrics disabled")
+
+    logger.info("🚀 Bot ready (Level 4-5 Core)")
 
     async def healthcheck_handler(request):
         return web.Response(text="OK")
@@ -6354,10 +6412,11 @@ def main():
            .token(settings.bot_token)
            .request(request)
            .rate_limiter(AIORateLimiter())
-           .post_init(on_startup)
+           .post_init(on_startup)        # <-- здесь создаётся ctx и сервисы
            .post_shutdown(on_shutdown)
            .build())
 
+    # Регистрируем хендлеры
     app.add_handler(MessageHandler(filters.PHOTO, get_file_id))
     app.add_handler(MessageHandler(filters.COMMAND, handle_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_chat_shortcut))
@@ -6365,17 +6424,14 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_error_handler(global_error_handler)
 
-    # Джобы теперь запускаются в on_startup, здесь не нужно
-    asyncio.run(setup_webhook(app))
-
-    web.run_app(
-        app._app,
-        host="0.0.0.0",
+    # Запуск вебхука (без ручного web.run_app)
+    app.run_webhook(
+        listen="0.0.0.0",
         port=settings.port,
-        access_log=None,
-        handle_signals=True,
-        reuse_port=True,
-        tcp_nodelay=True,
+        url_path=settings.webhook_path,
+        webhook_url=settings.webhook_url,
+        secret_token=settings.webhook_secret,
+        allowed_updates=["message", "callback_query"],
     )
 
 if __name__ == "__main__":
