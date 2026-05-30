@@ -1309,8 +1309,8 @@ async def init_db_pool():
         alert = f"❌ Не удалось подключиться к базе данных ({provider}): {e}"
         logger.critical(alert)
         if settings.admin_id and settings.bot_token:
-    url = f"https://api.telegram.org/bot{settings.bot_token}/sendMessage"
-            payload = {"chat_id": ADMIN_ID, "text": alert, "parse_mode": "HTML"}
+            url = f"https://api.telegram.org/bot{settings.bot_token}/sendMessage"
+            payload = {"chat_id": settings.admin_id, "text": alert, "parse_mode": "HTML"}
             try:
                 async with httpx.AsyncClient(timeout=10) as client:
                     await client.post(url, json=payload)
