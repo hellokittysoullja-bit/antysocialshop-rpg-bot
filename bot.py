@@ -32,104 +32,190 @@ from prometheus_client import Counter, Histogram
 # ЛОГИРОВАНИЕ
 # ============================================================
 
-# 1. Дублирование критических ошибок в stderr (Render всегда видит stderr)
+import asyncio
+import json
+import logging
+import os
 import sys
+import time
+from collections import deque
+from typing import Optional
 
-class StderrHandler(logging.StreamHandler):
-    def __init__(self):
-        super().__init__(stream=sys.stderr)
-        self.setLevel(logging.CRITICAL)
-        self.setFormatter(JsonFormatter())
+class UnbreakableHandler(logging.Handler):
+    """
+    Гарантированная доставка CRITICAL‑алертов через Telegram.
+    Без использования Redis – всё в памяти + файл для персистентности при перезапусках.
+    """
 
-# 2. Перехват необработанных синхронных исключений
-def handle_unhandled_exception(exc_type, exc_value, exc_traceback):
-    if issubclass(exc_type, KeyboardInterrupt):
-        sys.__excepthook__(exc_type, exc_value, exc_traceback)
-        return
-    logging.critical(
-        "НЕОБРАБОТАННОЕ ИСКЛЮЧЕНИЕ",
-        exc_info=(exc_type, exc_value, exc_traceback),
-        extra={"request_id": "unhandled"}
-    )
-    traceback.print_exception(exc_type, exc_value, exc_traceback, file=sys.stderr)
-
-sys.excepthook = handle_unhandled_exception
-
-# 3. Перехват асинхронных исключений (корутин)
-def handle_asyncio_exception(loop, context):
-    exception = context.get("exception")
-    if exception:
-        logging.critical(
-            "АСИНХРОННОЕ ИСКЛЮЧЕНИЕ",
-            exc_info=(type(exception), exception, exception.__traceback__),
-            extra={"request_id": "asyncio"}
-        )
-        traceback.print_exception(type(exception), exception, exception.__traceback__, file=sys.stderr)
-    else:
-        logging.critical(f"АСИНХРОННАЯ ОШИБКА: {context}", extra={"request_id": "asyncio"})
-
-# Установим перехватчик для текущего event loop (если уже есть)
-try:
-    loop = asyncio.get_running_loop()
-    loop.set_exception_handler(handle_asyncio_exception)
-except RuntimeError:
-    # event loop ещё не запущен – установим позже в main()
-    pass
-
-# 4. Улучшенный троттлинг Telegram-алертов (по ключу ошибки)
-class TelegramAlertHandler(logging.Handler):
-    """Отправляет CRITICAL ошибки админу, не чаще 1 раза в минуту на уникальный тип ошибки."""
-    def __init__(self, bot=None, admin_id=None):
+    def __init__(
+        self,
+        admin_id: int,
+        bot=None,
+        *,
+        throttle_sec: float = 60.0,
+        batch_sec: float = 3.0,
+        alerts_file: str = "unbreakable_alerts.json",
+    ):
         super().__init__()
-        self.bot = bot
         self.admin_id = admin_id
-        self._last_alert_times = {}  # ключ -> время последней отправки
+        self.bot = bot
+        self.throttle_sec = throttle_sec
+        self.batch_sec = batch_sec
+        self.alerts_file = alerts_file
+        self.queue: asyncio.Queue = asyncio.Queue(maxsize=500)
+        self.task: Optional[asyncio.Task] = None
+        self.shutdown = False
+        self.last_sent: dict[str, float] = {}
+        # Восстанавливаем неотправленные алерты из файла
+        self._load_persisted()
 
-    def emit(self, record):
-        if self.bot and self.admin_id and record.levelno >= logging.CRITICAL:
-            # Уникальный ключ ошибки: модуль + функция + строка
-            key = f"{record.module}:{record.funcName}:{record.lineno}"
-            now = time.time()
-            last_time = self._last_alert_times.get(key, 0)
-            if now - last_time < 60:
-                return
-            self._last_alert_times[key] = now
+    def emit(self, record: logging.LogRecord) -> None:
+        if self.shutdown or record.levelno < logging.CRITICAL:
+            return
+        try:
+            text = self.format(record)
+        except Exception:
+            text = f"FAILED FORMAT: {record.getMessage()}"
+
+        key = f"{record.module}:{record.funcName}:{record.lineno}"
+        entry = {"text": text, "key": key}
+
+        try:
+            loop = asyncio.get_running_loop()
+            if loop.is_running():
+                self.queue.put_nowait(entry)
+            else:
+                self._sync_fallback(entry)
+        except RuntimeError:
+            self._sync_fallback(entry)
+
+    def _sync_fallback(self, entry: dict) -> None:
+        """Если event loop недоступен – пишем в stderr и сохраняем в файл синхронно."""
+        sys.stderr.write(f"CRITICAL ALERT: {entry['text'][:200]}\n")
+        self._save_persisted_sync([entry])
+
+    async def start(self) -> None:
+        if self.task is not None:
+            return
+        self.task = asyncio.create_task(self._worker())
+        await self._send_persisted()
+
+    async def stop(self) -> None:
+        if self.task is None:
+            return
+        self.shutdown = True
+        self.task.cancel()
+        try:
+            await self.task
+        except asyncio.CancelledError:
+            pass
+        await self._drain()
+
+    async def _worker(self) -> None:
+        while not self.shutdown:
             try:
-                try:
-                    loop = asyncio.get_running_loop()
-                except RuntimeError:
-                    loop = asyncio.get_event_loop()
-                loop.create_task(self._send_alert(record))
+                await self._process_batch()
             except Exception:
-                pass
+                logging.error("UnbreakableHandler worker crashed, restarting...", exc_info=True)
+                await asyncio.sleep(1)
 
-    async def _send_alert(self, record):
-        msg = f"🚨 <b>КРИТИЧЕСКАЯ ОШИБКА</b>\n\n<pre>{html.escape(self.format(record)[:1000])}</pre>"
+    async def _process_batch(self) -> None:
+        try:
+            first = await asyncio.wait_for(self.queue.get(), timeout=self.batch_sec)
+        except asyncio.TimeoutError:
+            return
+
+        batch = [first]
+        for _ in range(9):
+            try:
+                batch.append(self.queue.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+
+        dedup: dict[str, dict] = {}
+        now = time.time()
+        for e in batch:
+            key = e['key']
+            last_time = self.last_sent.get(key, 0)
+            if now - last_time < self.throttle_sec:
+                continue
+            self.last_sent[key] = now
+            dedup[key] = e
+
+        for e in dedup.values():
+            success = await self._send_with_commit(e['text'], e['key'])
+            if not success:
+                # Если не отправилось – сохраняем в файл для повторной попытки
+                await self._save_persisted([e])
+
+    async def _send_with_commit(self, text: str, key: str) -> bool:
+        """Возвращает True, если Telegram принял сообщение."""
+        if not self.bot or not self.admin_id:
+            return False
         for attempt in range(3):
             try:
-                await self.bot.send_message(chat_id=self.admin_id, text=msg, parse_mode="HTML")
-                return
+                await self.bot.send_message(
+                    chat_id=self.admin_id,
+                    text=f"🚨 <b>КРИТИЧЕСКАЯ ОШИБКА</b>\n\n<pre>{html.escape(text[:1000])}</pre>",
+                    parse_mode="HTML"
+                )
+                return True
             except Exception:
                 await asyncio.sleep(2 ** attempt)
+        return False
 
-# Обновляем telegram_handler (заменяем старый на улучшенный)
-    if isinstance(handler, TelegramAlertHandler):
+    async def _send_persisted(self) -> None:
+        """Отправляет все алерты из файла (после перезапуска)."""
+        if not os.path.exists(self.alerts_file):
+            return
+        try:
+            with open(self.alerts_file, 'r', encoding='utf-8') as f:
+                entries = json.load(f)
+            os.remove(self.alerts_file)  # атомарно удаляем, чтобы не отправить дважды
+        except Exception:
+            logging.warning("Failed to load persisted alerts", exc_info=True)
+            return
 
-# telegram_handler = TelegramAlertHandler()
-#telegram_handler.setLevel(logging.CRITICAL)
-#telegram_handler.setFormatter(JsonFormatter())
-#telegram_handler.addFilter(RequestIdFilter())
+        for entry in entries:
+            await self._send_with_commit(entry['text'], entry['key'])
 
-# 5. Автоматический request_id для всех записей (если не задан)
-class AutoRequestIdFilter(logging.Filter):
-    def filter(self, record):
-        if not getattr(record, "request_id", None):
-            record.request_id = uuid.uuid4().hex[:8]
-        return True
-        
-    handler.addFilter(AutoRequestIdFilter())
+    async def _save_persisted(self, entries: list[dict]) -> None:
+        """Сохраняет алерты в JSON-файл (асинхронно, но блокирует I/O)."""
+        try:
+            existing = []
+            if os.path.exists(self.alerts_file):
+                with open(self.alerts_file, 'r', encoding='utf-8') as f:
+                    existing = json.load(f)
+            existing.extend(entries)
+            with open(self.alerts_file, 'w', encoding='utf-8') as f:
+                json.dump(existing, f, ensure_ascii=False)
+        except Exception:
+            logging.warning("Failed to save alerts to file", exc_info=True)
 
-logger.info("✅ Логирование усилено: asyncio-перехват, stderr, троттлинг по ключу ошибки")
+    def _save_persisted_sync(self, entries: list[dict]) -> None:
+        """Синхронное сохранение (для вызовов вне event loop)."""
+        try:
+            existing = []
+            if os.path.exists(self.alerts_file):
+                with open(self.alerts_file, 'r', encoding='utf-8') as f:
+                    existing = json.load(f)
+            existing.extend(entries)
+            with open(self.alerts_file, 'w', encoding='utf-8') as f:
+                json.dump(existing, f, ensure_ascii=False)
+        except Exception:
+            pass
+
+    async def _drain(self) -> None:
+        """Опустошает очередь перед остановкой."""
+        while not self.queue.empty():
+            try:
+                e = self.queue.get_nowait()
+                success = await self._send_with_commit(e['text'], e['key'])
+                if not success:
+                    await self._save_persisted([e])
+                self.queue.task_done()
+            except asyncio.QueueEmpty:
+                break
 
 # ============================================================
 # ДЕКОРАТОРЫ
