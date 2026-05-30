@@ -6352,7 +6352,6 @@ async def on_startup(app: Application):
 
     async def healthcheck_handler(request):
         return web.Response(text="OK")
-    app._app.router.add_get('/healthz', healthcheck_handler)
 
     # ВОССТАНОВЛЕНЫ: запуск всех джобов
     if app.job_queue:
