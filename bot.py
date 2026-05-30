@@ -28,6 +28,7 @@ import pybreaker
 from cachetools import TTLCache
 from prometheus_client import Counter, Histogram
 
+print("REAL FILE LINE COUNT:", len(open(__file__).readlines()))
 
 # ============================================================
 # ДЕКОРАТОРЫ
