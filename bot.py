@@ -31,6 +31,8 @@ db_breaker = pybreaker.CircuitBreaker(fail_max=5, reset_timeout=30)
 from cachetools import TTLCache
 from prometheus_client import Counter, Histogram
 
+import httpx
+
 # ============================================================
 # ДЕКОРАТОРЫ
 # ============================================================
@@ -2813,7 +2815,7 @@ async def handle_craft_normal(update, context):
         player.balance += medal_bonus
 
         await ctx.war_service.add_score_raw(uid, earned + medal_bonus, conn)
-        if war_service:
+        if ctx.war_service:
             await war_service.add_score(uid, WarAction.CRAFT, conn)
 
         return ("ok", medal_text, new_count, player.blunts, player.balance)
@@ -2905,7 +2907,7 @@ async def handle_named_name(update, context):
 
             # Очки войны внутри атомарной транзакции
             await ctx.war_service.add_score_raw(uid, earned + medal_bonus, conn)
-            if war_service:
+            if ctx.war_service:
                 await war_service.add_score(uid, WarAction.NAMED_CRAFT, conn)
             else:
                 logger.warning("GuildWarService not found")
@@ -2999,7 +3001,7 @@ async def handle_use_dust(update, context):
         item = await create_named_blunt(uid, name, rarity="legendary", conn=conn)
 
         await ctx.war_service.add_score_raw(uid, earned + medal_bonus, conn)
-        if war_service:
+        if ctx.war_service:
             await war_service.add_score(uid, WarAction.DUST_USE, conn)
         else:
             logger.warning("GuildWarService not found")
@@ -3215,7 +3217,7 @@ async def do_smoke(update, context):
 
         # военный счёт (новый сервис)
         await ctx.war_service.add_score_raw(uid, earned + medal_bonus, conn)
-        if war_service:
+        if ctx.war_service:
             await war_service.add_score_raw(uid, earned + medal_bonus, conn)
 
         return ("ok", earned, r, save, medal_text, new_count, player.blunts, player.balance)
@@ -3340,7 +3342,7 @@ async def ritual_callback(update, context):
 
         # Военный счёт (новый сервис)
         await ctx.war_service.add_score_raw(uid, earned + medal_bonus, conn)
-        if war_service:
+        if ctx.war_service:
             await war_service.add_score_raw(uid, reward + extra + medal_bonus, conn)
 
         return ("ok", reward, extra, medal_text, new_count, player.balance)
@@ -4428,12 +4430,12 @@ async def _process_berserk(update, context, uid, player, cfg, war_service):
         if random.random() < 0.6:
             p.balance += cfg["berserk"]["win_amount"]
             res = f"<b><i>🎲 БЕЗДНА ОТВЕТИЛА</i></b>\n\nИскажение благосклонно! +<b>{cfg['berserk']['win_amount']} OAC</b> 🍬."
-            if war_service:
+            if ctx.war_service:
                 await war_service.add_score(uid, WarAction.BERSERK_WIN, conn)
         else:
             p.balance -= cfg["berserk"]["cost"]
             res = f"<b><i>🕯️ БЕЗДНА МОЛЧИТ</i></b>\n\nИскажение промолчало. –<b>{cfg['berserk']['cost']} OAC</b>."
-            if war_service:
+            if ctx.war_service:
                 await war_service.add_score(uid, WarAction.BERSERK_LOSE, conn)
         p.last_berserk = datetime.now()
         return ("ok", res, p.balance)
@@ -4504,7 +4506,7 @@ async def _process_alchemy_confirm(update, context, uid, player, cfg, war_servic
             logger.error("Alchemy: ни одна реакция не сработала, r=%s", r)
             res = "<b>🌫️ Грязный Выхлоп...</b>\n\nБланты сгорели без следа."
 
-        if war_service:
+        if ctx.war_service:
             await war_service.add_score(uid, WarAction.ALCHEMY, conn)
         return (AlchemyResult.SUCCESS, res)
 
@@ -5036,7 +5038,7 @@ async def show_lab_final(update, context):
 
         # Военный счёт
         await ctx.war_service.add_score_raw(uid, earned + medal_bonus, conn)
-        if war_service:
+        if ctx.war_service:
             await war_service.add_score(uid, WarAction.LAB_WIN, conn)
 
     await ctx.repo.atomic_update(uid, _lab_win)
@@ -5074,7 +5076,7 @@ async def show_lab_death(update, context):
         p.lab_deaths += 1
 
         await ctx.war_service.add_score_raw(uid, earned + medal_bonus, conn)
-        if war_service:
+        if ctx.war_service:
             await war_service.add_score(uid, WarAction.LAB_DEATH, conn)
         else:
             logger.warning("GuildWarService not found in bot_data")
