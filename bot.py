@@ -6219,130 +6219,103 @@ async def setup_webhook(app: Application):
     logger.info("Вебхук установлен на %s", settings.webhook_url)
 
 def main():
-    # 1. Ускоряем event loop
     try:
-        import uvloop
-        uvloop.install()
-    except Exception:
-        pass
-
-    if not settings.bot_token or not settings.database_url:
-        raise RuntimeError("BOT_TOKEN and DATABASE_URL must be set")
-
-    # 2. HTTP‑клиент с пулом
-    request = HTTPXRequest(connection_pool_size=50, read_timeout=10, write_timeout=10)
-
-    # 3. Приложение Telegram
-    tg_app = (Application.builder()
-              .token(settings.bot_token)
-              .request(request)
-              .rate_limiter(AIORateLimiter())
-              .post_init(on_startup)
-              .post_shutdown(on_shutdown)
-              .build())
-
-    # 4. Регистрируем обработчики
-    tg_app.add_handler(MessageHandler(filters.PHOTO, get_file_id))
-    tg_app.add_handler(MessageHandler(filters.COMMAND, handle_command))
-    tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_chat_shortcut))
-    tg_app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_member))
-    tg_app.add_handler(CallbackQueryHandler(button_handler))
-    tg_app.add_error_handler(global_error_handler)
-
-    # 5. Инициализация и вебхук (с ретраями)
-    async def init_bot():
-        await tg_app.initialize()
-        for attempt in range(5):
-            try:
-                await tg_app.bot.delete_webhook(drop_pending_updates=True)
-                await tg_app.bot.set_webhook(
-                    url=settings.webhook_url,
-                    allowed_updates=["message", "callback_query"],
-                    secret_token=settings.webhook_secret,
-                )
-                logger.info("Webhook set to %s", settings.webhook_url)
-                return
-            except Exception as e:
-                logger.warning("Webhook attempt %d failed: %s", attempt + 1, e)
-                await asyncio.sleep(2 ** attempt)
-        raise RuntimeError("Could not set webhook after 5 attempts")
-
-    asyncio.run(init_bot())
-
-    # 6. Свой aiohttp‑сервер с защитой от потерь
-    from aiohttp import web
-
-    # Счётчики для мониторинга (можно заменить на Prometheus, если нужно)
-    webhook_timeouts = 0
-    webhook_errors = 0
-
-    async def handle_webhook(request):
-        nonlocal webhook_timeouts, webhook_errors
-
-        # Проверяем секретный токен
-        if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != settings.webhook_secret:
-            raise web.HTTPForbidden()
-
+        # 1. Ускоряем event loop
         try:
-            data = await request.json()
-            update = Update.de_json(data, tg_app.bot)
+            import uvloop
+            uvloop.install()
+        except Exception:
+            pass
 
-            # ★ Главное изменение: ждём обработку с таймаутом ★
-            await asyncio.wait_for(
-                tg_app.process_update(update),
-                timeout=25.0
-            )
-            # Всё хорошо → отвечаем 200
+        if not settings.bot_token or not settings.database_url:
+            raise RuntimeError("BOT_TOKEN and DATABASE_URL must be set")
+
+        request = HTTPXRequest(connection_pool_size=50, read_timeout=10, write_timeout=10)
+
+        tg_app = (Application.builder()
+                  .token(settings.bot_token)
+                  .request(request)
+                  .rate_limiter(AIORateLimiter())
+                  .post_init(on_startup)
+                  .post_shutdown(on_shutdown)
+                  .build())
+
+        tg_app.add_handler(MessageHandler(filters.PHOTO, get_file_id))
+        tg_app.add_handler(MessageHandler(filters.COMMAND, handle_command))
+        tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_chat_shortcut))
+        tg_app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_member))
+        tg_app.add_handler(CallbackQueryHandler(button_handler))
+        tg_app.add_error_handler(global_error_handler)
+
+        async def init_bot():
+            await tg_app.initialize()
+            for attempt in range(5):
+                try:
+                    await tg_app.bot.delete_webhook(drop_pending_updates=True)
+                    await tg_app.bot.set_webhook(
+                        url=settings.webhook_url,
+                        allowed_updates=["message", "callback_query"],
+                        secret_token=settings.webhook_secret,
+                    )
+                    logger.info("Webhook set to %s", settings.webhook_url)
+                    return
+                except Exception as e:
+                    logger.warning("Webhook attempt %d failed: %s", attempt + 1, e)
+                    await asyncio.sleep(2 ** attempt)
+            raise RuntimeError("Could not set webhook after 5 attempts")
+
+        asyncio.run(init_bot())
+
+        from aiohttp import web
+        webhook_timeouts = 0
+        webhook_errors = 0
+
+        async def handle_webhook(request):
+            nonlocal webhook_timeouts, webhook_errors
+            if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != settings.webhook_secret:
+                raise web.HTTPForbidden()
+            try:
+                data = await request.json()
+                update = Update.de_json(data, tg_app.bot)
+                await asyncio.wait_for(tg_app.process_update(update), timeout=25.0)
+                return web.Response(text="OK")
+            except asyncio.TimeoutError:
+                webhook_timeouts += 1
+                logger.error("Webhook timeout after 25s – returning 503")
+                return web.Response(text="Service Unavailable", status=503)
+            except Exception as e:
+                webhook_errors += 1
+                logger.error("Webhook processing error: %s – returning 503", e)
+                return web.Response(text="Service Unavailable", status=503)
+
+        async def healthcheck(request):
             return web.Response(text="OK")
 
-        except asyncio.TimeoutError:
-            # Обработка зависла – пусть Telegram повторит
-            webhook_timeouts += 1
-            logger.error("Webhook timeout after 25s – returning 503")
-            return web.Response(text="Service Unavailable", status=503)
+        async def stats_handler(request):
+            return web.json_response({"timeouts": webhook_timeouts, "errors": webhook_errors})
 
-        except Exception as e:
-            # Любая ошибка в хендлере – тоже возвращаем 503
-            webhook_errors += 1
-            logger.error("Webhook processing error: %s – returning 503", e)
-            return web.Response(text="Service Unavailable", status=503)
+        app = web.Application()
+        app.router.add_post(settings.webhook_path, handle_webhook)
+        app.router.add_get("/healthz", healthcheck)
+        app.router.add_get("/stats", stats_handler)
 
-    async def healthcheck(request):
-        return web.Response(text="OK")
+        async def on_shutdown_webhook(app):
+            logger.info("Shutting down, deleting webhook...")
+            try:
+                await tg_app.bot.delete_webhook(drop_pending_updates=False)
+            except Exception as e:
+                logger.error("Failed to delete webhook: %s", e)
+            try:
+                await tg_app.shutdown()
+            except Exception as e:
+                logger.error("Error during tg_app shutdown: %s", e)
 
-    # Добавляем маршрут для статистики (удобно для отладки)
-    async def stats_handler(request):
-        return web.json_response({
-            "timeouts": webhook_timeouts,
-            "errors": webhook_errors,
-        })
+        app.on_shutdown.append(on_shutdown_webhook)
 
-    app = web.Application()
-    app.router.add_post(settings.webhook_path, handle_webhook)
-    app.router.add_get("/healthz", healthcheck)
-    app.router.add_get("/stats", stats_handler)
+        web.run_app(app, host="0.0.0.0", port=settings.port, access_log=None,
+                    handle_signals=True, reuse_port=True, tcp_nodelay=True)
 
-    # 7. Graceful shutdown с удалением вебхука
-    async def on_shutdown_webhook(app):
-        logger.info("Shutting down, deleting webhook...")
-        try:
-            await tg_app.bot.delete_webhook(drop_pending_updates=False)
-        except Exception as e:
-            logger.error("Failed to delete webhook: %s", e)
-        try:
-            await tg_app.shutdown()
-        except Exception as e:
-            logger.error("Error during tg_app shutdown: %s", e)
-
-    app.on_shutdown.append(on_shutdown_webhook)
-
-    # 8. Запуск
-    web.run_app(
-        app,
-        host="0.0.0.0",
-        port=settings.port,
-        access_log=None,
-        handle_signals=True,
-        reuse_port=True,
-        tcp_nodelay=True,
-    )
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
