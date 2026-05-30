@@ -115,7 +115,7 @@ class TelegramAlertHandler(logging.Handler):
 # Обновляем telegram_handler (заменяем старый на улучшенный)
     if isinstance(handler, TelegramAlertHandler):
 
-telegram_handler = TelegramAlertHandler()
+# telegram_handler = TelegramAlertHandler()
 telegram_handler.setLevel(logging.CRITICAL)
 telegram_handler.setFormatter(JsonFormatter())
 telegram_handler.addFilter(RequestIdFilter())
