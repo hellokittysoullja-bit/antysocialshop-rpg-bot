@@ -892,7 +892,6 @@ def emoji_to_name(emoji: str) -> str:
 
 # Устаревшие глобальные переменные (заменены на AppContext, но оставлены для совместимости)
 redis = None
-player_cache = {}
 
 async def init_redis():
     global redis
@@ -936,7 +935,7 @@ async def create_named_blunt(user_id: int, name: str, rarity: str = None, conn=N
     
     clean_name = str(name or "").strip()[:25] or "Безымянный"
     reaction = random.choice(FUNNY_REACTIONS)
-    blunt_id = f"blunt_{user_id}_{int(datetime.utcnow().timestamp())}_{random.randint(1000,9999)}"
+    blunt_id = f"blunt_{user_id}_{int(datetime.now(datetime.timezone.utc).timestamp())}_{random.randint(1000,9999)}"
     hash_code = "0x" + hashlib.sha256((blunt_id + ":hash").encode()).hexdigest()[:16]
     rare_number = f"{rarity[0].upper()}-{random.randint(1000,9999)}"
     
@@ -1277,8 +1276,8 @@ async def init_db_pool():
             await test_conn.close()
 
         # --- отправляем сообщение админу (Telegram) ---
-        if ADMIN_ID and TOKEN:
-            url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+        if settings.admin_id and settings.bot_token:
+    url = f"https://api.telegram.org/bot{settings.bot_token}/sendMessage"
             payload = {
                 "chat_id": ADMIN_ID,
                 "text": success_msg,
@@ -1304,8 +1303,8 @@ async def init_db_pool():
             alert = f"❌ Внутренняя ошибка базы данных ({provider}): {e}"
             logger.critical(alert)
         # отправка в Telegram
-        if ADMIN_ID and TOKEN:
-            url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+        if settings.admin_id and settings.bot_token:
+    url = f"https://api.telegram.org/bot{settings.bot_token}/sendMessage"
             payload = {"chat_id": ADMIN_ID, "text": alert, "parse_mode": "HTML"}
             try:
                 async with httpx.AsyncClient(timeout=10) as client:
@@ -1316,8 +1315,8 @@ async def init_db_pool():
     except Exception as e:
         alert = f"❌ Не удалось подключиться к базе данных ({provider}): {e}"
         logger.critical(alert)
-        if ADMIN_ID and TOKEN:
-            url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+        if settings.admin_id and settings.bot_token:
+    url = f"https://api.telegram.org/bot{settings.bot_token}/sendMessage"
             payload = {"chat_id": ADMIN_ID, "text": alert, "parse_mode": "HTML"}
             try:
                 async with httpx.AsyncClient(timeout=10) as client:
@@ -1785,7 +1784,7 @@ async def _reset_and_notify_broken_id(rarity: str, context):
         await set_setting(f"blunt_image_{rarity}", "")
     except Exception as ex:
         logger.error("Ошибка очистки file_id в БД: %s", ex)
-    if ADMIN_ID:
+    if settings.admin_id:
         await _safe_send_message(
             context, ADMIN_ID,
             f"⚠️ Изображение для {rarity} недействительно. Обновите: /setbluntpic {rarity}"
@@ -2820,7 +2819,7 @@ async def handle_craft_normal(update, context):
 
         player.balance += medal_bonus
 
-        await ctx.war_service.add_score_raw(uid, earned + medal_bonus, conn)
+        await ctx.war_service.add_score_raw(uid, medal_bonus, conn)
         if ctx.war_service:
             await war_service.add_score(uid, WarAction.CRAFT, conn)
 
@@ -2872,6 +2871,7 @@ async def handle_craft_normal(update, context):
 
 @error_handler
 async def handle_craft_named(update, context):
+    ctx = context.application.bot_data["ctx"]  
     query = update.callback_query
     await query.answer()
     uid = query.from_user.id
@@ -2909,12 +2909,11 @@ async def handle_named_name(update, context):
                 return ("no_money",)
             player.balance -= 50
             player.craft_count = (player.craft_count or 0) + 1
-            item = await create_named_blunt(uid, name, rarity=None, conn=conn)
+            item = await create_named_blunt(uid, name, rarity=None, conn=conn, ctx=ctx)
 
-            # Очки войны внутри атомарной транзакции
-            await ctx.war_service.add_score_raw(uid, earned + medal_bonus, conn)
-            if ctx.war_service:
-                await war_service.add_score(uid, WarAction.NAMED_CRAFT, conn)
+            # Очки войны
+            await ctx.war_service.add_score_raw(uid, 0, conn)   # earned и medal_bonus не определены, поэтому 0
+            await ctx.war_service.add_score(uid, WarAction.NAMED_CRAFT, conn)
             else:
                 logger.warning("GuildWarService not found")
 
