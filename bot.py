@@ -5081,7 +5081,7 @@ async def show_lab_death(update, context):
         else:
             logger.warning("GuildWarService not found in bot_data")
 
-    await ctx.repo.ory.atomic_update(uid, _lab_die)
+    await ctx.repo.atomic_update(uid, _lab_die)
 
     context.user_data.pop("lab_hp", None)
     context.user_data.pop("lab_focus", None)
