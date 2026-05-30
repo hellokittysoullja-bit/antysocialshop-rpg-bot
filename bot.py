@@ -24,9 +24,16 @@ from telegram.request import HTTPXRequest
 import redis.asyncio as aioredis
 from functools import wraps
 
-import pybreaker
-redis_breaker = pybreaker.CircuitBreaker(fail_max=5, reset_timeout=30)
-db_breaker = pybreaker.CircuitBreaker(fail_max=5, reset_timeout=30)
+try:
+    import pybreaker
+    redis_breaker = pybreaker.CircuitBreaker(fail_max=5, reset_timeout=30)
+    db_breaker = pybreaker.CircuitBreaker(fail_max=5, reset_timeout=30)
+    # ... и так далее — все твои объявления, которые могут упасть
+    # Потом можно импортировать всё остальное
+except Exception as e:
+    import sys
+    print(f"FATAL IMPORT ERROR: {e}", file=sys.stderr)
+    sys.exit(1)
 
 from cachetools import TTLCache
 from prometheus_client import Counter, Histogram
