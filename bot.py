@@ -25,9 +25,6 @@ import redis.asyncio as aioredis
 from functools import wraps
 
 import pybreaker
-import pybreaker
-
-# Circuit Breakers для Redis и БД
 redis_breaker = pybreaker.CircuitBreaker(fail_max=5, reset_timeout=30)
 db_breaker = pybreaker.CircuitBreaker(fail_max=5, reset_timeout=30)
 
