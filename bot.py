@@ -25,6 +25,12 @@ import redis.asyncio as aioredis
 from functools import wraps
 
 import pybreaker
+import pybreaker
+
+# Circuit Breakers для Redis и БД
+redis_breaker = pybreaker.CircuitBreaker(fail_max=5, reset_timeout=30)
+db_breaker = pybreaker.CircuitBreaker(fail_max=5, reset_timeout=30)
+
 from cachetools import TTLCache
 from prometheus_client import Counter, Histogram
 
@@ -416,6 +422,10 @@ class Settings(BaseSettings):
         return f"{self.render_url}{self.webhook_path}"
 
 settings = Settings()
+FARM_MIN = settings.farm_min
+FARM_MAX = settings.farm_max
+FARM_COOLDOWN_HOURS = settings.farm_cooldown_hours
+HAPPY_HOUR_MULTIPLIER = settings.happy_hour_multiplier
 
 # ── JSON-логгер ──
 class JsonFormatter(logging.Formatter):
@@ -2623,9 +2633,8 @@ async def farm_callback(update, context):
         player.last_farm_date = date.today()
 
         # Военный счёт
-        await ctx.war_service.add_score_raw(uid, earned + medal_bonus, conn)
-        if war_service:
-            await war_service.add_score_raw(uid, earned + medal_bonus, conn)
+        if ctx.war_service:
+            await ctx.war_service.add_score_raw(uid, earned + medal_bonus, conn)
 
         return ("ok", earned, crit, happy, medal_text, new_count, player.balance, old_balance)
 
