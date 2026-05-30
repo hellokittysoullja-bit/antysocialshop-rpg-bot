@@ -1277,9 +1277,9 @@ async def init_db_pool():
 
         # --- отправляем сообщение админу (Telegram) ---
         if settings.admin_id and settings.bot_token:
-    url = f"https://api.telegram.org/bot{settings.bot_token}/sendMessage"
+            url = f"https://api.telegram.org/bot{settings.bot_token}/sendMessage"
             payload = {
-                "chat_id": ADMIN_ID,
+                "chat_id": settings.admin_id,
                 "text": success_msg,
                 "parse_mode": "HTML"
             }
@@ -1292,20 +1292,13 @@ async def init_db_pool():
     except asyncpg.exceptions.InternalServerError as e:
         error_text = str(e).lower()
         if "compute time quota exceeded" in error_text:
-            alert = (
-                f"❌ ЛИМИТ ВЫЧИСЛИТЕЛЬНОГО ВРЕМЕНИ ИСЧЕРПАН!\n"
-                f"Провайдер: {provider}\n"
-                f"Хост: {host_part}\n"
-                f"Решение: дождитесь сброса или перенесите базу на Render PostgreSQL."
-            )
-            logger.critical(alert)
+            alert = ( ... )
         else:
-            alert = f"❌ Внутренняя ошибка базы данных ({provider}): {e}"
-            logger.critical(alert)
+            alert = ( ... )
         # отправка в Telegram
         if settings.admin_id and settings.bot_token:
-    url = f"https://api.telegram.org/bot{settings.bot_token}/sendMessage"
-            payload = {"chat_id": ADMIN_ID, "text": alert, "parse_mode": "HTML"}
+            url = f"https://api.telegram.org/bot{settings.bot_token}/sendMessage"
+            payload = {"chat_id": settings.admin_id, "text": alert, "parse_mode": "HTML"}
             try:
                 async with httpx.AsyncClient(timeout=10) as client:
                     await client.post(url, json=payload)
