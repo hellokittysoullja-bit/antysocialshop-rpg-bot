@@ -389,14 +389,7 @@ class PlayerRepository:
         except Exception as e:
             logger.warning("Не удалось обновить кэш для игрока %d: %s", user_id, e)
             self.cache.pop(user_id, None)
-            
-# Заглушка, чтобы старый импорт player_repo не вызывал ошибку
-import sys
-from types import ModuleType
-if 'player_repo' not in sys.modules:
-    sys.modules['player_repo'] = ModuleType('player_repo')
-sys.modules['player_repo'].PlayerRepository = PlayerRepository
-
+        
 from pydantic import Field
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_prefix="")
