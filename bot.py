@@ -5098,8 +5098,6 @@ async def show_lab_death(update, context):
         p.lab_deaths += 1
 
         await ctx.war_service.add_score(uid, WarAction.LAB_DEATH, conn)
-        else:
-            logger.warning("GuildWarService not found in bot_data")
 
     await ctx.repo.atomic_update(uid, _lab_die)
 
