@@ -28,55 +28,117 @@ import pybreaker
 from cachetools import TTLCache
 from prometheus_client import Counter, Histogram
 
-# ─────────────────────────────────────────────────────────────
-# СВЕРХНАДЁЖНОЕ ЛОГИРОВАНИЕ (SENIOR-УРОВЕНЬ)
-# ─────────────────────────────────────────────────────────────
-class SafeStdoutHandler(logging.StreamHandler):
-    """Обработчик, который никогда не падает."""
+# ============================================================
+# ЛОГИРОВАНИЕ
+# ============================================================
+
+# 1. Дублирование критических ошибок в stderr (Render всегда видит stderr)
+import sys
+
+class StderrHandler(logging.StreamHandler):
+    def __init__(self):
+        super().__init__(stream=sys.stderr)
+        self.setLevel(logging.CRITICAL)
+        self.setFormatter(JsonFormatter())
+
+root_logger.addHandler(StderrHandler())
+
+# 2. Перехват необработанных синхронных исключений
+def handle_unhandled_exception(exc_type, exc_value, exc_traceback):
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_traceback)
+        return
+    logging.critical(
+        "НЕОБРАБОТАННОЕ ИСКЛЮЧЕНИЕ",
+        exc_info=(exc_type, exc_value, exc_traceback),
+        extra={"request_id": "unhandled"}
+    )
+    traceback.print_exception(exc_type, exc_value, exc_traceback, file=sys.stderr)
+
+sys.excepthook = handle_unhandled_exception
+
+# 3. Перехват асинхронных исключений (корутин)
+def handle_asyncio_exception(loop, context):
+    exception = context.get("exception")
+    if exception:
+        logging.critical(
+            "АСИНХРОННОЕ ИСКЛЮЧЕНИЕ",
+            exc_info=(type(exception), exception, exception.__traceback__),
+            extra={"request_id": "asyncio"}
+        )
+        traceback.print_exception(type(exception), exception, exception.__traceback__, file=sys.stderr)
+    else:
+        logging.critical(f"АСИНХРОННАЯ ОШИБКА: {context}", extra={"request_id": "asyncio"})
+
+# Установим перехватчик для текущего event loop (если уже есть)
+try:
+    loop = asyncio.get_running_loop()
+    loop.set_exception_handler(handle_asyncio_exception)
+except RuntimeError:
+    # event loop ещё не запущен – установим позже в main()
+    pass
+
+# 4. Улучшенный троттлинг Telegram-алертов (по ключу ошибки)
+class TelegramAlertHandler(logging.Handler):
+    """Отправляет CRITICAL ошибки админу, не чаще 1 раза в минуту на уникальный тип ошибки."""
+    def __init__(self, bot=None, admin_id=None):
+        super().__init__()
+        self.bot = bot
+        self.admin_id = admin_id
+        self._last_alert_times = {}  # ключ -> время последней отправки
+
     def emit(self, record):
-        try:
-            msg = self.format(record)
-            stream = self.stream
-            stream.write(msg + self.terminator)
-            self.flush()
-        except Exception:
-            import traceback
-            traceback.print_exc()
+        if self.bot and self.admin_id and record.levelno >= logging.CRITICAL:
+            # Уникальный ключ ошибки: модуль + функция + строка
+            key = f"{record.module}:{record.funcName}:{record.lineno}"
+            now = time.time()
+            last_time = self._last_alert_times.get(key, 0)
+            if now - last_time < 60:
+                return
+            self._last_alert_times[key] = now
+            try:
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    loop = asyncio.get_event_loop()
+                loop.create_task(self._send_alert(record))
+            except Exception:
+                pass
 
-# 1. Корневой логгер с INFO в stdout
-root_logger = logging.getLogger()
-root_logger.setLevel(logging.INFO)
+    async def _send_alert(self, record):
+        msg = f"🚨 <b>КРИТИЧЕСКАЯ ОШИБКА</b>\n\n<pre>{html.escape(self.format(record)[:1000])}</pre>"
+        for attempt in range(3):
+            try:
+                await self.bot.send_message(chat_id=self.admin_id, text=msg, parse_mode="HTML")
+                return
+            except Exception:
+                await asyncio.sleep(2 ** attempt)
 
-# Удаляем все старые обработчики, чтобы не было конфликтов
-for h in root_logger.handlers[:]:
-    root_logger.removeHandler(h)
+# Обновляем telegram_handler (заменяем старый на улучшенный)
+for handler in root_logger.handlers[:]:
+    if isinstance(handler, TelegramAlertHandler):
+        root_logger.removeHandler(handler)
 
-handler = SafeStdoutHandler(sys.stdout)
-handler.setFormatter(logging.Formatter(
-    "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-))
-root_logger.addHandler(handler)
+telegram_handler = TelegramAlertHandler()
+telegram_handler.setLevel(logging.CRITICAL)
+telegram_handler.setFormatter(JsonFormatter())
+telegram_handler.addFilter(RequestIdFilter())
+root_logger.addHandler(telegram_handler)
 
-# 2. Уровни для библиотек – только важное
-logging.getLogger("telegram").setLevel(logging.DEBUG)
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("httpcore").setLevel(logging.WARNING)
-logging.getLogger("apscheduler").setLevel(logging.WARNING)
+# 5. Автоматический request_id для всех записей (если не задан)
+class AutoRequestIdFilter(logging.Filter):
+    def filter(self, record):
+        if not getattr(record, "request_id", None):
+            record.request_id = uuid.uuid4().hex[:8]
+        return True
 
-# 3. Глобальный перехват необработанных исключений
-def unhandled_exception_hook(exc_type, exc_value, exc_traceback):
-    """Гарантированно выводит ошибку в stderr."""
-    import traceback
-    traceback.print_exception(exc_type, exc_value, exc_traceback)
-sys.excepthook = unhandled_exception_hook
+for handler in root_logger.handlers:
+    handler.addFilter(AutoRequestIdFilter())
 
-# 4. Логгер проекта
-logger = logging.getLogger(__name__)
-logger.info("===== БОТ ЗАПУСКАЕТСЯ =====")
-logger.info("Python %s", sys.version)
+logger.info("✅ Логирование усилено: asyncio-перехват, stderr, троттлинг по ключу ошибки")
 
 # ============================================================
-# ДЕКОРАТОРЫ (объявлены первыми, доступны везде)
+# ДЕКОРАТОРЫ
 # ============================================================
 def safe_callback(func: Callable):
     @wraps(func)
@@ -195,7 +257,7 @@ def divine_command(command_name: str):
 assert callable(retry), "retry должен быть функцией, а не модулем!"
 
 # # ============================================================
-# НАСТРОЙКИ (ENTERPRISE-READY)
+# НАСТРОЙКИ 
 # ============================================================
 # ── Настройки через Pydantic ──
 
@@ -2476,7 +2538,6 @@ class StreakConfig:
 
 daily_config = StreakConfig()
 
-# ---------------------------------------------------------------------------
 # Результат расчёта награды
 class RewardResult(NamedTuple):
     total_oac: int
@@ -2484,7 +2545,6 @@ class RewardResult(NamedTuple):
     inventory_items: Dict[str, int]  # имя поля → количество
 
 # Расчёт награды (чистая функция)
-# ---------------------------------------------------------------------------
 
 def _calculate_reward(streak: int, config: StreakConfig) -> RewardResult:
     base = config.base_rewards.get(streak, 100)
