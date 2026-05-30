@@ -3037,11 +3037,9 @@ async def handle_use_dust(update, context):
             "Крик Бездны", "Пепел Короля", "Шёпот Склепа",
             "Коготь Хаоса", "Вздох Пожирателя"
         ])
-        item = await create_named_blunt(uid, name, rarity="legendary", conn=conn)
+        item = await create_named_blunt(uid, name, rarity="legendary", conn=conn, ctx=ctx)
 
         await ctx.war_service.add_score(uid, WarAction.DUST_USE, conn)
-        else:
-            logger.warning("GuildWarService not found")
 
         return ("ok", item, name)
 
