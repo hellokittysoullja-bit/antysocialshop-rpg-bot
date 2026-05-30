@@ -1292,9 +1292,12 @@ async def init_db_pool():
     except asyncpg.exceptions.InternalServerError as e:
         error_text = str(e).lower()
         if "compute time quota exceeded" in error_text:
-            alert = ( ... )
-        else:
-            alert = ( ... )
+        alert = (
+            f"❌ Внутренняя ошибка базы данных ({provider}): {e}"
+        )
+        alert = (
+            f"❌ Внутренняя ошибка базы данных ({provider}): {e}"
+        )
         # отправка в Telegram
         if settings.admin_id and settings.bot_token:
             url = f"https://api.telegram.org/bot{settings.bot_token}/sendMessage"
@@ -1779,7 +1782,7 @@ async def _reset_and_notify_broken_id(rarity: str, context):
         logger.error("Ошибка очистки file_id в БД: %s", ex)
     if settings.admin_id:
         await _safe_send_message(
-            context, ADMIN_ID,
+            context, settings.admin_id,
             f"⚠️ Изображение для {rarity} недействительно. Обновите: /setbluntpic {rarity}"
         )
 
@@ -1898,6 +1901,7 @@ def get_rank_info(balance: int):
         return "🪓", "Рекрут"
 
 async def process_daily_login(user_id: int, context) -> None:
+    ctx = context.application.bot_data["ctx"]
     today = date.today()
     player = await ctx.repo.get_by_id(user_id)
     if not player or not player.user_id:
@@ -2228,6 +2232,7 @@ def get_rank_progress(balance):
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ /start
 
 async def _handle_referral(update, context, uid, player):
+    ctx = context.application.bot_data["ctx"]
     """Атомарно обрабатывает реферальную ссылку blunt_..."""
     if not context.args or not context.args[0].startswith("blunt_"):
         return
@@ -2313,7 +2318,7 @@ async def _create_new_player(update, context, uid, username):
         parse_mode='HTML'
     )
 
-async def _show_main_menu(update, context, player, user):
+async def _show_main_menu(update, context, player, user, ctx):
     """Формирует и отправляет главное меню."""
     bal = player.balance
     guild = player.guild
@@ -2373,7 +2378,7 @@ async def _show_main_menu(update, context, player, user):
         hint = "<b>💡 Исследуй 🏛️ Лабиринт! Он полон опасностей и наград.</b>"
 
     menu_text = f"<b>🎮 ГЛАВНОЕ МЕНЮ</b>\n\n<i>{whisper}</i>\n\n" + back + "\n\n" + hint
-    kb, _ = await get_main_menu_keyboard(player.user_id)
+    kb, _ = await get_main_menu_keyboard(player.user_id, ctx=ctx)
     await update.effective_message.reply_text(menu_text, reply_markup=kb, parse_mode='HTML')
 
 # САМА ФУНКЦИЯ START — ТОНКИЙ ОРКЕСТРАТОР
@@ -2769,6 +2774,7 @@ def _format_dust_message(name: str, reaction: str) -> str:
 @error_handler
 @rate_limit(2)
 async def craft_callback(update, context):
+    ctx = context.application.bot_data["ctx"]
     user, _ = get_user_and_msg(update)
     uid = user.id
     player = await ctx.repo.get_by_id(uid)
@@ -2785,6 +2791,7 @@ async def craft_callback(update, context):
 
 @error_handler
 async def handle_craft_normal(update, context):
+    ctx = context.application.bot_data["ctx"]
     query = update.callback_query
     await query.answer()
     uid = query.from_user.id
@@ -2814,7 +2821,7 @@ async def handle_craft_normal(update, context):
 
         await ctx.war_service.add_score_raw(uid, medal_bonus, conn)
         if ctx.war_service:
-            await war_service.add_score(uid, WarAction.CRAFT, conn)
+            await ctx.war_service.add_score(uid, WarAction.CRAFT, conn)
 
         return ("ok", medal_text, new_count, player.blunts, player.balance)
 
@@ -2889,6 +2896,7 @@ async def handle_craft_named(update, context):
 
 
 async def handle_named_name(update, context):
+    ctx = context.application.bot_data["ctx"]
     try:
         user = update.effective_user
         uid = user.id
@@ -2975,6 +2983,7 @@ async def handle_named_name(update, context):
 
 @error_handler
 async def handle_use_dust(update, context):
+    ctx = context.application.bot_data["ctx"]
     query = update.callback_query
     await query.answer()
     uid = query.from_user.id
@@ -3145,6 +3154,7 @@ async def cancel_gift(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Дунуть
 @error_handler
 async def smoke_callback(update, context):
+    ctx = context.application.bot_data["ctx"]
     user, msg = get_user_and_msg(update)
     uid = user.id
     player = await ctx.repo.get_by_id(uid)
