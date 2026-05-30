@@ -28,7 +28,11 @@ import pybreaker
 from cachetools import TTLCache
 from prometheus_client import Counter, Histogram
 
-print("REAL FILE LINE COUNT:", len(open(__file__).readlines()))
+# Заглушка, чтобы старый импорт player_repo не вызывал ошибку
+import sys
+from types import ModuleType
+sys.modules['player_repo'] = ModuleType('player_repo')
+sys.modules['player_repo'].PlayerRepository = PlayerRepository
 
 # ============================================================
 # ДЕКОРАТОРЫ
@@ -2014,7 +2018,7 @@ def invalidate_menu_cache(user_id: int):
     """Сброс кэша меню для конкретного пользователя."""
     _menu_cache.pop(user_id, None)
 
-async def get_main_menu_keyboard(user_id,ctx=None)
+async def get_main_menu_keyboard(user_id, ctx=None):
     now = time.time()
     if user_id in _menu_cache:
         cached_time, kb, whisper = _menu_cache[user_id]
