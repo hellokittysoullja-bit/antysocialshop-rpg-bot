@@ -2911,7 +2911,7 @@ async def handle_named_name(update, context):
             await update.message.reply_text("❌ Имя не может быть пустым.")
             return
 
-player = await ctx.repo.get_by_id(uid)
+        player = await ctx.repo.get_by_id(uid)
         if not player or not player.user_id:
             await update.message.reply_text("Сначала активируйся: /start")
             return
@@ -2948,18 +2948,6 @@ player = await ctx.repo.get_by_id(uid)
             p.craft_count = (p.craft_count or 0) + 1
             item = await create_named_blunt(uid, name, rarity=None, conn=conn, ctx=ctx)
 
-            await ctx.war_service.add_score_raw(uid, 0, conn)
-            await ctx.war_service.add_score(uid, WarAction.NAMED_CRAFT, conn)
-            return ("ok", item)
-
-        async def _named(player, conn):
-            if player.balance < GAME_CONFIG["named_blunt_cost"]:
-                return ("no_money",)
-            player.balance -= 50
-            player.craft_count = (player.craft_count or 0) + 1
-            item = await create_named_blunt(uid, name, rarity=None, conn=conn, ctx=ctx)
-
-            # Очки войны
             await ctx.war_service.add_score_raw(uid, 0, conn)
             await ctx.war_service.add_score(uid, WarAction.NAMED_CRAFT, conn)
             return ("ok", item)
