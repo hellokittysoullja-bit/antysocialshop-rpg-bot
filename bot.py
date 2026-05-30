@@ -116,9 +116,9 @@ class TelegramAlertHandler(logging.Handler):
     if isinstance(handler, TelegramAlertHandler):
 
 # telegram_handler = TelegramAlertHandler()
-telegram_handler.setLevel(logging.CRITICAL)
-telegram_handler.setFormatter(JsonFormatter())
-telegram_handler.addFilter(RequestIdFilter())
+#telegram_handler.setLevel(logging.CRITICAL)
+#telegram_handler.setFormatter(JsonFormatter())
+#telegram_handler.addFilter(RequestIdFilter())
 
 # 5. Автоматический request_id для всех записей (если не задан)
 class AutoRequestIdFilter(logging.Filter):
