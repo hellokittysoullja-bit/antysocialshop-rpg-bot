@@ -41,8 +41,6 @@ class StderrHandler(logging.StreamHandler):
         self.setLevel(logging.CRITICAL)
         self.setFormatter(JsonFormatter())
 
-root_logger.addHandler(StderrHandler())
-
 # 2. Перехват необработанных синхронных исключений
 def handle_unhandled_exception(exc_type, exc_value, exc_traceback):
     if issubclass(exc_type, KeyboardInterrupt):
