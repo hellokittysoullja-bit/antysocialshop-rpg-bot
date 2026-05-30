@@ -1,4 +1,11 @@
 # bot.py — ANTY SOCIAL SHOP RPG v8.0 ENTERPRISE
+import sys, traceback, time
+def log_uncaught(exc_type, exc_value, exc_tb):
+    traceback.print_exception(exc_type, exc_value, exc_tb, file=sys.stderr)
+    sys.stderr.flush()
+    time.sleep(2)   # даём время Render прочитать
+    sys.__excepthook__(exc_type, exc_value, exc_tb)
+sys.excepthook = log_uncaught
 import asyncio, json, logging, os, sys, time, random, re, hashlib, html, enum, uuid, copy
 from datetime import datetime, timedelta, date, time as time_module
 from threading import Thread
@@ -28,12 +35,13 @@ try:
     import pybreaker
     redis_breaker = pybreaker.CircuitBreaker(fail_max=5, reset_timeout=30)
     db_breaker = pybreaker.CircuitBreaker(fail_max=5, reset_timeout=30)
-    # ... и так далее — все твои объявления, которые могут упасть
-    # Потом можно импортировать всё остальное
 except Exception as e:
-    import sys
-    print(f"FATAL IMPORT ERROR: {e}", file=sys.stderr)
-    sys.exit(1)
+    print(f"WARNING: pybreaker not available: {e}", file=sys.stderr)
+    class DummyBreaker:
+        def call(self, func, *args, **kwargs):
+            return func(*args, **kwargs)
+    redis_breaker = DummyBreaker()
+    db_breaker = DummyBreaker()
 
 from cachetools import TTLCache
 from prometheus_client import Counter, Histogram
