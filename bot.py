@@ -113,15 +113,12 @@ class TelegramAlertHandler(logging.Handler):
                 await asyncio.sleep(2 ** attempt)
 
 # Обновляем telegram_handler (заменяем старый на улучшенный)
-for handler in root_logger.handlers[:]:
     if isinstance(handler, TelegramAlertHandler):
-        root_logger.removeHandler(handler)
 
 telegram_handler = TelegramAlertHandler()
 telegram_handler.setLevel(logging.CRITICAL)
 telegram_handler.setFormatter(JsonFormatter())
 telegram_handler.addFilter(RequestIdFilter())
-root_logger.addHandler(telegram_handler)
 
 # 5. Автоматический request_id для всех записей (если не задан)
 class AutoRequestIdFilter(logging.Filter):
@@ -129,8 +126,7 @@ class AutoRequestIdFilter(logging.Filter):
         if not getattr(record, "request_id", None):
             record.request_id = uuid.uuid4().hex[:8]
         return True
-
-for handler in root_logger.handlers:
+        
     handler.addFilter(AutoRequestIdFilter())
 
 logger.info("✅ Логирование усилено: asyncio-перехват, stderr, троттлинг по ключу ошибки")
