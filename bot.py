@@ -5661,7 +5661,7 @@ async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYP
         except Exception:
             pass
 
-@cb@cb
+@cb
 async def debug_pet(update, context, ctx):
     if update.effective_user.id != ctx.settings.admin_id: return
     player = await ctx.repo.get_by_id(update.effective_user.id)
