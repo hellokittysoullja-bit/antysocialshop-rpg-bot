@@ -2036,7 +2036,7 @@ async def get_main_menu_keyboard(user_id, ctx=None):
             return kb, whisper
 
     whisper = random.choice(WHISPERS)
-    player = await ctx.repo.get_by_id(user_id) if ctx else await PlayerRepository.get_by_id(user_id)
+    player = await ctx.repo.get_by_id(user_id) if ctx else None
     balance = player.balance if player else 0
     now_dt = datetime.now()
 
