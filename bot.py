@@ -2905,11 +2905,8 @@ async def handle_named_name(update, context):
             item = await create_named_blunt(uid, name, rarity=None, conn=conn, ctx=ctx)
 
             # Очки войны
-            await ctx.war_service.add_score_raw(uid, 0, conn)   # earned и medal_bonus не определены, поэтому 0
+            await ctx.war_service.add_score_raw(uid, 0, conn)
             await ctx.war_service.add_score(uid, WarAction.NAMED_CRAFT, conn)
-            else:
-                logger.warning("GuildWarService not found")
-
             return ("ok", item)
 
         result = await ctx.repo.atomic_update(uid, _named)
