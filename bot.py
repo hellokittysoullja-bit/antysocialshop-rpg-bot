@@ -37,6 +37,9 @@ except Exception as e:
 
 from cachetools import TTLCache
 from prometheus_client import Counter, Histogram
+callback_requests = Counter('bot_callback_requests', 'Total callbacks')
+callback_duration = Histogram('bot_callback_duration_seconds', 'Callback duration')
+rate_limited_requests = Counter('bot_rate_limited_requests', 'Rate limited requests')
 
 import httpx
 
@@ -1788,10 +1791,13 @@ async def _reset_and_notify_broken_id(rarity: str, context):
             f"⚠️ Изображение для {rarity} недействительно. Обновите: /setbluntpic {rarity}"
         )
 
+def get_golden_file_id(rarity: str) -> str | None:
+    """Заглушка – вернёт None, чтобы не падать. Замени на реальную логику позже."""
+    return None
 
 # ── Основная функция ────────────────────────────────────────
 async def safe_send_blunt_image(context, chat_id, rarity, caption, reply_markup, ctx):
-    file_id = ctx.blunt_images.get(rarity)
+    file_id = BLUNT_IMAGES.get(rarity)
     if not file_id: return False
     try:
         await context.bot.send_photo(chat_id, photo=file_id, caption=caption, reply_markup=reply_markup, parse_mode='HTML')
@@ -4340,20 +4346,17 @@ async def luck_callback(update, context, action=None):
     berserk_ok = _check_berserk_availability(player, now, cfg["berserk"]["cost"], cfg["berserk"]["cooldown_hours"])
     alchemy_ok = player.balance >= cfg["alchemy"]["required_balance"]
 
-    # Получаем сервис войны один раз
-    await ctx.war_service.add_score_raw(uid, earned + medal_bonus, conn)
-
     if action == "luck_wheel":
-        await _process_wheel(update, context, uid, player, cfg, war_service)
+        await _process_wheel(update, context, uid, player, cfg, ctx)          # передаём ctx вместо war_service
         return
     if action == "luck_berserk":
-        await _process_berserk(update, context, uid, player, cfg, war_service)
+        await _process_berserk(update, context, uid, player, cfg, ctx)
         return
     if action == "alchemy_start":
         await _process_alchemy_start(update, context, player, cfg)
         return
     if action == "alchemy_confirm":
-        await _process_alchemy_confirm(update, context, uid, player, cfg, war_service)
+        await _process_alchemy_confirm(update, context, uid, player, cfg, ctx)
         return
 
     # Главное меню удачи
@@ -4370,7 +4373,7 @@ async def luck_callback(update, context, action=None):
 
 
 # ── Колесо ──────────────────────────────────────────────────
-async def _process_wheel(update, context, uid, player, cfg, war_service):
+async def _process_wheel(update, context, uid, player, cfg, ctx):
     if not _check_wheel_availability(player, datetime.now(), cfg["wheel"]["cooldown_hours"]):
         await _notify_user(update, context, "🎡 Колесо пока недоступно. Загляни позже.")
         return
@@ -4418,7 +4421,7 @@ async def _process_wheel(update, context, uid, player, cfg, war_service):
 
 
 # ── Берсерк ─────────────────────────────────────────────────
-async def _process_berserk(update, context, uid, player, cfg, war_service):
+async def _process_berserk(update, context, uid, player, cfg, ctx):
     if not _check_berserk_availability(player, datetime.now(), cfg["berserk"]["cost"], cfg["berserk"]["cooldown_hours"]):
         await _notify_user(update, context, "🍀 Берсерк недоступен! Проверь баланс или время.")
         return
@@ -4482,7 +4485,7 @@ async def _process_alchemy_start(update, context, player, cfg):
 
 
 # ── Алхимия (запуск) ────────────────────────────────────────
-async def _process_alchemy_confirm(update, context, uid, player, cfg, war_service):
+async def _process_alchemy_confirm(update, context, uid, player, cfg, ctx):
     async def _alchemy(p, conn):
         if p.blunts < cfg["alchemy"]["cost_blunts"] or p.balance < cfg["alchemy"]["cost_oac"]:
             return (AlchemyResult.NO_RESOURCES,)
