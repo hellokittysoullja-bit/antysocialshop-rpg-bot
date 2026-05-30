@@ -1848,7 +1848,7 @@ def next_sunday_str() -> str:
     return next_sunday.strftime("%d.%m")
 
 async def add_title(user_id, emoji, conn=None):
-    player = await PlayerRepository.get_by_id(user_id)
+    player = await ctx.repo.get_by_id(user_id)
     titles = (player.titles or "").split()
     if emoji not in titles:
         titles.append(emoji)
@@ -1887,7 +1887,7 @@ def get_rank_info(balance: int):
 
 async def process_daily_login(user_id: int, context) -> None:
     today = date.today()
-    player = await PlayerRepository.get_by_id(user_id)
+    player = await ctx.repo.get_by_id(user_id)
     if not player or not player.user_id:
         return
 
@@ -2014,7 +2014,7 @@ def invalidate_menu_cache(user_id: int):
     """Сброс кэша меню для конкретного пользователя."""
     _menu_cache.pop(user_id, None)
 
-async def get_main_menu_keyboard(user_id):
+async def get_main_menu_keyboard(user_id,ctx=None)
     now = time.time()
     if user_id in _menu_cache:
         cached_time, kb, whisper = _menu_cache[user_id]
@@ -2022,7 +2022,7 @@ async def get_main_menu_keyboard(user_id):
             return kb, whisper
 
     whisper = random.choice(WHISPERS)
-    player = await PlayerRepository.get_by_id(user_id)
+    player = await ctx.repo.get_by_id(user_id)
     balance = player.balance if player else 0
     now_dt = datetime.now()
 
@@ -2239,7 +2239,7 @@ async def _handle_referral(update, context, uid, player):
     if not creator_id or creator_id == uid:
         return
 
-    creator = await PlayerRepository.get_by_id(creator_id)
+    creator = await ctx.repo.get_by_id(creator_id)
     if not creator or player.invited_by:
         return
 
@@ -2371,7 +2371,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = user.username or user.first_name
 
     # 1. Получаем игрока (или пустышку)
-    player = await PlayerRepository.get_by_id(uid)
+    player = await ctx.repo.get_by_id(uid)
 
     # 2. Обрабатываем реферала (если есть аргумент)
     await _handle_referral(update, context, uid, player)
@@ -2767,7 +2767,7 @@ def _format_dust_message(name: str, reaction: str) -> str:
 async def craft_callback(update, context):
     user, _ = get_user_and_msg(update)
     uid = user.id
-    player = await PlayerRepository.get_by_id(uid)
+    player = await ctx.repo.get_by_id(uid)
     if not player or not player.user_id:
         await update.effective_message.reply_text("Сначала активируйся: /start")
         return
@@ -2786,7 +2786,7 @@ async def handle_craft_normal(update, context):
     uid = query.from_user.id
 
     # Загружаем игрока для проверки онбординга и баланса
-    player = await PlayerRepository.get_by_id(uid)
+    player = await ctx.repo.get_by_id(uid)
     if not player or not player.exists:
         await context.bot.send_message(chat_id=update.effective_chat.id, text="Сначала активируйся: /start")
         return
@@ -2863,7 +2863,7 @@ async def handle_craft_named(update, context):
     query = update.callback_query
     await query.answer()
     uid = query.from_user.id
-    player = await PlayerRepository.get_by_id(uid)
+    player = await ctx.repo.get_by_id(uid)
     if not player or player.balance < GAME_CONFIG["named_blunt_cost"]:
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
@@ -2978,7 +2978,7 @@ async def handle_use_dust(update, context):
     await query.answer()
     uid = query.from_user.id
 
-    player = await PlayerRepository.get_by_id(uid)
+    player = await ctx.repo.get_by_id(uid)
     if not player or (player.m_essence or 0) < 1:
         await query.answer("Нет Кристальной Пыли.", show_alert=True)
         return
@@ -3061,9 +3061,11 @@ class BluntNotFound(TransferError):
 class SameUserError(TransferError):
     pass
 
-async def transfer_blunt(sender_id: int, receiver_id: int, blunt_id: str) -> None:
+async def transfer_blunt(sender_id: int, receiver_id: int, blunt_id: str, ctx: AppContext) -> None:
+    """Атомарная передача именного бланта с блокировкой строк (использует ctx)."""
     if sender_id == receiver_id:
         raise SameUserError("Нельзя передать блант самому себе")
+
     try:
         async with ctx.db_pool.acquire() as conn:
             async with conn.transaction():
@@ -3071,17 +3073,18 @@ async def transfer_blunt(sender_id: int, receiver_id: int, blunt_id: str) -> Non
                 receiver_row = await conn.fetchrow("SELECT * FROM players WHERE user_id = $1 FOR UPDATE", receiver_id)
                 if not sender_row or not receiver_row:
                     raise TransferError("Игрок не найден")
+
                 sender = Player(**dict(sender_row))
                 receiver = Player(**dict(receiver_row))
                 sender.inventory = _json_safe_load(sender.inventory, [])
                 receiver.inventory = _json_safe_load(receiver.inventory, [])
                 receiver.profile_skins = _json_safe_load(receiver.profile_skins, {})
-                sender.inventory = _json_safe_load(sender.inventory, [])
-                receiver.inventory = _json_safe_load(receiver.inventory, [])
+
                 if not isinstance(sender.inventory, list):
                     raise TransferError("Инвентарь отправителя повреждён")
                 if not isinstance(receiver.inventory, list):
                     receiver.inventory = []
+
                 item = None
                 for it in sender.inventory:
                     if it.get("id") == blunt_id and it.get("type") == "named":
@@ -3089,22 +3092,26 @@ async def transfer_blunt(sender_id: int, receiver_id: int, blunt_id: str) -> Non
                         break
                 if not item:
                     raise BluntNotFound("Блант не найден или не является именным")
+
                 initial_len = len(sender.inventory)
                 sender.inventory.remove(item)
                 if len(sender.inventory) == initial_len:
                     raise TransferError("Не удалось удалить предмет")
                 if any(it.get("id") == blunt_id for it in sender.inventory):
                     raise TransferError("Обнаружен дубликат бланта")
+
                 if "owner_history" not in item:
                     item["owner_history"] = []
                 item["owner_history"].append({
                     "user_id": str(receiver_id),
                     "since": datetime.utcnow().isoformat()
                 })
+
                 receiver.inventory.append(item)
-                await PlayerRepository.save(sender, conn=conn)
-                await PlayerRepository.save(receiver, conn=conn)
+                await ctx.repo.save(sender, conn=conn)
+                await ctx.repo.save(receiver, conn=conn)
                 logger.info(f"Blunt {blunt_id} передан от {sender_id} к {receiver_id}")
+
     except TransferError:
         raise
     except Exception as e:
@@ -3131,103 +3138,15 @@ async def cancel_gift(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     context.user_data.pop("gifting_blunt_id", None)
-    await profile_callback(update, context)
-
-async def handle_gift_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if "gifting_blunt_id" not in context.user_data:
-        return
-    text = update.message.text.strip()
-    receiver_id = None
-    if text.isdigit():
-        receiver_id = int(text)
-    elif text.startswith("@"):
-        async with ctx.db_pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT user_id FROM players WHERE LOWER(username) = LOWER($1)", text.lstrip("@")
-            )
-            if row:
-                receiver_id = row["user_id"]
-    if not receiver_id:
-        await update.message.reply_text("❌ Игрок не найден.")
-        return
-    if receiver_id == update.effective_user.id:
-        await update.message.reply_text("❌ Нельзя подарить блант самому себе.")
-        return
-    blunt_id = context.user_data.pop("gifting_blunt_id")
-    try:
-        await transfer_blunt(update.effective_user.id, receiver_id, blunt_id)
-        await update.message.reply_text("✅ Блант успешно подарен! 🎁")
-        try:
-            await context.bot.send_message(chat_id=receiver_id, text="🎁 Вам подарили именной блант! Проверьте инвентарь.")
-        except Exception:
-            pass
-    except ValueError as e:
-        await update.message.reply_text(f"❌ Ошибка: {e}")
-    except Exception as e:
-        logger.error(f"Gift error: {e}")
-        await update.message.reply_text("⚠️ Внутренняя ошибка. Попробуй позже.")
-
-async def cancel_gift(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отмена дарения."""
-    query = update.callback_query
-    await query.answer()
-    context.user_data.pop("gifting_blunt_id", None)
     # Вернёмся в меню или в список блантов – здесь просто в профиль
     await profile_callback(update, context)
-
-async def handle_gift_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает текст с именем получателя, вызывает transfer_blunt."""
-    if "gifting_blunt_id" not in context.user_data:
-        return  # не в процессе дарения
-    
-    text = update.message.text.strip()
-    receiver_id = None
-    
-    # Пытаемся распарсить как числовой ID
-    if text.isdigit():
-        receiver_id = int(text)
-    # Или как @username
-    elif text.startswith("@"):
-        # Нужно найти user_id по username. В текущей БД username хранится в players.
-        async with ctx.db_pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT user_id FROM players WHERE LOWER(username) = LOWER($1)", text.lstrip("@")
-            )
-            if row:
-                receiver_id = row["user_id"]
-    
-    if not receiver_id:
-        await update.message.reply_text("❌ Игрок не найден. Попробуй ещё раз или отмени.")
-        return
-    
-    if receiver_id == update.effective_user.id:
-        await update.message.reply_text("❌ Нельзя подарить блант самому себе.")
-        return
-    
-    blunt_id = context.user_data.pop("gifting_blunt_id")
-    try:
-        await transfer_blunt(update.effective_user.id, receiver_id, blunt_id)
-        await update.message.reply_text("✅ Блант успешно подарен! 🎁")
-        # Уведомим получателя
-        try:
-            await context.bot.send_message(
-                chat_id=receiver_id,
-                text="🎁 Вам подарили именной блант! Проверьте инвентарь."
-            )
-        except Exception:
-            pass
-    except ValueError as e:
-        await update.message.reply_text(f"❌ Ошибка: {e}")
-    except Exception as e:
-        logger.error(f"Gift error: {e}")
-        await update.message.reply_text("⚠️ Внутренняя ошибка. Попробуй позже.")
 
 # Дунуть
 @error_handler
 async def smoke_callback(update, context):
     user, msg = get_user_and_msg(update)
     uid = user.id
-    player = await PlayerRepository.get_by_id(uid)
+    player = await ctx.repo.get_by_id(uid)
     if not player or not player.user_id:
         await msg.reply_text("Сначала активируйся: /start")
         return
@@ -3524,7 +3443,7 @@ async def profile_callback(update, context):
     uid = user.id
     uname = html.escape(user.username or user.first_name)
 
-    player = await PlayerRepository.get_by_id(uid)
+    player = await ctx.repo.get_by_id(uid)
     if not player or not player.user_id:
         await msg.reply_text("Сначала активируйся: /start")
         return
@@ -3713,7 +3632,7 @@ async def my_blunts_callback(update, context, page=0):
     query = update.callback_query
     await query.answer()
     uid = query.from_user.id
-    player = await PlayerRepository.get_by_id(uid)
+    player = await ctx.repo.get_by_id(uid)
     if not player:
         return
 
@@ -3767,7 +3686,7 @@ async def my_blunts_callback(update, context, page=0):
 async def achievements_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, page=0):
     query = update.callback_query
     uid = query.from_user.id
-    player = await PlayerRepository.get_by_id(uid)
+    player = await ctx.repo.get_by_id(uid)
     if not player or not player.user_id:
         await query.answer("Профиль не найден.", show_alert=True)
         return
@@ -3823,7 +3742,7 @@ async def top_callback(update, context):
         return
 
     first_balance = top[0]["balance"]
-    player = await PlayerRepository.get_by_id(uid)
+    player = await ctx.repo.get_by_id(uid)
     my_balance = player.balance if player else 0
 
     text = "<b>💎 ТОП-10 ИГРОКОВ 🏆</b>\n\n"
@@ -3950,7 +3869,7 @@ async def top_scout_callback(update, context):
 async def guild_info_callback(update, context):
     user, msg = get_user_and_msg(update)
     uid = user.id
-    player = await PlayerRepository.get_by_id(uid)
+    player = await ctx.repo.get_by_id(uid)
     if not player:
         await edit_or_reply(update, context, "Профиль не найден. Напиши /start")
         return
@@ -4020,7 +3939,7 @@ async def guild_shrine_callback(update, context):
     query = update.callback_query
     await query.answer()
     uid = query.from_user.id
-    player = await PlayerRepository.get_by_id(uid)
+    player = await ctx.repo.get_by_id(uid)
     if not player or not player.guild:
         await query.answer("Ты не в гильдии.")
         return
@@ -4246,7 +4165,7 @@ async def rules_callback(update, context):
 async def privilege_callback(update, context):
     user, msg = get_user_and_msg(update)
     uid = user.id
-    player = await PlayerRepository.get_by_id(uid)
+    player = await ctx.repo.get_by_id(uid)
     if not player or not player.user_id:
         await msg.reply_text("Сначала активируйся: /start")
         return
@@ -4275,47 +4194,6 @@ async def catalog_callback(update, context):
     user, msg = get_user_and_msg(update)
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔗 Перейти", url="https://t.me/antysocialshop")]])
     await msg.reply_text("<b>🕯️ ANTYSOCIALSHOP · КАТАЛОГ</b>", parse_mode='HTML', reply_markup=kb)
-
-# Удача – сеньорская версия (ленивая загрузка, атомарность, safe_edit)
-# ---------------------------------------------------------------------------
-# Конфиг удачи (все числа в одном месте)
-# ---------------------------------------------------------------------------
-LUCK_CONFIG = {
-    "wheel": {
-        "rewards": [
-            (0.40, 30, "oac"),
-            (0.65, 75, "oac"),
-            (0.80, 1, "blunt"),
-            (0.90, 150, "oac"),
-            (0.97, 2, "blunt"),
-            (1.0, 1000, "jackpot"),
-        ],
-        "cooldown_hours": 24,
-    },
-    "berserk": {
-        "cost": 300,
-        "win_amount": 200,
-        "lose_amount": 300,
-        "cooldown_hours": 24,
-    },
-    "alchemy": {
-        "cost_blunts": 10,
-        "cost_oac": 250,
-        "required_balance": 5000,  # ветеран
-        "reactions": [
-            (0.40, "dust", 1),
-            (0.75, "none", 0),
-            (0.90, "dust", 2),
-            (1.0, "legendary", 1),
-        ],
-    },
-    "war_points": {
-        "wheel_oac": 0,        # не начисляем за колесо (или настрой)
-        "berserk_win": 200,
-        "berserk_lose": -300,
-        "alchemy": 30,
-    }
-}
 
 
 # ---------------------------------------------------------------------------
@@ -4683,7 +4561,7 @@ async def check_blunt(update, context):
     await update.message.reply_text(details, parse_mode='HTML')
 
     # Обновляем счётчик проверок через модель
-    player = await PlayerRepository.get_by_id(update.effective_user.id)
+    player = await ctx.repo.get_by_id(update.effective_user.id)
     if player:
         player.check_count = (player.check_count or 0) + 1
         await PlayerRepository.save(player)
@@ -5291,7 +5169,6 @@ async def handle_named_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop('awaiting_named_blunt', None)
 
 async def handle_gift_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает ввод username для дарения бланта."""
     ctx: AppContext = context.application.bot_data.get("ctx")
     if not ctx:
         return
