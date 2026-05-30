@@ -2900,7 +2900,9 @@ async def handle_craft_named(update, context):
 
 
 async def handle_named_name(update, context):
-    ctx = context.application.bot_data["ctx"]
+    ctx = context.application.bot_data.get("ctx")
+    if not ctx:
+        return
     try:
         user = update.effective_user
         uid = user.id
@@ -2908,6 +2910,47 @@ async def handle_named_name(update, context):
         if not name:
             await update.message.reply_text("❌ Имя не может быть пустым.")
             return
+
+player = await ctx.repo.get_by_id(uid)
+        if not player or not player.user_id:
+            await update.message.reply_text("Сначала активируйся: /start")
+            return
+
+        # === Попытка переименовать безымянный блант ===
+        inv = _json_safe_load(player.inventory, [])
+        for item in reversed(inv):
+            if item.get("type") == "named" and not item.get("name", "").strip():
+                item["name"] = name
+                player.inventory = inv
+                await ctx.repo.save(player)
+                
+                # Красивое оформление
+                rarity = item.get("rarity", "common")
+                color = {"legendary": "🟡", "epic": "🟣", "rare": "🔵"}.get(rarity, "🟢")
+                reaction = item.get("reaction", "")
+
+                caption = (
+                    f"✅ <b>ИМЯ ДАНО! ✨</b>\n\n"
+                    f"{color} <b><i>«{html.escape(name)}»</i></b> 🌿\n"
+                    f"<i>Редкость: {rarity}</i>\n\n"
+                    f"📜 <i>{reaction}</i>\n\n"
+                    f"💎 Этот блант навсегда останется в твоей коллекции!"
+                )
+                
+                await update.message.reply_text(caption,parse_mode='HTML')
+                context.user_data.pop('awaiting_named_blunt', None)
+                return
+
+        async def _named(p, conn):
+            if p.balance < GAME_CONFIG["named_blunt_cost"]:
+                return ("no_money",)
+            p.balance -= 50
+            p.craft_count = (p.craft_count or 0) + 1
+            item = await create_named_blunt(uid, name, rarity=None, conn=conn, ctx=ctx)
+
+            await ctx.war_service.add_score_raw(uid, 0, conn)
+            await ctx.war_service.add_score(uid, WarAction.NAMED_CRAFT, conn)
+            return ("ok", item)
 
         async def _named(player, conn):
             if player.balance < GAME_CONFIG["named_blunt_cost"]:
@@ -5135,35 +5178,6 @@ async def handle_chat_shortcut(update: Update, context: ContextTypes.DEFAULT_TYP
 # ============================================================
 # ФУНКЦИИ ДЛЯ ИМЕННЫХ БЛАНТОВ И ДАРЕНИЯ (ВОССТАНОВЛЕНЫ)
 # ============================================================
-async def handle_named_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Присваивает имя созданному именному бланту."""
-    ctx: AppContext = context.application.bot_data.get("ctx")
-    if not ctx:
-        return
-    name = update.message.text.strip()[:30]  # лимит длины
-    if not name:
-        await update.message.reply_text("❌ Имя не может быть пустым.")
-        return
-
-    uid = update.effective_user.id
-    player = await ctx.repo.get_by_id(uid, with_inventory=True)
-    if not player:
-        await update.message.reply_text("Профиль не найден.")
-        context.user_data.pop('awaiting_named_blunt', None)
-        return
-
-    inv = player.inventory or []
-    # Ищем последний именной блант без имени (type=named и поле name не установлено)
-    for item in reversed(inv):
-        if item.get("type") == "named" and not item.get("custom_name"):
-            item["custom_name"] = name
-            item["name"] = f"{name} (именной)"
-            await ctx.repo.save(player)
-            await update.message.reply_text(f"✅ Твой блант теперь называется «{name}»! 🌿")
-            break
-    else:
-        await update.message.reply_text("❌ Не найден блант, ожидающий имени.")
-    context.user_data.pop('awaiting_named_blunt', None)
 
 async def handle_gift_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ctx: AppContext = context.application.bot_data.get("ctx")
