@@ -1858,7 +1858,7 @@ async def add_title(user_id, emoji, conn=None):
     if emoji not in titles:
         titles.append(emoji)
         player.titles = " ".join(titles).strip()
-        await PlayerRepository.save(player, conn=conn)
+        await ctx.repo.save(player, conn=conn)
 
 def get_user_and_msg(update: Update):
     if update.callback_query:
@@ -1928,7 +1928,7 @@ async def process_daily_login(user_id: int, context) -> None:
                 p.blunts += qty
         return True
 
-    result = await PlayerRepository.atomic_update(user_id, _apply_daily)
+    result = await ctx.repo.atomic_update(user_id, _apply_daily)
     if not result:
         if result is False:
             logger.info("Daily already claimed (race prevented) for user %d", user_id)
@@ -2019,7 +2019,7 @@ def invalidate_menu_cache(user_id: int):
     """Сброс кэша меню для конкретного пользователя."""
     _menu_cache.pop(user_id, None)
 
-async def get_main_menu_keyboard(user_id, ctx=None):
+async def get_main_menu_keyboard(user_id, ctx=None): 
     now = time.time()
     if user_id in _menu_cache:
         cached_time, kb, whisper = _menu_cache[user_id]
@@ -2027,7 +2027,7 @@ async def get_main_menu_keyboard(user_id, ctx=None):
             return kb, whisper
 
     whisper = random.choice(WHISPERS)
-    player = await ctx.repo.get_by_id(user_id)
+    player = await ctx.repo.get_by_id(user_id) if ctx else await PlayerRepository.get_by_id(user_id)
     balance = player.balance if player else 0
     now_dt = datetime.now()
 
@@ -2258,9 +2258,9 @@ async def _handle_referral(update, context, uid, player):
             p.titles = f"{p.titles or ''} 🩸".strip()
         # Связываем реферала с создателем
         player.invited_by = creator_id
-        await PlayerRepository.save(player, conn=conn)
+        await ctx.repo.save(player, conn=conn)
 
-    await PlayerRepository.atomic_update(creator_id, _ref)
+    await ctx.repo.atomic_update(creator_id, _ref)
 
   # Оповещение в канал (закомментировано для безопасного старта)
     # try:
@@ -2276,7 +2276,7 @@ async def _handle_referral(update, context, uid, player):
 
 async def _create_new_player(update, context, uid, username):
     player = Player(user_id=uid, username=username, balance=800, onboarding_step=0)
-    await PlayerRepository.save(player)
+    await ctx.repo.save(player)
     new_name = random.choice(["Крик Бездны","Пепел Короля","Шёпот Склепа"])
     await create_named_blunt(uid, new_name)
 
@@ -2373,25 +2373,17 @@ async def _show_main_menu(update, context, player, user):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user, msg = get_user_and_msg(update)
     uid = user.id
-    username = user.username or user.first_name
-
-    # 1. Получаем игрока (или пустышку)
+    ctx = context.application.bot_data["ctx"]
     player = await ctx.repo.get_by_id(uid)
-
-    # 2. Обрабатываем реферала (если есть аргумент)
     await _handle_referral(update, context, uid, player)
-
-    # 3. Если игрока нет в БД – создаём новичка и выходим
     if not player or not player.exists:
         await _create_new_player(update, context, uid, username)
         return
-
     await asyncio.gather(
-    process_daily_login(uid, context),
-    _show_main_menu(update, context, player, user)
-)
-    
-# ---------------------------------------------------------------------------
+        process_daily_login(uid, context),
+        _show_main_menu(update, context, player, user)
+    )
+
 # Конфигурация (все правила в одном месте)
 @dataclass(frozen=True)
 class StreakConfig:
@@ -2637,7 +2629,7 @@ async def farm_callback(update, context):
         return ("ok", earned, crit, happy, medal_text, new_count, player.balance, old_balance)
 
     # --- Выполнение атомарного обновления ---
-    result = await PlayerRepository.atomic_update(uid, _farm)
+    result = await ctx.repo.atomic_update(uid, _farm)
     if result is None:
         await update.effective_message.reply_text("Сначала активируйся: /start")
         return
@@ -2676,7 +2668,7 @@ async def farm_callback(update, context):
     
     if player and player.onboarding_step == 1:
         player.onboarding_step = 2
-        await PlayerRepository.save(player)
+        await ctx.repo.save(player)
         kb2 = InlineKeyboardMarkup([
             [InlineKeyboardButton("🌿 Крафт", callback_data="craft")],
             [InlineKeyboardButton("⏭️ Пропустить обучение", callback_data="skip_onboarding")]
@@ -2819,7 +2811,7 @@ async def handle_craft_normal(update, context):
 
         return ("ok", medal_text, new_count, player.blunts, player.balance)
 
-    result = await PlayerRepository.atomic_update(uid, _craft)
+    result = await ctx.repo.atomic_update(uid, _craft)
     if result is None:
         await context.bot.send_message(chat_id=update.effective_chat.id, text="Сначала активируйся: /start")
         return
@@ -2854,7 +2846,7 @@ async def handle_craft_normal(update, context):
     # Онбординг: после первого крафта завершаем обучение (шаг 3 из 3)
     if player and player.onboarding_step == 2:
         player.onboarding_step = -1
-        await PlayerRepository.save(player)
+        await ctx.repo.save(player)
         await context.bot.send_message(
             chat_id=uid,
             text=(
@@ -2913,7 +2905,7 @@ async def handle_named_name(update, context):
 
             return ("ok", item)
 
-        result = await PlayerRepository.atomic_update(uid, _named)
+        result = await ctx.repo.atomic_update(uid, _named)
         if result is None:
             await update.message.reply_text("Сначала активируйся: /start")
             return
@@ -3007,7 +2999,7 @@ async def handle_use_dust(update, context):
 
         return ("ok", item, name)
 
-    result = await PlayerRepository.atomic_update(uid, _use_dust)
+    result = await ctx.repo.atomic_update(uid, _use_dust)
     if result is None:
         await query.answer("Профиль не найден.", show_alert=True)
         return
@@ -3221,7 +3213,7 @@ async def do_smoke(update, context):
 
         return ("ok", earned, r, save, medal_text, new_count, player.blunts, player.balance)
 
-    result = await PlayerRepository.atomic_update(uid, _smoke)
+    result = await ctx.repo.atomic_update(uid, _smoke)
     if result is None:
         await query.answer("Профиль не найден.")
         return
@@ -3304,7 +3296,7 @@ async def do_smoke(update, context):
     
     if player and player.onboarding_step == 3:
         player.onboarding_step = -1
-        await PlayerRepository.save(player)
+        await ctx.repo.save(player)
         await context.bot.send_message(
             chat_id=uid,
             text="<b>🎉 Поздравляю! Ты освоил основы.</b>\n\nТеперь ты можешь исследовать другие разделы меню."
@@ -3346,7 +3338,7 @@ async def ritual_callback(update, context):
 
         return ("ok", reward, extra, medal_text, new_count, player.balance)
 
-    result = await PlayerRepository.atomic_update(uid, _ritual)
+    result = await ctx.repo.atomic_update(uid, _ritual)
     if result is None:
         await msg.reply_text("Профиль не найден.")
         return
@@ -3413,7 +3405,7 @@ async def collect_callback(update, context):
 
         return ("ok", earned, player.balance)
 
-    result = await PlayerRepository.atomic_update(uid, _collect)
+    result = await ctx.repo.atomic_update(uid, _collect)
     if result is None:
         await send_whisper_dm(update, context, "Профиль не найден.")
         return
@@ -3579,7 +3571,7 @@ async def handle_set_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
             p.titles = " ".join(titles).strip()
         return new_title  # чтобы вывести сообщение
 
-    result = await PlayerRepository.atomic_update(user_id, _set)
+    result = await ctx.repo.atomic_update(user_id, _set)
     if result is None:
         await query.answer("Профиль не найден", show_alert=True)
         return
@@ -3606,7 +3598,7 @@ async def handle_set_bg(update: Update, context: ContextTypes.DEFAULT_TYPE):
         p.profile_skins = skins
         return new_bg
 
-    result = await PlayerRepository.atomic_update(user_id, _set)
+    result = await ctx.repo.atomic_update(user_id, _set)
     if result is None:
         await query.answer("Профиль не найден", show_alert=True)
         return
@@ -4092,7 +4084,7 @@ async def confess_callback(update, context):
             await create_named_blunt(uid, name, rarity="legendary", conn=conn)
             return ("ok", f"<b><i>⚜️ ИСПОВЕДЬ</i></b>\n\n🌟 Чудо! Легендарный блант «{name}»!")
 
-    result = await PlayerRepository.atomic_update(uid, _confess)
+    result = await ctx.repo.atomic_update(uid, _confess)
 
     # Обработка результата
     if result is None:
@@ -4397,7 +4389,7 @@ async def _process_wheel(update, context, uid, player, cfg, war_service):
 
         return prize, ptype, p.balance
 
-    result = await PlayerRepository.atomic_update(uid, _wheel)
+    result = await ctx.repo.atomic_update(uid, _wheel)
     if result is None:
         logger.error("wheel atomic_update failed", extra={"user_id": uid})
         await _notify_user(update, context, "❌ Ошибка при обработке. Попробуй позже.")
@@ -4439,7 +4431,7 @@ async def _process_berserk(update, context, uid, player, cfg, war_service):
         p.last_berserk = datetime.now()
         return ("ok", res, p.balance)
 
-    result = await PlayerRepository.atomic_update(uid, _berserk)
+    result = await ctx.repo.atomic_update(uid, _berserk)
     if result is None:
         logger.error("berserk atomic_update failed", extra={"user_id": uid})
         await _notify_user(update, context, "❌ Ошибка при обработке. Попробуй позже.")
@@ -4509,7 +4501,7 @@ async def _process_alchemy_confirm(update, context, uid, player, cfg, war_servic
             await war_service.add_score(uid, WarAction.ALCHEMY, conn)
         return (AlchemyResult.SUCCESS, res)
 
-    result = await PlayerRepository.atomic_update(uid, _alchemy)
+    result = await ctx.repo.atomic_update(uid, _alchemy)
     if result is None:
         logger.error("alchemy atomic_update failed", extra={"user_id": uid})
         await _notify_user(update, context, "❌ Ошибка при обработке. Попробуй позже.")
@@ -4569,7 +4561,7 @@ async def check_blunt(update, context):
     player = await ctx.repo.get_by_id(update.effective_user.id)
     if player:
         player.check_count = (player.check_count or 0) + 1
-        await PlayerRepository.save(player)
+        await ctx.repo.save(player)
 
 # ============================================================
 # ЛАБИРИНТ ИСКАЖЕНИЯ — ИТОГОВАЯ СЕНЬОР-ВЕРСИЯ (ПОЛНАЯ ЗАМЕНА)
@@ -5040,7 +5032,7 @@ async def show_lab_final(update, context):
         if war_service:
             await war_service.add_score(uid, WarAction.LAB_WIN, conn)
 
-    await PlayerRepository.atomic_update(uid, _lab_win)
+    await ctx.repo.atomic_update(uid, _lab_win)
 
     # очистка состояний
     for key in ("lab_hp", "lab_focus", "lab_room"):
@@ -5080,7 +5072,7 @@ async def show_lab_death(update, context):
         else:
             logger.warning("GuildWarService not found in bot_data")
 
-    await PlayerRepository.atomic_update(uid, _lab_die)
+    await ctx.repo.ory.atomic_update(uid, _lab_die)
 
     context.user_data.pop("lab_hp", None)
     context.user_data.pop("lab_focus", None)
