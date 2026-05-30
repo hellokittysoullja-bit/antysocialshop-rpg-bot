@@ -4207,22 +4207,6 @@ async def catalog_callback(update, context):
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔗 Перейти", url="https://t.me/antysocialshop")]])
     await msg.reply_text("<b>🕯️ ANTYSOCIALSHOP · КАТАЛОГ</b>", parse_mode='HTML', reply_markup=kb)
 
-
-# ---------------------------------------------------------------------------
-# Хелпер для ответа пользователю (защита от AttributeError)
-# ---------------------------------------------------------------------------
-async def _notify_user(update, context, text, show_alert=False, reply_markup=None):
-    """Безопасно отправляет ответ: через callback или новым сообщением."""
-    if update.callback_query:
-        if show_alert:
-            await update.callback_query.answer(text, show_alert=True)
-        else:
-            await update.callback_query.answer()
-        await update.callback_query.message.edit_text(text, reply_markup=reply_markup, parse_mode='HTML')
-    else:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=reply_markup, parse_mode='HTML')
-
-
 # ============================================================
 # УДАЧА – полная сеньорская версия
 # ============================================================
@@ -4273,7 +4257,6 @@ async def _notify_user(update, context, text, show_alert=False, reply_markup=Non
         await update.callback_query.message.edit_text(text, reply_markup=reply_markup, parse_mode='HTML')
     else:
         await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=reply_markup, parse_mode='HTML')
-
 
 def _check_wheel_availability(player, now, cooldown_hours):
     last = player.last_daily
@@ -6184,8 +6167,7 @@ async def on_startup(app: Application):
         from prometheus_client import generate_latest
         async def metrics_handler(request):
             return web.Response(body=generate_latest(), content_type='text/plain')
-        # Маршрут /metrics будет доступен, если ты передашь это приложение в main()
-        # app._app.router.add_get('/metrics', metrics_handler)
+
     except ImportError:
         pass
 
