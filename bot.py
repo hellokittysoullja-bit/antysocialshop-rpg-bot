@@ -401,7 +401,7 @@ class Settings(BaseSettings):
     database_url: str = Field(..., alias="DATABASE_URL_AIVEN")
     render_url: str = Field("", alias="RENDER_URL")
     redis_url: str = Field("", alias="REDIS_URL")
-    port: int = 10000
+    port: int = Field(default=10000, alias="PORT")
     webhook_path: str = "/webhook"
     webhook_secret: str = "SuperSecret"
     sentry_dsn: str = ""
