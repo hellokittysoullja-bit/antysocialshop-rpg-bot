@@ -1293,13 +1293,15 @@ async def init_db_pool():
     except asyncpg.exceptions.InternalServerError as e:
         error_text = str(e).lower()
         if "compute time quota exceeded" in error_text:
-        alert = (
-            f"❌ Внутренняя ошибка базы данных ({provider}): {e}"
-        )
-        alert = (
-            f"❌ Внутренняя ошибка базы данных ({provider}): {e}"
-        )
-        # отправка в Telegram
+            alert = (
+                f"❌ ЛИМИТ ВЫЧИСЛИТЕЛЬНОГО ВРЕМЕНИ ИСЧЕРПАН!\n"
+                f"Провайдер: {provider}\n"
+                f"Хост: {host_part}\n"
+                f"Решение: дождитесь сброса или перенесите базу на Render PostgreSQL."
+            )
+        else:
+            alert = f"❌ Внутренняя ошибка базы данных ({provider}): {e}"
+        logger.critical(alert)
         if settings.admin_id and settings.bot_token:
             url = f"https://api.telegram.org/bot{settings.bot_token}/sendMessage"
             payload = {"chat_id": settings.admin_id, "text": alert, "parse_mode": "HTML"}
@@ -1308,6 +1310,7 @@ async def init_db_pool():
                     await client.post(url, json=payload)
             except Exception as send_err:
                 logger.warning("Не удалось отправить Telegram-уведомление админу: %s", send_err)
+        raise
 
     except Exception as e:
         alert = f"❌ Не удалось подключиться к базе данных ({provider}): {e}"
