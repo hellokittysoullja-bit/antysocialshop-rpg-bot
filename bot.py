@@ -400,6 +400,7 @@ class Settings(BaseSettings):
     bot_token: str = Field(..., alias="TOKEN")
     database_url: str = Field(..., alias="DATABASE_URL_AIVEN")
     render_url: str = Field("", alias="RENDER_URL")
+    redis_url: str = Field("", alias="REDIS_URL")
     port: int = 10000
     webhook_path: str = "/webhook"
     webhook_secret: str = "SuperSecret"
@@ -3004,9 +3005,7 @@ async def handle_use_dust(update, context):
         ])
         item = await create_named_blunt(uid, name, rarity="legendary", conn=conn)
 
-        await ctx.war_service.add_score_raw(uid, earned + medal_bonus, conn)
-        if ctx.war_service:
-            await war_service.add_score(uid, WarAction.DUST_USE, conn)
+        await ctx.war_service.add_score(uid, WarAction.DUST_USE, conn)
         else:
             logger.warning("GuildWarService not found")
 
@@ -3221,9 +3220,7 @@ async def do_smoke(update, context):
             player.inhaled = 1
 
         # военный счёт (новый сервис)
-        await ctx.war_service.add_score_raw(uid, earned + medal_bonus, conn)
-        if ctx.war_service:
-            await war_service.add_score_raw(uid, earned + medal_bonus, conn)
+        await ctx.war_service.add_score(uid, WarAction.CRAFT, conn)
 
         return ("ok", earned, r, save, medal_text, new_count, player.blunts, player.balance)
 
@@ -3320,6 +3317,7 @@ async def do_smoke(update, context):
 @error_handler
 @rate_limit(3)
 async def ritual_callback(update, context):
+    ctx = context.application.bot_data["ctx"]
     user, msg = get_user_and_msg(update)
     uid = user.id
     uname = html.escape(user.username or user.first_name)
@@ -3346,9 +3344,7 @@ async def ritual_callback(update, context):
         player.last_ritual = now
 
         # Военный счёт (новый сервис)
-        await ctx.war_service.add_score_raw(uid, earned + medal_bonus, conn)
-        if ctx.war_service:
-            await war_service.add_score_raw(uid, reward + extra + medal_bonus, conn)
+        await ctx.war_service.add_score(uid, WarAction.RITUAL, conn)
 
         return ("ok", reward, extra, medal_text, new_count, player.balance)
 
@@ -3392,6 +3388,7 @@ async def ritual_callback(update, context):
 # КУСТИК (с защитой от None)
 @error_handler
 async def collect_callback(update, context):
+    ctx = context.application.bot_data["ctx"]
     user, msg = get_user_and_msg(update)
     uid = user.id
     uname = html.escape(user.username or user.first_name)
@@ -3450,6 +3447,7 @@ async def collect_callback(update, context):
 @error_handler
 @rate_limit(2)
 async def profile_callback(update, context):
+    ctx = context.application.bot_data["ctx"]
     user, msg = get_user_and_msg(update)
     uid = user.id
     uname = html.escape(user.username or user.first_name)
@@ -3640,6 +3638,7 @@ async def skins_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 @error_handler
 @rate_limit(1)
 async def my_blunts_callback(update, context, page=0):
+    ctx = context.application.bot_data["ctx"]
     query = update.callback_query
     await query.answer()
     uid = query.from_user.id
@@ -3695,6 +3694,7 @@ async def my_blunts_callback(update, context, page=0):
     await edit_or_reply(update, context, text, reply_markup=InlineKeyboardMarkup(kb_rows))
 
 async def achievements_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, page=0):
+    ctx = context.application.bot_data["ctx"]
     query = update.callback_query
     uid = query.from_user.id
     player = await ctx.repo.get_by_id(uid)
@@ -3878,6 +3878,7 @@ async def top_scout_callback(update, context):
 # Гильдии
 @error_handler
 async def guild_info_callback(update, context):
+    ctx = context.application.bot_data["ctx"]
     user, msg = get_user_and_msg(update)
     uid = user.id
     player = await ctx.repo.get_by_id(uid)
@@ -3947,6 +3948,7 @@ async def guild_info_callback(update, context):
 
 @error_handler
 async def guild_shrine_callback(update, context):
+    ctx = context.application.bot_data["ctx"]
     query = update.callback_query
     await query.answer()
     uid = query.from_user.id
@@ -4012,6 +4014,7 @@ async def guild_shrine_callback(update, context):
     
 @error_handler
 async def guild_war_callback(update, context):
+    ctx = context.application.bot_data["ctx"]
     query = update.callback_query
     await query.answer()
     uid = query.from_user.id
@@ -4067,6 +4070,7 @@ async def guild_war_callback(update, context):
 
 @error_handler
 async def confess_callback(update, context):
+    ctx = context.application.bot_data["ctx"]
     user, msg = get_user_and_msg(update)
     uid = user.id
 
@@ -4174,6 +4178,7 @@ async def rules_callback(update, context):
 
 @error_handler
 async def privilege_callback(update, context):
+    ctx = context.application.bot_data["ctx"]
     user, msg = get_user_and_msg(update)
     uid = user.id
     player = await ctx.repo.get_by_id(uid)
@@ -4511,6 +4516,7 @@ async def _process_alchemy_confirm(update, context, uid, player, cfg, ctx):
 
 # /check
 async def check_blunt(update, context):
+    ctx = context.application.bot_data["ctx"]
     if not context.args:
         await update.message.reply_text("Укажи серийный номер бланта: /check R-0001")
         return
@@ -4542,7 +4548,7 @@ async def check_blunt(update, context):
     name = item["name"]; rarity = item.get("rarity","common")
     color = {"legendary":"🟡","epic":"🟣","rare":"🔵"}.get(rarity,"🟢")
     reaction = item.get("reaction",""); hash_code = item.get("hash","0x????...????")
-    await safe_send_blunt_image(context, query.message.chat.id, "legendary")
+    await safe_send_blunt_image(context, update.effective_chat.id, "legendary", caption=None, reply_markup=None)
     details = f"<b>ДЕТАЛИ NFT БЛАНТА 💎</b>\n\n{color} <b>{name}</b>\n\n<b>Редкость:</b> <i>{rarity}</i> {color}\n\n🩸 <b>Серийный номер:</b> <b>#{rare_number}</b>\n🔗 <b>Хеш:</b> <b>{hash_code}</b>\n📜 <b>Реакция:</b> <i>{reaction}</i>\n"
     if "owner_history" in item:
         details += "\n🔄 История владения:\n"
@@ -4712,7 +4718,7 @@ async def lab_enter_confirm(update, context):
     context.user_data["lab_focused_attack"] = False
     context.user_data["lab_curse_rooms"] = 0
 
-    if redis:
+    if ctx.redis:
         state = {k: context.user_data[k] for k in (
             "lab_room","lab_hp","lab_max_hp","lab_focus","lab_rewards",
             "lab_depth","lab_total_rooms","lab_attack_bonus",
@@ -4726,6 +4732,7 @@ async def lab_enter_confirm(update, context):
 
 # ─── ОТОБРАЖЕНИЕ КОМНАТЫ ─────────────────────────────────────
 async def show_lab_room(update, context):
+    ctx = context.application.bot_data["ctx"]
     room_index = context.user_data.get("lab_room", 1)
     hp = context.user_data.get("lab_hp", 100)
     max_hp = context.user_data.get("lab_max_hp", 100)
@@ -5022,9 +5029,7 @@ async def show_lab_final(update, context):
         p.lab_depth += 1
 
         # Военный счёт
-        await ctx.war_service.add_score_raw(uid, earned + medal_bonus, conn)
-        if ctx.war_service:
-            await war_service.add_score(uid, WarAction.LAB_WIN, conn)
+        await ctx.war_service.add_score(uid, WarAction.LAB_WIN, conn)
 
     await ctx.repo.atomic_update(uid, _lab_win)
 
@@ -5060,9 +5065,7 @@ async def show_lab_death(update, context):
         p.balance += 50
         p.lab_deaths += 1
 
-        await ctx.war_service.add_score_raw(uid, earned + medal_bonus, conn)
-        if ctx.war_service:
-            await war_service.add_score(uid, WarAction.LAB_DEATH, conn)
+        await ctx.war_service.add_score(uid, WarAction.LAB_DEATH, conn)
         else:
             logger.warning("GuildWarService not found in bot_data")
 
@@ -5308,6 +5311,7 @@ async def shop_callback(update, context, ctx):
 
 @cb
 async def setbluntpic(update, context, ctx):
+    ctx = context.application.bot_data["ctx"]
     if update.effective_user.id != ctx.settings.admin_id:
         await update.message.reply_text("⛔ Только для админа.")
         return
@@ -5328,6 +5332,7 @@ async def setbluntpic(update, context, ctx):
 
 @cb
 async def give_oac(update, context, ctx):
+    ctx = context.application.bot_data["ctx"]
     if update.effective_user.id != ctx.settings.admin_id:
         await update.message.reply_text("⛔ Только для админа.")
         return
@@ -5713,6 +5718,7 @@ async def shrine_donate_handler(update, context, ctx):
 
 @cb
 async def guild_join_handler(update, context, ctx):
+    ctx = context.application.bot_data["ctx"]
     query = update.callback_query
     guild = "BLACK" if query.data == "guild_join_BLACK" else "WHITE"
     uid = query.from_user.id
