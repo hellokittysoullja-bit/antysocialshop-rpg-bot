@@ -1821,19 +1821,14 @@ async def _reset_and_notify_broken_id(rarity: str, context):
 
 
 # ── Основная функция ────────────────────────────────────────
-async def safe_send_blunt_image(context, chat_id, rarity, caption=None, reply_markup=None):
-    """
-    Профессиональная отправка фото бланта.
-    – Собственный ретрай при сетевых ошибках.
-    – Золотой резерв при невалидном file_id.
-    – Автосброс и уведомление админа.
-    – Игрок всегда получает ответ (фото или текст).
-    – Никакого вмешательства в игровой контент.
-    Возвращает True, если отправлено фото, иначе False.
-    """
-    file_id = BLUNT_IMAGES.get(rarity)
-    if not file_id:
-        await _send_fallback(context, chat_id, caption, "🖼️ Изображение временно недоступно.")
+async def safe_send_blunt_image(context, chat_id, rarity, caption, reply_markup, ctx):
+    file_id = ctx.blunt_images.get(rarity)
+    if not file_id: return False
+    try:
+        await context.bot.send_photo(chat_id, photo=file_id, caption=caption, reply_markup=reply_markup, parse_mode='HTML')
+        return True
+    except Exception as e:
+        logger.error("Failed to send blunt image: %s", e)
         return False
 
     try:
@@ -2271,7 +2266,7 @@ async def _handle_referral(update, context, uid, player):
         return
 
     ref_blunt_id = context.args[0].replace("blunt_", "")
-    async with db_pool.acquire() as conn:
+    async with ctx.db_pool.acquire() as conn:
         rows = await conn.fetch("SELECT user_id, inventory FROM players")
     creator_id = None
     for row in rows:
@@ -2650,11 +2645,12 @@ def _format_farm_message(earned: int, crit: bool, happy: bool,
 @error_handler
 @rate_limit(3)
 async def farm_callback(update, context):
-    user, _ = get_user_and_msg(update)
+    ctx = context.application.bot_data["ctx"]
+    user, msg = get_user_and_msg(update)
     uid = user.id
     uname = user.username or user.first_name
     now = datetime.now()
-    player = await PlayerRepository.get_by_id(uid)
+    player = await ctx.repo.get_by_id(uid)
 
     # --- Атомарная бизнес-логика ---
     async def _farm(player, conn):
@@ -3116,7 +3112,7 @@ async def transfer_blunt(sender_id: int, receiver_id: int, blunt_id: str) -> Non
     if sender_id == receiver_id:
         raise SameUserError("Нельзя передать блант самому себе")
     try:
-        async with db_pool.acquire() as conn:
+        async with ctx.db_pool.acquire() as conn:
             async with conn.transaction():
                 sender_row = await conn.fetchrow("SELECT * FROM players WHERE user_id = $1 FOR UPDATE", sender_id)
                 receiver_row = await conn.fetchrow("SELECT * FROM players WHERE user_id = $1 FOR UPDATE", receiver_id)
@@ -3192,7 +3188,7 @@ async def handle_gift_username(update: Update, context: ContextTypes.DEFAULT_TYP
     if text.isdigit():
         receiver_id = int(text)
     elif text.startswith("@"):
-        async with db_pool.acquire() as conn:
+        async with ctx.db_pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT user_id FROM players WHERE LOWER(username) = LOWER($1)", text.lstrip("@")
             )
@@ -3240,8 +3236,7 @@ async def handle_gift_username(update: Update, context: ContextTypes.DEFAULT_TYP
     # Или как @username
     elif text.startswith("@"):
         # Нужно найти user_id по username. В текущей БД username хранится в players.
-        # Простой способ – поискать в БД
-        async with db_pool.acquire() as conn:
+        async with ctx.db_pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT user_id FROM players WHERE LOWER(username) = LOWER($1)", text.lstrip("@")
             )
@@ -3824,7 +3819,7 @@ async def achievements_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await query.answer("Профиль не найден.", show_alert=True)
         return
 
-    async with db_pool.acquire() as conn:
+    async with ctx.db_pool.acquire() as conn:
         awarded = await conn.fetch("SELECT ach_id FROM achievements_awarded WHERE user_id = $1", uid)
     awarded_ids = {r["ach_id"] for r in awarded}
 
@@ -3956,12 +3951,12 @@ async def top_callback(update, context):
         else:
             text += f"✦ 📊 Твоя позиция: {my_position} ✦\n"
     else:  # вне топа
-        async with db_pool.acquire() as conn:
+        async with ctx.db_pool.acquire() as conn:
             cnt_row = await conn.fetchrow(
                 "SELECT COUNT(*) as cnt FROM players WHERE balance > $1", my_balance
             )
         pos = cnt_row["cnt"] + 1 if cnt_row else 1
-        async with db_pool.acquire() as conn:
+        async with ctx.db_pool.acquire() as conn:
             tenth_row = await conn.fetchrow(
                 "SELECT balance FROM players ORDER BY balance DESC LIMIT 1 OFFSET 9"
             )
@@ -4014,8 +4009,8 @@ async def guild_info_callback(update, context):
     black_cnt = cnt.get("BLACK", 0) if isinstance(cnt, dict) else 0
     white_cnt = cnt.get("WHITE", 0) if isinstance(cnt, dict) else 0
 
-    # Пожертвования (с защитой)
-    async with db_pool.acquire() as conn:
+    # Пожертвования
+    async with ctx.db_pool.acquire() as conn:
         black_donated = await conn.fetchval("SELECT COALESCE(SUM(donated),0) FROM players WHERE guild='BLACK'") or 0
         white_donated = await conn.fetchval("SELECT COALESCE(SUM(donated),0) FROM players WHERE guild='WHITE'") or 0
     target = 50000
@@ -4078,7 +4073,7 @@ async def guild_shrine_callback(update, context):
         return
 
     guild = player.guild
-    async with db_pool.acquire() as conn:
+    async with ctx.db_pool.acquire() as conn:
         total_donated = await conn.fetchval(
             "SELECT COALESCE(SUM(donated),0) FROM players WHERE guild=$1", guild
         ) or 0
@@ -4138,7 +4133,7 @@ async def guild_war_callback(update, context):
     await query.answer()
     uid = query.from_user.id
 
-    async with db_pool.acquire() as conn:
+    async with ctx.db_pool.acquire() as conn:
         # Загружаем очки гильдий и героев одним запросом
         scores = await conn.fetch("SELECT guild, total_score FROM guild_weekly")
         black_score = next((r["total_score"] for r in scores if r["guild"] == "BLACK"), 0)
@@ -4493,9 +4488,10 @@ def _format_remaining(td):
 @error_handler
 @rate_limit(2)
 async def luck_callback(update, context, action=None):
+    ctx = context.application.bot_data["ctx"]
     user, msg = get_user_and_msg(update)
     uid = user.id
-    player = await PlayerRepository.get_by_id(uid)
+    player = await ctx.repo.get_by_id(uid)
     if not player or not player.user_id:
         await _notify_user(update, context, "Сначала активируйся: /start")
         return
@@ -4697,7 +4693,7 @@ async def check_blunt(update, context):
         await update.message.reply_text("Укажи серийный номер бланта: /check R-0001")
         return
     nft_id = context.args[0].strip().upper()
-    async with db_pool.acquire() as conn:
+    async with ctx.db_pool.acquire() as conn:
         rows = await conn.fetch("SELECT blunt_id, created_by, serial, rare_number FROM nft_registry WHERE rare_number = $1", nft_id)
         if not rows:
             await update.message.reply_text("🕳️ Блант с таким серийным номером не найден.")
@@ -4707,7 +4703,7 @@ async def check_blunt(update, context):
             return
         row = rows[0]
     blunt_id, creator_id, serial, rare_number = row["blunt_id"], row["created_by"], row["serial"], row["rare_number"]
-    async with db_pool.acquire() as conn:
+    async with ctx.db_pool.acquire() as conn:
         rows = await conn.fetch("SELECT user_id, inventory FROM players WHERE inventory LIKE $1", f"%{blunt_id}%")
         owner_id = None; item = None
         for user_row in rows:
@@ -4834,9 +4830,10 @@ LABYRINTH_ROOMS = [
 
 # ─── ВХОД В ЛАБИРИНТ ────────────────────────────────────────
 async def lab_enter(update, context):
+    ctx = context.application.bot_data["ctx"]
     user, msg = get_user_and_msg(update)
     uid = user.id
-    player = await PlayerRepository.get_by_id(uid)
+    player = await ctx.repo.get_by_id(uid)
     if not player:
         return
     depth = player.lab_depth or 1
@@ -4871,14 +4868,15 @@ async def lab_enter(update, context):
 
 # ─── ПОДГОТОВКА К ЗАБЕГУ ────────────────────────────────────
 async def lab_enter_confirm(update, context):
+    ctx = context.application.bot_data["ctx"]
     query = update.callback_query
     await query.answer()
     uid = query.from_user.id
-    player = await PlayerRepository.get_by_id(uid)
+    player = await ctx.repo.get_by_id(uid)
     depth = player.lab_depth or 1 if player else 1
     total_rooms = 4 + depth
     now = datetime.now()
-    async with db_pool.acquire() as conn:
+    async with ctx.db_pool.acquire() as conn:
         await conn.execute("UPDATE players SET last_lab_attempt=$1 WHERE user_id=$2", now, uid)
 
     context.user_data["lab_room"] = 1
@@ -5186,9 +5184,10 @@ async def handle_lab_option(update, context):
 
 # ─── ФИНАЛЬНЫЙ СУНДУК ────────────────────────────────────────
 async def show_lab_final(update, context):
+    ctx = context.application.bot_data["ctx"]
     query = update.callback_query
     uid = query.from_user.id
-    player = await PlayerRepository.get_by_id(uid)
+    player = await ctx.repo.get_by_id(uid)
     if not player:
         return
     rewards = context.user_data.get("lab_rewards", [])
@@ -5226,9 +5225,10 @@ async def show_lab_final(update, context):
 
 # ─── СМЕРТЬ В ЛАБИРИНТЕ ──────────────────────────────────────
 async def show_lab_death(update, context):
+    ctx = context.application.bot_data["ctx"]
     query = update.callback_query
     uid = query.from_user.id
-    player = await PlayerRepository.get_by_id(uid)
+    player = await ctx.repo.get_by_id(uid)
     if not player:
         return
     depth = player.lab_depth or 1
@@ -5661,11 +5661,10 @@ async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYP
         except Exception:
             pass
 
-@cb
+@cb@cb
 async def debug_pet(update, context, ctx):
-    if update.effective_user.id != ctx.settings.admin_id:
-        return
-    player = await ctx.repo.get_by_id(update.effective_user.id, with_inventory=False)
+    if update.effective_user.id != ctx.settings.admin_id: return
+    player = await ctx.repo.get_by_id(update.effective_user.id)
     if player is None:
         await update.message.reply_text("Профиль не найден.")
         return
@@ -6174,53 +6173,56 @@ async def weekly_guild_rating(context: ContextTypes.DEFAULT_TYPE):
         return
     job_name = "weekly_guild_rating"
     try:
+        # Завершаем текущую войну и получаем очки
+        await ctx.war_service.stop_war()
+
         async with ctx.db_pool.acquire() as conn:
-            async with conn.transaction():
-                # ИСПРАВЛЕНО: используем поле total_farmed вместо total_score
-                await conn.execute("""
-                    INSERT INTO guild_weekly (guild, total_farmed, war_active)
-                    VALUES ('BLACK', 0, FALSE), ('WHITE', 0, FALSE)
-                    ON CONFLICT (guild) DO NOTHING
-                """)
-                war = await conn.fetchrow("SELECT guild, total_farmed FROM guild_weekly WHERE war_active = TRUE LIMIT 1")
-                if not war:
-                    await conn.execute("UPDATE guild_weekly SET total_farmed = 0, war_active = TRUE")
-                    logger.info("%s: Новая война гильдий начата.", job_name)
-                    await _safe_send_guild_message(context, "⚔️ <b>ВОЙНА ГИЛЬДИЙ НАЧАЛАСЬ!</b>\n\n🕯️ Тёмные vs ⚜️ Светлые\nЗарабатывай OAC, крафти, проходи лабиринт — всё идёт в зачёт гильдии!\nПобедители получат сундук с ресурсами! 🎁")
-                    return
+            black_score = await conn.fetchval("SELECT total_score FROM guild_weekly WHERE guild='BLACK'") or 0
+            white_score = await conn.fetchval("SELECT total_score FROM guild_weekly WHERE guild='WHITE'") or 0
 
-                await conn.execute("UPDATE guild_weekly SET war_active = FALSE")
-                rows = await conn.fetch("SELECT guild, total_farmed FROM guild_weekly")
-                black_score = next((r["total_farmed"] for r in rows if r["guild"] == "BLACK"), 0)
-                white_score = next((r["total_farmed"] for r in rows if r["guild"] == "WHITE"), 0)
+            if black_score == white_score:
+                logger.info("%s: Война завершилась вничью (%d - %d).", job_name, black_score, white_score)
+                await _safe_send_guild_message(context,
+                    f"🤝 <b>ВОЙНА ГИЛЬДИЙ ЗАВЕРШИЛАСЬ ВНИЧЬЮ!</b>\n"
+                    f"🕯️ Тёмные: {black_score} | ⚜️ Светлые: {white_score}\n"
+                    f"Ничья — награды не выданы. Следующая война скоро!"
+                )
+                await ctx.war_service.start_war()
+                return
 
-                if black_score == white_score:
-                    logger.info("%s: Война завершилась вничью (%d - %d).", job_name, black_score, white_score)
-                    await _safe_send_guild_message(context, f"🤝 <b>ВОЙНА ГИЛЬДИЙ ЗАВЕРШИЛАСЬ ВНИЧЬЮ!</b>\n🕯️ Тёмные: {black_score} | ⚜️ Светлые: {white_score}\nНичья — награды не выданы. Следующая война скоро!")
-                    return
+            winner = "BLACK" if black_score > white_score else "WHITE"
+            oac = random.randint(200, 500)
+            blunts = random.randint(3, 7)
+            dust = random.randint(1, 3)
 
-                winner = "BLACK" if black_score > white_score else "WHITE"
-                oac = random.randint(200, 500)
-                blunts = random.randint(3, 7)
-                dust = random.randint(1, 3)
+            # Атомарное обновление каждого игрока победившей гильдии
+            rows = await conn.fetch("SELECT user_id FROM players WHERE guild = $1", winner)
+            winners_count = len(rows)
+            for r in rows:
+                async def _reward(p, conn):
+                    p.balance += oac
+                    p.blunts += blunts
+                    p.m_essence += dust
+                try:
+                    await ctx.repo.atomic_update(r["user_id"], _reward)
+                except Exception as e:
+                    logger.warning("Не удалось начислить награду игроку %d: %s", r["user_id"], e)
 
-                # Пакетное обновление
-                rows = await conn.fetch("SELECT user_id FROM players WHERE guild = $1", winner)
-                user_ids = [r["user_id"] for r in rows]
-                batch_size = 500
-                for i in range(0, len(user_ids), batch_size):
-                    batch = user_ids[i:i+batch_size]
-                    await conn.execute(
-                        "UPDATE players SET balance = balance + $1, blunts = blunts + $2, m_essence = m_essence + $3 WHERE user_id = ANY($4)",
-                        oac, blunts, dust, batch
-                    )
-                    await asyncio.sleep(0.05)
+            logger.info("%s: Война завершена. Победитель: %s (%d vs %d). Начислено %d OAC, %d блантов, %d пыли %d игрокам.",
+                        job_name, winner, black_score, white_score, oac, blunts, dust, winners_count)
 
-                winners_count = len(user_ids)
-                logger.info("%s: Война завершена. Победитель: %s (%d vs %d). Начислено %d OAC, %d блантов, %d пыли %d игрокам.", job_name, winner, black_score, white_score, oac, blunts, dust, winners_count)
+            winner_emoji = "🕯️" if winner == "BLACK" else "⚜️"
+            await _safe_send_guild_message(context,
+                f"🎉 <b>ВОЙНА ГИЛЬДИЙ ЗАВЕРШЕНА!</b>\n\n"
+                f"{winner_emoji} <b>Победила {winner} гильдия!</b>\n"
+                f"🕯️ Тёмные: {black_score} | ⚜️ Светлые: {white_score}\n\n"
+                f"Каждый участник победившей гильдии получает:\n"
+                f"• {oac} OAC 🍬\n• {blunts} блантов 🌿\n• {dust} кристальной пыли 💠"
+            )
 
-                winner_emoji = "🕯️" if winner == "BLACK" else "⚜️"
-                await _safe_send_guild_message(context, f"🎉 <b>ВОЙНА ГИЛЬДИЙ ЗАВЕРШЕНА!</b>\n\n{winner_emoji} <b>Победила {winner} гильдия!</b>\n🕯️ Тёмные: {black_score} | ⚜️ Светлые: {white_score}\n\nКаждый участник победившей гильдии получает:\n• {oac} OAC 🍬\n• {blunts} блантов 🌿\n• {dust} кристальной пыли 💠")
+        # Запускаем новую войну
+        await ctx.war_service.start_war()
+
     except Exception as e:
         logger.critical("%s: КРИТИЧЕСКАЯ ОШИБКА: %s", job_name, e, exc_info=True)
         if ctx.settings.admin_id:
