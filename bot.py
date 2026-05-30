@@ -2275,11 +2275,12 @@ async def _handle_referral(update, context, uid, player):
 
 
 async def _create_new_player(update, context, uid, username):
-    player = Player(user_id=uid, username=username, balance=800, onboarding_step=0)
+    ctx = context.application.bot_data.get("ctx")
+    player = Player(user_id=uid, username=username, balance=800)
     await ctx.repo.save(player)
-    new_name = random.choice(["Крик Бездны","Пепел Короля","Шёпот Склепа"])
-    await create_named_blunt(uid, new_name)
-
+    new_name = random.choice(["Крик Бездны","Шёпот Склепа"])
+    await create_named_blunt(uid, new_name, ctx=ctx)
+    
     welcome_text = (
         "🎁 Смотритель дарует тебе <code>800</code> 🍬 и твой первый именной блант!\n\n"
         "<b>🎉 Добро пожаловать в Гильдию Antysocialshop!</b>\n\n"
@@ -2622,7 +2623,7 @@ async def farm_callback(update, context):
         player.last_farm_date = date.today()
 
         # Военный счёт
-        war_service = context.bot_data.get("war_service")
+        await ctx.war_service.add_score_raw(uid, earned + medal_bonus, conn)
         if war_service:
             await war_service.add_score_raw(uid, earned + medal_bonus, conn)
 
@@ -2805,7 +2806,7 @@ async def handle_craft_normal(update, context):
 
         player.balance += medal_bonus
 
-        war_service = context.bot_data.get("war_service")
+        await ctx.war_service.add_score_raw(uid, earned + medal_bonus, conn)
         if war_service:
             await war_service.add_score(uid, WarAction.CRAFT, conn)
 
@@ -2897,7 +2898,7 @@ async def handle_named_name(update, context):
             item = await create_named_blunt(uid, name, rarity=None, conn=conn)
 
             # Очки войны внутри атомарной транзакции
-            war_service = context.bot_data.get("war_service")
+            await ctx.war_service.add_score_raw(uid, earned + medal_bonus, conn)
             if war_service:
                 await war_service.add_score(uid, WarAction.NAMED_CRAFT, conn)
             else:
@@ -2991,7 +2992,7 @@ async def handle_use_dust(update, context):
         ])
         item = await create_named_blunt(uid, name, rarity="legendary", conn=conn)
 
-        war_service = context.bot_data.get("war_service")
+        await ctx.war_service.add_score_raw(uid, earned + medal_bonus, conn)
         if war_service:
             await war_service.add_score(uid, WarAction.DUST_USE, conn)
         else:
@@ -3207,7 +3208,7 @@ async def do_smoke(update, context):
             player.inhaled = 1
 
         # военный счёт (новый сервис)
-        war_service = context.bot_data.get("war_service")
+        await ctx.war_service.add_score_raw(uid, earned + medal_bonus, conn)
         if war_service:
             await war_service.add_score_raw(uid, earned + medal_bonus, conn)
 
@@ -3332,7 +3333,7 @@ async def ritual_callback(update, context):
         player.last_ritual = now
 
         # Военный счёт (новый сервис)
-        war_service = context.bot_data.get("war_service")
+        await ctx.war_service.add_score_raw(uid, earned + medal_bonus, conn)
         if war_service:
             await war_service.add_score_raw(uid, reward + extra + medal_bonus, conn)
 
@@ -4332,7 +4333,7 @@ async def luck_callback(update, context, action=None):
     alchemy_ok = player.balance >= cfg["alchemy"]["required_balance"]
 
     # Получаем сервис войны один раз
-    war_service = context.bot_data.get("war_service")
+    await ctx.war_service.add_score_raw(uid, earned + medal_bonus, conn)
 
     if action == "luck_wheel":
         await _process_wheel(update, context, uid, player, cfg, war_service)
@@ -5028,7 +5029,7 @@ async def show_lab_final(update, context):
         p.lab_depth += 1
 
         # Военный счёт
-        war_service = context.bot_data.get("war_service")
+        await ctx.war_service.add_score_raw(uid, earned + medal_bonus, conn)
         if war_service:
             await war_service.add_score(uid, WarAction.LAB_WIN, conn)
 
@@ -5066,7 +5067,7 @@ async def show_lab_death(update, context):
         p.balance += 50
         p.lab_deaths += 1
 
-        war_service = context.bot_data.get("war_service")
+        await ctx.war_service.add_score_raw(uid, earned + medal_bonus, conn)
         if war_service:
             await war_service.add_score(uid, WarAction.LAB_DEATH, conn)
         else:
