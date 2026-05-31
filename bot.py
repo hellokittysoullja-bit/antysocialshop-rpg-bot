@@ -6153,6 +6153,41 @@ async def on_startup(app: Application):
         logger.info("✅ Все джобы зарегистрированы")
     else:
         logger.warning("JobQueue не доступна")
+        
+    # Резервное создание контекста (если основной блок не сработал)
+    if "ctx" not in app.bot_data:
+        logger.warning("ctx not found after init, creating fallback context...")
+        pool = await asyncpg.create_pool(
+            settings.database_url,
+            min_size=5, max_size=20, command_timeout=15,
+            max_inactive_connection_lifetime=300.0
+        )
+        redis_client = None
+        if settings.redis_url:
+            try:
+                redis_client = await aioredis.from_url(settings.redis_url)
+            except Exception:
+                pass
+        cache = TTLCache(maxsize=2000, ttl=600)
+        repo = PlayerRepository(pool, redis_client, cache)
+        war_config = WarConfig()
+        war_settings = WarSettings()
+        war_service = GuildWarService(pool, redis_client, war_config, war_settings)
+        pet_config = {"dog": {"name": "🐕 Песик", "price": 3000, "max_name_len": 15}}
+        pet_service = PetService(repo, pet_config)
+        achievement_service = AchievementService(pool, redis_client, repo)
+        ctx = AppContext(
+            db_pool=pool,
+            redis_client=redis_client,
+            cache=cache,
+            settings=settings,
+            repo=repo,
+            war_service=war_service,
+            pet_service=pet_service,
+            achievement_service=achievement_service,
+        )
+        app.bot_data["ctx"] = ctx
+        logger.info("Fallback context created and saved")
 
     logger.info("🚀 Бот готов к работе (полная совместимость с исходной логикой)")
 
@@ -6224,41 +6259,6 @@ def main():
             raise RuntimeError("Could not set webhook after 5 attempts")
 
         asyncio.run(init_bot())
-        
-        # Гарантируем создание контекста, если on_startup не сработал
-        if "ctx" not in tg_app.bot_data:
-            logger.warning("ctx not found after init, creating minimal context...")
-            pool = await asyncpg.create_pool(
-                settings.database_url,
-                min_size=5, max_size=20, command_timeout=15,
-                max_inactive_connection_lifetime=300.0
-            )
-            redis_client = None
-            if settings.redis_url:
-                try:
-                    redis_client = await aioredis.from_url(settings.redis_url)
-                except Exception:
-                    pass
-            cache = TTLCache(maxsize=2000, ttl=600)
-            repo = PlayerRepository(pool, redis_client, cache)
-            war_config = WarConfig()
-            war_settings = WarSettings()
-            war_service = GuildWarService(pool, redis_client, war_config, war_settings)
-            pet_config = {"dog": {"name": "🐕 Песик", "price": 3000, "max_name_len": 15}}
-            pet_service = PetService(repo, pet_config)
-            achievement_service = AchievementService(pool, redis_client, repo)
-            ctx = AppContext(
-                db_pool=pool,
-                redis_client=redis_client,
-                cache=cache,
-                settings=settings,
-                repo=repo,
-                war_service=war_service,
-                pet_service=pet_service,
-                achievement_service=achievement_service,
-            )
-            tg_app.bot_data["ctx"] = ctx
-            logger.info("Fallback context created and saved")
 
         from aiohttp import web
         webhook_timeouts = 0
