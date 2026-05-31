@@ -6046,7 +6046,6 @@ async def on_startup(app: Application):
             await create_tables(conn)
             await _run_migrations(conn)
 
-        # Создаём минимальный контекст
         ctx = AppContext(
             db_pool=pool,
             redis_client=None,
@@ -6190,23 +6189,23 @@ def main():
         webhook_errors = 0
 
         async def handle_webhook(request):
-    try:
-        data = await request.json()
-        update = Update.de_json(data, tg_app.bot)
-        chat_id = update.effective_chat.id if update.effective_chat else None
+            try:
+                data = await request.json()
+                update = Update.de_json(data, tg_app.bot)
+                chat_id = update.effective_chat.id if update.effective_chat else None
 
-        ctx = tg_app.bot_data.get("ctx")
-        if not ctx:
-            logger.error("ctx missing in webhook")
-            if chat_id:
-                await tg_app.bot.send_message(chat_id, "⚠️ Бот инициализируется.")
-            return web.Response(text="ctx_missing", status=500)
+                ctx = tg_app.bot_data.get("ctx")
+                if not ctx:
+                    logger.error("ctx missing in webhook")
+                    if chat_id:
+                        await tg_app.bot.send_message(chat_id, "⚠️ Бот инициализируется.")
+                    return web.Response(text="ctx_missing", status=500)
 
-        await tg_app.process_update(update)
-        return web.Response(text="OK")
-    except Exception as e:
-        logger.exception("webhook error")
-        return web.Response(text="Error", status=500)
+                await tg_app.process_update(update)
+                return web.Response(text="OK")
+            except Exception:
+                logger.exception("webhook error")
+                return web.Response(text="Error", status=500)
 
         async def healthcheck(request):
             return web.Response(text="OK")
