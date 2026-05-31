@@ -6035,7 +6035,7 @@ async def load_blunt_images(ctx: AppContext):
             await redis_breaker.call(ctx.redis.setex, f"blunt_image:{rarity}", 86400, saved)
 
 async def on_startup(app: Application):
-    logger.info("Starting minimal init...")
+    print("=== ON_STARTUP CALLED ===", flush=True)
     try:
         pool = await asyncpg.create_pool(
             settings.database_url,
@@ -6057,6 +6057,7 @@ async def on_startup(app: Application):
             achievement_service=None,
         )
         app.bot_data["ctx"] = ctx
+        print("=== CTX SAVED ===", flush=True)
         logger.info("✅ Minimal ctx saved")
     except Exception as e:
         logger.exception("Minimal init failed")
