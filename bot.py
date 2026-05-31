@@ -6204,39 +6204,48 @@ def main():
         webhook_errors = 0
 
         async def handle_webhook(request):
+    try:
+        data = await request.json()
+        update = Update.de_json(data, tg_app.bot)
+        chat_id = update.effective_chat.id if update.effective_chat else None
+
+        ctx = tg_app.bot_data.get("ctx")
+        if not ctx:
+            logger.error("ctx missing")
+            if chat_id:
+                await tg_app.bot.send_message(chat_id, "⚠️ Бот инициализируется, попробуйте позже.")
+            return web.Response(text="ctx_missing", status=500)
+
+        try:
+            async with ctx.db_pool.acquire(timeout=2) as conn:
+                await conn.execute("SELECT 1")
+        except Exception:
+            logger.exception("DB not reachable")
+            if chat_id:
+                await tg_app.bot.send_message(chat_id, "⚠️ База данных временно недоступна.")
+            return web.Response(text="db_unreachable", status=500)
+
+        await tg_app.process_update(update)
+        return web.Response(text="OK")
+
+    except Exception:
+        logger.exception("Webhook processing error")
+        if 'chat_id' in locals() and chat_id:
             try:
-                data = await request.json()
-                update = Update.de_json(data, tg_app.bot)
-
-                # Проверка: есть ли ctx в bot_data
-                ctx = tg_app.bot_data.get("ctx")
-                if not ctx:
-                    logger.error("❌ ctx not found in bot_data!")
-                    await tg_app.bot.send_message(
-                        chat_id=update.effective_chat.id,
-                        text="⚠️ Бот временно недоступен (ctx)."
-                    )
-                    return web.Response(text="OK")
-
-                # Проверка: может ли бот отправлять сообщения (тест)
-                try:
-                    await tg_app.bot.send_message(
-                        chat_id=update.effective_chat.id,
-                        text="🔄 Проверка связи..."
-                    )
-                    logger.info("✅ Test message sent OK")
-                except Exception as e:
-                    logger.error("❌ Test message failed: %s", e)
-                    # Если не можем отправить, то и обработчики не смогут
-                    return web.Response(text="OK")
-
-                # Если тест прошёл, обрабатываем запрос как обычно
-                await tg_app.process_update(update)
-                logger.info("Update processed OK")
-                return web.Response(text="OK")
-            except Exception as e:
-                logger.exception("Webhook error")
-                return web.Response(text="Error", status=500)
+                await tg_app.bot.send_message(chat_id, "⚠️ Произошла внутренняя ошибка.")
+            except Exception:
+                pass
+        if settings.admin_id:
+            try:
+                import traceback as tb_module
+                await tg_app.bot.send_message(
+                    chat_id=settings.admin_id,
+                    text=f"🚨 Webhook error:\n<code>{html.escape(tb_module.format_exc()[:1000])}</code>",
+                    parse_mode='HTML'
+                )
+            except Exception:
+                pass
+        return web.Response(text="Error", status=500)
 
         async def healthcheck(request):
             return web.Response(text="OK")
