@@ -6211,8 +6211,20 @@ def main():
                 await tg_app.process_update(update)
                 logger.info("Update processed OK")
                 return web.Response(text="OK")
-            except Exception as e:
+            except Exception:
                 logger.exception("Webhook processing failed")
+                # Отправляем traceback админу, используя экземпляр бота
+                if settings.admin_id:
+                    import traceback as tb_module
+                    tb = tb_module.format_exc()
+                    try:
+                        await tg_app.bot.send_message(
+                            chat_id=settings.admin_id,
+                            text=f"🚨 Webhook error:\n<code>{html.escape(tb[:1000])}</code>",
+                            parse_mode='HTML'
+                        )
+                    except Exception:
+                        pass
                 return web.Response(text="Error", status=500)
 
         async def healthcheck(request):
@@ -6225,13 +6237,6 @@ def main():
         app.router.add_post(settings.webhook_path, handle_webhook)
         app.router.add_get("/healthz", healthcheck)
         app.router.add_get("/stats", stats_handler)
-        
-        # Диагностический catch-all: логирует любые неопознанные запросы
-        async def catch_all(request):
-            logger.warning("Unhandled request: method=%s path=%s headers=%s",
-                           request.method, request.path, dict(request.headers))
-            return web.Response(text="unhandled", status=200)
-        app.router.add_route('*', '/{tail:.*}', catch_all)
 
         async def on_shutdown_webhook(app):
             logger.info("Shutting down, deleting webhook...")
