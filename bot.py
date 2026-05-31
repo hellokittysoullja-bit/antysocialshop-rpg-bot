@@ -2359,18 +2359,26 @@ async def _show_main_menu(update, context, player, user, ctx):
 # САМА ФУНКЦИЯ START — ТОНКИЙ ОРКЕСТРАТОР
 # --------------------------------------------------------------------------- def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user, msg = get_user_and_msg(update)
-    uid = user.id
-    ctx = context.application.bot_data["ctx"]
-    player = await ctx.repo.get_by_id(uid)
-    await _handle_referral(update, context, uid, player)
-    if not player or not player.exists:
-        await _create_new_player(update, context, uid, username)
+    ctx = context.application.bot_data.get("ctx")
+    if not ctx:
+        await update.effective_message.reply_text("⚠️ Бот инициализируется, попробуйте позже.")
         return
-    await asyncio.gather(
-        process_daily_login(uid, context),
-        _show_main_menu(update, context, player, user)
-    )
+    try:
+        user, msg = get_user_and_msg(update)
+        uid = user.id
+        username = user.username or user.first_name or "Странник"
+        player = await ctx.repo.get_by_id(uid)
+        await _handle_referral(update, context, uid, player)
+        if not player or not player.exists:
+            await _create_new_player(update, context, uid, username)
+        else:
+            await asyncio.gather(
+                process_daily_login(uid, context),
+                _show_main_menu(update, context, player, user, ctx)
+            )
+    except Exception as e:
+        logger.exception("start failed")
+        await update.effective_message.reply_text("⚠️ Произошла ошибка. Попробуйте позже.")
 
 # Конфигурация (все правила в одном месте)
 @dataclass(frozen=True)
@@ -6027,11 +6035,10 @@ async def load_blunt_images(ctx: AppContext):
             await redis_breaker.call(ctx.redis.setex, f"blunt_image:{rarity}", 86400, saved)
 
 async def on_startup(app: Application):
-    """Инициализация всех сервисов и контекста (уровень 4-5)."""
+    """Инициализация всех сервисов и контекста."""
     logger.info("Starting bot initialization...")
 
     # 1. База данных
-    pool = None
     try:
         pool = await asyncpg.create_pool(
             settings.database_url,
@@ -6044,11 +6051,12 @@ async def on_startup(app: Application):
         app.bot_data["db_error"] = str(e)
         return
 
+    # Миграции
     async with pool.acquire() as conn:
         await create_tables(conn)
         await _run_migrations(conn)
 
-    # 2. Redis (опционально)
+    # 2. Redis
     redis_client = None
     if settings.redis_url:
         try:
@@ -6085,6 +6093,7 @@ async def on_startup(app: Application):
         achievement_service=achievement_service,
     )
     app.bot_data["ctx"] = ctx
+    logger.info("✅ Контекст сохранён в bot_data")
 
     # 7. Загрузка изображений
     try:
@@ -6101,16 +6110,33 @@ async def on_startup(app: Application):
         except Exception as e:
             logger.error("Sentry init failed: %s", e)
 
-    # 9. Prometheus (опционально)
+    # 9. Джобы
+    if app.job_queue:
+        app.job_queue.run_repeating(keep_db_alive, interval=180, first=10)
+        app.job_queue.run_repeating(update_pulse, interval=3600, first=30)
+        app.job_queue.run_repeating(echo_of_distortion, interval=21600, first=300)
+        app.job_queue.run_daily(happy_hour_trigger, time=datetime.strptime("20:00", "%H:%M").time())
+        app.job_queue.run_weekly(weekly_guild_rating, day_of_week=6, time=datetime.strptime("00:00", "%H:%M").time())
+        logger.info("✅ Все джобы зарегистрированы")
+    else:
+        logger.warning("JobQueue не доступна")
+
+    # Prometheus (опционально)
     try:
         from prometheus_client import generate_latest
+        from aiohttp import web
+
         async def metrics_handler(request):
             return web.Response(body=generate_latest(), content_type='text/plain')
 
+        # Регистрируем маршрут, если приложение ещё не запущено
+        # (но здесь app уже существует, однако маршруты добавляются в main())
+        # поэтому просто сохраним handler, а в main() добавим:
+        app['metrics_handler'] = metrics_handler
     except ImportError:
         pass
 
-    logger.info("🚀 Bot ready (Level 4-5 Core)")
+    logger.info("🚀 Бот готов к работе")
 
     async def healthcheck_handler(request):
         return web.Response(text="OK")
@@ -6239,45 +6265,38 @@ def main():
         webhook_errors = 0
 
         async def handle_webhook(request):
+    try:
+        data = await request.json()
+        update = Update.de_json(data, tg_app.bot)
+        chat_id = update.effective_chat.id if update.effective_chat else None
+
+        ctx = tg_app.bot_data.get("ctx")
+        if not ctx:
+            logger.error("ctx отсутствует в bot_data")
+            if chat_id:
+                await tg_app.bot.send_message(chat_id, "⚠️ Бот инициализируется, попробуйте позже.")
+            return web.Response(text="ctx_missing", status=500)
+
+        try:
+            async with ctx.db_pool.acquire(timeout=2) as conn:
+                await conn.execute("SELECT 1")
+        except Exception:
+            logger.exception("База данных недоступна")
+            if chat_id:
+                await tg_app.bot.send_message(chat_id, "⚠️ База данных временно недоступна.")
+            return web.Response(text="db_unreachable", status=500)
+
+        await tg_app.process_update(update)
+        return web.Response(text="OK")
+
+    except Exception:
+        logger.exception("Ошибка при обработке вебхука")
+        if 'chat_id' in locals() and chat_id:
             try:
-                data = await request.json()
-                update = Update.de_json(data, tg_app.bot)
-                chat_id = update.effective_chat.id if update.effective_chat else None
-
-                ctx = tg_app.bot_data.get("ctx")
-                if not ctx:
-                    logger.error("ctx missing")
-                    if chat_id:
-                        await tg_app.bot.send_message(chat_id, "⚠️ Бот инициализируется, попробуйте позже.")
-                    return web.Response(text="ctx_missing", status=500)
-
-                try:
-                    async with ctx.db_pool.acquire(timeout=2) as conn:
-                        await conn.execute("SELECT 1")
-                except Exception:
-                    logger.exception("DB not reachable")
-                    if chat_id:
-                        await tg_app.bot.send_message(chat_id, "⚠️ База данных временно недоступна.")
-                    return web.Response(text="db_unreachable", status=500)
-
-                await tg_app.process_update(update)
-                return web.Response(text="OK")
-
+                await tg_app.bot.send_message(chat_id, "⚠️ Произошла внутренняя ошибка.")
             except Exception:
-                logger.exception("Webhook processing error")
-                if 'chat_id' in locals() and chat_id:
-                    try:
-                        await tg_app.bot.send_message(chat_id, "⚠️ Произошла внутренняя ошибка.")
-                    except Exception:
-                        pass
-                if settings.admin_id:
-                    import traceback as tb_module
-                    tb = tb_module.format_exc()
-                    await tg_app.bot.send_message(
-                        chat_id=settings.admin_id,
-                        text=f"🚨 Webhook error:\n{tb[:1000]}"
-                    )
-                return web.Response(text="Error", status=500)
+                pass
+        return web.Response(text="Error", status=500)
 
         async def healthcheck(request):
             return web.Response(text="OK")
