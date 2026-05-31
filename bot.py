@@ -6204,22 +6204,16 @@ def main():
         webhook_errors = 0
 
         async def handle_webhook(request):
-            nonlocal webhook_timeouts, webhook_errors
-            if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != settings.webhook_secret:
-                raise web.HTTPForbidden()
             try:
                 data = await request.json()
+                logger.info("Webhook data: %s", json.dumps(data, indent=2))
                 update = Update.de_json(data, tg_app.bot)
-                await asyncio.wait_for(tg_app.process_update(update), timeout=25.0)
+                await tg_app.process_update(update)
+                logger.info("Update processed OK")
                 return web.Response(text="OK")
-            except asyncio.TimeoutError:
-                webhook_timeouts += 1
-                logger.error("Webhook timeout after 25s – returning 503")
-                return web.Response(text="Service Unavailable", status=503)
             except Exception as e:
-                webhook_errors += 1
-                logger.error("Webhook processing error: %s – returning 503", e)
-                return web.Response(text="Service Unavailable", status=503)
+                logger.exception("Webhook processing failed")
+                return web.Response(text="Error", status=500)
 
         async def healthcheck(request):
             return web.Response(text="OK")
