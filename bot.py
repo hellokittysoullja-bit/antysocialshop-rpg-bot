@@ -6231,6 +6231,13 @@ def main():
         app.router.add_post(settings.webhook_path, handle_webhook)
         app.router.add_get("/healthz", healthcheck)
         app.router.add_get("/stats", stats_handler)
+        
+        # Диагностический catch-all: логирует любые неопознанные запросы
+        async def catch_all(request):
+            logger.warning("Unhandled request: method=%s path=%s headers=%s",
+                           request.method, request.path, dict(request.headers))
+            return web.Response(text="unhandled", status=200)
+        app.router.add_route('*', '/{tail:.*}', catch_all)
 
         async def on_shutdown_webhook(app):
             logger.info("Shutting down, deleting webhook...")
