@@ -147,7 +147,7 @@ def divine_command(command_name: str):
                     for attempt in range(3):
                         try:
                             await context.bot.send_message(
-                                chat_id=ADMIN_ID,
+                                chat_id=settings.admin_id,
                                 text=f"🚨 [{request_id}] Ошибка /{command_name} от {user_id}: {html.escape(str(e)[:500])}"
                             )
                             break
@@ -951,8 +951,8 @@ async def create_named_blunt(user_id: int, name: str, rarity: str = None, conn=N
     item = {
         "id": blunt_id, "type": "named", "name": clean_name, "rarity": rarity,
         "serial": None, "rare_number": rare_number, "hash": hash_code,
-        "reaction": reaction, "created_at": datetime.utcnow().isoformat(),
-        "owner_history": [{"user_id": str(user_id), "since": datetime.utcnow().isoformat()}],
+        "reaction": reaction, "created_at": datetime.now(datetime.timezone.utc).isoformat(),
+        "owner_history": [{"user_id": str(user_id), "since": datetime.now(datetime.timezone.utc).isoformat()}],
     }
     
     player = await ctx.repo.get_by_id(user_id)
@@ -1874,7 +1874,7 @@ def next_sunday_str() -> str:
     next_sunday = now + timedelta(days=days_until_sunday)
     return next_sunday.strftime("%d.%m")
 
-async def add_title(user_id, emoji, conn=None):
+async def add_title(user_id, emoji, ctx, conn=None):
     player = await ctx.repo.get_by_id(user_id)
     titles = (player.titles or "").split()
     if emoji not in titles:
@@ -3064,7 +3064,7 @@ async def handle_use_dust(update, context):
     item, name = data
     reaction = item["reaction"]
 
-    await safe_send_blunt_image(context, query.message.chat.id, "legendary")
+    await safe_send_blunt_image(context, query.message.chat.id, "legendary", caption=None, reply_markup=None)
     text = _format_dust_message(name, reaction)
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
     await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
@@ -3230,6 +3230,7 @@ async def smoke_callback(update, context):
 
 @error_handler
 async def do_smoke(update, context):
+    ctx = context.application.bot_data["ctx"]         
     query = update.callback_query
     await query.answer()
     uid = query.from_user.id
@@ -6122,6 +6123,10 @@ async def on_startup(app: Application):
         logger.critical("Failed to create database pool: %s", e)
         app.bot_data["db_error"] = str(e)
         return
+
+    async with pool.acquire() as conn:
+        await create_tables(conn)
+        await _run_migrations(conn)
 
     # 2. Redis (опционально)
     redis_client = None
