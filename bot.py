@@ -6206,25 +6206,36 @@ def main():
         async def handle_webhook(request):
             try:
                 data = await request.json()
-                logger.info("Webhook data: %s", json.dumps(data, indent=2))
                 update = Update.de_json(data, tg_app.bot)
+
+                # Проверка: есть ли ctx в bot_data
+                ctx = tg_app.bot_data.get("ctx")
+                if not ctx:
+                    logger.error("❌ ctx not found in bot_data!")
+                    await tg_app.bot.send_message(
+                        chat_id=update.effective_chat.id,
+                        text="⚠️ Бот временно недоступен (ctx)."
+                    )
+                    return web.Response(text="OK")
+
+                # Проверка: может ли бот отправлять сообщения (тест)
+                try:
+                    await tg_app.bot.send_message(
+                        chat_id=update.effective_chat.id,
+                        text="🔄 Проверка связи..."
+                    )
+                    logger.info("✅ Test message sent OK")
+                except Exception as e:
+                    logger.error("❌ Test message failed: %s", e)
+                    # Если не можем отправить, то и обработчики не смогут
+                    return web.Response(text="OK")
+
+                # Если тест прошёл, обрабатываем запрос как обычно
                 await tg_app.process_update(update)
                 logger.info("Update processed OK")
                 return web.Response(text="OK")
-            except Exception:
-                logger.exception("Webhook processing failed")
-                # Отправляем traceback админу, используя экземпляр бота
-                if settings.admin_id:
-                    import traceback as tb_module
-                    tb = tb_module.format_exc()
-                    try:
-                        await tg_app.bot.send_message(
-                            chat_id=settings.admin_id,
-                            text=f"🚨 Webhook error:\n<code>{html.escape(tb[:1000])}</code>",
-                            parse_mode='HTML'
-                        )
-                    except Exception:
-                        pass
+            except Exception as e:
+                logger.exception("Webhook error")
                 return web.Response(text="Error", status=500)
 
         async def healthcheck(request):
