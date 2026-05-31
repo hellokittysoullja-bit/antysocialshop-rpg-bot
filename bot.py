@@ -6265,38 +6265,38 @@ def main():
         webhook_errors = 0
 
         async def handle_webhook(request):
-    try:
-        data = await request.json()
-        update = Update.de_json(data, tg_app.bot)
-        chat_id = update.effective_chat.id if update.effective_chat else None
-
-        ctx = tg_app.bot_data.get("ctx")
-        if not ctx:
-            logger.error("ctx отсутствует в bot_data")
-            if chat_id:
-                await tg_app.bot.send_message(chat_id, "⚠️ Бот инициализируется, попробуйте позже.")
-            return web.Response(text="ctx_missing", status=500)
-
-        try:
-            async with ctx.db_pool.acquire(timeout=2) as conn:
-                await conn.execute("SELECT 1")
-        except Exception:
-            logger.exception("База данных недоступна")
-            if chat_id:
-                await tg_app.bot.send_message(chat_id, "⚠️ База данных временно недоступна.")
-            return web.Response(text="db_unreachable", status=500)
-
-        await tg_app.process_update(update)
-        return web.Response(text="OK")
-
-    except Exception:
-        logger.exception("Ошибка при обработке вебхука")
-        if 'chat_id' in locals() and chat_id:
             try:
-                await tg_app.bot.send_message(chat_id, "⚠️ Произошла внутренняя ошибка.")
+                data = await request.json()
+                update = Update.de_json(data, tg_app.bot)
+                chat_id = update.effective_chat.id if update.effective_chat else None
+
+                ctx = tg_app.bot_data.get("ctx")
+                if not ctx:
+                    logger.error("ctx отсутствует в bot_data")
+                    if chat_id:
+                        await tg_app.bot.send_message(chat_id, "⚠️ Бот инициализируется, попробуйте позже.")
+                    return web.Response(text="ctx_missing", status=500)
+
+                try:
+                    async with ctx.db_pool.acquire(timeout=2) as conn:
+                        await conn.execute("SELECT 1")
+                except Exception:
+                    logger.exception("База данных недоступна")
+                    if chat_id:
+                        await tg_app.bot.send_message(chat_id, "⚠️ База данных временно недоступна.")
+                    return web.Response(text="db_unreachable", status=500)
+
+                await tg_app.process_update(update)
+                return web.Response(text="OK")
+
             except Exception:
-                pass
-        return web.Response(text="Error", status=500)
+                logger.exception("Ошибка при обработке вебхука")
+                if 'chat_id' in locals() and chat_id:
+                    try:
+                        await tg_app.bot.send_message(chat_id, "⚠️ Произошла внутренняя ошибка.")
+                    except Exception:
+                        pass
+                return web.Response(text="Error", status=500)
 
         async def healthcheck(request):
             return web.Response(text="OK")
