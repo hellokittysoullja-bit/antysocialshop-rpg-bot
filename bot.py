@@ -51,6 +51,8 @@ rate_limited_requests = Counter('bot_rate_limited_requests', 'Rate limited reque
 
 import httpx
 
+import copy
+
 # ============================================================
 # ДЕКОРАТОРЫ
 # ============================================================
@@ -1185,45 +1187,6 @@ ACHIEVEMENT_CONDITIONS = {
     "craft_250": ("craft_count", 250),
     "alchemy_15": ("alchemy_count", 15),
 }
-
-LABYRINTH_ROOMS = [
-    {
-        "name": "👁️ Зал Наблюдателя",
-        "desc": "📿 <i>Сотни глаз смотрят на тебя с потолка.</i> <b>Они ждут тебя.</b>",
-        "options": [
-            {"text": "⚔️ Уничтожить смотрящих (20 OAC)", "cost_oac": 20, "risk": 0.6, "reward_oac": (10,50), "fail": "life"},
-            {"text": "🕯️ Отвести взгляд (1 блант)", "cost_blunt": 1, "risk": 0.8, "reward_fragment": True, "fail": "none"},
-            {"text": "🏃 Бежать", "cost_none": True, "risk": 1.0, "reward_escape": True, "fail": "none"}
-        ]
-    },
-    {
-        "name": "⚗️ Алтарь Теней",
-        "desc": "Густая кровь капает с алтаря. Тени шепчут о силе.",
-        "options": [
-            {"text": "🩸 Пожертвовать OAC (30 OAC)", "cost_oac": 30, "risk": 0.7, "reward_oac": (40,100), "fail": "life"},
-            {"text": "📜 Прочесть руны (1 блант)", "cost_blunt": 1, "risk": 0.9, "reward_title": "Посвящённый", "fail": "none"},
-            {"text": "🏃 Бежать", "cost_none": True, "risk": 1.0, "reward_escape": True, "fail": "none"}
-        ]
-    },
-    {
-        "name": "🌀 Водоворот Хаоса",
-        "desc": "Воздух дрожит, затягивая в воронку. Прямо в центре — мерцающий сгусток.",
-        "options": [
-            {"text": "🌀 Схватить сгусток (25 OAC)", "cost_oac": 25, "risk": 0.5, "reward_dust": True, "fail": "life_big"},
-            {"text": "🚪 Обойти (1 блант)", "cost_blunt": 1, "risk": 0.95, "reward_none": True, "fail": "life"},
-            {"text": "🏃 Бежать", "cost_none": True, "risk": 1.0, "reward_escape": True, "fail": "none"}
-        ]
-    },
-    {
-        "name": "☠️ Склеп Короля",
-        "desc": "Груды костей, трон из черепов. С них свисают драгоценные камни.",
-        "options": [
-            {"text": "💎 Сорвать камень (20 OAC)", "cost_oac": 20, "risk": 0.8, "reward_oac": (20,80), "fail": "life"},
-            {"text": "🕯️ Зажечь свечу (1 блант)", "cost_blunt": 1, "risk": 1.0, "reward_dust": True, "fail": "none"},
-            {"text": "🏃 Бежать", "cost_none": True, "risk": 1.0, "reward_escape": True, "fail": "none"}
-        ]
-    }
-]
 
 # ========== БАЗА ДАННЫХ AIVEN ==========
 db_pool = None
@@ -3605,38 +3568,6 @@ async def profile_callback(update, context):
     else:
         await msg.reply_text(text, reply_markup=kb, parse_mode='HTML')
 
-async def handle_set_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    new_title = query.data.replace("set_title_", "")
-
-    async def _set(p, conn):
-        skins = p.profile_skins or {}
-        if not isinstance(skins, dict):
-            skins = {}
-        skins["active_title"] = new_title
-        p.profile_skins = skins
-        # Дополнительно можно добавить титул в titles (если надо)
-        titles = (p.titles or "").split()
-        if new_title not in titles:
-            titles.append(new_title)
-            p.titles = " ".join(titles).strip()
-        return new_title  # чтобы вывести сообщение
-
-    result = await ctx.repo.atomic_update(user_id, _set)
-    if result is None:
-        await query.answer("Профиль не найден", show_alert=True)
-        return
-
-    # Подтверждение игроку
-    await context.bot.send_message(
-        chat_id=query.message.chat.id,
-        text=f"✨ Титул «{new_title}» активирован!"
-    )
-    # Возвращаемся в меню кастомизации (можно вызвать функцию skins_menu)
-    await skins_menu_handler(update, context)
-
 async def handle_set_bg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -3661,19 +3592,6 @@ async def handle_set_bg(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text=f"✨ Фон «{new_bg}» активирован!"
     )
     await skins_menu_handler(update, context)
-
-async def skins_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("💬 Выбрать титул", callback_data="choose_title")],
-        [InlineKeyboardButton("🖼️ Выбрать фон", callback_data="choose_bg")],
-        [InlineKeyboardButton("🔙 Назад", callback_data="profile")]
-    ])
-    await query.message.edit_text(
-        "<b>🎨 СКИНЫ</b>\n\nВыбери, что хочешь изменить.",
-        reply_markup=kb,
-        parse_mode='HTML'
-    )
 
 # Все бланты
 @error_handler
@@ -4607,9 +4525,6 @@ async def check_blunt(update, context):
 # ============================================================
 # ЛАБИРИНТ ИСКАЖЕНИЯ — ИТОГОВАЯ СЕНЬОР-ВЕРСИЯ (ПОЛНАЯ ЗАМЕНА)
 # ============================================================
-
-import copy
-
 LABYRINTH_ROOMS = [
     # === БАЗОВЫЕ КОМНАТЫ ===
     {
@@ -5617,13 +5532,18 @@ async def handle_set_title(update, context, ctx):
         skins = p.profile_skins or {}
         skins["active_title"] = new_title
         p.profile_skins = skins
+        # Сохраняем в общий список титулов (из первой версии)
+        titles = (p.titles or "").split()
+        if new_title not in titles:
+            titles.append(new_title)
+            p.titles = " ".join(titles).strip()
         return new_title
     result = await ctx.repo.atomic_update(uid, _set)
     if result is None:
         await query.answer("Профиль не найден", show_alert=True)
         return
     await context.bot.send_message(chat_id=query.message.chat.id, text=f"✨ Титул «{new_title}» активирован!")
-    await skins_menu_handler(update, context)
+    await skins_menu_handler(update, context, ctx)
 
 @cb
 async def handle_set_bg(update, context, ctx):
