@@ -6035,108 +6035,33 @@ async def load_blunt_images(ctx: AppContext):
             await redis_breaker.call(ctx.redis.setex, f"blunt_image:{rarity}", 86400, saved)
 
 async def on_startup(app: Application):
-    """Инициализация всех сервисов и контекста."""
-    logger.info("Starting bot initialization...")
-
-    # 1. База данных
+    logger.info("Starting minimal init...")
     try:
         pool = await asyncpg.create_pool(
             settings.database_url,
-            min_size=5, max_size=20, command_timeout=15,
+            min_size=2, max_size=5, command_timeout=15,
             max_inactive_connection_lifetime=300.0
         )
-        logger.info("Database pool created")
+        async with pool.acquire() as conn:
+            await create_tables(conn)
+            await _run_migrations(conn)
+
+        # Создаём минимальный контекст
+        ctx = AppContext(
+            db_pool=pool,
+            redis_client=None,
+            cache=TTLCache(maxsize=2000, ttl=600),
+            settings=settings,
+            repo=PlayerRepository(pool, None, TTLCache(maxsize=2000, ttl=600)),
+            war_service=None,
+            pet_service=None,
+            achievement_service=None,
+        )
+        app.bot_data["ctx"] = ctx
+        logger.info("✅ Minimal ctx saved")
     except Exception as e:
-        logger.critical("Failed to create database pool: %s", e)
-        app.bot_data["db_error"] = str(e)
-        return
-
-    # Миграции
-    async with pool.acquire() as conn:
-        await create_tables(conn)
-        await _run_migrations(conn)
-
-    # 2. Redis
-    redis_client = None
-    if settings.redis_url:
-        try:
-            redis_client = await aioredis.from_url(settings.redis_url)
-            logger.info("Redis connected")
-        except Exception as e:
-            logger.warning("Redis unavailable: %s", e)
-
-    # 3. In‑memory cache
-    cache = TTLCache(maxsize=2000, ttl=600)
-
-    # 4. Репозиторий
-    repo = PlayerRepository(pool, redis_client, cache)
-
-    # 5. Сервисы
-    war_config = WarConfig()
-    war_settings = WarSettings()
-    war_service = GuildWarService(pool, redis_client, war_config, war_settings)
-
-    pet_config = {"dog": {"name": "🐕 Песик", "price": 3000, "max_name_len": 15}}
-    pet_service = PetService(repo, pet_config)
-
-    achievement_service = AchievementService(pool, redis_client, repo)
-
-    # 6. Контекст приложения
-    ctx = AppContext(
-        db_pool=pool,
-        redis_client=redis_client,
-        cache=cache,
-        settings=settings,
-        repo=repo,
-        war_service=war_service,
-        pet_service=pet_service,
-        achievement_service=achievement_service,
-    )
-    app.bot_data["ctx"] = ctx
-    logger.info("✅ Контекст сохранён в bot_data")
-
-    # 7. Загрузка изображений
-    try:
-        await load_blunt_images(ctx)
-    except Exception as e:
-        logger.error("Failed to load blunt images: %s", e)
-
-    # 8. Sentry
-    if settings.sentry_dsn:
-        try:
-            import sentry_sdk
-            sentry_sdk.init(dsn=settings.sentry_dsn, traces_sample_rate=1.0, environment=settings.environment)
-            logger.info("✅ Sentry activated")
-        except Exception as e:
-            logger.error("Sentry init failed: %s", e)
-
-    # 9. Джобы
-    if app.job_queue:
-        app.job_queue.run_repeating(keep_db_alive, interval=180, first=10)
-        app.job_queue.run_repeating(update_pulse, interval=3600, first=30)
-        app.job_queue.run_repeating(echo_of_distortion, interval=21600, first=300)
-        app.job_queue.run_daily(happy_hour_trigger, time=datetime.strptime("20:00", "%H:%M").time())
-        app.job_queue.run_weekly(weekly_guild_rating, day_of_week=6, time=datetime.strptime("00:00", "%H:%M").time())
-        logger.info("✅ Все джобы зарегистрированы")
-    else:
-        logger.warning("JobQueue не доступна")
-
-    # Prometheus (опционально)
-    try:
-        from prometheus_client import generate_latest
-        from aiohttp import web
-
-        async def metrics_handler(request):
-            return web.Response(body=generate_latest(), content_type='text/plain')
-
-        # Регистрируем маршрут, если приложение ещё не запущено
-        # (но здесь app уже существует, однако маршруты добавляются в main())
-        # поэтому просто сохраним handler, а в main() добавим:
-        app['metrics_handler'] = metrics_handler
-    except ImportError:
-        pass
-
-    logger.info("🚀 Бот готов к работе")
+        logger.exception("Minimal init failed")
+        raise
 
     async def healthcheck_handler(request):
         return web.Response(text="OK")
@@ -6265,38 +6190,23 @@ def main():
         webhook_errors = 0
 
         async def handle_webhook(request):
-            try:
-                data = await request.json()
-                update = Update.de_json(data, tg_app.bot)
-                chat_id = update.effective_chat.id if update.effective_chat else None
+    try:
+        data = await request.json()
+        update = Update.de_json(data, tg_app.bot)
+        chat_id = update.effective_chat.id if update.effective_chat else None
 
-                ctx = tg_app.bot_data.get("ctx")
-                if not ctx:
-                    logger.error("ctx отсутствует в bot_data")
-                    if chat_id:
-                        await tg_app.bot.send_message(chat_id, "⚠️ Бот инициализируется, попробуйте позже.")
-                    return web.Response(text="ctx_missing", status=500)
+        ctx = tg_app.bot_data.get("ctx")
+        if not ctx:
+            logger.error("ctx missing in webhook")
+            if chat_id:
+                await tg_app.bot.send_message(chat_id, "⚠️ Бот инициализируется.")
+            return web.Response(text="ctx_missing", status=500)
 
-                try:
-                    async with ctx.db_pool.acquire(timeout=2) as conn:
-                        await conn.execute("SELECT 1")
-                except Exception:
-                    logger.exception("База данных недоступна")
-                    if chat_id:
-                        await tg_app.bot.send_message(chat_id, "⚠️ База данных временно недоступна.")
-                    return web.Response(text="db_unreachable", status=500)
-
-                await tg_app.process_update(update)
-                return web.Response(text="OK")
-
-            except Exception:
-                logger.exception("Ошибка при обработке вебхука")
-                if 'chat_id' in locals() and chat_id:
-                    try:
-                        await tg_app.bot.send_message(chat_id, "⚠️ Произошла внутренняя ошибка.")
-                    except Exception:
-                        pass
-                return web.Response(text="Error", status=500)
+        await tg_app.process_update(update)
+        return web.Response(text="OK")
+    except Exception as e:
+        logger.exception("webhook error")
+        return web.Response(text="Error", status=500)
 
         async def healthcheck(request):
             return web.Response(text="OK")
