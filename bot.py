@@ -170,15 +170,75 @@ def divine_command(command_name: str):
                     pass
         return wrapper
     return decorator
+    
+def game_handler(func):
+    """Универсальный декоратор: автоматически предоставляет ctx и player, обрабатывает ошибки."""
+    import inspect
+    sig = inspect.signature(func)
+    needs_ctx = 'ctx' in sig.parameters
+    needs_player = 'player' in sig.parameters
+
+    @wraps(func)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+        ctx = None
+        player = None
+
+        # 1. Автоматическая загрузка ctx (если требуется)
+        if needs_ctx:
+            ctx = context.application.bot_data.get("ctx")
+            if not ctx:
+                try:
+                    await update.effective_message.reply_text("⚠️ Бот инициализируется, попробуйте позже.")
+                except Exception:
+                    pass
+                return
+
+        # 2. Автоматическая загрузка player (если требуется)
+        if needs_player and ctx:
+            uid = update.effective_user.id if update.effective_user else None
+            if uid:
+                player = await ctx.repo.get_by_id(uid)
+                if not player or not player.exists:
+                    try:
+                        await update.effective_message.reply_text("Профиль не найден. Напиши /start")
+                    except Exception:
+                        pass
+                    return
+
+        # 3. Подготовка аргументов
+        new_kwargs = {**kwargs}
+        if needs_ctx:
+            new_kwargs['ctx'] = ctx
+        if needs_player:
+            new_kwargs['player'] = player
+
+        # 4. Выполнение с защитой от ошибок
+        try:
+            return await func(update, context, *args, **new_kwargs)
+        except Exception as e:
+            logger.exception(f"Ошибка в {func.__name__}")
+            try:
+                if update.callback_query:
+                    await update.callback_query.answer("⚠️ Внутренняя ошибка. Админ уже уведомлён.", show_alert=True)
+                else:
+                    await update.effective_message.reply_text("⚠️ Внутренняя ошибка. Админ уже уведомлён.")
+            except Exception:
+                pass
+            if settings.admin_id:
+                import traceback as tb_module
+                try:
+                    await context.bot.send_message(
+                        chat_id=settings.admin_id,
+                        text=f"🚨 {func.__name__}:\n{tb_module.format_exc()[:800]}"
+                    )
+                except Exception:
+                    pass
+    return wrapper
 
 # Проверка: если retry – модуль, а не функция, будет ошибка
 assert callable(retry), "retry должен быть функцией, а не модулем!"
 
-# # ============================================================
-# НАСТРОЙКИ 
-# ============================================================
-# ── Настройки через Pydantic ──
-
+# НАСТРОЙКИ через пидантик
 class Player(BaseModel):
     user_id: int
     username: str = ""
@@ -2672,6 +2732,86 @@ async def farm_callback(update, context):
     await check_achievements(uid, context)
     
     if player and player.onboarding_step == 1:
+        player.onboarding_step = 2
+        await ctx.repo.save(player)
+        kb2 = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🌿 Крафт", callback_data="craft")],
+            [InlineKeyboardButton("⏭️ Пропустить обучение", callback_data="skip_onboarding")]
+        ])
+        await context.bot.send_message(
+            chat_id=uid,
+            text=(
+                "<b>🎓 Обучение (шаг 3 из 3)</b>\n\n"
+                "<b>🌿 Отлично! Теперь создай свой первый блант.</b>\n\n"
+                "Нажми «Крафт» и выбери «Обычный блант».\n\n"
+                "<i>💡 Бланты нужны, чтобы активировать случайный эффект.</i>"
+            ),
+            reply_markup=kb2,
+            parse_mode='HTML'
+        )
+    
+@rate_limit(3)
+async def farm_callback_v2(update, context, ctx, player):
+    user = update.effective_user
+    uid = user.id
+    uname = user.username or user.first_name
+    now = datetime.now()
+
+    async def _farm(p, conn):
+        if p.last_farm and (now - p.last_farm) < timedelta(hours=FARM_COOLDOWN_HOURS):
+            remain = int((timedelta(hours=FARM_COOLDOWN_HOURS) - (now - p.last_farm)).seconds / 60)
+            return ("cooldown", remain)
+
+        old_balance = p.balance
+        earned, crit, happy = _calculate_farm_reward(p, context)
+
+        old_count = p.farm_count
+        new_count = old_count + 1
+        medal_text, medal_bonus = get_medal_text_and_reward(old_count, new_count, FARM_MEDALS)
+
+        p.balance += earned + medal_bonus
+        p.farm_count = new_count
+        p.last_farm = now
+        p.last_farm_date = date.today()
+
+        if ctx.war_service:
+            await ctx.war_service.add_score_raw(uid, earned + medal_bonus, conn)
+
+        return ("ok", earned, crit, happy, medal_text, new_count, p.balance, old_balance)
+
+    result = await ctx.repo.atomic_update(uid, _farm)
+    if result is None:
+        await update.effective_message.reply_text("Сначала активируйся: /start")
+        return
+
+    status, *data = result
+    if status == "cooldown":
+        remain = data[0]
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=f"<b>🍬 OAC копятся 🌱</b>\n\n<b>🍃 Подожди {remain} мин</b>",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
+        )
+        if update.callback_query:
+            await update.callback_query.answer()
+        return
+
+    earned, crit, happy, medal_text, new_count, new_balance, old_balance = data
+
+    target = get_medal_target(new_count, FARM_MEDALS)
+    text = _format_farm_message(earned, crit, happy, medal_text, new_count, target, new_balance)
+
+    anim_msg = await animate_progress_bar(update, context, title="🍬 Фармим...")
+    if anim_msg is not None:
+        await anim_msg.edit_text(text, parse_mode='HTML')
+    else:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=text, parse_mode='HTML')
+
+    await check_rank_up(context, uid, uname, old_balance, new_balance)
+    await check_achievements(uid, context)
+
+    if player.onboarding_step == 1:
         player.onboarding_step = 2
         await ctx.repo.save(player)
         kb2 = InlineKeyboardMarkup([
@@ -5693,7 +5833,7 @@ async def cancel_gift_handler(update, context):
 TEXT_COMMAND_HANDLERS = {
     # Команды с / (без слеша)
     "start": start,
-    "farm": farm_callback,
+    "farm": game_handler(farm_callback_v2),
     "craft": craft_callback,
     "smoke": smoke_callback,
     "ritual": ritual_callback,
@@ -5740,7 +5880,7 @@ TEXT_COMMAND_HANDLERS = {
 # ============================================================
 CALLBACKS: Dict[str, Callable] = {
     "menu": menu_handler,
-    "farm": farm_callback,
+    "farm": game_handler(farm_callback_v2),
     "craft": craft_callback,
     "smoke": smoke_callback,
     "ritual": ritual_callback,
