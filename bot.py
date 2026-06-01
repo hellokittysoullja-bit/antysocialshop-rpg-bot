@@ -7,10 +7,10 @@ def log_uncaught(exc_type, exc_value, exc_tb):
     sys.__excepthook__(exc_type, exc_value, exc_tb)
 sys.excepthook = log_uncaught
 import asyncio, json, logging, os, sys, time, random, re, hashlib, html, enum, uuid, copy
-from datetime import datetime, timedelta, date, time as time_module
+from datetime import datetime, timedelta, date, time as time_module, timezone
 from threading import Thread
 from typing import Optional, List, Any, Dict, NamedTuple, Callable
-from dataclasses import dataclass, field   # <-- должно быть здесь, до использования
+from dataclasses import dataclass, field  
 
 import asyncpg
 from tenacity import (
@@ -946,15 +946,15 @@ async def create_named_blunt(user_id: int, name: str, rarity: str = None, conn=N
     
     clean_name = str(name or "").strip()[:25] or "Безымянный"
     reaction = random.choice(FUNNY_REACTIONS)
-    blunt_id = f"blunt_{user_id}_{int(datetime.now(datetime.timezone.utc).timestamp())}_{random.randint(1000,9999)}"
+    blunt_id = f"blunt_{user_id}_{int(datetime.now(timezone.utc).timestamp())}_{random.randint(1000,9999)}"
     hash_code = "0x" + hashlib.sha256((blunt_id + ":hash").encode()).hexdigest()[:16]
     rare_number = f"{rarity[0].upper()}-{random.randint(1000,9999)}"
     
     item = {
         "id": blunt_id, "type": "named", "name": clean_name, "rarity": rarity,
         "serial": None, "rare_number": rare_number, "hash": hash_code,
-        "reaction": reaction, "created_at": datetime.now(datetime.timezone.utc).isoformat(),
-        "owner_history": [{"user_id": str(user_id), "since": datetime.now(datetime.timezone.utc).isoformat()}],
+        "reaction": reaction, "created_at": datetime.now(timezone.utc).isoformat(),
+        "owner_history": [{"user_id": str(user_id), "since": datetime.now(timezone.utc).isoformat()}],
     }
     
     player = await ctx.repo.get_by_id(user_id)
@@ -3124,7 +3124,7 @@ async def transfer_blunt(sender_id: int, receiver_id: int, blunt_id: str, ctx: A
                     item["owner_history"] = []
                 item["owner_history"].append({
                     "user_id": str(receiver_id),
-                    "since": datetime.utcnow().isoformat()
+                    "since": datetime.now(timezone.utc).isoformat()
                 })
 
                 receiver.inventory.append(item)
