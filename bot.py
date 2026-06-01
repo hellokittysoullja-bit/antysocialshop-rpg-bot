@@ -1302,6 +1302,10 @@ def calculate_smoke_reward(p, happy_hour):
 class SmokeStatus(Enum):
     NO_BLUNTS = "no_blunts"
     OK = "ok"
+    
+class CraftStatus(Enum):
+    NO_MONEY = "no_money"
+    OK = "ok"
 
 # ========== БАЗА ДАННЫХ AIVEN ==========
 db_pool = None
@@ -2905,6 +2909,7 @@ def _format_dust_message(name: str, reaction: str) -> str:
     )
 
 @rate_limit(3)
+@game_handler
 async def craft_callback_v2(update, context, ctx, player):
     user = update.effective_user
     uid = user.id
@@ -2917,53 +2922,49 @@ async def craft_callback_v2(update, context, ctx, player):
     kb = _build_craft_keyboard(player.m_essence)
     await edit_or_reply(update, context, text, reply_markup=kb, parse_mode='HTML')
 
-
-@error_handler
-async def handle_craft_normal(update, context):
-    ctx = context.application.bot_data["ctx"]
+@rate_limit(2)
+@game_handler
+async def handle_craft_normal_v2(update, context, ctx, player):
     query = update.callback_query
     await query.answer()
     uid = query.from_user.id
+    chat_id = update.effective_chat.id
 
-    # Загружаем игрока для проверки онбординга и баланса
-    player = await ctx.repo.get_by_id(uid)
-    if not player or not player.exists:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="Сначала активируйся: /start")
-        return
+    async def _craft(p, conn):
+        if p.balance < GAME_CONFIG["craft_cost"]:
+            return CraftStatus.NO_MONEY, None
 
-    async def _craft(player, conn):
-        if player.balance < GAME_CONFIG["craft_cost"]:
-            return ("no_money",)
-
-        old_count = player.craft_count
+        old_count = p.craft_count
         new_count = old_count + 1
         medal_text, medal_bonus = get_medal_text_and_reward(old_count, new_count, CRAFT_MEDALS)
 
-        player.balance -= GAME_CONFIG["craft_cost"]
-        player.blunts += 1
-        player.craft_count = new_count
+        p.balance -= GAME_CONFIG["craft_cost"]
+        p.blunts += 1
+        p.craft_count = new_count
 
         if random.random() < 0.05:
-            player.blunts += 1
+            p.blunts += 1
 
-        player.balance += medal_bonus
+        p.balance += medal_bonus
 
-        await ctx.war_service.add_score_raw(uid, medal_bonus, conn)
+        # Безопасное начисление очков войны
         if ctx.war_service:
-            await ctx.war_service.add_score(uid, WarAction.CRAFT, conn)
+            try:
+                await ctx.war_service.add_score(uid, WarAction.CRAFT, conn)
+            except Exception:
+                logger.exception("War service error, proceeding without points")
 
-        return ("ok", medal_text, new_count, player.blunts, player.balance)
+        return CraftStatus.OK, (medal_text, new_count, p.blunts, p.balance)
 
     result = await ctx.repo.atomic_update(uid, _craft)
     if result is None:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="Сначала активируйся: /start")
+        await query.answer("Профиль не найден.", show_alert=True)
         return
 
-    status, *data = result
-    if status == "no_money":
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=f"<b>❌ Недостаточно OAC.</b>\n🕯️ Требуется <b>{GAME_CONFIG['craft_cost']} OAC</b> 🍬.",
+    status, data = result
+    if status == CraftStatus.NO_MONEY:
+        await safe_send(context, chat_id,
+            f"<b>❌ Недостаточно OAC.</b>\n🕯️ Требуется <b>{GAME_CONFIG['craft_cost']} OAC</b> 🍬.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]]),
             parse_mode='HTML'
         )
@@ -2978,24 +2979,27 @@ async def handle_craft_normal(update, context):
         [InlineKeyboardButton("🔙 Назад", callback_data="craft")]
     ])
 
+    # Элегантная отправка результата без дублирования
     anim_msg = await animate_progress_bar(update, context, title="🌿 Скручиваем Блант...")
     if anim_msg is not None:
         await anim_msg.edit_text(text, reply_markup=kb, parse_mode='HTML')
     else:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=kb, parse_mode='HTML')
+        await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb, parse_mode='HTML')
 
-    await check_achievements(uid, context)
+    # Достижения в фоне
+    background = context.application.bot_data.get("background")
+    if background:
+        asyncio.create_task(background.run(check_achievements(uid, context)))
+    else:
+        await check_achievements(uid, context)
 
-    # Онбординг: после первого крафта завершаем обучение (шаг 3 из 3)
-    if player and player.onboarding_step == 2:
+    # Онбординг
+    if player.onboarding_step == 2:
         player.onboarding_step = -1
         await ctx.repo.save(player)
         await context.bot.send_message(
             chat_id=uid,
-            text=(
-                "<b>🎉 Поздравляю! Ты освоил основы.</b>\n\n"
-                "💎 Теперь ты можешь исследовать другие разделы меню."
-            )
+            text="<b>🎉 Поздравляю! Ты освоил основы.</b>\n\n💎 Теперь ты можешь исследовать другие разделы меню."
         )
 
 @error_handler
