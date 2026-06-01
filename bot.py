@@ -2809,22 +2809,16 @@ def _format_dust_message(name: str, reaction: str) -> str:
         f"📜 Реакция: <i>{reaction}</i>"
     )
 
-
-# ── Обработчики ──
-@error_handler
-@rate_limit(2)
-async def craft_callback(update, context):
-    ctx = context.application.bot_data["ctx"]
-    user, _ = get_user_and_msg(update)
+@rate_limit(3)
+async def craft_callback_v2(update, context, ctx, player):
+    user = update.effective_user
     uid = user.id
-    player = await ctx.repo.get_by_id(uid)
-    if not player or not player.user_id:
-        await update.effective_message.reply_text("Сначала активируйся: /start")
-        return
 
     stats = _get_craft_stats(player.balance, player.blunts, player.craft_count)
-    text = _format_craft_menu_text(player.balance, player.blunts, player.craft_count,
-                                   stats["medal_name"], stats["target"], player.m_essence)
+    text = _format_craft_menu_text(
+        player.balance, player.blunts, player.craft_count,
+        stats["medal_name"], stats["target"], player.m_essence
+    )
     kb = _build_craft_keyboard(player.m_essence)
     await edit_or_reply(update, context, text, reply_markup=kb, parse_mode='HTML')
 
@@ -5741,7 +5735,7 @@ TEXT_COMMAND_HANDLERS = {
     # Команды с / (без слеша)
     "start": start,
     "farm": game_handler(farm_callback_v2),
-    "craft": craft_callback,
+    "craft": game_handler(craft_callback_v2),
     "smoke": smoke_callback,
     "ritual": ritual_callback,
     "profile": profile_callback,
@@ -5763,8 +5757,8 @@ TEXT_COMMAND_HANDLERS = {
     "checkbluntpics": check_blunt_pics,
     # Текстовые сокращения (без слеша)
     "фарм": farm_callback_v2,
+    "крафт": craft_callback_v2,
     "дунуть": smoke_callback,
-    "крафт": craft_callback,
     "топ": top_callback,
     "удача": luck_callback,
     "профиль": profile_callback,
@@ -5788,7 +5782,7 @@ TEXT_COMMAND_HANDLERS = {
 CALLBACKS: Dict[str, Callable] = {
     "menu": menu_handler,
     "farm": game_handler(farm_callback_v2),
-    "craft": craft_callback,
+    "craft": game_handler(craft_callback_v2),
     "smoke": smoke_callback,
     "ritual": ritual_callback,
     "collect": collect_callback,
