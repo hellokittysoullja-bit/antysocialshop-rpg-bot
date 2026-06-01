@@ -172,57 +172,73 @@ def divine_command(command_name: str):
     return decorator
     
 def game_handler(func):
-    """Универсальный декоратор: автоматически предоставляет ctx и player, обрабатывает ошибки."""
+    """Универсальный декоратор с кэшированием, защитой от повторов и ошибок."""
     import inspect
     sig = inspect.signature(func)
     needs_ctx = 'ctx' in sig.parameters
     needs_player = 'player' in sig.parameters
 
     @wraps(func)
-    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+    async def wrapper(update, context, *args, **kwargs):
+        # === ИДЕМПОТЕНТНОСТЬ (защита от повторных вебхуков) ===
+        update_id = None
+        if update:
+            update_id = getattr(update, 'update_id', None)
+
+        if update_id:
+            ctx_temp = context.application.bot_data.get("ctx")
+            if ctx_temp and ctx_temp.cache:
+                idemp_key = f"processed_update:{update_id}"
+                if ctx_temp.cache.get(idemp_key):
+                    return  # тихо выходим, уже обработано
+                ctx_temp.cache[idemp_key] = True
+
+        # === ЗАГРУЗКА ЗАВИСИМОСТЕЙ ===
         ctx = None
         player = None
 
-        # 1. Автоматическая загрузка ctx (если требуется)
         if needs_ctx:
             ctx = context.application.bot_data.get("ctx")
             if not ctx:
                 try:
                     await update.effective_message.reply_text("⚠️ Бот инициализируется, попробуйте позже.")
-                except Exception:
+                except:
                     pass
                 return
 
-        # 2. Автоматическая загрузка player (если требуется)
         if needs_player and ctx:
-            uid = update.effective_user.id if update.effective_user else None
-            if uid:
+            uid = update.effective_user.id
+            # Кэш игрока (TTLCache)
+            cache_key = f"player:{uid}"
+            player = ctx.cache.get(cache_key) if ctx.cache else None
+            if not player:
                 player = await ctx.repo.get_by_id(uid)
-                if not player or not player.exists:
-                    try:
-                        await update.effective_message.reply_text("Профиль не найден. Напиши /start")
-                    except Exception:
-                        pass
-                    return
+                if player and player.exists and ctx.cache:
+                    ctx.cache[cache_key] = player
+            if not player or not player.exists:
+                try:
+                    await update.effective_message.reply_text("Профиль не найден. Напиши /start")
+                except:
+                    pass
+                return
 
-        # 3. Подготовка аргументов
         new_kwargs = {**kwargs}
         if needs_ctx:
             new_kwargs['ctx'] = ctx
         if needs_player:
             new_kwargs['player'] = player
 
-        # 4. Выполнение с защитой от ошибок
+        # === ВЫПОЛНЕНИЕ ===
         try:
             return await func(update, context, *args, **new_kwargs)
-        except Exception as e:
-            logger.exception(f"Ошибка в {func.__name__}")
+        except Exception:
+            logger.exception(f"Критическая ошибка в {func.__name__}")
             try:
                 if update.callback_query:
                     await update.callback_query.answer("⚠️ Внутренняя ошибка. Админ уже уведомлён.", show_alert=True)
-                else:
+                elif update.effective_message:
                     await update.effective_message.reply_text("⚠️ Внутренняя ошибка. Админ уже уведомлён.")
-            except Exception:
+            except:
                 pass
             if settings.admin_id:
                 import traceback as tb_module
@@ -231,7 +247,7 @@ def game_handler(func):
                         chat_id=settings.admin_id,
                         text=f"🚨 {func.__name__}:\n{tb_module.format_exc()[:800]}"
                     )
-                except Exception:
+                except:
                     pass
     return wrapper
 
@@ -1250,6 +1266,42 @@ ACHIEVEMENT_CONDITIONS = {
     "craft_250": ("craft_count", 250),
     "alchemy_15": ("alchemy_count", 15),
 }
+
+SMOKE_EFFECTS = [
+    (0.18, "😵‍💫 Лёгкий приход", "«Станки Фабрики №9 работают в ритме твоего сердца»", True),
+    (0.36, "💤 Полный Штиль", "«Дым рассеялся, оставив лишь лёгкий шлейф»", False),
+    (0.53, "😵‍💫 Паранойя", "Всё идёт не так. Тени сгущаются…", False),
+    (0.70, "💨 Кашель", "«Первая тяга была слишком жёсткой, пробило на кашель»", True),
+    (0.85, "🛋️ Паралич", "«Тело стало ватным, смотришь в одну точку и не можешь пошевелиться»", False),
+    (1.0,  "🧘 Глубокое Озарение", "«Ты понял, что блант — это ключ к разгадке бытия»", False),
+]
+
+def build_smoke_effect(roll, earned):
+    for threshold, name, flavor, has_earned in SMOKE_EFFECTS:
+        if roll < threshold:
+            earned_str = f"🍬 <b>+{earned} OAC</b>" if has_earned and earned else ""
+            return (
+                f"<b>💨 ДЫМ РАССЕЯЛСЯ</b>\n"
+                f"– {name}\n"
+                f"– <i>{flavor}</i>\n\n"
+                f"{earned_str}"
+            )
+    return ""
+
+def calculate_smoke_reward(p, happy_hour):
+    r = random.random()
+    earned = 0
+    if r < 0.18:
+        earned = random.randint(15, 40)
+        if happy_hour:
+            earned *= HAPPY_HOUR_MULTIPLIER
+    elif r < 0.70:
+        earned = -5
+    return earned
+
+class SmokeStatus(Enum):
+    NO_BLUNTS = "no_blunts"
+    OK = "ok"
 
 # ========== БАЗА ДАННЫХ AIVEN ==========
 db_pool = None
@@ -3293,130 +3345,82 @@ async def smoke_callback(update, context):
     else:
         await msg.reply_text(main_text, reply_markup=main_kb, parse_mode='HTML')
 
-@error_handler
-async def do_smoke(update, context):
-    ctx = context.application.bot_data["ctx"]         
+@rate_limit(1) #версия 2
+@game_handler
+async def do_smoke(update, context, ctx, player):
     query = update.callback_query
     await query.answer()
     uid = query.from_user.id
-    uname = html.escape(query.from_user.username or query.from_user.first_name)
 
-    async def _smoke(player, conn):
-        if (player.blunts or 0) < 1:
-            return ("no_blunts",)
-        save = (player.guild == "WHITE" and random.randint(1, 100) <= 20)
-        r = random.random()
-        earned = 0
-        if r < 0.18:
-            earned = random.randint(15, 40)
-            if context.bot_data.get("happy_hour"):
-                earned *= HAPPY_HOUR_MULTIPLIER
-        elif r < 0.70:
-            earned = -5
+    async def _smoke(p, conn):
+        if (p.blunts or 0) < 1:
+            return SmokeStatus.NO_BLUNTS, None
 
-        old_count = player.smoke_count or 0
+        save = (p.guild == "WHITE" and random.randint(1, 100) <= 20)
+        earned = calculate_smoke_reward(p, context.bot_data.get("happy_hour"))
+
+        old_count = p.smoke_count or 0
         new_count = old_count + 1
         medal_text, medal_bonus = get_medal_text_and_reward(old_count, new_count, SMOKE_MEDALS)
 
         if not save:
-            player.blunts -= 1
-        player.smoke_count = new_count
-        player.balance = (player.balance or 0) + earned + medal_bonus
-        if not player.inhaled:
-            player.inhaled = 1
+            p.blunts -= 1
+        p.smoke_count = new_count
+        p.balance = (p.balance or 0) + earned + medal_bonus
+        p.inhaled = 1
 
-        # военный счёт (новый сервис)
-        await ctx.war_service.add_score(uid, WarAction.CRAFT, conn)
+        if ctx.war_service:
+            try:
+                await ctx.war_service.add_score(uid, WarAction.CRAFT, conn)
+            except Exception:
+                logger.exception("War service error, proceeding without points")
 
-        return ("ok", earned, r, save, medal_text, new_count, player.blunts, player.balance)
+        return SmokeStatus.OK, (earned, save, medal_text, new_count, p.blunts, p.balance)
 
     result = await ctx.repo.atomic_update(uid, _smoke)
     if result is None:
-        await query.answer("Профиль не найден.")
+        await query.answer("Профиль не найден.", show_alert=True)
         return
 
-    status, *data = result
-    if status == "no_blunts":
-        empty_text = (
-            "<b>💨 ДУНУТЬ</b>\n\n"
-            "<b>🌿 Твой свёрток пуст</b>\n\n"
-            "<i>🎈 Скрути новый блант</i>"
+    status, data = result
+    if status == SmokeStatus.NO_BLUNTS:
+        await query.message.edit_text(
+            "<b>💨 ДУНУТЬ</b>\n\n<b>🌿 Твой свёрток пуст</b>\n\n<i>🎈 Скрути новый блант</i>",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🌿 Крафт", callback_data="craft")],
+                [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
+            ]),
+            parse_mode='HTML'
         )
-        empty_kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🌿 Крафт", callback_data="craft")],
-            [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
-        ])
-        await query.message.edit_text(empty_text, reply_markup=empty_kb, parse_mode='HTML')
         return
 
-    earned, r, save, medal_text, new_count, bl_left, new_balance = data
-
-    # Эффекты (без изменений, твоя оригинальная логика)
-    if r < 0.18:
-        effect = (
-            f"<b>💨 ДЫМ РАССЕЯЛСЯ</b>\n"
-            f"– 😵‍💫 <b>Лёгкий приход</b>\n"
-            f"– <i>«Станки Фабрики №9 работают в ритме твоего сердца»</i>\n\n"
-            f"🍬 <b>+{earned} OAC</b>"
-        )
-    elif r < 0.36:
-        effect = (
-            f"<b>💨 ДЫМ РАССЕЯЛСЯ</b>\n"
-            f"– 💤 <b>Полный Штиль</b>\n"
-            f"– <i>«Дым рассеялся, оставив лишь лёгкий шлейф»</i>"
-        )
-    elif r < 0.53:
-        effect = (
-            f"<b>💨 ДЫМ РАССЕЯЛСЯ</b>\n"
-            f"– 😵‍💫 <b>Паранойя</b>\n"
-            f"– <i>Всё идёт не так. Тени сгущаются…</i>"
-        )
-    elif r < 0.70:
-        effect = (
-            f"<b>💨 ДЫМ РАССЕЯЛСЯ</b>\n"
-            f"– 💨 <b>Кашель</b>\n"
-            f"– <i>«Первая тяга была слишком жёсткой, пробило на кашель»</i>\n\n"
-            f"📉 <b>{earned} OAC</b>"
-        )
-    elif r < 0.85:
-        effect = (
-            f"<b>💨 ДЫМ РАССЕЯЛСЯ</b>\n"
-            f"– 🛋️ <b>Паралич</b>\n"
-            f"– <i>«Тело стало ватным, смотришь в одну точку и не можешь пошевелиться»</i>"
-        )
-    else:
-        effect = (
-            f"<b>💨 ДЫМ РАССЕЯЛСЯ</b>\n"
-            f"– 🧘 <b>Глубокое Озарение</b>\n"
-            f"– <i>«Ты понял, что блант — это ключ к разгадке бытия»</i>"
-        )
-
-    target = get_medal_target(new_count, SMOKE_MEDALS)
-    progress_bar_str = get_medal_progress(new_count, SMOKE_MEDALS)
+    earned, save, medal_text, new_count, bl_left, new_balance = data
+    effect = build_smoke_effect(random.random(), earned)
 
     text = (
         f"{effect}\n\n"
         f"{medal_text}"
-        f"<b>💨 Дым:</b> {new_count}/{target}\n"
-        f"{progress_bar_str}\n\n"
+        f"<b>💨 Дым:</b> {new_count}/{get_medal_target(new_count, SMOKE_MEDALS)}\n"
+        f"{get_medal_progress(new_count, SMOKE_MEDALS)}\n\n"
         f"<b>🍃 Блантов в свёртке:</b> <b>{bl_left}</b>"
     )
     if save:
         text += "\n⚜️ <i>Светлая Гильдия сохранила твой Блант!</i>"
 
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("💨 Дунуть ещё", callback_data="do_smoke") if bl_left >= 1 else InlineKeyboardButton("🌿 Крафтить ещё", callback_data="craft")],
+        [InlineKeyboardButton("💨 Дунуть ещё", callback_data="do_smoke") if bl_left >= 1
+         else InlineKeyboardButton("🌿 Крафтить ещё", callback_data="craft")],
         [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
     ])
     await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
-    # Достижения проверяем в фоне
+
     background = context.application.bot_data.get("background")
     if background:
         asyncio.create_task(background.run(check_achievements(uid, context)))
     else:
         await check_achievements(uid, context)
-    
-    if player and player.onboarding_step == 3:
+
+    if player.onboarding_step == 3:
         player.onboarding_step = -1
         await ctx.repo.save(player)
         await context.bot.send_message(
