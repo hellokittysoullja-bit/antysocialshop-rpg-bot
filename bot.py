@@ -6163,8 +6163,7 @@ def main():
                   .post_shutdown(on_shutdown)
                   .build())
 
-        tg_app.add_handler(MessageHandler(filters.COMMAND, handle_command))
-        tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_chat_shortcut))
+        tg_app.add_handler(MessageHandler(filters.TEXT, handle_text))
         tg_app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_member))
         tg_app.add_handler(CallbackQueryHandler(button_handler))
         tg_app.add_error_handler(global_error_handler)
