@@ -3921,7 +3921,7 @@ async def guild_info_callback(update, context):
     kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="menu")])
     kb = InlineKeyboardMarkup(kb_rows)
 
-    await edit_or_reply(update, context, text, reply_markup=kb)
+    await edit_or_reply(update, context, text, reply_markup=kb, parse_mode='HTML')
 
 @error_handler
 async def guild_shrine_callback(update, context):
@@ -4043,7 +4043,7 @@ async def guild_war_callback(update, context):
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔙 Назад", callback_data="guild_info")]
     ])
-    await edit_or_reply(update, context, text, reply_markup=kb)
+    await edit_or_reply(update, context, text, reply_markup=kb, parse_mode='HTML')
 
 @error_handler
 async def confess_callback(update, context):
@@ -4333,7 +4333,7 @@ async def luck_callback(update, context, action=None):
     )
     kb_rows = _build_luck_keyboard(now, player, cfg, wheel_ok, berserk_ok, alchemy_ok)
     kb = InlineKeyboardMarkup(kb_rows)
-    await edit_or_reply(update, context, text, reply_markup=kb)
+    await edit_or_reply(update, context, text, reply_markup=kb, parse_mode='HTML')
 
 
 # ── Колесо ──────────────────────────────────────────────────
@@ -4445,7 +4445,7 @@ async def _process_alchemy_start(update, context, player, cfg):
         [InlineKeyboardButton("🧪 Запустить реакцию ⚗️", callback_data="alchemy_confirm")],
         [InlineKeyboardButton("🔙 Назад", callback_data="luck")]
     ])
-    await edit_or_reply(update, context, text, reply_markup=kb)
+    await edit_or_reply(update, context, text, reply_markup=kb, parse_mode='HTML')
 
 
 # ── Алхимия (запуск) ────────────────────────────────────────
@@ -4652,7 +4652,7 @@ async def lab_enter(update, context):
                 f"<i>– Портал откроется через <b>{hrs} ч {mins} мин</b>.</i>"
             )
             kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="menu")]])
-            await edit_or_reply(update, context, text, reply_markup=kb)
+            await edit_or_reply(update, context, text, reply_markup=kb, parse_mode='HTML')
             return
     total_rooms = 4 + depth
     text = (
@@ -4666,7 +4666,7 @@ async def lab_enter(update, context):
         [InlineKeyboardButton("🍃 Войти в лабиринт", callback_data="lab_enter_confirm")],
         [InlineKeyboardButton("🔙 Назад", callback_data="menu")]
     ])
-    await edit_or_reply(update, context, text, reply_markup=kb)
+    await edit_or_reply(update, context, text, reply_markup=kb, parse_mode='HTML')
 
 # ─── ПОДГОТОВКА К ЗАБЕГУ ────────────────────────────────────
 async def lab_enter_confirm(update, context):
@@ -5021,7 +5021,7 @@ async def show_lab_final(update, context):
     )
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 К Лабиринту", callback_data="lab_start")],
                                [InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
-    await edit_or_reply(update, context, text, reply_markup=kb)
+    await edit_or_reply(update, context, text, reply_markup=kb, parse_mode='HTML')
     await check_achievements(uid, context)
 
 # ─── СМЕРТЬ В ЛАБИРИНТЕ ──────────────────────────────────────
@@ -5055,7 +5055,7 @@ async def show_lab_death(update, context):
     )
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 К Лабиринту", callback_data="lab_start")],
                                [InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
-    await edit_or_reply(update, context, text, reply_markup=kb)
+    await edit_or_reply(update, context, text, reply_markup=kb, parse_mode='HTML')
 
 async def welcome_new_member(update, context):
     for member in update.message.new_chat_members:
