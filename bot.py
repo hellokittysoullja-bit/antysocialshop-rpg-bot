@@ -317,7 +317,7 @@ class PlayerRepository:
         values = [getattr(player, col) for col in columns]
         for idx, col in enumerate(columns):
             if col in json_cols:
-                values[idx] = json.dumps(getattr(player, col), default=str)
+                values[idx] = json.dumps(getattr(player, col), separators=(',', ':'), default=str)
 
         sql = f"""
             INSERT INTO players ({cols_sql})
@@ -1442,6 +1442,11 @@ async def _run_migrations(conn):
     except Exception as e:
         logger.critical("❌ Ошибка целостности после миграций: %s", e)
         raise RuntimeError("Database integrity check failed") from e
+        
+    # Срочная настройка autovacuum для таблицы players
+    await conn.execute("ALTER TABLE players SET (autovacuum_vacuum_scale_factor = 0.01)")
+    await conn.execute("ALTER TABLE players SET (autovacuum_vacuum_threshold = 50)")
+    await conn.execute("ALTER TABLE players SET (autovacuum_vacuum_cost_limit = 200)")
     
 async def close_db_pool():
     global db_pool
@@ -6026,6 +6031,18 @@ async def on_startup(app: Application):
 
     async def healthcheck_handler(request):
         return web.Response(text="OK")
+        
+    async def clean_old_data(context):
+        ctx = context.application.bot_data.get("ctx")
+        async with ctx.db_pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM players WHERE last_farm < $1 AND balance = 0",
+                datetime.now(timezone.utc) - timedelta(days=30)
+            )
+            await conn.execute(
+                "DELETE FROM guild_weekly WHERE week_start < $1",
+                (datetime.now(timezone.utc) - timedelta(days=60)).date()
+            )
 
     # ВОССТАНОВЛЕНЫ: запуск всех джобов
     if app.job_queue:
