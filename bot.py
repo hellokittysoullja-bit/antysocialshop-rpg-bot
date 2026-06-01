@@ -6250,9 +6250,10 @@ def main():
             raise RuntimeError("BOT_TOKEN and DATABASE_URL must be set")
 
         request = HTTPXRequest(connection_pool_size=50, read_timeout=10, write_timeout=10)
-        
+
+        # 2. Определяем shutdown-функцию ДО использования
         async def on_shutdown_webhook(app):
-            """Процедура завершения 7-го уровня. Выполняется только при полностью инициализированном приложении."""
+            """Процедура завершения 7-го уровня."""
             logger.info("🛑 Начинаю плавное завершение работы...")
 
             # Фаза 1: Даём текущим задачам завершиться с таймаутом
@@ -6279,15 +6280,25 @@ def main():
                         await asyncio.sleep(2 ** attempt + random.uniform(0, 0.5))
 
             # Фаза 3: Освобождаем ресурсы
-            ctx = tg_app.bot_data["ctx"]  # гарантированно существует
-            await ctx.db_pool.close()
-            logger.info("✅ Пул базы данных закрыт")
-            if ctx.redis:
-                await ctx.redis.close()
-                logger.info("✅ Redis соединение закрыто")
+            ctx = tg_app.bot_data.get("ctx")
+            if ctx:
+                if hasattr(ctx, 'db_pool') and ctx.db_pool:
+                    try:
+                        await ctx.db_pool.close()
+                        logger.info("✅ Пул базы данных закрыт")
+                    except Exception as e:
+                        logger.error("❌ Ошибка при закрытии пула БД: %s", e)
+
+                if hasattr(ctx, 'redis') and ctx.redis:
+                    try:
+                        await ctx.redis.close()
+                        logger.info("✅ Redis соединение закрыто")
+                    except Exception as e:
+                        logger.error("❌ Ошибка при закрытии Redis: %s", e)
 
             logger.info("🏁 Завершение работы завершено")
 
+        # 3. Создаём tg_app с привязкой shutdown
         tg_app = (Application.builder()
                   .token(settings.bot_token)
                   .request(request)
@@ -6296,24 +6307,29 @@ def main():
                   .post_shutdown(on_shutdown_webhook)
                   .build())
 
-        # Создаём менеджер фоновых задач с ограничением параллельности
-        class BackgroundTasks:
-            def __init__(self, max_concurrent=5):
-                self.semaphore = asyncio.Semaphore(max_concurrent)
-            async def run(self, coro):
-                async with self.semaphore:
-                    try:
-                        await coro
-                    except Exception:
-                        logger.exception("Фоновая задача упала")
-
-        tg_app.bot_data["background"] = BackgroundTasks(max_concurrent=5)
-
+        # 4. Регистрируем обработчики
         tg_app.add_handler(MessageHandler(filters.TEXT, handle_text))
         tg_app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_member))
         tg_app.add_handler(CallbackQueryHandler(button_handler))
         tg_app.add_error_handler(global_error_handler)
 
+        # 5. Менеджер фоновых задач
+        class BackgroundTasks:
+            def __init__(self, max_concurrent=5):
+                self.semaphore = asyncio.Semaphore(max_concurrent)
+            async def run(self, coro, max_retries=3):
+                async with self.semaphore:
+                    for attempt in range(max_retries):
+                        try:
+                            await coro
+                            return
+                        except Exception:
+                            logger.exception(f"Фоновая задача упала, попытка {attempt+1}")
+                            if attempt < max_retries - 1:
+                                await asyncio.sleep(2 ** attempt)
+        tg_app.bot_data["background"] = BackgroundTasks(max_concurrent=5)
+
+        # 6. Инициализация и вебхук
         async def init_bot():
             await tg_app.initialize()
             for attempt in range(5):
@@ -6333,16 +6349,17 @@ def main():
 
         asyncio.run(init_bot())
 
+        # 7. aiohttp-сервер
         from aiohttp import web
         webhook_timeouts = 0
         webhook_errors = 0
 
-        # Предохранитель: максимальное количество одновременных обработок (Render Free)
+        # Предохранитель конкурентности
         MAX_CONCURRENT_UPDATES = 50
         update_semaphore = asyncio.Semaphore(MAX_CONCURRENT_UPDATES)
 
         async def handle_webhook(request):
-            # 1. Мгновенный pre-parse
+            # Мгновенный pre-parse
             try:
                 data = await request.json()
             except Exception:
@@ -6353,12 +6370,44 @@ def main():
                 logger.warning("📛 Структура не похожа на Telegram Update")
                 return web.Response(text="Bad Request", status=400)
 
-            # 2. Запускаем обработку в фоне — Telegram получает 200 OK мгновенно
+            # Ack-first: Telegram получает 200 OK мгновенно
             asyncio.create_task(_process_update_async(data))
             return web.Response(text="OK")
 
         async def _process_update_async(data: dict) -> None:
-            """Фоновая обработка обновления с контролем конкурентности."""
+            """Фоновая обработка с гарантией контекста и семафором."""
+            ctx = tg_app.bot_data.get("ctx")
+            if not ctx:
+                logger.warning("Контекст не найден, создаю...")
+                pool = await asyncpg.create_pool(
+                    settings.database_url,
+                    min_size=2, max_size=5, command_timeout=15,
+                    max_inactive_connection_lifetime=300.0
+                )
+                async with pool.acquire() as conn:
+                    await create_tables(conn)
+                    await _run_migrations(conn)
+                cache = TTLCache(maxsize=2000, ttl=600)
+                repo = PlayerRepository(pool, None, cache)
+                war_config = WarConfig()
+                war_settings = WarSettings()
+                war_service = GuildWarService(pool, None, war_config, war_settings)
+                pet_config = {"dog": {"name": "🐕 Песик", "price": 3000, "max_name_len": 15}}
+                pet_service = PetService(repo, pet_config)
+                achievement_service = AchievementService(pool, None, repo)
+                ctx = AppContext(
+                    db_pool=pool,
+                    redis_client=None,
+                    cache=cache,
+                    settings=settings,
+                    repo=repo,
+                    war_service=war_service,
+                    pet_service=pet_service,
+                    achievement_service=achievement_service,
+                )
+                tg_app.bot_data["ctx"] = ctx
+                logger.info("✅ Контекст создан в фоновой задаче")
+
             async with update_semaphore:
                 try:
                     update = Update.de_json(data, tg_app.bot)
@@ -6377,18 +6426,11 @@ def main():
         app.router.add_get("/healthz", healthcheck)
         app.router.add_get("/stats", stats_handler)
 
-        async def on_shutdown_webhook(app):
-            logger.info("Shutting down, deleting webhook...")
-            try:
-                await tg_app.bot.delete_webhook(drop_pending_updates=False)
-            except Exception as e:
-                logger.error("Failed to delete webhook: %s", e)
-            try:
-                await tg_app.shutdown()
-            except Exception as e:
-                logger.error("Error during tg_app shutdown: %s", e)
+        async def on_shutdown_webhook_app(app):
+            # Просто вызовем нашу основную функцию
+            await on_shutdown_webhook(app)
 
-        app.on_shutdown.append(on_shutdown_webhook)
+        app.on_shutdown.append(on_shutdown_webhook_app)
 
         web.run_app(app, host="0.0.0.0", port=settings.port, access_log=None,
                     handle_signals=True, reuse_port=True, tcp_nodelay=True)
