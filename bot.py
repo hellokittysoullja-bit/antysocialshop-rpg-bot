@@ -35,6 +35,7 @@ try:
     import pybreaker
     redis_breaker = pybreaker.CircuitBreaker(fail_max=5, reset_timeout=30)
     db_breaker = pybreaker.CircuitBreaker(fail_max=5, reset_timeout=30)
+    tg_breaker = pybreaker.CircuitBreaker(fail_max=3, reset_timeout=30)
 except Exception as e:
     print(f"WARNING: pybreaker not available: {e}", file=sys.stderr)
     class DummyBreaker:
@@ -42,6 +43,7 @@ except Exception as e:
             return func(*args, **kwargs)
     redis_breaker = DummyBreaker()
     db_breaker = DummyBreaker()
+    tg_breaker = DummyBreaker()
 
 from cachetools import TTLCache
 from prometheus_client import Counter, Histogram
@@ -1771,29 +1773,25 @@ def get_golden_file_id(rarity: str) -> str | None:
     return None
 
 # ── Основная функция ────────────────────────────────────────
-async def safe_send_blunt_image(context, chat_id, rarity, caption, reply_markup, ctx):
+async def safe_send_blunt_image(context, chat_id, rarity, caption, reply_markup):
+    """Отправляет изображение бланта с отказоустойчивостью 5-го уровня."""
     file_id = BLUNT_IMAGES.get(rarity)
-    if not file_id: return False
-    try:
-        await context.bot.send_photo(chat_id, photo=file_id, caption=caption, reply_markup=reply_markup, parse_mode='HTML')
-        return True
-    except Exception as e:
-        logger.error("Failed to send blunt image: %s", e)
+    if not file_id:
         return False
 
+    # Пытаемся отправить фото через Circuit Breaker
     try:
-        await _send_photo_with_retry(context, chat_id, file_id, caption, reply_markup)
+        await tg_breaker.call(_send_photo_with_retry, context, chat_id, file_id, caption, reply_markup)
         return True
     except BadRequest as e:
         if "Wrong file identifier" in str(e):
             logger.warning("Невалидный file_id для %s", rarity)
             await _reset_and_notify_broken_id(rarity, context)
 
-            # Попытка золотого резерва
             golden = get_golden_file_id(rarity)
             if golden and golden != file_id:
                 try:
-                    await _send_photo_with_retry(context, chat_id, golden, caption, reply_markup)
+                    await tg_breaker.call(_send_photo_with_retry, context, chat_id, golden, caption, reply_markup)
                     async with _blunt_images_lock:
                         BLUNT_IMAGES[rarity] = golden
                     await set_setting(f"blunt_image_{rarity}", golden)
@@ -1813,9 +1811,15 @@ async def safe_send_blunt_image(context, chat_id, rarity, caption, reply_markup,
         await _send_fallback(context, chat_id, caption, "🌐 Ошибка сети. Попробуйте позже.")
         return False
     except Exception as e:
-        logger.error("Непредвиденная ошибка отправки %s: %s", rarity, e)
-        await _send_fallback(context, chat_id, caption, "⚠️ Произошла ошибка при отправке изображения.")
-        return False
+        # Ловим ВСЁ, включая возможный CircuitBreakerError (без импорта pybreaker)
+        if "CircuitBreaker" in type(e).__name__:
+            logger.warning("Circuit breaker разомкнут для %s", rarity)
+            await _send_fallback(context, chat_id, caption, "🔌 Сервис изображений временно перегружен.")
+            return False
+        else:
+            logger.error("Непредвиденная ошибка отправки %s: %s", rarity, e)
+            await _send_fallback(context, chat_id, caption, "⚠️ Произошла ошибка при отправке изображения.")
+            return False
 
 async def send_whisper_dm(update, context, text):
     if update.callback_query:
