@@ -5762,7 +5762,7 @@ TEXT_COMMAND_HANDLERS = {
     "debugpet": debug_pet,
     "checkbluntpics": check_blunt_pics,
     # Текстовые сокращения (без слеша)
-    "фарм": farm_callback,
+    "фарм": farm_callback_v2,
     "дунуть": smoke_callback,
     "крафт": craft_callback,
     "топ": top_callback,
