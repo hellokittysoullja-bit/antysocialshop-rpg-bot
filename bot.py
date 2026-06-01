@@ -1762,13 +1762,9 @@ def _extract_provider_info(error: Exception) -> tuple[str, str]:
 # КОМАНДА УСТАНОВКИ ФОТО БЛАНТА
 
 # ============================================================
-# БЛОК ОТПРАВКИ ИЗОБРАЖЕНИЙ (Высший Senior Grade)
+# БЛОК ОТПРАВКИ ИЗОБРАЖЕНИЙ
 # ============================================================
 _blunt_images_lock = asyncio.Lock()
-
-# ── Внутренние хелперы ──────────────────────────────────────
-
-import random
 
 async def _send_photo_with_retry(context, chat_id, file_id, caption=None, reply_markup=None, max_retries=3):
     """Отказоустойчивая отправка фото с адаптивными повторами. Никогда не роняет бота."""
