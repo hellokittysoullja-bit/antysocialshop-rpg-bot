@@ -6337,6 +6337,10 @@ def main():
         webhook_timeouts = 0
         webhook_errors = 0
 
+        # Предохранитель: максимальное количество одновременных обработок (Render Free)
+        MAX_CONCURRENT_UPDATES = 50
+        update_semaphore = asyncio.Semaphore(MAX_CONCURRENT_UPDATES)
+
         async def handle_webhook(request):
             # 1. Мгновенный pre-parse
             try:
@@ -6352,6 +6356,15 @@ def main():
             # 2. Запускаем обработку в фоне — Telegram получает 200 OK мгновенно
             asyncio.create_task(_process_update_async(data))
             return web.Response(text="OK")
+
+        async def _process_update_async(data: dict) -> None:
+            """Фоновая обработка обновления с контролем конкурентности."""
+            async with update_semaphore:
+                try:
+                    update = Update.de_json(data, tg_app.bot)
+                    await tg_app.process_update(update)
+                except Exception:
+                    logger.exception("💥 Ошибка обработки обновления %s", data.get("update_id"))
 
         async def healthcheck(request):
             return web.Response(text="OK")
