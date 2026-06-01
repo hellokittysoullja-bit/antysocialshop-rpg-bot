@@ -6293,7 +6293,7 @@ def main():
                   .request(request)
                   .rate_limiter(AIORateLimiter())
                   .post_init(on_startup)
-                  .post_shutdown(on_shutdown)
+                  .post_shutdown(on_shutdown_webhook)
                   .build())
 
         # Создаём менеджер фоновых задач с ограничением параллельности
