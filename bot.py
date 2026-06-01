@@ -1497,6 +1497,13 @@ async def _run_migrations(conn):
     await conn.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS pet_name TEXT DEFAULT '';")
     await conn.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS \"exists\" BOOLEAN DEFAULT TRUE;")
 
+    # ===== ОПТИМИЗАЦИЯ ХРАНЕНИЯ (Render Free Tier) =====
+    await conn.execute("ALTER TABLE players ALTER COLUMN inventory SET STORAGE EXTENDED;")
+    await conn.execute("ALTER TABLE players ALTER COLUMN profile_skins SET STORAGE EXTENDED;")
+    await conn.execute("ALTER TABLE players SET (autovacuum_vacuum_scale_factor = 0.01);")
+    await conn.execute("ALTER TABLE players SET (autovacuum_vacuum_threshold = 50);")
+    await conn.execute("ALTER TABLE players SET (autovacuum_vacuum_cost_limit = 200);")
+
     # === Финальная проверка целостности ===
     try:
         await conn.execute("SELECT 1 FROM war_state LIMIT 1")
