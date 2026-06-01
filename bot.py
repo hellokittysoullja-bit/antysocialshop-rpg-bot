@@ -218,6 +218,7 @@ class Player(BaseModel):
     lab_depth: int = 1
     pet: str = ""
     pet_name: str = ""
+    onboarding_step: int = 0
     exists: bool = False
     model_config = ConfigDict(populate_by_name=True)
     
@@ -2778,7 +2779,7 @@ async def craft_callback(update, context):
     text = _format_craft_menu_text(player.balance, player.blunts, player.craft_count,
                                    stats["medal_name"], stats["target"], player.m_essence)
     kb = _build_craft_keyboard(player.m_essence)
-    await edit_or_reply(update, context, text, reply_markup=kb)
+    await edit_or_reply(update, context, text, reply_markup=kb, parse_mode='HTML')
 
 
 @error_handler
