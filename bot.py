@@ -1791,29 +1791,23 @@ async def _send_fallback(context, chat_id, caption, default_text):
 
 
 async def _send_photo_with_retry(context, chat_id, file_id, caption, reply_markup):
-    """Собственный ретрай (без tenacity) – 2 попытки."""
-    last_exc = None
-    for attempt in range(1, 3):
+    """Отправляет фото с экспоненциальным backoff + jitter. Компактно и надёжно."""
+    for attempt in range(3):
         try:
-            await context.bot.send_photo(
-                chat_id=chat_id,
-                photo=file_id,
-                caption=caption,
+            return await tg_breaker.call(
+                context.bot.send_photo,
+                chat_id=chat_id, photo=file_id, caption=caption,
                 reply_markup=reply_markup,
                 parse_mode='HTML' if caption else None
             )
-            return
         except (RetryAfter, OSError, TimeoutError) as e:
-            last_exc = e
-            if attempt < 2:
-                wait = min(2 ** attempt, 5)
-                logger.warning("Повтор отправки фото через %d сек (%s)", wait, e)
-                await asyncio.sleep(wait)
+            if attempt == 2:
+                raise
+            delay = 2**attempt + random.uniform(0, 0.5)
+            logger.warning("Повтор отправки фото через %.2f сек (%s)", delay, e)
+            await asyncio.sleep(delay)
         except BadRequest:
             raise  # не ретраим ошибки валидации
-    if last_exc:
-        raise last_exc
-
 
 async def _reset_and_notify_broken_id(rarity: str, context):
     """Атомарно удаляет file_id из кэша и БД, уведомляет админа."""
