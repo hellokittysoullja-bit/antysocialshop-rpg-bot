@@ -814,7 +814,7 @@ class AchievementService:
                                 f"<i>{ach['emoji']} «{ach['name']}» {ach['emoji']}</i>\n\n"
                                 f"<b>📜 Запись добавлена! 💎</b>"
                             )
-                            await context.bot.send_message(chat_id=user_id, text=text, parse_mode='HTML')
+                            await safe_send_message(context, uid, text, parse_mode='HTML')
                         except Exception as e:
                             logger.error(f"Achievement notify error: {e}")
             # lunar_lord
@@ -841,7 +841,7 @@ class AchievementService:
                         f"<i>{lunar['emoji']} «{lunar['name']}» {lunar['emoji']}</i>\n\n"
                         f"<b>📜 Запись добавлена! 💎</b>"
                     )
-                    await context.bot.send_message(chat_id=user_id, text=text, parse_mode='HTML')
+                    await safe_send_message(context, uid, text, parse_mode='HTML')
                 except Exception as e:
                     logger.error(f"Achievement notify error (lunar): {e}")
 
@@ -1767,47 +1767,89 @@ def _extract_provider_info(error: Exception) -> tuple[str, str]:
 _blunt_images_lock = asyncio.Lock()
 
 # ── Внутренние хелперы ──────────────────────────────────────
-async def _safe_send_message(context, chat_id, text: str, parse_mode: str = None):
-    """Отправляет сообщение с защитой от ошибок HTML."""
-    try:
-        await context.bot.send_message(chat_id=chat_id, text=text, parse_mode=parse_mode)
-    except BadRequest as e:
-        if parse_mode and "can't parse entities" in str(e).lower():
-            try:
-                await context.bot.send_message(chat_id=chat_id, text=text)
-            except Exception as ex:
-                logger.error("Не удалось отправить сообщение: %s", ex)
-        else:
-            logger.error("BadRequest при отправке сообщения: %s", e)
-    except Exception as e:
-        logger.error("Ошибка отправки сообщения: %s", e)
 
+import random
 
-async def _send_fallback(context, chat_id, caption, default_text):
-    """Отправляет caption или стандартное сообщение."""
-    text = caption if caption else default_text
-    parse_mode = 'HTML' if caption else None
-    await _safe_send_message(context, chat_id, text, parse_mode)
+async def _send_photo_with_retry(context, chat_id, file_id, caption=None, reply_markup=None, max_retries=3):
+    """Отказоустойчивая отправка фото с адаптивными повторами. Никогда не роняет бота."""
+    # Подготавливаем аргументы для send_photo
+    kwargs = {'chat_id': chat_id, 'photo': file_id, 'reply_markup': reply_markup}
+    if caption:
+        kwargs.update(caption=caption, parse_mode='HTML')
 
-
-async def _send_photo_with_retry(context, chat_id, file_id, caption, reply_markup):
-    """Отправляет фото с экспоненциальным backoff + jitter. Компактно и надёжно."""
-    for attempt in range(3):
+    for attempt in range(max_retries):
         try:
-            return await tg_breaker.call(
-                context.bot.send_photo,
-                chat_id=chat_id, photo=file_id, caption=caption,
-                reply_markup=reply_markup,
-                parse_mode='HTML' if caption else None
-            )
-        except (RetryAfter, OSError, TimeoutError) as e:
-            if attempt == 2:
-                raise
-            delay = 2**attempt + random.uniform(0, 0.5)
-            logger.warning("Повтор отправки фото через %.2f сек (%s)", delay, e)
-            await asyncio.sleep(delay)
+            # Пытаемся отправить фото через Circuit Breaker
+            return await tg_breaker.call(context.bot.send_photo, **kwargs)
+
         except BadRequest:
-            raise  # не ретраим ошибки валидации
+            # Ошибки валидации не ретраим – пробрасываем наверх
+            raise
+
+        except Exception as e:
+            # Если цепь разомкнута – немедленно пробрасываем, без повторов
+            if "CircuitBreaker" in type(e).__name__:
+                raise
+
+            # На последней попытке сдаёмся
+            if attempt == max_retries - 1:
+                raise
+
+            # Вычисляем задержку перед повтором:
+            # 1) Если Telegram вернул RetryAfter – используем его + jitter
+            # 2) Иначе используем экспоненциальный backoff + jitter
+            retry_after = getattr(e, 'retry_after', None)
+            if retry_after:
+                delay = retry_after + random.uniform(0, 0.5)
+            else:
+                delay = (2 ** attempt) + random.uniform(0, 1)
+
+            logger.warning(
+                "Ошибка отправки фото (попытка %d/%d), повтор через %.2f сек: %s",
+                attempt + 1, max_retries, delay, e
+            )
+            await asyncio.sleep(delay)
+
+    # Сюда выполнение не должно дойти, но для безопасности:
+    raise RuntimeError("Не удалось отправить фото после всех попыток")
+
+async def safe_send_message(context, chat_id, text, parse_mode='HTML', reply_markup=None, max_retries=3):
+    """Отказоустойчивая отправка текста с адаптивными повторами. Никогда не роняет бота."""
+    kwargs = {'chat_id': chat_id, 'text': text, 'reply_markup': reply_markup}
+    if parse_mode:
+        kwargs['parse_mode'] = parse_mode
+
+    for attempt in range(max_retries):
+        try:
+            # Пытаемся отправить сообщение через Circuit Breaker
+            return await tg_breaker.call(context.bot.send_message, **kwargs)
+
+        except BadRequest as e:
+            # Если проблема в HTML – пробуем отправить без форматирования
+            if "can't parse entities" in str(e).lower() or "not found" in str(e).lower():
+                logger.warning("Ошибка HTML, отправляю без форматирования")
+                kwargs.pop('parse_mode', None)
+                try:
+                    return await tg_breaker.call(context.bot.send_message, **kwargs)
+                except Exception:
+                    raise
+            raise
+
+        except Exception as e:
+            if "CircuitBreaker" in type(e).__name__:
+                raise
+            if attempt == max_retries - 1:
+                raise
+
+            retry_after = getattr(e, 'retry_after', None)
+            delay = (retry_after + random.uniform(0, 0.5)) if retry_after else (2 ** attempt + random.uniform(0, 1))
+            logger.warning(
+                "Ошибка отправки сообщения (попытка %d/%d), повтор через %.2f сек: %s",
+                attempt + 1, max_retries, delay, e
+            )
+            await asyncio.sleep(delay)
+
+    raise RuntimeError("Не удалось отправить сообщение после всех попыток")
 
 async def _reset_and_notify_broken_id(rarity: str, context):
     """Атомарно удаляет file_id из кэша и БД, уведомляет админа."""
@@ -1829,14 +1871,14 @@ def get_golden_file_id(rarity: str) -> str | None:
 
 # ── Основная функция ────────────────────────────────────────
 async def safe_send_blunt_image(context, chat_id, rarity, caption, reply_markup):
-    """Отправляет изображение бланта с отказоустойчивостью 5-го уровня."""
+    """Отправляет изображение бланта с абсолютной отказоустойчивостью."""
     file_id = BLUNT_IMAGES.get(rarity)
     if not file_id:
         return False
 
-    # Пытаемся отправить фото через Circuit Breaker
     try:
-        await tg_breaker.call(_send_photo_with_retry, context, chat_id, file_id, caption, reply_markup)
+        # Новый _send_photo_with_retry сам управляет повторами и jitter
+        await tg_breaker.call(_send_photo_with_retry, context, chat_id, file_id, caption=caption, reply_markup=reply_markup)
         return True
     except BadRequest as e:
         if "Wrong file identifier" in str(e):
@@ -1846,7 +1888,7 @@ async def safe_send_blunt_image(context, chat_id, rarity, caption, reply_markup)
             golden = get_golden_file_id(rarity)
             if golden and golden != file_id:
                 try:
-                    await tg_breaker.call(_send_photo_with_retry, context, chat_id, golden, caption, reply_markup)
+                    await tg_breaker.call(_send_photo_with_retry, context, chat_id, golden, caption=caption, reply_markup=reply_markup)
                     async with _blunt_images_lock:
                         BLUNT_IMAGES[rarity] = golden
                     await set_setting(f"blunt_image_{rarity}", golden)
@@ -1855,36 +1897,27 @@ async def safe_send_blunt_image(context, chat_id, rarity, caption, reply_markup)
                 except Exception:
                     await _reset_and_notify_broken_id(rarity, context)
 
-            await _send_fallback(context, chat_id, caption, "🖼️ Изображение временно недоступно.")
+            await safe_send_message(context, chat_id, "🖼️ Изображение временно недоступно.", parse_mode=None)
             return False
         else:
             logger.error("BadRequest фото %s: %s", rarity, e)
-            await _send_fallback(context, chat_id, caption, "❌ Не удалось отправить изображение.")
+            await safe_send_message(context, chat_id, "❌ Не удалось отправить изображение.", parse_mode=None)
             return False
-    except (RetryAfter, OSError, TimeoutError) as e:
-        logger.warning("Сеть при отправке %s: %s", rarity, e)
-        await _send_fallback(context, chat_id, caption, "🌐 Ошибка сети. Попробуйте позже.")
-        return False
     except Exception as e:
-        # Ловим ВСЁ, включая возможный CircuitBreakerError (без импорта pybreaker)
         if "CircuitBreaker" in type(e).__name__:
             logger.warning("Circuit breaker разомкнут для %s", rarity)
-            await _send_fallback(context, chat_id, caption, "🔌 Сервис изображений временно перегружен.")
-            return False
+            await safe_send_message(context, chat_id, "🔌 Сервис изображений временно перегружен.", parse_mode=None)
         else:
             logger.error("Непредвиденная ошибка отправки %s: %s", rarity, e)
-            await _send_fallback(context, chat_id, caption, "⚠️ Произошла ошибка при отправке изображения.")
-            return False
+            await safe_send_message(context, chat_id, "⚠️ Произошла ошибка при отправке изображения.", parse_mode=None)
+        return False
 
 async def send_whisper_dm(update, context, text):
     if update.callback_query:
         chat_id = update.callback_query.message.chat.id
     else:
         chat_id = update.effective_chat.id
-    try:
-        await context.bot.send_message(chat_id=chat_id, text=text, parse_mode='HTML')
-    except Exception as e:
-        logger.error(f"Whisper error: {e}")
+    await safe_send_message(context, chat_id, text, parse_mode='HTML')
 
 def format_date(iso_string):
     try:
@@ -1994,7 +2027,7 @@ async def process_daily_login(user_id: int, context) -> None:
 
     try:
         text = _build_daily_message(streak, reward, daily_config)
-        await context.bot.send_message(chat_id=user_id, text=text, parse_mode='HTML')
+        await safe_send_message(context, user_id, text, parse_mode='HTML')
     except Exception as e:
         logger.error("Failed to send daily login msg", extra={"user_id": user_id}, exc_info=True)
 
