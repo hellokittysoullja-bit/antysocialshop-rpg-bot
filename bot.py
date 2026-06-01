@@ -6181,13 +6181,42 @@ async def on_startup(app: Application):
 
     logger.info("🚀 Бот готов к работе (полная совместимость с исходной логикой)")
 
-async def on_shutdown(app: Application):
-    ctx = app.bot_data.get("ctx")
-    if ctx:
-        await ctx.db_pool.close()
-        if ctx.redis:
-            await ctx.redis.close()
-    logger.info("✅ Ресурсы освобождены")
+async def on_shutdown_webhook(app):
+            """Процедура завершения 7-го уровня. Выполняется только при полностью инициализированном приложении."""
+            logger.info("🛑 Начинаю плавное завершение работы...")
+
+            # Фаза 1: Даём текущим задачам завершиться с таймаутом
+            try:
+                await asyncio.wait_for(tg_app.shutdown(), timeout=15.0)
+                logger.info("✅ Приложение Telegram остановлено")
+            except asyncio.TimeoutError:
+                logger.warning("⚠️ Таймаут остановки приложения, продолжаем")
+            except Exception as e:
+                logger.error("❌ Неожиданная ошибка при остановке: %s", e)
+
+            # Фаза 2: Удаляем вебхук с экспоненциальным backoff + jitter
+            for attempt in range(3):
+                try:
+                    await tg_app.bot.delete_webhook(drop_pending_updates=False)
+                    logger.info("✅ Вебхук удалён")
+                    break
+                except Exception as e:
+                    if "handler is closed" in str(e) or "Transport closed" in str(e):
+                        logger.info("ℹ️ Соединение закрыто, вебхук будет удалён при старте")
+                        break
+                    logger.warning("⚠️ Попытка %d удалить вебхук: %s", attempt + 1, e)
+                    if attempt < 2:
+                        await asyncio.sleep(2 ** attempt + random.uniform(0, 0.5))
+
+            # Фаза 3: Освобождаем ресурсы
+            ctx = tg_app.bot_data["ctx"]  # гарантированно существует
+            await ctx.db_pool.close()
+            logger.info("✅ Пул базы данных закрыт")
+            if ctx.redis:
+                await ctx.redis.close()
+                logger.info("✅ Redis соединение закрыто")
+
+            logger.info("🏁 Завершение работы завершено")
 
 @retry(stop=stop_after_attempt(5), wait=wait_exponential(min=2, max=30), reraise=True)
 async def setup_webhook(app: Application):
@@ -6309,48 +6338,20 @@ def main():
         webhook_errors = 0
 
         async def handle_webhook(request):
+            # 1. Мгновенный pre-parse
             try:
                 data = await request.json()
-                update = Update.de_json(data, tg_app.bot)
-                chat_id = update.effective_chat.id if update.effective_chat else None
-        
-                ctx = tg_app.bot_data.get("ctx")
-                if not ctx:
-                    logger.warning("Контекст не найден, создаю минимальный...")
-                    pool = await asyncpg.create_pool(
-                        settings.database_url,
-                        min_size=2, max_size=5, command_timeout=15,
-                        max_inactive_connection_lifetime=300.0
-                    )
-                    async with pool.acquire() as conn:
-                        await create_tables(conn)
-                        await _run_migrations(conn)
-                    cache = TTLCache(maxsize=2000, ttl=600)
-                    repo = PlayerRepository(pool, None, cache)
-                    war_config = WarConfig()
-                    war_settings = WarSettings()
-                    war_service = GuildWarService(pool, None, war_config, war_settings)
-                    pet_config = {"dog": {"name": "🐕 Песик", "price": 3000, "max_name_len": 15}}
-                    pet_service = PetService(repo, pet_config)
-                    achievement_service = AchievementService(pool, None, repo)
-                    ctx = AppContext(
-                        db_pool=pool,
-                        redis_client=None,
-                        cache=cache,
-                        settings=settings,
-                        repo=repo,
-                        war_service=war_service,
-                        pet_service=pet_service,
-                        achievement_service=achievement_service,
-                    )
-                    tg_app.bot_data["ctx"] = ctx
-                    logger.info("✅ Контекст создан прямо в handle_webhook (с war-сервисом)")
-        
-                await tg_app.process_update(update)
-                return web.Response(text="OK")
             except Exception:
-                logger.exception("webhook error")
-                return web.Response(text="Error", status=500)
+                logger.warning("📛 Невалидный JSON в вебхуке")
+                return web.Response(text="Bad Request", status=400)
+
+            if not isinstance(data, dict) or "update_id" not in data:
+                logger.warning("📛 Структура не похожа на Telegram Update")
+                return web.Response(text="Bad Request", status=400)
+
+            # 2. Запускаем обработку в фоне — Telegram получает 200 OK мгновенно
+            asyncio.create_task(_process_update_async(data))
+            return web.Response(text="OK")
 
         async def healthcheck(request):
             return web.Response(text="OK")
