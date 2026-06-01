@@ -6194,13 +6194,30 @@ def main():
                 data = await request.json()
                 update = Update.de_json(data, tg_app.bot)
                 chat_id = update.effective_chat.id if update.effective_chat else None
-
+        
                 ctx = tg_app.bot_data.get("ctx")
                 if not ctx:
-                    logger.error("ctx missing in webhook")
-                    if chat_id:
-                        await tg_app.bot.send_message(chat_id, "⚠️ Бот инициализируется.")
-                    return web.Response(text="ctx_missing", status=500)
+                    logger.warning("Контекст не найден, создаю минимальный...")
+                    pool = await asyncpg.create_pool(
+                        settings.database_url,
+                        min_size=2, max_size=5, command_timeout=15,
+                        max_inactive_connection_lifetime=300.0
+                    )
+                    async with pool.acquire() as conn:
+                        await create_tables(conn)
+                        await _run_migrations(conn)
+                    ctx = AppContext(
+                        db_pool=pool,
+                        redis_client=None,
+                        cache=TTLCache(maxsize=2000, ttl=600),
+                        settings=settings,
+                        repo=PlayerRepository(pool, None, TTLCache(maxsize=2000, ttl=600)),
+                        war_service=None,
+                        pet_service=None,
+                        achievement_service=None,
+                    )
+                    tg_app.bot_data["ctx"] = ctx
+                    logger.info("✅ Контекст создан прямо в handle_webhook")
 
                 await tg_app.process_update(update)
                 return web.Response(text="OK")
