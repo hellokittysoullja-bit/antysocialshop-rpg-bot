@@ -2442,10 +2442,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not player or not player.exists:
             await _create_new_player(update, context, uid, username)
         else:
-            await asyncio.gather(
-                process_daily_login(uid, context),
-                _show_main_menu(update, context, player, user, ctx)
-            )
+            # Запускаем ежедневный бонус в фоне, чтобы меню появилось мгновенно
+            background = context.application.bot_data.get("background")
+            if background:
+                asyncio.create_task(background.run(process_daily_login(uid, context)))
+            else:
+                await process_daily_login(uid, context)
+
+            # Меню отправляем немедленно
+            await _show_main_menu(update, context, player, user, ctx)
     except Exception as e:
         logger.exception("start failed")
         await update.effective_message.reply_text("⚠️ Произошла ошибка. Попробуйте позже.")
@@ -2715,8 +2720,16 @@ async def farm_callback_v2(update, context, ctx, player):
     else:
         await context.bot.send_message(chat_id=update.effective_chat.id, text=text, parse_mode='HTML')
 
-    await check_rank_up(context, uid, uname, old_balance, new_balance)
-    await check_achievements(uid, context)
+    # --- Фоновые задачи (не блокируют ответ игроку) ---
+    background = context.application.bot_data.get("background")
+    if background:
+        # Отправляем в фон — игрок не ждёт
+        asyncio.create_task(background.run(check_achievements(uid, context)))
+        asyncio.create_task(background.run(check_rank_up(context, uid, uname, old_balance, new_balance)))
+    else:
+        # Если менеджер ещё не готов (на старте), выполняем синхронно
+        await check_rank_up(context, uid, uname, old_balance, new_balance)
+        await check_achievements(uid, context)
 
     if player.onboarding_step == 1:
         player.onboarding_step = 2
@@ -3366,7 +3379,12 @@ async def do_smoke(update, context):
         [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
     ])
     await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
-    await check_achievements(uid, context)
+    # Достижения проверяем в фоне
+    background = context.application.bot_data.get("background")
+    if background:
+        asyncio.create_task(background.run(check_achievements(uid, context)))
+    else:
+        await check_achievements(uid, context)
     
     if player and player.onboarding_step == 3:
         player.onboarding_step = -1
