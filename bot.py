@@ -6225,19 +6225,27 @@ def main():
                     async with pool.acquire() as conn:
                         await create_tables(conn)
                         await _run_migrations(conn)
+                    cache = TTLCache(maxsize=2000, ttl=600)
+                    repo = PlayerRepository(pool, None, cache)
+                    war_config = WarConfig()
+                    war_settings = WarSettings()
+                    war_service = GuildWarService(pool, None, war_config, war_settings)
+                    pet_config = {"dog": {"name": "🐕 Песик", "price": 3000, "max_name_len": 15}}
+                    pet_service = PetService(repo, pet_config)
+                    achievement_service = AchievementService(pool, None, repo)
                     ctx = AppContext(
                         db_pool=pool,
                         redis_client=None,
-                        cache=TTLCache(maxsize=2000, ttl=600),
+                        cache=cache,
                         settings=settings,
-                        repo=PlayerRepository(pool, None, TTLCache(maxsize=2000, ttl=600)),
-                        war_service=None,
-                        pet_service=None,
-                        achievement_service=None,
+                        repo=repo,
+                        war_service=war_service,
+                        pet_service=pet_service,
+                        achievement_service=achievement_service,
                     )
                     tg_app.bot_data["ctx"] = ctx
-                    logger.info("✅ Контекст создан прямо в handle_webhook")
-
+                    logger.info("✅ Контекст создан прямо в handle_webhook (с war-сервисом)")
+        
                 await tg_app.process_update(update)
                 return web.Response(text="OK")
             except Exception:
