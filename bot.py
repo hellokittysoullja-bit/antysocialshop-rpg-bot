@@ -1940,7 +1940,7 @@ async def process_daily_login(user_id: int, context) -> None:
         logger.error("Failed to send daily login msg", extra={"user_id": user_id}, exc_info=True)
 
     try:
-        await check_achievements(user_id, context)
+        await check_achievements(user_id, context, ctx=ctx)
     except Exception:
         logger.exception("Achievement check failed", extra={"user_id": user_id})
 
@@ -6179,6 +6179,19 @@ def main():
                   .post_init(on_startup)
                   .post_shutdown(on_shutdown)
                   .build())
+
+        # Создаём менеджер фоновых задач с ограничением параллельности
+        class BackgroundTasks:
+            def __init__(self, max_concurrent=5):
+                self.semaphore = asyncio.Semaphore(max_concurrent)
+            async def run(self, coro):
+                async with self.semaphore:
+                    try:
+                        await coro
+                    except Exception:
+                        logger.exception("Фоновая задача упала")
+
+        tg_app.bot_data["background"] = BackgroundTasks(max_concurrent=5)
 
         tg_app.add_handler(MessageHandler(filters.TEXT, handle_text))
         tg_app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_member))
