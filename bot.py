@@ -5849,7 +5849,7 @@ CALLBACKS: Dict[str, Callable] = {
     "privilege": privilege_callback,
     "catalog": catalog_callback,
     "luck": luck_callback,
-    "craft_normal": handle_craft_normal,
+    "craft_normal": handle_craft_normal_v2,
     "craft_named": handle_craft_named,
     "cancel_named": cancel_named,
     "do_smoke": do_smoke,
