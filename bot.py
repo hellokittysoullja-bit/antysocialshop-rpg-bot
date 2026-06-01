@@ -6181,43 +6181,6 @@ async def on_startup(app: Application):
 
     logger.info("🚀 Бот готов к работе (полная совместимость с исходной логикой)")
 
-async def on_shutdown_webhook(app):
-            """Процедура завершения 7-го уровня. Выполняется только при полностью инициализированном приложении."""
-            logger.info("🛑 Начинаю плавное завершение работы...")
-
-            # Фаза 1: Даём текущим задачам завершиться с таймаутом
-            try:
-                await asyncio.wait_for(tg_app.shutdown(), timeout=15.0)
-                logger.info("✅ Приложение Telegram остановлено")
-            except asyncio.TimeoutError:
-                logger.warning("⚠️ Таймаут остановки приложения, продолжаем")
-            except Exception as e:
-                logger.error("❌ Неожиданная ошибка при остановке: %s", e)
-
-            # Фаза 2: Удаляем вебхук с экспоненциальным backoff + jitter
-            for attempt in range(3):
-                try:
-                    await tg_app.bot.delete_webhook(drop_pending_updates=False)
-                    logger.info("✅ Вебхук удалён")
-                    break
-                except Exception as e:
-                    if "handler is closed" in str(e) or "Transport closed" in str(e):
-                        logger.info("ℹ️ Соединение закрыто, вебхук будет удалён при старте")
-                        break
-                    logger.warning("⚠️ Попытка %d удалить вебхук: %s", attempt + 1, e)
-                    if attempt < 2:
-                        await asyncio.sleep(2 ** attempt + random.uniform(0, 0.5))
-
-            # Фаза 3: Освобождаем ресурсы
-            ctx = tg_app.bot_data["ctx"]  # гарантированно существует
-            await ctx.db_pool.close()
-            logger.info("✅ Пул базы данных закрыт")
-            if ctx.redis:
-                await ctx.redis.close()
-                logger.info("✅ Redis соединение закрыто")
-
-            logger.info("🏁 Завершение работы завершено")
-
 @retry(stop=stop_after_attempt(5), wait=wait_exponential(min=2, max=30), reraise=True)
 async def setup_webhook(app: Application):
     await app.bot.delete_webhook(drop_pending_updates=True)
@@ -6287,6 +6250,43 @@ def main():
             raise RuntimeError("BOT_TOKEN and DATABASE_URL must be set")
 
         request = HTTPXRequest(connection_pool_size=50, read_timeout=10, write_timeout=10)
+        
+        async def on_shutdown_webhook(app):
+            """Процедура завершения 7-го уровня. Выполняется только при полностью инициализированном приложении."""
+            logger.info("🛑 Начинаю плавное завершение работы...")
+
+            # Фаза 1: Даём текущим задачам завершиться с таймаутом
+            try:
+                await asyncio.wait_for(tg_app.shutdown(), timeout=15.0)
+                logger.info("✅ Приложение Telegram остановлено")
+            except asyncio.TimeoutError:
+                logger.warning("⚠️ Таймаут остановки приложения, продолжаем")
+            except Exception as e:
+                logger.error("❌ Неожиданная ошибка при остановке: %s", e)
+
+            # Фаза 2: Удаляем вебхук с экспоненциальным backoff + jitter
+            for attempt in range(3):
+                try:
+                    await tg_app.bot.delete_webhook(drop_pending_updates=False)
+                    logger.info("✅ Вебхук удалён")
+                    break
+                except Exception as e:
+                    if "handler is closed" in str(e) or "Transport closed" in str(e):
+                        logger.info("ℹ️ Соединение закрыто, вебхук будет удалён при старте")
+                        break
+                    logger.warning("⚠️ Попытка %d удалить вебхук: %s", attempt + 1, e)
+                    if attempt < 2:
+                        await asyncio.sleep(2 ** attempt + random.uniform(0, 0.5))
+
+            # Фаза 3: Освобождаем ресурсы
+            ctx = tg_app.bot_data["ctx"]  # гарантированно существует
+            await ctx.db_pool.close()
+            logger.info("✅ Пул базы данных закрыт")
+            if ctx.redis:
+                await ctx.redis.close()
+                logger.info("✅ Redis соединение закрыто")
+
+            logger.info("🏁 Завершение работы завершено")
 
         tg_app = (Application.builder()
                   .token(settings.bot_token)
