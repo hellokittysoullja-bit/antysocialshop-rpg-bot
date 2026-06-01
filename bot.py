@@ -5059,37 +5059,7 @@ logger = logging.getLogger(__name__)
 # ============================================================
 # ОБРАБОТЧИК ТЕКСТОВЫХ СОКРАЩЕНИЙ (с Redis лимитером)
 # ============================================================
-async def handle_chat_shortcut(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.text:
-        return
 
-    user_id = update.effective_user.id
-    ctx = context.application.bot_data.get("ctx")
-    if not ctx:
-        return
-
-    if not await check_rate_limit_redis(ctx, user_id, "shortcut", limit=5, period=10):
-        await update.message.reply_text("⚠️ Слишком часто. Подожди секунду.")
-        return
-
-    # Состояния ввода
-    if context.user_data.get('awaiting_pet_name'):
-        return await handle_pet_name(update, context)
-    if context.user_data.get('awaiting_named_blunt'):
-        return await handle_named_name(update, context)
-    if context.user_data.get('gifting_blunt_id'):
-        return await handle_gift_username(update, context)
-
-    text = update.message.text.strip().lower()
-    handler = TEXT_COMMAND_HANDLERS.get(text)
-    if not handler:
-        return
-
-    try:
-        await handler(update, context)
-    except Exception as e:
-        logger.error("Ошибка в текстовой команде '%s' от %d: %s", text, user_id, e, exc_info=True)
-        await update.message.reply_text("⚠️ Внутренняя ошибка. Попробуйте позже 🍃.")
 
 # ============================================================
 # ФУНКЦИИ ДЛЯ ИМЕННЫХ БЛАНТОВ И ДАРЕНИЯ (ВОССТАНОВЛЕНЫ)
@@ -5360,15 +5330,6 @@ async def get_file_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============================================================
 # ОБРАБОТЧИК КОМАНД
 # ============================================================
-async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.message
-    if not msg or not msg.text:
-        return
-
-    user_id = update.effective_user.id
-    ctx = context.application.bot_data.get("ctx")
-    if not ctx:
-        return
 
     if not await check_rate_limit_redis(ctx, user_id, "command", limit=10, period=10):
         await update.message.reply_text("⚠️ Слишком часто. Подожди секунду.")
@@ -6137,6 +6098,49 @@ async def setup_webhook(app: Application):
         raise RuntimeError(f"URL mismatch: {info.url}")
     logger.info("Вебхук установлен на %s", settings.webhook_url)
 
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    if not msg or not msg.text:
+        return
+
+    user_id = update.effective_user.id
+    ctx = context.application.bot_data.get("ctx")
+    if not ctx:
+        return
+
+    if not await check_rate_limit_redis(ctx, user_id, "text", limit=10, period=10):
+        await msg.reply_text("⚠️ Слишком часто. Подожди секунду.")
+        return
+
+    # Состояния ввода (питомец, бланты, подарки)
+    if context.user_data.get('awaiting_pet_name'):
+        return await handle_pet_name(update, context)
+    if context.user_data.get('awaiting_named_blunt'):
+        return await handle_named_name(update, context)
+    if context.user_data.get('gifting_blunt_id'):
+        return await handle_gift_username(update, context)
+
+    raw_text = msg.text.strip()
+    text_lower = raw_text.lower()
+
+    # Убираем слеш, если есть
+    if text_lower.startswith("/"):
+        command = text_lower.split()[0][1:].split('@')[0]   # /start -> start
+    else:
+        command = text_lower
+
+    handler = TEXT_COMMAND_HANDLERS.get(command)
+    if not handler:
+        return
+
+    try:
+        # Аргументы для команд с параметрами
+        context.args = raw_text.split()[1:] if raw_text.startswith("/") else []
+        await handler(update, context)
+    except Exception as e:
+        logger.exception(f"Ошибка в текстовой команде '{command}' от {user_id}")
+        await msg.reply_text("⚠️ Внутренняя ошибка. Попробуйте позже.")
+
 def main():
     try:
         # 1. Ускоряем event loop
@@ -6159,7 +6163,6 @@ def main():
                   .post_shutdown(on_shutdown)
                   .build())
 
-        tg_app.add_handler(MessageHandler(filters.PHOTO, get_file_id))
         tg_app.add_handler(MessageHandler(filters.COMMAND, handle_command))
         tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_chat_shortcut))
         tg_app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_member))
