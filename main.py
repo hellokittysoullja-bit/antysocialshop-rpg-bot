@@ -370,9 +370,6 @@ async def main_async():
             secret_token=settings.webhook_secret,
             allowed_updates=["message", "callback_query"]
         )
-        else:
-            logger.warning("WEBHOOK_URL не задан – вебхук не установлен")
-
         runner = web.AppRunner(app)
         await runner.setup()
         site = web.TCPSite(runner, "0.0.0.0", settings.port)
