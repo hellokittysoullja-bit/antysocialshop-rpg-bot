@@ -9,10 +9,9 @@ sys.stderr.reconfigure(line_buffering=True) if hasattr(sys.stderr, "reconfigure"
 print("=== Запуск run.py ===", flush=True)
 
 try:
-    # Пробуем импортировать bot.py как модуль
     import main
 except Exception as e:
-    print("❌ Ошибка импорта bot:", file=sys.stderr, flush=True)
+    print("❌ Ошибка импорта main:", file=sys.stderr, flush=True)
     traceback.print_exc()
     sys.exit(1)
 
