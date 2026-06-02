@@ -56,9 +56,6 @@ logger = logging.getLogger(__name__)
 # ============================================================
 # ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ
 # ============================================================
-BLUNT_IMAGES: Dict[str, str] = {}
-TEXT_COMMAND_HANDLERS: Dict[str, callable] = {}
-
 background_tasks: Set[asyncio.Task] = set()
 active_updates: Set[asyncio.Task] = set()
 
