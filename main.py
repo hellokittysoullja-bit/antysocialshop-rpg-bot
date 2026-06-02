@@ -194,9 +194,10 @@ async def on_startup(app: Application):
         )
         app.bot_data["db_pool"] = pool
 
-        # 2. Миграции (вставьте свои)
+        # 2. Миграции
         async with pool.acquire() as conn:
-            pass  # await create_tables(conn); await _run_migrations(conn)
+            await create_tables(conn)
+            await _run_migrations(conn)
 
         # 3. Redis с повторными попытками подключения
         redis_client = None
