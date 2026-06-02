@@ -10,16 +10,16 @@ print("=== Запуск run.py ===", flush=True)
 
 try:
     # Пробуем импортировать bot.py как модуль
-    import bot
+    import main
 except Exception as e:
     print("❌ Ошибка импорта bot:", file=sys.stderr, flush=True)
     traceback.print_exc()
     sys.exit(1)
 
-print("✅ Импорт bot успешен, запускаем main()...", flush=True)
+print("✅ Импорт main успешен, запускаем main()...", flush=True)
 
 try:
-    bot.main()
+    main.main()
 except Exception as e:
     print("❌ Ошибка в main():", file=sys.stderr, flush=True)
     traceback.print_exc()
