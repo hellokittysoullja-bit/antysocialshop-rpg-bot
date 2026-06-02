@@ -44,7 +44,6 @@ from bot import (
     weekly_guild_rating,
     _safe_send_guild_message,
     BLUNT_IMAGES,
-    clean_old_data,   # если используется
 )
 
 # ============================================================
@@ -358,7 +357,7 @@ async def main_async():
             pass
 
         if not settings.bot_token or not settings.database_url:
-            raise RuntimeError("BOT_TOKEN and DATABASE_URL must be set")
+            raise RuntimeError("TOKEN and DATABASE_URL_AIVEN must be set")
 
         request = HTTPXRequest(
             connection_pool_size=50,
