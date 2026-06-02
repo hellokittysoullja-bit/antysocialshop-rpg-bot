@@ -29,7 +29,7 @@ from bot import (
     TEXT_COMMAND_HANDLERS,
     CALLBACKS,
     EXACT_HANDLERS,
-    PREFIX_HANDLERS
+    PREFIX_HANDLERS,
     handle_text,
     button_handler,
     global_error_handler,
