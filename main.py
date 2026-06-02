@@ -1,8 +1,8 @@
 # ИМПОРТЫ
 # ============================================================
-import asyncio, logging, sys, os, signal, time, traceback
+import asyncio, logging, sys, signal, traceback
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Tuple, Set, Optional
+from typing import Set
 
 import asyncpg
 import redis.asyncio as aioredis
@@ -12,12 +12,11 @@ from cachetools import TTLCache
 from telegram import Update
 from telegram.ext import (
     Application, ApplicationBuilder,
-    MessageHandler, CallbackQueryHandler, ContextTypes,
+    MessageHandler, CallbackQueryHandler,
     AIORateLimiter, filters
 )
 from telegram.request import HTTPXRequest
 
-# === Импорт реальных классов и функций из bot.py ===
 from bot import (
     settings,
     AppContext,
@@ -30,7 +29,7 @@ from bot import (
     TEXT_COMMAND_HANDLERS,
     CALLBACKS,
     EXACT_HANDLERS,
-    PREFIX_HANDLERS,
+    PREFIX_HANDLERS
     handle_text,
     button_handler,
     global_error_handler,
@@ -46,24 +45,15 @@ from bot import (
     BLUNT_IMAGES,
 )
 
-# ============================================================
-# ЛОГИРОВАНИЕ
-# ============================================================
-logging.basicConfig(level=logging.INFO,
-                    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# ============================================================
-# ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ
-# ============================================================
 background_tasks: Set[asyncio.Task] = set()
 active_updates: Set[asyncio.Task] = set()
 
 # ============================================================
-# УТИЛИТЫ ДЛЯ НАДЁЖНЫХ ФОНОВЫХ ЗАДАЧ
-# ============================================================
 def resilient_task(func):
-    """Декоратор, перезапускающий задачу при любом исключении."""
+    """Перезапускает задачу при любом исключении."""
     async def wrapper(*args, **kwargs):
         while True:
             try:
@@ -77,8 +67,6 @@ def resilient_task(func):
     return wrapper
 
 # ============================================================
-# ЗАГРУЗКА БЛАНТОВ (с защитой от падения Redis)
-# ============================================================
 async def load_blunt_images(ctx: AppContext):
     """Прогрев кэша изображений, устойчивый к недоступности Redis."""
     try:
@@ -90,22 +78,14 @@ async def load_blunt_images(ctx: AppContext):
                 cached = await ctx.redis.get(f"blunt_image:{rarity}")
                 if cached:
                     BLUNT_IMAGES[rarity] = cached.decode() if isinstance(cached, bytes) else cached
-                    continue
-                # Замените на реальный вызов получения из БД
-                saved = None  # await get_setting(f"blunt_image_{rarity}", ctx=ctx)
-                if saved:
-                    BLUNT_IMAGES[rarity] = saved
-                    await ctx.redis.setex(f"blunt_image:{rarity}", 86400, saved)
             except Exception:
                 logger.warning(f"Ошибка загрузки изображения {rarity} из Redis")
     except Exception as e:
         logger.warning(f"Критическая ошибка прогрева блантов: {e}")
 
 # ============================================================
-# ФОНОВЫЕ ДЖОБЫ (с автоматическим перезапуском)
-# ============================================================
 async def background_jobs(ctx: AppContext):
-    """Создаёт периодические задачи, все с декоратором @resilient_task."""
+    """Создаёт периодические задачи с авто-перезапуском."""
 
     @resilient_task
     async def job_keep_db_alive():
@@ -152,7 +132,6 @@ async def background_jobs(ctx: AppContext):
     async def job_weekly_guild_rating():
         while True:
             now = datetime.now(timezone.utc)
-            # Воскресенье 00:00 UTC (weekday=6)
             target = now.replace(hour=0, minute=0, second=0, microsecond=0)
             days_until_sunday = (6 - now.weekday()) % 7
             target += timedelta(days=days_until_sunday)
@@ -165,7 +144,6 @@ async def background_jobs(ctx: AppContext):
             except Exception:
                 logger.exception("weekly_guild_rating error")
 
-    # Создаём задачи и сохраняем их
     for coro in (job_keep_db_alive, job_update_pulse, job_echo_of_distortion,
                  job_happy_hour, job_weekly_guild_rating):
         t = asyncio.create_task(coro())
@@ -175,31 +153,22 @@ async def background_jobs(ctx: AppContext):
     logger.info("✅ Фоновые джобы запущены (с авто-перезапуском)")
 
 # ============================================================
-# ИНИЦИАЛИЗАЦИЯ – единый контекст + прогрев + джобы
-# ============================================================
 async def on_startup(app: Application):
+    """Инициализация ресурсов и контекста."""
     logger.info("=== ON_STARTUP CALLED ===")
     try:
-        # 1. Пул БД с keepalive и ограничением жизни соединений
         pool = await asyncpg.create_pool(
             settings.database_url,
             min_size=1, max_size=3, command_timeout=15,
             max_inactive_connection_lifetime=120.0,
             max_queries=50000,
-            server_settings={
-                'keepalives_idle': '60',
-                'keepalives_interval': '10',
-                'keepalives_count': '5'
-            }
         )
         app.bot_data["db_pool"] = pool
 
-        # 2. Миграции
         async with pool.acquire() as conn:
             await create_tables(conn)
             await _run_migrations(conn)
 
-        # 3. Redis с повторными попытками подключения
         redis_client = None
         if settings.redis_url:
             try:
@@ -211,16 +180,14 @@ async def on_startup(app: Application):
                 await redis_client.ping()
                 logger.info("✅ Redis подключён")
             except Exception as e:
-                logger.warning(f"Redis недоступен при старте: {e}")
+                logger.warning(f"Redis недоступен: {e}")
 
-        # 4. Сервисы (полные)
-        cache = TTLCache(maxsize=1000, ttl=600)  # 1000 записей для 100 игроков
+        cache = TTLCache(maxsize=1000, ttl=600)
         repo = PlayerRepository(pool, redis_client, cache)
         war_service = GuildWarService(pool, redis_client, WarConfig(), WarSettings())
         pet_service = PetService(repo, {"dog": {"name": "🐕 Песик", "price": 3000, "max_name_len": 15}})
         achievement_service = AchievementService(pool, redis_client, repo)
 
-        # 5. Единый контекст
         ctx = AppContext(
             db_pool=pool,
             redis_client=redis_client,
@@ -234,42 +201,36 @@ async def on_startup(app: Application):
         app.bot_data["ctx"] = ctx
         logger.info("✅ Контекст сохранён")
 
-        # 6. Прогрев кэша (безопасный)
-        await load_blunt_images(ctx)
+        if redis_client:
+            await load_blunt_images(ctx)
 
     except Exception:
         logger.exception("Критическая ошибка инициализации")
         raise
 
-    # 7. Запускаем фоновые задачи (с сохранением для отмены)
     await background_jobs(app.bot_data["ctx"])
-
     logger.info("🚀 Бот готов к работе")
 
 # ============================================================
-# GRACEFUL SHUTDOWN (с отменой задач и ожиданием вебхуков)
-# ============================================================
 async def on_shutdown(app: Application):
+    """Корректное завершение всех задач и освобождение ресурсов."""
     logger.info("🛑 Завершение работы...")
 
-    # 1. Отменяем фоновые задачи
-    for task in list(background_tasks):
-        task.cancel()
-    if background_tasks:
-        await asyncio.gather(*background_tasks, return_exceptions=True)
-    logger.info("Фоновые задачи остановлены")
+    # Отменяем фоновые задачи
+    for t in background_tasks:
+        t.cancel()
+    # Отменяем активные обработки вебхуков
+    for t in active_updates:
+        t.cancel()
 
-    # 2. Ждём завершения активных вебхук-обновлений (с таймаутом 10с)
-    if active_updates:
-        try:
-            await asyncio.wait_for(
-                asyncio.gather(*active_updates, return_exceptions=True),
-                timeout=10.0
-            )
-        except asyncio.TimeoutError:
-            logger.warning("Не все вебхук-задачи завершились вовремя")
+    # Ожидаем их завершения с таймаутом
+    all_tasks = list(background_tasks) + list(active_updates)
+    if all_tasks:
+        done, pending = await asyncio.wait(all_tasks, timeout=5, return_when=asyncio.ALL_COMPLETED)
+        for p in pending:
+            p.cancel()
+            logger.warning("Принудительно отменяем зависшую задачу")
 
-    # 3. Закрываем пул и Redis
     pool = app.bot_data.get("db_pool")
     if pool:
         await pool.close()
@@ -277,16 +238,13 @@ async def on_shutdown(app: Application):
     if ctx and ctx.redis:
         await ctx.redis.close()
     logger.info("🏁 Ресурсы освобождены")
-    
-# ============================================================
-# ЗАПУСК (aiohttp + PTB + корректная обработка сигналов)
+
 # ============================================================
 async def main_async():
-    # Инициализируем переменные вне try для безопасного finally
     tg_app = None
     runner = None
-
     try:
+        # optional uvloop
         try:
             import uvloop
             uvloop.install()
@@ -294,7 +252,7 @@ async def main_async():
             pass
 
         if not settings.bot_token or not settings.database_url:
-            raise RuntimeError("TOKEN and DATABASE_URL_AIVEN must be set")
+            raise RuntimeError("TOKEN and DATABASE_URL must be set")
 
         request = HTTPXRequest(
             connection_pool_size=50,
@@ -311,75 +269,57 @@ async def main_async():
                   .post_shutdown(on_shutdown)
                   .build())
 
+        # Хендлеры добавляются ДО initialize()
         tg_app.add_handler(MessageHandler(filters.TEXT, handle_text))
         tg_app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_member))
         tg_app.add_handler(CallbackQueryHandler(button_handler))
         tg_app.add_error_handler(global_error_handler)
 
+        # ЯВНАЯ ИНИЦИАЛИЗАЦИЯ (вызывает on_startup)
+        logger.info("🔄 Запуск tg_app.initialize()...")
         await tg_app.initialize()
-        logger.info("PTB инициализирован")
+        logger.info("✅ PTB инициализирован")
 
-        # --- Кастомный вебхук-сервер ---
-        update_semaphore = asyncio.Semaphore(100)  # плавная обработка пиков
+        ctx = tg_app.bot_data.get("ctx")
+        if not ctx:
+            raise RuntimeError("AppContext не был создан в on_startup. Аварийное завершение.")
 
-        # --- Кастомный вебхук-сервер ---
+        # Идемпотентный кэш для вебхуков
+        idempotent_cache = TTLCache(maxsize=100_000, ttl=600)
         update_semaphore = asyncio.Semaphore(100)
-        _ctx_lock = asyncio.Lock()
-        _idempotent_cache = TTLCache(maxsize=100_000, ttl=600)
 
         async def process_update(data: dict):
             update_id = data.get("update_id")
-            if update_id is not None:
-                if update_id in _idempotent_cache:
-                    return
-                _idempotent_cache[update_id] = True
+            if update_id is None:
+                return
 
-            ctx = tg_app.bot_data.get("ctx")
-            if not ctx:
-                async with _ctx_lock:
-                    ctx = tg_app.bot_data.get("ctx")
-                    if not ctx:
-                        logger.warning("Контекст не найден, создаю...")
-                        pool = await asyncpg.create_pool(
-                            settings.database_url,
-                            min_size=1, max_size=3, command_timeout=15,
-                            max_inactive_connection_lifetime=120.0,
-                            server_settings={
-                                'keepalives_idle': '60',
-                                'keepalives_interval': '10',
-                                'keepalives_count': '5'
-                            }
-                        )
-                        async with pool.acquire() as conn:
-                            await create_tables(conn)
-                            await _run_migrations(conn)
-                        cache = TTLCache(maxsize=1000, ttl=600)
-                        repo = PlayerRepository(pool, None, cache)
-                        war_service = GuildWarService(pool, None, WarConfig(), WarSettings())
-                        pet_service = PetService(repo, {"dog": {"name": "🐕 Песик", "price": 3000, "max_name_len": 15}})
-                        achievement_service = AchievementService(pool, None, repo)
-                        ctx = AppContext(
-                            db_pool=pool,
-                            redis_client=None,
-                            cache=cache,
-                            settings=settings,
-                            repo=repo,
-                            war_service=war_service,
-                            pet_service=pet_service,
-                            achievement_service=achievement_service,
-                        )
-                        tg_app.bot_data["ctx"] = ctx
-                        logger.info("✅ Контекст создан")
+            # Idempotency check
+            if update_id in idempotent_cache:
+                return
+            idempotent_cache[update_id] = True
+
+            last_known = tg_app.bot_data.get("last_update_id", 0)
+            if update_id <= last_known:
+                return
+
+            ctx_local = tg_app.bot_data.get("ctx")
+            if not ctx_local:
+                logger.critical("Контекст не найден! Сервис не работоспособен.")
+                raise RuntimeError("AppContext missing")
 
             async with update_semaphore:
                 try:
                     update = Update.de_json(data, tg_app.bot)
                     await tg_app.process_update(update)
+                    # Сохраняем максимальный update_id
+                    if update_id > tg_app.bot_data.get("last_update_id", 0):
+                        tg_app.bot_data["last_update_id"] = update_id
+                        if ctx_local.redis:
+                            asyncio.create_task(ctx_local.redis.set("bot:last_update_id", update_id))
                 except Exception:
-                    logger.exception("Ошибка обработки обновления")
+                    logger.exception("Критическая ошибка обработки обновления")
 
         async def handle_webhook(request):
-            # Проверка секретного токена
             if settings.webhook_secret:
                 secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
                 if secret != settings.webhook_secret:
@@ -393,40 +333,50 @@ async def main_async():
             if not isinstance(data, dict) or "update_id" not in data:
                 return web.Response(text="Bad Request", status=400)
 
-            # Создаём задачу и следим за ней
             task = asyncio.create_task(process_update(data))
             active_updates.add(task)
             task.add_done_callback(active_updates.discard)
             return web.Response(text="OK")
 
         async def healthcheck(request):
-            return web.Response(text="OK")
+            try:
+                async with ctx.db_pool.acquire(timeout=1) as conn:
+                    await conn.execute("SELECT 1")
+                if ctx.redis:
+                    await ctx.redis.ping()
+                return web.Response(text="OK")
+            except Exception:
+                return web.Response(text="FAIL", status=500)
 
+        # aiohttp веб-сервер
         app = web.Application()
         app.router.add_post(settings.webhook_path, handle_webhook)
         app.router.add_get("/healthz", healthcheck)
 
-        # Установка вебхука
         webhook_url = f"{settings.render_url}{settings.webhook_path}"
-        logger.info("Устанавливаю вебхук на %s", webhook_url)
+        logger.info(f"🌐 Устанавливаю вебхук: {webhook_url}")
         await tg_app.bot.set_webhook(
             url=webhook_url,
             secret_token=settings.webhook_secret,
             allowed_updates=["message", "callback_query"]
         )
+
         runner = web.AppRunner(app)
         await runner.setup()
         site = web.TCPSite(runner, "0.0.0.0", settings.port)
         await site.start()
-        logger.info("Веб-сервер запущен")
+        logger.info("🚀 Веб-сервер запущен и готов принимать запросы")
 
         # Ожидание сигнала завершения
         stop_event = asyncio.Event()
-        def shutdown_signal(signum):
-            stop_event.set()
         loop = asyncio.get_running_loop()
-        loop.add_signal_handler(signal.SIGTERM, lambda: shutdown_signal(signal.SIGTERM))
-        loop.add_signal_handler(signal.SIGINT, lambda: shutdown_signal(signal.SIGINT))
+        try:
+            loop.add_signal_handler(signal.SIGTERM, stop_event.set)
+            loop.add_signal_handler(signal.SIGINT, stop_event.set)
+        except NotImplementedError:
+            # Windows fallback
+            signal.signal(signal.SIGINT, lambda s, f: stop_event.set())
+            signal.signal(signal.SIGTERM, lambda s, f: stop_event.set())
 
         await stop_event.wait()
 
