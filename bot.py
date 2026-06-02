@@ -9,7 +9,7 @@ sys.excepthook = log_uncaught
 import asyncio, json, logging, os, sys, time, random, re, hashlib, html, enum, uuid, copy
 from datetime import datetime, timedelta, date, time as time_module, timezone
 from threading import Thread
-from typing import Optional, List, Any, Dict, NamedTuple, Callable
+from typing import Optional, List, Any, Dict, Tuple, NamedTuple, Callable
 from dataclasses import dataclass, field  
 
 import asyncpg
