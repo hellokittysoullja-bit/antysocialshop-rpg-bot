@@ -322,11 +322,55 @@ async def main_async():
         # --- Кастомный вебхук-сервер ---
         update_semaphore = asyncio.Semaphore(100)  # плавная обработка пиков
 
+        # --- Кастомный вебхук-сервер ---
+        update_semaphore = asyncio.Semaphore(100)
+        _ctx_lock = asyncio.Lock()
+        _idempotent_cache = TTLCache(maxsize=100_000, ttl=600)
+
         async def process_update(data: dict):
+            update_id = data.get("update_id")
+            if update_id is not None:
+                if update_id in _idempotent_cache:
+                    return
+                _idempotent_cache[update_id] = True
+
             ctx = tg_app.bot_data.get("ctx")
             if not ctx:
-                logger.critical("Контекст отсутствует")
-                return
+                async with _ctx_lock:
+                    ctx = tg_app.bot_data.get("ctx")
+                    if not ctx:
+                        logger.warning("Контекст не найден, создаю...")
+                        pool = await asyncpg.create_pool(
+                            settings.database_url,
+                            min_size=1, max_size=3, command_timeout=15,
+                            max_inactive_connection_lifetime=120.0,
+                            server_settings={
+                                'keepalives_idle': '60',
+                                'keepalives_interval': '10',
+                                'keepalives_count': '5'
+                            }
+                        )
+                        async with pool.acquire() as conn:
+                            await create_tables(conn)
+                            await _run_migrations(conn)
+                        cache = TTLCache(maxsize=1000, ttl=600)
+                        repo = PlayerRepository(pool, None, cache)
+                        war_service = GuildWarService(pool, None, WarConfig(), WarSettings())
+                        pet_service = PetService(repo, {"dog": {"name": "🐕 Песик", "price": 3000, "max_name_len": 15}})
+                        achievement_service = AchievementService(pool, None, repo)
+                        ctx = AppContext(
+                            db_pool=pool,
+                            redis_client=None,
+                            cache=cache,
+                            settings=settings,
+                            repo=repo,
+                            war_service=war_service,
+                            pet_service=pet_service,
+                            achievement_service=achievement_service,
+                        )
+                        tg_app.bot_data["ctx"] = ctx
+                        logger.info("✅ Контекст создан")
+
             async with update_semaphore:
                 try:
                     update = Update.de_json(data, tg_app.bot)
