@@ -110,10 +110,6 @@ async def load_blunt_images(ctx: AppContext):
 # ============================================================
 async def background_jobs(ctx: AppContext):
     """Создаёт периодические задачи, все с декоратором @resilient_task."""
-    async def update_pulse(ctx): pass
-    async def echo_of_distortion(ctx): pass
-    async def happy_hour_trigger(ctx): pass
-    async def weekly_guild_rating(ctx): pass
 
     @resilient_task
     async def job_keep_db_alive():
@@ -397,14 +393,6 @@ TEXT_COMMAND_HANDLERS = {
     "farm": farm,
     # ...
 }
-
-async def button_handler(update, context):
-    query = update.callback_query
-    await query.answer()
-    # ваша логика
-
-async def global_error_handler(update, context):
-    logger.error("Ошибка при обработке обновления", exc_info=context.error)
 
 # ============================================================
 # ЗАПУСК (aiohttp + PTB + корректная обработка сигналов)
