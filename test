@@ -1,0 +1,69 @@
+import time
+from typing import Dict
+
+class UltimateIdempotentCache:
+    __slots__ = ('_data', '_ttl', '_lock', '_last_cleanup')
+    def __init__(self, ttl_seconds: int = 3600):
+        self._ttl = ttl_seconds
+        self._data: Dict[int, float] = {}
+        self._lock = asyncio.Lock()
+        self._last_cleanup: float = 0.0
+
+    async def check_and_set(self, key: int) -> bool:
+        async with self._lock:
+            now = time.monotonic()
+            if now - self._last_cleanup > 60:
+                expired = [k for k, ts in self._data.items() if now - ts > self._ttl]
+                for k in expired:
+                    self._data.pop(k, None)
+                self._last_cleanup = now
+            if key in self._data:
+                return True
+            self._data[key] = now
+            return False
+
+    async def discard(self, key: int) -> None:
+        async with self._lock:
+            self._data.pop(key, None) IDEMPOTENT_CACHE = UltimateIdempotentCache(ttl_seconds=3600)
+UPDATE_SEMAPHORE = asyncio.Semaphore(10)
+
+ # ==================== ОСНОВНОЙ ХЕНДЛЕР (СИНХРОННЫЙ + ULTIMATE КЭШ) ====================
+async def handle_webhook(request):
+    # 1. Быстрый парсинг
+    try:
+        data = await request.json()
+    except Exception:
+        return web.Response(text="Bad Request", status=400)
+
+    if not isinstance(data, dict) or "update_id" not in data:
+        return web.Response(text="Bad Request", status=400)
+
+    update_id = data["update_id"]
+
+    # 2. Идемпотентность через твой UltimateIdempotentCache
+    already_processed = await IDEMPOTENT_CACHE.check_and_set(update_id)
+    if already_processed:
+        return web.Response(text="OK")
+
+    # 3. Контекст должен быть готов
+    ctx = tg_app.bot_data.get("ctx")
+    if not ctx:
+        await IDEMPOTENT_CACHE.discard(update_id)
+        return web.Response(text="Service Unavailable", status=503)
+
+    # 4. Синхронная обработка с таймаутом (не фон!)
+    try:
+        update = Update.de_json(data, tg_app.bot)
+        await asyncio.wait_for(
+            tg_app.process_update(update),
+            timeout=5.0
+        )
+        return web.Response(text="OK")
+    except asyncio.TimeoutError:
+        logger.error("⏰ Таймаут update_id=%d", update_id)
+        await IDEMPOTENT_CACHE.discard(update_id)
+        return web.Response(text="Service Unavailable", status=503)
+    except Exception:
+        logger.exception("💥 Ошибка update_id=%d", update_id)
+        await IDEMPOTENT_CACHE.discard(update_id)
+        return web.Response(text="Internal Server Error", status=500)
