@@ -157,10 +157,13 @@ async def on_startup(app: Application):
     """Инициализация ресурсов и контекста."""
     logger.info("=== ON_STARTUP CALLED ===")
     try:
+        # ================== БД ==================
         pool = await asyncpg.create_pool(
             settings.database_url,
-            min_size=1, max_size=3, command_timeout=15,
-            max_inactive_connection_lifetime=120.0,
+            min_size=2,
+            max_size=5,
+            command_timeout=15,
+            max_inactive_connection_lifetime=300.0,
             max_queries=50000,
         )
         app.bot_data["db_pool"] = pool
@@ -169,25 +172,35 @@ async def on_startup(app: Application):
             await create_tables(conn)
             await _run_migrations(conn)
 
+        # ================== Redis ==================
         redis_client = None
         if settings.redis_url:
             try:
                 redis_client = await aioredis.from_url(
                     settings.redis_url,
                     retry_on_timeout=True,
-                    health_check_interval=30
+                    health_check_interval=30,
+                    socket_keepalive=True,
                 )
                 await redis_client.ping()
                 logger.info("✅ Redis подключён")
+
+                # Инициализируем множество для обработанных update_id
+                await redis_client.sadd("processed_updates", "__placeholder__")
+                await redis_client.expire("processed_updates", 86400 * 7)
+
             except Exception as e:
                 logger.warning(f"Redis недоступен: {e}")
+                redis_client = None  # без Redis продолжим
 
-        cache = TTLCache(maxsize=1000, ttl=600)
+        # ================== Кэш и сервисы ==================
+        cache = TTLCache(maxsize=2000, ttl=600)
         repo = PlayerRepository(pool, redis_client, cache)
         war_service = GuildWarService(pool, redis_client, WarConfig(), WarSettings())
         pet_service = PetService(repo, {"dog": {"name": "🐕 Песик", "price": 3000, "max_name_len": 15}})
         achievement_service = AchievementService(pool, redis_client, repo)
 
+        # ================== Контекст ==================
         ctx = AppContext(
             db_pool=pool,
             redis_client=redis_client,
@@ -201,6 +214,7 @@ async def on_startup(app: Application):
         app.bot_data["ctx"] = ctx
         logger.info("✅ Контекст сохранён")
 
+        # ================== Прогрев кэша ==================
         if redis_client:
             await load_blunt_images(ctx)
 
@@ -208,6 +222,7 @@ async def on_startup(app: Application):
         logger.exception("Критическая ошибка инициализации")
         raise
 
+    # ================== Фоновые задачи ==================
     await background_jobs(app.bot_data["ctx"])
     logger.info("🚀 Бот готов к работе")
 
@@ -216,17 +231,14 @@ async def on_shutdown(app: Application):
     """Корректное завершение всех задач и освобождение ресурсов."""
     logger.info("🛑 Завершение работы...")
 
-    # Отменяем фоновые задачи
     for t in background_tasks:
         t.cancel()
-    # Отменяем активные обработки вебхуков
     for t in active_updates:
         t.cancel()
 
-    # Ожидаем их завершения с таймаутом
     all_tasks = list(background_tasks) + list(active_updates)
     if all_tasks:
-        done, pending = await asyncio.wait(all_tasks, timeout=5, return_when=asyncio.ALL_COMPLETED)
+        done, pending = await asyncio.wait(all_tasks, timeout=10, return_when=asyncio.ALL_COMPLETED)
         for p in pending:
             p.cancel()
             logger.warning("Принудительно отменяем зависшую задачу")
@@ -244,13 +256,6 @@ async def main_async():
     tg_app = None
     runner = None
     try:
-        # optional uvloop
-        #try:
-            #import uvloop
-            #uvloop.install()
-        #except ImportError:
-            #pass
-
         if not settings.bot_token or not settings.database_url:
             raise RuntimeError("TOKEN and DATABASE_URL must be set")
 
@@ -265,20 +270,19 @@ async def main_async():
                   .token(settings.bot_token)
                   .request(request)
                   .rate_limiter(AIORateLimiter())
-                  .post_init(on_startup)
-                  .post_shutdown(on_shutdown)
                   .build())
 
-        # Хендлеры добавляются ДО initialize()
         tg_app.add_handler(MessageHandler(filters.TEXT, handle_text))
         tg_app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_member))
         tg_app.add_handler(CallbackQueryHandler(button_handler))
         tg_app.add_error_handler(global_error_handler)
 
-        # ЯВНАЯ ИНИЦИАЛИЗАЦИЯ (вызывает on_startup)
         logger.info("🔄 Запуск tg_app.initialize()...")
         await tg_app.initialize()
         logger.info("✅ PTB инициализирован")
+
+        # Явно вызываем стартовую инициализацию контекста
+        await on_startup(tg_app)
 
         ctx = tg_app.bot_data.get("ctx")
         if not ctx:
@@ -286,36 +290,26 @@ async def main_async():
 
         # Идемпотентный кэш для вебхуков
         idempotent_cache = TTLCache(maxsize=100_000, ttl=600)
-        update_semaphore = asyncio.Semaphore(100)
+        update_semaphore = asyncio.Semaphore(150)
 
         async def process_update(data: dict):
             update_id = data.get("update_id")
             if update_id is None:
                 return
 
-            # Idempotency check
             if update_id in idempotent_cache:
                 return
             idempotent_cache[update_id] = True
 
-            last_known = tg_app.bot_data.get("last_update_id", 0)
-            if update_id <= last_known:
-                return
-
             ctx_local = tg_app.bot_data.get("ctx")
             if not ctx_local:
                 logger.critical("Контекст не найден! Сервис не работоспособен.")
-                raise RuntimeError("AppContext missing")
+                return
 
             async with update_semaphore:
                 try:
                     update = Update.de_json(data, tg_app.bot)
                     await tg_app.process_update(update)
-                    # Сохраняем максимальный update_id
-                    if update_id > tg_app.bot_data.get("last_update_id", 0):
-                        tg_app.bot_data["last_update_id"] = update_id
-                        if ctx_local.redis:
-                            asyncio.create_task(ctx_local.redis.set("bot:last_update_id", update_id))
                 except Exception:
                     logger.exception("Критическая ошибка обработки обновления")
 
@@ -348,7 +342,6 @@ async def main_async():
             except Exception:
                 return web.Response(text="FAIL", status=500)
 
-        # aiohttp веб-сервер
         app = web.Application()
         app.router.add_post(settings.webhook_path, handle_webhook)
         app.router.add_get("/healthz", healthcheck)
@@ -358,7 +351,8 @@ async def main_async():
         await tg_app.bot.set_webhook(
             url=webhook_url,
             secret_token=settings.webhook_secret,
-            allowed_updates=["message", "callback_query"]
+            allowed_updates=["message", "callback_query"],
+            drop_pending_updates=True
         )
 
         runner = web.AppRunner(app)
@@ -367,14 +361,12 @@ async def main_async():
         await site.start()
         logger.info("🚀 Веб-сервер запущен и готов принимать запросы")
 
-        # Ожидание сигнала завершения
         stop_event = asyncio.Event()
         loop = asyncio.get_running_loop()
         try:
             loop.add_signal_handler(signal.SIGTERM, stop_event.set)
             loop.add_signal_handler(signal.SIGINT, stop_event.set)
         except NotImplementedError:
-            # Windows fallback
             signal.signal(signal.SIGINT, lambda s, f: stop_event.set())
             signal.signal(signal.SIGTERM, lambda s, f: stop_event.set())
 
@@ -385,7 +377,11 @@ async def main_async():
         sys.exit(1)
     finally:
         logger.info("Остановка сервера...")
-        if tg_app:
+        if tg_app is not None:
+            try:
+                await on_shutdown(tg_app)
+            except Exception:
+                logger.exception("Ошибка при освобождении ресурсов")
             try:
                 await tg_app.stop()
                 await tg_app.shutdown()
