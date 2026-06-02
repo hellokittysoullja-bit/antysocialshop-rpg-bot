@@ -363,12 +363,13 @@ async def main_async():
         app.router.add_get("/healthz", healthcheck)
 
         # Установка вебхука
-        if settings.webhook_url:
-            await tg_app.bot.set_webhook(
-                url=settings.webhook_url,
-                secret_token=settings.webhook_secret,
-                allowed_updates=["message", "callback_query"]
-            )
+        webhook_url = f"{settings.render_url}{settings.webhook_path}"
+        logger.info("Устанавливаю вебхук на %s", webhook_url)
+        await tg_app.bot.set_webhook(
+            url=webhook_url,
+            secret_token=settings.webhook_secret,
+            allowed_updates=["message", "callback_query"]
+        )
         else:
             logger.warning("WEBHOOK_URL не задан – вебхук не установлен")
 
