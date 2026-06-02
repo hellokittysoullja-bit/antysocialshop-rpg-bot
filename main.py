@@ -279,68 +279,7 @@ async def on_shutdown(app: Application):
     if ctx and ctx.redis:
         await ctx.redis.close()
     logger.info("🏁 Ресурсы освобождены")
-
-# ============================================================
-# АНТИСПАМ – совершенная версия (Redis Lua + in‑memory fallback)
-# ============================================================
-_rate_limit_storage: Dict[str, Tuple[int, float]] = {}
-_rate_lock = asyncio.Lock()
-_last_cleanup = time.monotonic()
-_CLEANUP_INTERVAL = 300
-
-async def _cleanup_expired(now: float) -> None:
-    expired = [k for k, (_, exp) in _rate_limit_storage.items() if exp <= now]
-    for k in expired:
-        del _rate_limit_storage[k]
-
-async def check_rate_limit_redis(ctx, user_id: int, action: str, limit: int, period: float) -> bool:
-    """True если лимит не превышен. Атомарный Redis + надёжный fallback."""
-    if limit <= 0:
-        return False
-
-    key = f"rate:{action}:{user_id}"
-
-    # Lua-скрипт для атомарности Redis
-    if getattr(ctx, "redis", None) is not None:
-        try:
-            lua_script = """
-                local current = redis.call('INCR', KEYS[1])
-                if current == 1 then
-                    redis.call('EXPIRE', KEYS[1], ARGV[1])
-                end
-                return current
-            """
-            current = await ctx.redis.eval(lua_script, 1, key, period)
-            return int(current) <= limit
-        except Exception:
-            logger.warning("Redis rate limit failed, switching to in-memory fallback")
-
-    # In‑memory fallback с периодической очисткой
-    now = time.monotonic()
-    global _last_cleanup
-
-    async with _rate_lock:
-        if now - _last_cleanup > _CLEANUP_INTERVAL:
-            await _cleanup_expired(now)
-            _last_cleanup = now
-
-        entry = _rate_limit_storage.get(key)
-        if entry is not None:
-            count, expire = entry
-            if expire <= now:
-                del _rate_limit_storage[key]
-                entry = None
-            elif count >= limit:
-                return False
-
-        if entry is None:
-            _rate_limit_storage[key] = (1, now + period)
-        else:
-            count, expire = entry
-            _rate_limit_storage[key] = (count + 1, expire)
-
-    return True
-
+    
 # ============================================================
 # ЗАПУСК (aiohttp + PTB + корректная обработка сигналов)
 # ============================================================
