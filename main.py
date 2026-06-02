@@ -343,58 +343,6 @@ async def check_rate_limit_redis(ctx, user_id: int, action: str, limit: int, per
     return True
 
 # ============================================================
-# ОБРАБОТЧИКИ
-# ============================================================
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.message
-    if not msg or not msg.text:
-        return
-    user_id = update.effective_user.id
-    ctx = context.application.bot_data.get("ctx")
-    if not ctx:
-        return
-
-    # Единый антиспам
-    if not await check_rate_limit_redis(ctx, user_id, "text", 10, 10):
-        await msg.reply_text("⚠️ Слишком часто. Подожди секунду.")
-        return
-
-    # Сначала состояния ввода
-    if context.user_data.get('awaiting_pet_name'):
-        return await handle_pet_name(update, context)
-    if context.user_data.get('awaiting_named_blunt'):
-        return await handle_named_name(update, context)
-    if context.user_data.get('gifting_blunt_id'):
-        return await handle_gift_username(update, context)
-
-    raw_text = msg.text.strip()
-    parts = raw_text.split()
-    command = parts[0].lstrip("/").split("@")[0].lower()
-    context.args = parts[1:]
-
-    handler = TEXT_COMMAND_HANDLERS.get(command)
-    if handler:
-        try:
-            await handler(update, context)
-        except Exception:
-            logger.exception(f"Ошибка команды '{command}' от {user_id}")
-            await msg.reply_text("⚠️ Внутренняя ошибка. Попробуйте позже.")
-
-# Примеры команд – добавьте все свои
-async def start(update, context):
-    await update.message.reply_text("Добро пожаловать в RPG!")
-
-async def farm(update, context):
-    args = context.args
-    await update.message.reply_text(f"Вы фармите золото... {args}")
-
-TEXT_COMMAND_HANDLERS = {
-    "start": start,
-    "farm": farm,
-    # ...
-}
-
-# ============================================================
 # ЗАПУСК (aiohttp + PTB + корректная обработка сигналов)
 # ============================================================
 async def main_async():
