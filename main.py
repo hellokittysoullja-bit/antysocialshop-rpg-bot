@@ -245,11 +245,11 @@ async def main_async():
     runner = None
     try:
         # optional uvloop
-        try:
-            import uvloop
-            uvloop.install()
-        except ImportError:
-            pass
+        #try:
+            #import uvloop
+            #uvloop.install()
+        #except ImportError:
+            #pass
 
         if not settings.bot_token or not settings.database_url:
             raise RuntimeError("TOKEN and DATABASE_URL must be set")
