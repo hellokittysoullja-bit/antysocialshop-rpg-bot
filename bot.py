@@ -1099,7 +1099,7 @@ async def claim_daily(user_id: int, today: date, streak: int, reward_oac: int,
         return True
     return await ctx.repo.atomic_update(user_id, _apply)
 
-async def create_named_blunt(user_id: int, name: str, rarity: str = None, conn=None, ctx: AppContext = None) -> dict:
+async def create_named_blunt(user_id: int, name: str, rarity: str = None, conn=None, ctx: AppContext = None, player: Player = None) -> dict:
     """Создаёт именной блант (использует репозиторий из ctx)."""
     if ctx is None:
         raise ValueError("AppContext is required")
@@ -1124,7 +1124,9 @@ async def create_named_blunt(user_id: int, name: str, rarity: str = None, conn=N
         "owner_history": [{"user_id": str(user_id), "since": datetime.now(timezone.utc).isoformat()}],
     }
     
-    player = await ctx.repo.get_by_id(user_id)
+    # Загружаем игрока только если не передан готовый
+    if player is None:
+        player = await ctx.repo.get_by_id(user_id)
     if not player or not player.exists:
         player = Player(user_id=user_id)
     
@@ -2507,11 +2509,15 @@ async def _handle_referral(update, context, uid, player):
 
 async def _create_new_player(update, context, uid, username):
     ctx = context.bot_data.get("ctx")
-    player = Player(user_id=uid, username=username, balance=800)
-    await ctx.repo.save(player)
-    new_name = random.choice(["Крик Бездны","Шёпот Склепа"])
-    await create_named_blunt(uid, new_name, ctx=ctx)
-    
+    new_name = random.choice(["Крик Бездны", "Шёпот Склепа"])
+
+    # Атомарное создание игрока и первого бланта
+    async with ctx.db_pool.acquire() as conn:
+        async with conn.transaction():
+            player = Player(user_id=uid, username=username, balance=800)
+            await ctx.repo.save(player, conn=conn)
+            await create_named_blunt(uid, new_name, ctx=ctx, conn=conn)
+
     welcome_text = (
         "🎁 Смотритель дарует тебе <code>800</code> 🍬 и твой первый именной блант!\n\n"
         "<b>🎉 Добро пожаловать в Гильдию Antysocialshop!</b>\n\n"
@@ -2600,8 +2606,6 @@ async def _show_main_menu(update, context, player, user, ctx):
     kb, _ = await get_main_menu_keyboard(player.user_id, ctx=ctx)
     await update.effective_message.reply_text(menu_text, reply_markup=kb, parse_mode='HTML')
 
-# САМА ФУНКЦИЯ START — ТОНКИЙ ОРКЕСТРАТОР
-# --------------------------------------------------------------------------- def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ctx = context.bot_data.get("ctx")
     if not ctx:
@@ -2616,14 +2620,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not player or not player.exists:
             await _create_new_player(update, context, uid, username)
         else:
-            # Запускаем ежедневный бонус в фоне, чтобы меню появилось мгновенно
-            background = context.application.bot_data.get("background")
-            if background:
-                asyncio.create_task(background.run(process_daily_login(uid, context)))
-            else:
-                await process_daily_login(uid, context)
+            # Запускаем ежедневный бонус в фоне, чтобы меню появилось мгновенно:
+            asyncio.create_task(process_daily_login(uid, context))
 
-            # Меню отправляем немедленно
+            # Меню отправляем немедленно:
             await _show_main_menu(update, context, player, user, ctx)
     except Exception as e:
         logger.exception("start failed")
@@ -2997,7 +2997,7 @@ def _format_dust_message(name: str, reaction: str) -> str:
         f"📜 Реакция: <i>{reaction}</i>"
     )
 
-@rate_limit(3)
+@rate_limit(1)
 @game_handler
 async def craft_callback_v2(update, context, ctx, player):
     user = update.effective_user
@@ -3661,7 +3661,7 @@ async def collect_callback(update, context):
 
 # Профиль – премиум-карточка, сеньорская версия (аватарка + текст + кнопки)
 @error_handler
-@rate_limit(2)
+@rate_limit(1)
 async def profile_callback(update, context):
     ctx = context.application.bot_data["ctx"]
     user, msg = get_user_and_msg(update)
@@ -3805,17 +3805,13 @@ async def handle_set_bg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await skins_menu_handler(update, context)
 
-# Все бланты
-@error_handler
+# Все мои бланты
 @rate_limit(1)
-async def my_blunts_callback(update, context, page=0):
-    ctx = context.application.bot_data["ctx"]
+@game_handler
+async def my_blunts_callback(update, context, ctx, player, page=0):
     query = update.callback_query
     await query.answer()
     uid = query.from_user.id
-    player = await ctx.repo.get_by_id(uid)
-    if not player:
-        return
 
     inv_data = player.inventory or []
     named = [it for it in inv_data if it.get("type") == "named"]
@@ -5735,14 +5731,13 @@ async def handle_set_bg(update, context, ctx):
     await context.bot.send_message(chat_id=query.message.chat.id, text=f"✨ Фон «{new_bg}» активирован!")
     await skins_menu_handler(update, context)
 
-@cb
-async def blunt_details_handler(update, context, ctx):
+@rate_limit(1)
+@game_handler
+async def blunt_details_handler(update, context, ctx, player):
     query = update.callback_query
+    await query.answer()
     uid = query.from_user.id
     blunt_id = query.data.replace("blunt_details_", "")
-    player = await ctx.repo.get_by_id(uid, with_inventory=True)
-    if player is None:
-        return
     inv = player.inventory or []
     item = next((it for it in inv if it.get("id") == blunt_id), None)
     if not item:
@@ -5781,14 +5776,13 @@ async def blunt_details_handler(update, context, ctx):
     else:
         await query.message.edit_text(text=text, reply_markup=kb, parse_mode='HTML')
 
-@cb
-async def share_blunt_handler(update, context, ctx):
+@rate_limit(1)
+@game_handler
+async def share_blunt_handler(update, context, ctx, player):
     query = update.callback_query
+    await query.answer()
     uid = query.from_user.id
     blunt_id = query.data.replace("share_blunt_", "")
-    player = await ctx.repo.get_by_id(uid, with_inventory=True)
-    if player is None:
-        return
     bot_username = (await context.bot.get_me()).username
     ref_link = f"https://t.me/{bot_username}?start=blunt_{blunt_id}"
     inv = player.inventory or []
