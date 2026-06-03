@@ -6054,14 +6054,23 @@ async def reset_happy_hour(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Happy hour reset error: {e}")
 
-async def echo_of_distortion(context: ContextTypes.DEFAULT_TYPE):
-    ctx = context.application.bot_data.get("ctx")
-    if not ctx:
+async def echo_of_distortion(ctx: AppContext):
+    """Эхо искажения: показывает 3 случайных именных бланта в чат гильдии."""
+    if not ctx or not ctx.db_pool:
         return
-    async with ctx.db_pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT user_id, username, inventory FROM players WHERE inventory IS NOT NULL AND inventory != '[]'"
-        )
+
+    # 1. Получаем данные из БД
+    try:
+        async with ctx.db_pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT user_id, username, inventory FROM players "
+                "WHERE inventory IS NOT NULL AND inventory != '[]'"
+            )
+    except Exception as e:
+        logger.error(f"Echo of distortion DB error: {e}")
+        return
+
+    # 2. Собираем именные бланты
     all_named = []
     for row in rows:
         try:
@@ -6071,8 +6080,11 @@ async def echo_of_distortion(context: ContextTypes.DEFAULT_TYPE):
                     all_named.append((row["user_id"], row["username"], item))
         except Exception:
             continue
+
     if not all_named:
         return
+
+    # 3. Сообщение эхо
     sample = random.sample(all_named, min(3, len(all_named)))
     text = "<b><i>🩸 ЭХО ИСКАЖЕНИЯ</i></b>\n\n"
     for uid, uname, item in sample:
@@ -6080,11 +6092,31 @@ async def echo_of_distortion(context: ContextTypes.DEFAULT_TYPE):
         rarity = item.get("rarity", "common")
         color = {"legendary": "🟡", "epic": "🟣", "rare": "🔵"}.get(rarity, "🟢")
         reaction = item.get("reaction", "")
-        text += f"⚜️ <b>@{html.escape(uname)}</b> создал свой блант {color} <b><i>«{html.escape(name)}»</i></b> 🌿\n<i>Редкость: {rarity}</i>\n🩸 <i>{reaction}</i>\n\n"
+        text += (
+            f"⚜️ <b>@{html.escape(uname)}</b> создал свой блант {color} "
+            f"<b><i>«{html.escape(name)}»</i></b> 🌿\n"
+            f"<i>Редкость: {rarity}</i>\n"
+            f"🩸 <i>{reaction}</i>\n\n"
+        )
+
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("💍 Создать свой блант", callback_data="craft_named")]])
-    # ВОССТАНОВЛЕНО: отправка в чат гильдии
+
+    # 4. Отправка в ЧАТ ГИЛЬДИИ через прямой HTTP-запрос (надёжно, без PTB Application)
+    token = ctx.settings.bot_token
+    chat_id = "@guild_antysocial"
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "reply_markup": kb.to_json() if kb else None,
+    }
+
     try:
-        await context.bot.send_message(chat_id="@guild_antysocial", text=text, parse_mode='HTML', reply_markup=kb)
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(url, json=payload)
+            if resp.status_code != 200:
+                logger.error(f"Echo send failed: {resp.status_code} {resp.text}")
     except Exception as e:
         logger.error(f"Echo of distortion error: {e}")
 
@@ -6161,14 +6193,13 @@ async def _safe_send_guild_message(context: ContextTypes.DEFAULT_TYPE, text: str
             logger.warning("Ошибка отправки в чат гильдии (попытка %d): %s", attempt+1, e)
             await asyncio.sleep(2 ** attempt)
 
-async def keep_db_alive(context: ContextTypes.DEFAULT_TYPE):
-    ctx = context.application.bot_data.get("ctx")
-    if ctx and ctx.db_pool:
-        try:
-            async with ctx.db_pool.acquire() as conn:
-                await conn.execute("SELECT 1")
-        except Exception as e:
-            logger.error(f"Keep-alive error: {e}")
+async def keep_db_alive(ctx: AppContext):
+    try:
+        async with ctx.db_pool.acquire() as conn:
+            await conn.execute("SELECT 1")
+        logger.debug("DB keep-alive executed")
+    except Exception as e:
+        logger.error(f"keep_db_alive failed: {e}")
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
