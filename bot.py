@@ -254,6 +254,56 @@ def game_handler(func):
 # Проверка: если retry – модуль, а не функция, будет ошибка
 assert callable(retry), "retry должен быть функцией, а не модулем!"
 
+# Метрики-заглушки (без зависимостей, экономят память)
+class DummyMetric:
+    def inc(self): pass
+    def time(self): return self
+    def __enter__(self): return self
+    def __exit__(self, *args): pass
+
+callback_requests = DummyMetric()
+callback_duration = DummyMetric()
+
+def cb(func_or_alert=False):
+    """
+    Универсальный декоратор. Используй как @cb или @cb(True).
+    Всегда передаёт ctx из context.bot_data.
+    """
+    if callable(func_or_alert):
+        func = func_or_alert
+        show_alert_on_error = False
+        return _create_wrapper(func, show_alert_on_error)
+    else:
+        show_alert_on_error = func_or_alert
+        def decorator(func):
+            return _create_wrapper(func, show_alert_on_error)
+        return decorator
+
+def _create_wrapper(func, show_alert_on_error):
+    @wraps(func)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+        query = update.callback_query
+        if query:
+            try:
+                await query.answer()
+            except Exception:
+                pass
+
+        ctx = context.bot_data.get("ctx")
+        if not ctx:
+            logger.error("AppContext not found in bot_data")
+            return
+
+        try:
+            callback_requests.inc()
+            with callback_duration.time():
+                return await func(update, context, ctx, *args, **kwargs)
+        except Exception as e:
+            logger.error(f"Callback error in {func.__name__}: {e}", exc_info=True)
+            if query and show_alert_on_error:
+                await query.answer(f"❌ Ошибка: {e}", show_alert=True)
+    return wrapper
+
 # НАСТРОЙКИ через пидантик
 class Player(BaseModel):
     user_id: int
@@ -988,29 +1038,6 @@ async def check_rate_limit_redis(ctx, user_id: int, action: str, limit: int, per
         #return True
     #except pybreaker.CircuitBreakerError:
         #return True
-
-# ДЕКОРАТОР cb
-def cb(show_alert_on_error=False):
-    def decorator(func):
-        @wraps(func)
-        async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
-            query = update.callback_query
-            if query:
-                await query.answer()
-            ctx = context.application.bot_data.get("ctx")
-            if not ctx:
-                logger.error("AppContext not found")
-                return
-            try:
-                callback_requests.inc()
-                with callback_duration.time():
-                    return await func(update, context, ctx, *args, **kwargs)
-            except Exception as e:
-                logger.error(f"Callback error in {func.__name__}: {e}", exc_info=True)
-                if query and show_alert_on_error:
-                    await query.answer(f"❌ Ошибка: {e}", show_alert=True)
-        return wrapper
-    return decorator
 
 def _json_safe_load(value, default):
     if isinstance(value, (list, dict)):
