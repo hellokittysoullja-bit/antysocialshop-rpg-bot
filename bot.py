@@ -1182,7 +1182,7 @@ async def _award_achievement_rewards(user_id: int, player: Player, reward_text: 
 async def check_achievements(user_id: int, context, ctx: AppContext = None) -> None:
     """Проверяет и выдаёт достижения (использует репозиторий из ctx)."""
     if ctx is None:
-        ctx = context.application.bot_data.get("ctx")
+        ctx = context.bot_data.get("ctx")
     if not ctx:
         return
     
@@ -2506,7 +2506,7 @@ async def _handle_referral(update, context, uid, player):
 
 
 async def _create_new_player(update, context, uid, username):
-    ctx = context.application.bot_data.get("ctx")
+    ctx = context.bot_data.get("ctx")
     player = Player(user_id=uid, username=username, balance=800)
     await ctx.repo.save(player)
     new_name = random.choice(["Крик Бездны","Шёпот Склепа"])
@@ -2603,7 +2603,7 @@ async def _show_main_menu(update, context, player, user, ctx):
 # САМА ФУНКЦИЯ START — ТОНКИЙ ОРКЕСТРАТОР
 # --------------------------------------------------------------------------- def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    ctx = context.application.bot_data.get("ctx")
+    ctx = context.bot_data.get("ctx")
     if not ctx:
         await update.effective_message.reply_text("⚠️ Бот инициализируется, попробуйте позже.")
         return
@@ -3117,7 +3117,7 @@ async def handle_craft_named(update, context):
 
 
 async def handle_named_name(update, context):
-    ctx = context.application.bot_data.get("ctx")
+    ctx = context.bot_data.get("ctx")
     if not ctx:
         return
     try:
@@ -5515,7 +5515,7 @@ async def check_blunt_pics(update, context, ctx):
     await update.message.reply_text("\n".join(status))
 
 async def get_file_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    ctx = context.application.bot_data.get("ctx")
+    ctx = context.bot_data.get("ctx")
     if not ctx or update.effective_user.id != ctx.settings.admin_id:
         return
     if update.message.photo:
@@ -5569,7 +5569,7 @@ async def get_file_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     error = context.error
     logger.error("Глобальная ошибка", exc_info=error)
-    ctx = context.application.bot_data.get("ctx")
+    ctx = context.bot_data.get("ctx")
     if ctx and ctx.settings.admin_id:
         try:
             await context.bot.send_message(chat_id=ctx.settings.admin_id, text=f"🚨 Глобальная ошибка: {error}")
@@ -6015,8 +6015,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============================================================
 # ДЖОБЫ (ВОССТАНОВЛЕНЫ И АКТИВИРОВАНЫ)
 # ============================================================
-async def update_pulse(context: ContextTypes.DEFAULT_TYPE):
-    ctx = context.application.bot_data.get("ctx")
+async def update_pulse(ctx: AppContext):
     if not ctx:
         return
     now = time.time()
@@ -6028,29 +6027,35 @@ async def update_pulse(context: ContextTypes.DEFAULT_TYPE):
             ctx.guild_counts_updated = now
     online = await ctx.db_pool.fetchval("SELECT COUNT(DISTINCT user_id) FROM players WHERE last_farm > $1", datetime.now()-timedelta(hours=1))
     desc = f"🕯️{ctx.guild_counts['BLACK']} ▰▱⚜️{ctx.guild_counts['WHITE']} | 👥{online}"
-    # РАСКОММЕНТИРОВАНО: отправка описания чата (если бот имеет права)
+    # Отправка описания ЧАТА через HTTP
+    token = ctx.settings.bot_token
+    url = f"https://api.telegram.org/bot{token}/setChatDescription"
+    payload = {"chat_id": "@guild_antysocial", "description": desc}
     try:
-        await context.bot.set_chat_description(chat_id="@guild_antysocial", description=desc)
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.post(url, json=payload)
     except Exception:
         pass
 
-async def happy_hour_trigger(context: ContextTypes.DEFAULT_TYPE):
-    ctx = context.application.bot_data.get("ctx")
+async def happy_hour_trigger(ctx: AppContext):
     if not ctx:
         return
-    context.bot_data["happy_hour"] = True
-    context.bot_data["happy_hour_end"] = datetime.now() + timedelta(minutes=ctx.settings.happy_hour_duration_min)
-    # ВОССТАНОВЛЕНО: отправка уведомления
+    ctx.cache["happy_hour"] = True
+    ctx.cache["happy_hour_end"] = datetime.now() + timedelta(minutes=ctx.settings.happy_hour_duration_min)
     try:
-        await context.bot.send_message(chat_id="@guild_antysocial", text="🎉 <b>ЧАС УДАЧИ!</b> 🌠 Все действия приносят x2 OAC 🍬 (30 минут)!", parse_mode='HTML')
+        await _send_http_message(ctx, "@guild_antysocial",
+            "🎉 <b>ЧАС УДАЧИ!</b> 🌠 Все действия приносят x2 OAC 🍬 (30 минут)!")
     except Exception as e:
         logger.error(f"Happy hour announce error: {e}")
-    context.job_queue.run_once(reset_happy_hour, ctx.settings.happy_hour_duration_min * 60)
 
-async def reset_happy_hour(context: ContextTypes.DEFAULT_TYPE):
-    context.bot_data["happy_hour"] = False
+    # Отложенное выключение через asyncio вместо PTB job_queue
+    asyncio.create_task(_reset_happy_hour_after(ctx, ctx.settings.happy_hour_duration_min * 60))
+
+async def _reset_happy_hour_after(ctx: AppContext, delay_seconds: int):
+    await asyncio.sleep(delay_seconds)
+    ctx.cache["happy_hour"] = False
     try:
-        await context.bot.send_message(chat_id="@guild_antysocial", text="⏳ Час Удачи завершён.")
+        await _send_http_message(ctx, "@guild_antysocial", "⏳ Час Удачи завершён.")
     except Exception as e:
         logger.error(f"Happy hour reset error: {e}")
 
@@ -6120,13 +6125,11 @@ async def echo_of_distortion(ctx: AppContext):
     except Exception as e:
         logger.error(f"Echo of distortion error: {e}")
 
-async def weekly_guild_rating(context: ContextTypes.DEFAULT_TYPE):
-    ctx = context.application.bot_data.get("ctx")
+async def weekly_guild_rating(ctx: AppContext):
     if not ctx:
         return
     job_name = "weekly_guild_rating"
     try:
-        # Завершаем текущую войну и получаем очки
         await ctx.war_service.stop_war()
 
         async with ctx.db_pool.acquire() as conn:
@@ -6135,7 +6138,7 @@ async def weekly_guild_rating(context: ContextTypes.DEFAULT_TYPE):
 
             if black_score == white_score:
                 logger.info("%s: Война завершилась вничью (%d - %d).", job_name, black_score, white_score)
-                await _safe_send_guild_message(context,
+                await _safe_send_guild_message(ctx,
                     f"🤝 <b>ВОЙНА ГИЛЬДИЙ ЗАВЕРШИЛАСЬ ВНИЧЬЮ!</b>\n"
                     f"🕯️ Тёмные: {black_score} | ⚜️ Светлые: {white_score}\n"
                     f"Ничья — награды не выданы. Следующая война скоро!"
@@ -6148,7 +6151,6 @@ async def weekly_guild_rating(context: ContextTypes.DEFAULT_TYPE):
             blunts = random.randint(3, 7)
             dust = random.randint(1, 3)
 
-            # Атомарное обновление каждого игрока победившей гильдии
             rows = await conn.fetch("SELECT user_id FROM players WHERE guild = $1", winner)
             winners_count = len(rows)
             for r in rows:
@@ -6165,7 +6167,7 @@ async def weekly_guild_rating(context: ContextTypes.DEFAULT_TYPE):
                         job_name, winner, black_score, white_score, oac, blunts, dust, winners_count)
 
             winner_emoji = "🕯️" if winner == "BLACK" else "⚜️"
-            await _safe_send_guild_message(context,
+            await _safe_send_guild_message(ctx,
                 f"🎉 <b>ВОЙНА ГИЛЬДИЙ ЗАВЕРШЕНА!</b>\n\n"
                 f"{winner_emoji} <b>Победила {winner} гильдия!</b>\n"
                 f"🕯️ Тёмные: {black_score} | ⚜️ Светлые: {white_score}\n\n"
@@ -6173,21 +6175,21 @@ async def weekly_guild_rating(context: ContextTypes.DEFAULT_TYPE):
                 f"• {oac} OAC 🍬\n• {blunts} блантов 🌿\n• {dust} кристальной пыли 💠"
             )
 
-        # Запускаем новую войну
         await ctx.war_service.start_war()
 
     except Exception as e:
         logger.critical("%s: КРИТИЧЕСКАЯ ОШИБКА: %s", job_name, e, exc_info=True)
         if ctx.settings.admin_id:
             try:
-                await context.bot.send_message(chat_id=ctx.settings.admin_id, text=f"🚨 Ошибка в weekly_guild_rating:\n{e}")
+                await _send_http_message(ctx, ctx.settings.admin_id,
+                    f"🚨 Ошибка в weekly_guild_rating:\n{e}")
             except Exception:
                 pass
 
-async def _safe_send_guild_message(context: ContextTypes.DEFAULT_TYPE, text: str):
+async def _safe_send_guild_message(ctx: AppContext, text: str):
     for attempt in range(3):
         try:
-            await context.bot.send_message(chat_id="@guild_antysocial", text=text, parse_mode="HTML")
+            await _send_http_message(ctx, "@guild_antysocial", text)
             return
         except Exception as e:
             logger.warning("Ошибка отправки в чат гильдии (попытка %d): %s", attempt+1, e)
@@ -6207,7 +6209,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user_id = update.effective_user.id
-    ctx = context.application.bot_data.get("ctx")
+    ctx = context.bot_data.get("ctx")
     if not ctx:
         return
 
