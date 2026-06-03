@@ -2837,6 +2837,7 @@ def _format_farm_message(earned: int, crit: bool, happy: bool,
     )
     
 @rate_limit(3)
+@game_handler
 async def farm_callback_v2(update, context, ctx, player):
     user = update.effective_user
     uid = user.id
@@ -3090,31 +3091,39 @@ async def handle_craft_normal_v2(update, context, ctx, player):
             text="<b>🎉 Поздравляю! Ты освоил основы.</b>\n\n💎 Теперь ты можешь исследовать другие разделы меню."
         )
 
-@error_handler
-async def handle_craft_named(update, context):
-    ctx = context.application.bot_data["ctx"]  
+@rate_limit(3)
+@game_handler
+async def handle_craft_named(update, context, ctx, player):
     query = update.callback_query
     await query.answer()
     uid = query.from_user.id
-    player = await ctx.repo.get_by_id(uid)
-    if not player or player.balance < GAME_CONFIG["named_blunt_cost"]:
+
+    if player.balance < GAME_CONFIG["named_blunt_cost"]:
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=f"<b>🔮 ИСКАЖЕНИЕ МОЛЧИТ</b>\n\n<i>🛡️ Недостаточно OAC.</i>\n🕯️ Требуется <b>{GAME_CONFIG['named_blunt_cost']} OAC</b> 🍬.",
             parse_mode='HTML'
         )
         return
+
     context.user_data['awaiting_named_blunt'] = True
-    context.job_queue.run_once(clear_named_blunt_state, 300, data=uid)
+    # Вместо PTB job_queue используем asyncio задачу для отмены состояния через 5 минут
+    asyncio.create_task(_clear_named_blunt_state_after(uid, context, 300))
+
     await query.message.delete()
     sent_msg = await context.bot.send_message(
         chat_id=query.message.chat.id,
-        text="<b>💍 ИМЕННОЙ БЛАНТ</b>\n\n<i>Введи имя своего бланта (до 25 символов)</i>",
+        text="<b>💍 ИМЕННОЙ БЛАНТ</b>\n\n<i>Введи имя своего Бланта (до 25 символов)</i>",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel_named")]]),
         parse_mode='HTML'
     )
     context.user_data['awaiting_named_blunt_msg_id'] = sent_msg.message_id
 
+
+async def _clear_named_blunt_state_after(uid, context, delay):
+    """Сбрасывает состояние ввода именного бланта через delay секунд."""
+    await asyncio.sleep(delay)
+    context.user_data['awaiting_named_blunt'] = False
 
 async def handle_named_name(update, context):
     ctx = context.bot_data.get("ctx")
@@ -3449,7 +3458,7 @@ async def do_smoke(update, context, ctx, player):
             return SmokeStatus.NO_BLUNTS, None
 
         save = (p.guild == "WHITE" and random.randint(1, 100) <= 20)
-        earned = calculate_smoke_reward(p, context.bot_data.get("happy_hour"))
+        earned = calculate_smoke_reward(p, ctx.cache.get("happy_hour", False))
 
         old_count = p.smoke_count or 0
         new_count = old_count + 1
@@ -5925,8 +5934,8 @@ TEXT_COMMAND_HANDLERS = {
 # ============================================================
 CALLBACKS: Dict[str, Callable] = {
     "menu": menu_handler,
-    "farm": game_handler(farm_callback_v2),
-    "craft": game_handler(craft_callback_v2),
+    "farm": farm_callback_v2,
+    "craft": craft_callback_v2,
     "smoke": smoke_callback,
     "ritual": ritual_callback,
     "collect": collect_callback,
