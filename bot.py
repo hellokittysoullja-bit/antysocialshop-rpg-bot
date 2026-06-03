@@ -198,7 +198,7 @@ def game_handler(func):
         player = None
 
         if needs_ctx:
-            ctx = context.application.bot_data.get("ctx")
+            ctx = context.bot_data.get("ctx")
             if not ctx:
                 try:
                     await update.effective_message.reply_text("⚠️ Бот инициализируется, попробуйте позже.")
