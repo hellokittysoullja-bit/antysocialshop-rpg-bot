@@ -3902,18 +3902,25 @@ async def achievements_callback(update: Update, context: ContextTypes.DEFAULT_TY
     kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="profile")])
     await edit_or_reply(update, context, text, reply_markup=InlineKeyboardMarkup(kb_rows))
 
-@error_handler
-async def top_callback(update, context):
+@rate_limit(1)
+@game_handler
+async def top_callback(update, context, ctx, player):
     user, msg = get_user_and_msg(update)
     uid = user.id
-    top = await get_top(10)
+
+    # Прямой запрос топа
+    async with ctx.db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT user_id, username, balance, guild FROM players ORDER BY balance DESC LIMIT 10"
+        )
+    top = [dict(r) for r in rows]
+
     if not top:
         await edit_or_reply(update, context, "🏆 Топ-10 пока пуст.")
         return
 
     first_balance = top[0]["balance"]
-    player = await ctx.repo.get_by_id(uid)
-    my_balance = player.balance if player else 0
+    my_balance = player.balance or 0
 
     text = "<b>💎 ТОП-10 ИГРОКОВ 🏆</b>\n\n"
     my_position = None
@@ -3924,7 +3931,6 @@ async def top_callback(update, context):
         filled = percent // 10
         bar = "▓" * filled + "░" * (10 - filled)
 
-        # Префикс с эмодзи и номером
         if i == 1: prefix = "🥇 1. "
         elif i == 2: prefix = "🥈 2. "
         elif i == 3: prefix = "🥉 3. "
@@ -3936,7 +3942,6 @@ async def top_callback(update, context):
         elif i == 9: prefix = "🍀 9. "
         else: prefix = "🌱 10. "
 
-        # Гильдия
         guild = row.get("guild", "")
         if guild == "BLACK":
             g_emoji, g_name = "🕯️", "<b>Тёмная Гильдия</b>"
@@ -3945,8 +3950,11 @@ async def top_callback(update, context):
         else:
             g_emoji, g_name = "🩸", "<b>Без гильдии</b>"
 
-        # Ранг
-        rank_emoji, rank_name = get_rank_info(bal)
+        rank_emoji, rank_name = "🪓", "Рекрут"
+        for emoji, threshold, _ in RANKS:
+            if bal >= threshold:
+                rank_emoji = emoji
+                rank_name = emoji_to_name(emoji)
         username = html.escape(row["username"])
 
         text += (
@@ -3955,11 +3963,10 @@ async def top_callback(update, context):
             f"   {g_emoji} {g_name} | {rank_emoji} <b>{rank_name}</b>\n\n"
         )
 
-        # Определяем позицию текущего игрока
         if row.get("user_id") == uid:
             my_position = i
 
-    # --- Блок позиции игрока (динамическая дата) ---
+    # Блок позиции игрока (весь оригинальный код без изменений)
     deadline = next_sunday_str()
     if my_position == 1:
         text += (
@@ -3982,7 +3989,7 @@ async def top_callback(update, context):
             "<b>   🎁 Скин: «Золотой Венец» — фон профиля</b>\n"
             "<b>   ⚜️ Титул: «Хранитель Топа»</b>\n"
         )
-    elif my_position is not None:  # 4-10 места
+    elif my_position is not None:
         third_balance = top[2]["balance"] if len(top) >= 3 else 0
         gap = third_balance - my_balance
         if gap > 0:
@@ -3992,17 +3999,18 @@ async def top_callback(update, context):
             )
         else:
             text += f"✦ 📊 Твоя позиция: {my_position} ✦\n"
-    else:  # вне топа
+    else:
+        # Объединённый запрос для позиции вне топа
         async with ctx.db_pool.acquire() as conn:
             cnt_row = await conn.fetchrow(
                 "SELECT COUNT(*) as cnt FROM players WHERE balance > $1", my_balance
             )
-        pos = cnt_row["cnt"] + 1 if cnt_row else 1
-        async with ctx.db_pool.acquire() as conn:
+            pos = cnt_row["cnt"] + 1 if cnt_row else 1
             tenth_row = await conn.fetchrow(
                 "SELECT balance FROM players ORDER BY balance DESC LIMIT 1 OFFSET 9"
             )
-        tenth_balance = tenth_row["balance"] if tenth_row else 0
+            tenth_balance = tenth_row["balance"] if tenth_row else 0
+
         gap_to_top10 = tenth_balance - my_balance
         if gap_to_top10 > 0:
             text += (
@@ -4018,15 +4026,23 @@ async def top_callback(update, context):
     ])
     await edit_or_reply(update, context, text, reply_markup=kb, parse_mode="HTML")
 
-async def top_scout_callback(update, context):
+
+@cb
+async def top_scout_callback(update, context, ctx):
     query = update.callback_query
     await query.answer()
-    top = await get_top(3)
-    if not top:
+
+    # ctx гарантирован @cb, проверка не нужна
+    async with ctx.db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT username, balance, guild FROM players ORDER BY balance DESC LIMIT 3"
+        )
+    if not rows:
         await query.answer("Топ пуст.")
         return
+
     text = "<b>🔍 РАЗВЕДКА: ТОП-3</b>\n\n"
-    for i, row in enumerate(top):
+    for i, row in enumerate(rows):
         name = html.escape(row["username"])
         bal = row["balance"]
         guild = row["guild"]
