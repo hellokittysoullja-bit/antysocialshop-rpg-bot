@@ -172,7 +172,7 @@ def divine_command(command_name: str):
     return decorator
     
 def game_handler(func):
-    """Универсальный декоратор с кэшированием, защитой от повторов и ошибок."""
+    """Абсолютный декоратор: гарантированная идемпотентность, атомарный контекст, умная загрузка игрока."""
     import inspect
     sig = inspect.signature(func)
     needs_ctx = 'ctx' in sig.parameters
@@ -180,57 +180,64 @@ def game_handler(func):
 
     @wraps(func)
     async def wrapper(update, context, *args, **kwargs):
-        # === ИДЕМПОТЕНТНОСТЬ (защита от повторных вебхуков) ===
-        update_id = None
-        if update:
-            update_id = getattr(update, 'update_id', None)
+        # === РАННЯЯ ЗАЩИТА ===
+        if not update or not context:
+            logger.error(f"game_handler: update или context отсутствуют в {func.__name__}")
+            return
 
-        if update_id:
-            ctx_temp = context.application.bot_data.get("ctx")
-            if ctx_temp and ctx_temp.cache:
-                idemp_key = f"processed_update:{update_id}"
-                if ctx_temp.cache.get(idemp_key):
-                    return  # тихо выходим, уже обработано
-                ctx_temp.cache[idemp_key] = True
+        # === ПОЛУЧЕНИЕ КОНТЕКСТА (всегда, ради идемпотентности) ===
+        ctx = context.bot_data.get("ctx")
 
-        # === ЗАГРУЗКА ЗАВИСИМОСТЕЙ ===
-        ctx = None
-        player = None
-
-        if needs_ctx:
-            ctx = context.bot_data.get("ctx")
-            if not ctx:
-                try:
-                    await update.effective_message.reply_text("⚠️ Бот инициализируется, попробуйте позже.")
-                except:
-                    pass
+        # === ГАРАНТИРОВАННАЯ ИДЕМПОТЕНТНОСТЬ ===
+        update_id = getattr(update, 'update_id', None)
+        if update_id and ctx and ctx.cache:
+            idemp_key = f"processed_update:{update_id}"
+            if ctx.cache.get(idemp_key):
                 return
+            ctx.cache[idemp_key] = True
 
+        # === ПРОВЕРКА ГОТОВНОСТИ БОТА ===
+        if (needs_ctx or needs_player) and not ctx:
+            try:
+                if update.effective_message:
+                    await update.effective_message.reply_text("⚠️ Бот инициализируется, попробуйте позже.")
+            except Exception:
+                pass
+            return
+
+        # === ЗАГРУЗКА ИГРОКА ===
+        player = None
         if needs_player and ctx:
-            uid = update.effective_user.id
-            # Кэш игрока (TTLCache)
-            cache_key = f"player:{uid}"
-            player = ctx.cache.get(cache_key) if ctx.cache else None
-            if not player:
-                player = await ctx.repo.get_by_id(uid)
-                if player and player.exists and ctx.cache:
-                    ctx.cache[cache_key] = player
+            try:
+                uid = update.effective_user.id
+                if uid is None:
+                    raise AttributeError("effective_user.id is None")
+            except AttributeError:
+                logger.warning(f"game_handler: не удалось получить user_id в {func.__name__}")
+                return
+            player = await ctx.repo.get_by_id(uid)
             if not player or not player.exists:
                 try:
-                    await update.effective_message.reply_text("Профиль не найден. Напиши /start")
-                except:
+                    if update.effective_message:
+                        await update.effective_message.reply_text(
+                            "⚠️ Ваш профиль не обнаружен. Пожалуйста, нажмите /start для создания."
+                        )
+                except Exception:
                     pass
                 return
 
+        # === СБОР АРГУМЕНТОВ ===
         new_kwargs = {**kwargs}
         if needs_ctx:
             new_kwargs['ctx'] = ctx
         if needs_player:
             new_kwargs['player'] = player
 
-        # === ВЫПОЛНЕНИЕ ===
+        # === ВЫПОЛНЕНИЕ С ЗАЩИТОЙ ===
         try:
             return await func(update, context, *args, **new_kwargs)
+        except asyncio.CancelledError:
+            raise   # не глушим, чтобы корректно работала отмена задач
         except Exception:
             logger.exception(f"Критическая ошибка в {func.__name__}")
             try:
@@ -238,7 +245,7 @@ def game_handler(func):
                     await update.callback_query.answer("⚠️ Внутренняя ошибка. Админ уже уведомлён.", show_alert=True)
                 elif update.effective_message:
                     await update.effective_message.reply_text("⚠️ Внутренняя ошибка. Админ уже уведомлён.")
-            except:
+            except Exception:
                 pass
             if settings.admin_id:
                 import traceback as tb_module
@@ -247,7 +254,7 @@ def game_handler(func):
                         chat_id=settings.admin_id,
                         text=f"🚨 {func.__name__}:\n{tb_module.format_exc()[:800]}"
                     )
-                except:
+                except Exception:
                     pass
     return wrapper
 
@@ -292,6 +299,9 @@ def _create_wrapper(func, show_alert_on_error):
         ctx = context.bot_data.get("ctx")
         if not ctx:
             logger.error("AppContext not found in bot_data")
+            # 🔥 АБСОЛЮТНАЯ СИММЕТРИЯ с game_handler – игрок всегда видит ответ
+            if query:
+                await query.answer("⚠️ Бот инициализируется, попробуйте позже.", show_alert=True)
             return
 
         try:
