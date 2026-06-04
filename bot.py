@@ -3660,20 +3660,14 @@ async def collect_callback(update, context):
         f"<b><i>🪴 УРОЖАЙ СОБРАН</i></b>\n\nТвой куст принёс <b>{earned} OAC</b> 🍬.\n\n💎 <i>У тебя:</i> <b>{new_bal} OAC</b> 🍬")
 
 # Профиль – премиум-карточка, сеньорская версия (аватарка + текст + кнопки)
-@error_handler
 @rate_limit(1)
-async def profile_callback(update, context):
-    ctx = context.application.bot_data["ctx"]
+@game_handler
+async def profile_callback(update, context, ctx, player):
     user, msg = get_user_and_msg(update)
     uid = user.id
     uname = html.escape(user.username or user.first_name)
 
-    player = await ctx.repo.get_by_id(uid)
-    if not player or not player.user_id:
-        await msg.reply_text("Сначала активируйся: /start")
-        return
-
-    # Теперь все поля берутся напрямую из модели (никаких .get)
+    # player гарантированно существует благодаря @game_handler
     bal = player.balance or 0
     bl = player.blunts or 0
     guild = player.guild or ""
@@ -3711,7 +3705,6 @@ async def profile_callback(update, context):
 
     rank_progress = get_rank_progress(bal)
 
-    # --- Питомец
     pet_line = ""
     if player.pet:
         pet_line = f"🐾 <b>Питомец:</b> {player.pet}"
@@ -3760,7 +3753,6 @@ async def profile_callback(update, context):
     kb_rows.append([InlineKeyboardButton("🏰 В меню", callback_data="menu")])
     kb = InlineKeyboardMarkup(kb_rows)
 
-    # Аватар
     photo_id = None
     try:
         photos = await context.bot.get_user_profile_photos(uid, limit=1)
