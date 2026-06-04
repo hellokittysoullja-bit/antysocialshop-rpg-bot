@@ -3182,7 +3182,7 @@ async def handle_named_name(update, context):
                 return ("no_money",)
             p.balance -= 50
             p.craft_count = (p.craft_count or 0) + 1
-            item = await create_named_blunt(uid, name, rarity=None, conn=conn, ctx=ctx)
+            item = await create_named_blunt(uid, name, rarity=None, conn=conn, ctx=ctx, player=p)
 
             await ctx.war_service.add_score_raw(uid, 0, conn)
             await ctx.war_service.add_score(uid, WarAction.NAMED_CRAFT, conn)
@@ -3254,7 +3254,12 @@ async def handle_named_name(update, context):
 
 @error_handler
 async def handle_use_dust(update, context):
-    ctx = context.application.bot_data["ctx"]
+    # 1. Современный доступ к ctx
+    ctx = context.bot_data.get("ctx")
+    if not ctx:
+        await update.callback_query.answer("⚠️ Бот инициализируется.", show_alert=True)
+        return
+
     query = update.callback_query
     await query.answer()
     uid = query.from_user.id
@@ -3273,7 +3278,8 @@ async def handle_use_dust(update, context):
             "Крик Бездны", "Пепел Короля", "Шёпот Склепа",
             "Коготь Хаоса", "Вздох Пожирателя"
         ])
-        item = await create_named_blunt(uid, name, rarity="legendary", conn=conn, ctx=ctx)
+        # 2. Передаём player=p, чтобы блант добавился к тому же объекту, который будет сохранён
+        item = await create_named_blunt(uid, name, rarity="legendary", conn=conn, ctx=ctx, player=p)
 
         await ctx.war_service.add_score(uid, WarAction.DUST_USE, conn)
 
