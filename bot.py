@@ -2930,7 +2930,7 @@ async def farm_callback_v2(update, context, ctx, player):
         if btn_callback == "menu":
             message_text = f"<b>🍬 OAC копятся 🌱</b>\n\n<b>🍃 Подожди {remain} мин</b>"
         else:
-            message_text = f"<b>🍬 OAC копятся 🌱</b>\n\n<b>🍃 Подожди {remain} мин</b>\n\n<i>💡 Пока можно:</i>"
+            message_text = f"<b>🍬 OAC копятся 🌱</b>\n\n<b>🍃 Подожди {remain} мин</b>\n\n<b>💡 Совет:</b> <i>чем заняться прямо сейчас:</i>"
     
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
