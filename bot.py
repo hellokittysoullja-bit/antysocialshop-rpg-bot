@@ -2580,13 +2580,17 @@ async def _show_main_menu(update, context, player, user, ctx):
     whisper = random.choice(WHISPERS)
 
     # Приветствие и гильдия
-    back = f"<b>⚔️ С возвращением в Гильдию, {rank_display} {html.escape(display_name)}.</b>\n\n"
+    back = f"<b>⚔️ С возвращением в Гильдию, {rank_display} {html.escape(display_name)}</b>\n\n"
     if guild == "BLACK":
         back += "<b>🔮 Ты — часть Темной Гильдии. 🕯️Ритуалы ждут тебя</b>\n"
     elif guild == "WHITE":
         back += "<b>🔮 Ты — часть Светлой Гильдии. ⚜️Исповедь очищает душу и ждёт тебя</b>\n"
     else:
-        back += "<b>🔮 Ты пока не в Гильдии. Нажми 🕋Гильдии чтобы вступить!</b>\n"
+        back += (
+            "<b>🕯️⚜️ Ты ещё не выбрал сторону!</b>\n"
+            "🔮 Гильдия откроет ритуалы, исповеди и войну\n"
+            "👉 <b>Нажми кнопку «🕋 Гильдии» в меню.</b>\n"
+        )
 
     # Мотивационная строка
     if next_threshold > 0:
@@ -2597,16 +2601,20 @@ async def _show_main_menu(update, context, player, user, ctx):
 
     # Подсказка для новичков
     farm_count = player.farm_count
-    guild_joined = guild is not None
     craft_count = player.craft_count
     is_veteran = bal >= 5000
-
+    
+    # Список именных блантов для проверки
+    named = [it for it in (player.inventory or []) if it.get("type") == "named"]
+    
     if farm_count == 0:
         hint = "<b>💡 Твой первый шаг: нажми 🍬 Фармить и получи свои первые OAC!</b>"
-    elif not guild_joined:
-        hint = "<b>💡 Отлично! Теперь вступи в 🕋 Гильдию — это откроет ритуалы и исповеди.</b>"
     elif craft_count == 0:
         hint = "<b>💡 Попробуй 🌿 Крафт, чтобы создать свой первый Блант!</b>"
+    elif craft_count == 0:
+        hint = "<b>💡 Попробуй 🌿 Крафт, чтобы создать свой первый Блант!</b>"
+    elif len(named) <= 1 and (player.balance or 0) >= GAME_CONFIG["named_blunt_cost"]:
+        hint = "<b>💡 Готов к большему? Создай свой первый 💍 Именной блант! (50 OAC)</b>"
     elif is_veteran:
         hint = "<b>💡 Исследуй 🔮 Алхимию и корми своего 🐾 питомца!</b>"
     else:
@@ -2615,6 +2623,39 @@ async def _show_main_menu(update, context, player, user, ctx):
     menu_text = f"<b>🎮 ГЛАВНОЕ МЕНЮ</b>\n\n<i>{whisper}</i>\n\n" + back + "\n\n" + hint
     kb, _ = await get_main_menu_keyboard(player.user_id, ctx=ctx)
     await update.effective_message.reply_text(menu_text, reply_markup=kb, parse_mode='HTML')
+    
+def get_next_action(player) -> tuple[str, str]:
+    """
+    Возвращает (текст_кнопки, callback_data) для рекомендации во время кулдауна.
+    Приоритет: незавершённый онбординг → обычные подсказки.
+    """
+    step = player.onboarding_step or 0
+
+    # === ЭТАПЫ ОНБОРДИНГА (обучение не закончено) ===
+    if step != -1:
+        if step == 0:
+            return ("🕋 Выбрать Гильдию", "guild_info")
+        elif step == 1:
+            return ("🍬 Фармить OAC", "farm")
+        elif step == 2:
+            return ("🌿 Создать первый блант", "craft")
+        # Если появятся новые шаги, их легко добавить сюда
+
+    # === ОБЫЧНЫЕ РЕКОМЕНДАЦИИ (онбординг завершён) ===
+    if (player.blunts or 0) < 2:
+        return ("🌿 Скрутить блант", "craft")
+    if not player.guild:
+        return ("🕋 Вступить в Гильдию", "guild_info")
+
+    now = datetime.now(timezone.utc)
+    last_lab = player.last_lab_attempt
+    if not last_lab or (now - last_lab) > timedelta(hours=GAME_CONFIG["lab_cooldown_hours"]):
+        return ("🏛️ Исследовать Лабиринт", "lab_start")
+
+    if player.pet and (player.pet_hunger or 100) < 50:
+        return ("🐾 Покормить питомца", "pet_preview")
+
+    return ("🏰 В меню", "menu")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ctx = context.bot_data.get("ctx")
@@ -2884,15 +2925,22 @@ async def farm_callback_v2(update, context, ctx, player):
     status, *data = result
     if status == "cooldown":
         remain = data[0]
+        btn_text, btn_callback = get_next_action(player)
+    
+        if btn_callback == "menu":
+            message_text = f"<b>🍬 OAC копятся 🌱</b>\n\n<b>🍃 Подожди {remain} мин</b>"
+        else:
+            message_text = f"<b>🍬 OAC копятся 🌱</b>\n\n<b>🍃 Подожди {remain} мин</b>\n\n<i>💡 Пока можно:</i>"
+    
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text=f"<b>🍬 OAC копятся 🌱</b>\n\n<b>🍃 Подожди {remain} мин</b>",
+            text=message_text,
             parse_mode='HTML',
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(btn_text, callback_data=btn_callback)]])
         )
-        if update.callback_query:
-            await update.callback_query.answer()
-        return
+    if update.callback_query:
+        await update.callback_query.answer()
+    return
 
     earned, crit, happy, medal_text, new_count, new_balance, old_balance = data
 
@@ -3696,11 +3744,13 @@ async def profile_callback(update, context, ctx, player):
             rank_name = emoji_to_name(emoji)
 
     # Гильдия
-    g_emoji = ""
+    guild_line = ""
     if guild == "BLACK":
-        g_emoji = " 🕯️ Тёмная Гильдия"
+        guild_line = "\n🕯️ <b>Тёмная Гильдия</b> — ритуал и тёмная магия 🔮"
     elif guild == "WHITE":
-        g_emoji = " ⚜️ Светлая Гильдия"
+        guild_line = "\n⚜️ <b>Светлая Гильдия</b> — исповедь и благосклонность удачи 🪽"
+    else:
+        guild_line = "\n🕯️🪽 <i>Не в гильдии</i> — вступление откроет <b>новые возможности </b>"
 
     neuro = random.choice(NEURO_STATUSES)
     skins = player.profile_skins or {}
@@ -3730,7 +3780,7 @@ async def profile_callback(update, context, ctx, player):
 
     text = (
         f"<b>⚜️ ПРОФИЛЬ</b>\n"
-        f"👤 <b>{uname}</b>{g_emoji}\n"
+        f"👤 <b>{uname}</b>{guild_line}\n"
         f"🫧 Фон: {bg}\n\n"
         f"{rank_progress}\n\n"
         f"💎 <b>ОАС:</b> <b>{bal} OAC</b> 🍬\n"
@@ -3761,6 +3811,8 @@ async def profile_callback(update, context, ctx, player):
             )
 
     kb_rows = []
+    if not guild:
+        kb_rows.append([InlineKeyboardButton("🕋 Вступить в Гильдию", callback_data="guild_info")])
     if len(named) > 2:
         kb_rows.append([InlineKeyboardButton(f"💍 Все именные бланты ({len(named)})", callback_data="my_blunts")])
     kb_rows.append([InlineKeyboardButton("📜 Кодекс", callback_data="rules")])
