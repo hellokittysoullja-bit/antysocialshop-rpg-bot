@@ -5891,23 +5891,25 @@ async def shrine_donate_handler(update, context, ctx):
 
 @cb
 async def guild_join_handler(update, context, ctx):
-    ctx = context.application.bot_data["ctx"]
     query = update.callback_query
     guild = "BLACK" if query.data == "guild_join_BLACK" else "WHITE"
     uid = query.from_user.id
+
     player = await ctx.repo.get_by_id(uid, with_inventory=False)
     if player is None:
         await query.answer("Профиль не найден, начните с /start", show_alert=True)
         return
-    player.guild = guild
 
+    player.guild = guild
+    g_emoji = "🕯️" if guild == "BLACK" else "⚜️"
+    g_name = "Тёмная" if guild == "BLACK" else "Светлая"
+
+    # === Онбординг: шаг 0 → шаг 1 ===
     if player.onboarding_step == 0:
         player.onboarding_step = 1
         await ctx.repo.save(player)
-        try:
-            await query.message.delete()
-        except Exception:
-            pass
+
+        # Отправляем сообщение с обучением
         kb1 = InlineKeyboardMarkup([
             [InlineKeyboardButton("🍬 Фармить", callback_data="farm")],
             [InlineKeyboardButton("⏭️ Пропустить обучение", callback_data="skip_onboarding")]
@@ -5920,22 +5922,38 @@ async def guild_join_handler(update, context, ctx):
                   "<i>💡 OAC — главная валюта. Трать её на крафт, питомцев и свитки.</i>"),
             reply_markup=kb1, parse_mode='HTML'
         )
-        g_emoji = "🕯️" if guild == "BLACK" else "⚜️"
-        g_name = "Тёмная" if guild == "BLACK" else "Светлая"
-        await query.message.edit_text(
-            f"<b><i>🕋 ГИЛЬДИЯ ТЕБЯ ПРИНЯЛА</i></b>\n\n✅ Теперь <b>ты</b> — {g_emoji} <b>{g_name} Гильдия</b> ·\n\n<i>🩸 Искажение стало плотнее...</i>",
-            parse_mode='HTML'
-        )
-        return
 
+        # Показываем уведомление и удаляем ИСХОДНОЕ сообщение с кнопками вступления
+        await query.answer(f"✅ Ты вступил в {g_emoji} {g_name} Гильдию!", show_alert=True)
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        return   # ← жёстко выходим, никакого двойного сохранения
+
+    # === Обычное вступление (без онбординга) ===
     await ctx.repo.save(player)
-    g_emoji = "🕯️" if guild == "BLACK" else "⚜️"
-    g_name = "Тёмная" if guild == "BLACK" else "Светлая"
+    
+    # === Склоняем названия гильдий
+    guild_name_genitive = "Тёмной Гильдии" if guild == "BLACK" else "Светлой Гильдии"
+    action_emoji = "🕯️" if guild == "BLACK" else "⚜️"
+    action_text = "Совершить первый Ритуал" if guild == "BLACK" else "Принести первую Исповедь"
+    action_cb = "ritual" if guild == "BLACK" else "confess"
+    
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"{action_emoji} {action_text}", callback_data=action_cb)],
+        [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
+    ])
+    
     await query.message.edit_text(
-        f"<b><i>🕋 ГИЛЬДИЯ ТЕБЯ ПРИНЯЛА</i></b>\n\n✅ Теперь <b>ты</b> — в {g_emoji} <b>{g_name} Гильдия</b> ·\n\n<i>🩸 Искажение стало плотнее...</i>",
+        f"<b><i>🕋 ГИЛЬДИЯ ПРИНЯЛА ТЕБЯ 🪽</i></b>\n\n"
+        f"✨ Отныне ты — часть <b>{guild_name_genitive}</b>.\n"
+        f"🩸 Искажение стало плотнее...\n\n"
+        f"<b>💡 Твой первый шаг:</b>",
+        reply_markup=kb,
         parse_mode='HTML'
     )
-
+    
 # ============================================================
 # ОБРАБОТЧИКИ УДАЧИ, АЛХИМИИ, ПОДАРКОВ (прокси)
 # ============================================================
