@@ -4121,7 +4121,10 @@ async def top_scout_callback(update, context, ctx):
 # Гильдии
 @error_handler
 async def guild_info_callback(update, context):
-    ctx = context.application.bot_data["ctx"]
+    ctx = context.bot_data.get("ctx")
+    if not ctx:
+        await update.effective_message.reply_text("⚠️ Контекст (ctx) игры временно недоступен. Это бывает при перезапуске. Попробуй позже.")
+        return
     user, msg = get_user_and_msg(update)
     uid = user.id
     player = await ctx.repo.get_by_id(uid)
@@ -4191,7 +4194,10 @@ async def guild_info_callback(update, context):
 
 @error_handler
 async def guild_shrine_callback(update, context):
-    ctx = context.application.bot_data["ctx"]
+    ctx = context.bot_data.get("ctx")
+    if not ctx:
+        await update.effective_message.reply_text("⚠️ Контекст (ctx) игры временно недоступен. Это бывает при перезапуске. Попробуй позже.")
+        return
     query = update.callback_query
     await query.answer()
     uid = query.from_user.id
@@ -4311,73 +4317,58 @@ async def guild_war_callback(update, context):
     ])
     await edit_or_reply(update, context, text, reply_markup=kb, parse_mode='HTML')
 
-@error_handler
-async def confess_callback(update, context):
-    ctx = context.application.bot_data["ctx"]
-    user, msg = get_user_and_msg(update)
-    uid = user.id
+@cb
+async def confess_callback(update, context, ctx):
+    query = update.callback_query
+    uid = query.from_user.id
 
-    # Вся логика с проверками и изменениями внутри атомарной транзакции
-    async def _confess(player, conn):
-        # Проверки
-        if not player or not player.user_id:
+    async def _confess(p, conn):
+        if not p or not p.user_id:
             return ("no_player",)
-        if player.guild != "WHITE":
+        if p.guild != "WHITE":
             return ("wrong_guild",)
-        if (player.blunts or 0) < 1:
+        if (p.blunts or 0) < 1:
             return ("no_blunts",)
 
-        # Списание бланта
-        player.blunts -= 1
-
-        # Случайный результат
+        p.blunts -= 1
         r = random.random()
         if r < 0.70:
             reward = random.randint(100, 200)
-            player.balance = (player.balance or 0) + reward
+            p.balance = (p.balance or 0) + reward
             return ("ok", f"<b><i>⚜️ ИСПОВЕДЬ</i></b>\n\nБлагословение! +{reward} OAC.")
         elif r < 0.95:
-            player.m_essence = (player.m_essence or 0) + 1
+            p.m_essence = (p.m_essence or 0) + 1
             return ("ok", "<b><i>⚜️ ИСПОВЕДЬ</i></b>\n\nТы получил 💠 Кристальную Пыль.")
         else:
-            # Легендарный блант – создаём через create_named_blunt внутри транзакции
             name = random.choice(["Крик Бездны","Пепел Короля","Шёпот Склепа"])
-            await create_named_blunt(uid, name, rarity="legendary", conn=conn)
+            await create_named_blunt(uid, name, rarity="legendary", ctx=ctx, player=p)
             return ("ok", f"<b><i>⚜️ ИСПОВЕДЬ</i></b>\n\n🌟 Чудо! Легендарный блант «{name}»!")
 
     result = await ctx.repo.atomic_update(uid, _confess)
 
-    # Обработка результата
-    if result is None:
-        await context.bot.send_message(chat_id=uid, text="Сначала активируйся: /start")
+    if not result:
+        await query.answer("Профиль не найден. Напиши /start", show_alert=True)
         return
 
-    status, data = result[0], result[1] if len(result) > 1 else ""
+    status, *rest = result
+    data = rest[0] if rest else ""
+
     if status == "no_player":
-        await context.bot.send_message(chat_id=uid, text="Сначала активируйся: /start")
+        await query.answer("Профиль не найден. Напиши /start", show_alert=True)
         return
     if status == "wrong_guild":
-        if update.callback_query:
-            await update.callback_query.answer("Только для Светлой Гильдии.", show_alert=True)
-        else:
-            await msg.reply_text("❌ Только для Светлой Гильдии.")
+        await query.answer("Только для Светлой Гильдии.", show_alert=True)
         return
     if status == "no_blunts":
-        if update.callback_query:
-            await update.callback_query.answer("Нужен 1 блант.", show_alert=True)
-        else:
-            await msg.reply_text("❌ Нужен 1 блант.")
+        await query.answer("Нужен 1 блант.", show_alert=True)
         return
 
     # Успех
-    if update.callback_query:
-        await update.callback_query.message.edit_text(
-            data,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="guild_info")]]),
-            parse_mode='HTML'
-        )
-    else:
-        await msg.reply_text(data, parse_mode='HTML')
+    await query.message.edit_text(
+        data,
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="guild_info")]]),
+        parse_mode='HTML'
+    )
 
 @error_handler
 async def rules_callback(update, context):
