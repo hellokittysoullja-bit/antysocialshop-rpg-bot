@@ -5962,8 +5962,8 @@ async def cancel_gift_handler(update, context):
 TEXT_COMMAND_HANDLERS = {
     # Команды с / (без слеша)
     "start": start,
-    "farm": game_handler(farm_callback_v2),
-    "craft": game_handler(craft_callback_v2),
+    "farm": farm_callback_v2,
+    "craft": craft_callback_v2,
     "smoke": smoke_callback,
     "ritual": ritual_callback,
     "profile": profile_callback,
