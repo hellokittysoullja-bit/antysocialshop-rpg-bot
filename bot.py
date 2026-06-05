@@ -1363,8 +1363,7 @@ class CraftStatus(Enum):
     NO_MONEY = "no_money"
     OK = "ok"
 
-# ========== БАЗА ДАННЫХ AIVEN ==========
-db_pool = None
+# ========== БАЗА ДАННЫХ ==========
 BLUNTS_PER_PAGE = 3
 
 BLUNT_IMAGES = {
@@ -1373,115 +1372,6 @@ BLUNT_IMAGES = {
     "epic": "",
     "legendary": ""
 }
-
-
-    # ============================================================
-    # 🔬 ДИАГНОСТИКА ПОДКЛЮЧЕНИЯ (логи + Telegram)
-    # ============================================================
-    try:
-        # --- парсим хост и определяем провайдера ---
-        if "@" in database_url:
-            host_part = database_url.split("@")[1].split(":")[0]
-            port = database_url.split(":")[-1].split("/")[0]
-            dbname = database_url.split("/")[-1].split("?")[0]
-        else:
-            host_part = "localhost"
-            port = "5432"
-            dbname = "unknown"
-
-        provider = "unknown"
-        if "neon.tech" in host_part:
-            provider = "Neon"
-        elif "aivencloud.com" in host_part:
-            provider = "Aiven"
-        elif "cockroachlabs.cloud" in host_part:
-            provider = "CockroachDB"
-        elif "render.com" in host_part or "oregon-postgres" in host_part:
-            provider = "Render"
-        elif "supabase.co" in host_part:
-            provider = "Supabase"
-
-        # --- пробное подключение ---
-        test_conn = await asyncpg.connect(database_url, timeout=10)
-        try:
-            version = await test_conn.fetchval("SELECT version()")
-            success_msg = (
-                f"✅ База данных доступна\n"
-                f"Провайдер: {provider}\n"
-                f"Хост: {host_part}\n"
-                f"Порт: {port}\n"
-                f"База: {dbname}\n"
-                f"Версия: {version}"
-            )
-            logger.info(success_msg)
-        finally:
-            await test_conn.close()
-
-        # --- отправляем сообщение админу (Telegram) ---
-        if settings.admin_id and settings.bot_token:
-            url = f"https://api.telegram.org/bot{settings.bot_token}/sendMessage"
-            payload = {
-                "chat_id": settings.admin_id,
-                "text": success_msg,
-                "parse_mode": "HTML"
-            }
-            try:
-                async with httpx.AsyncClient(timeout=10) as client:
-                    await client.post(url, json=payload)
-            except Exception as send_err:
-                logger.warning("Не удалось отправить Telegram-уведомление админу: %s", send_err)
-
-    except asyncpg.exceptions.InternalServerError as e:
-        error_text = str(e).lower()
-        if "compute time quota exceeded" in error_text:
-            alert = (
-                f"❌ ЛИМИТ ВЫЧИСЛИТЕЛЬНОГО ВРЕМЕНИ ИСЧЕРПАН!\n"
-                f"Провайдер: {provider}\n"
-                f"Хост: {host_part}\n"
-                f"Решение: дождитесь сброса или перенесите базу на Render PostgreSQL."
-            )
-        else:
-            alert = f"❌ Внутренняя ошибка базы данных ({provider}): {e}"
-        logger.critical(alert)
-        if settings.admin_id and settings.bot_token:
-            url = f"https://api.telegram.org/bot{settings.bot_token}/sendMessage"
-            payload = {"chat_id": settings.admin_id, "text": alert, "parse_mode": "HTML"}
-            try:
-                async with httpx.AsyncClient(timeout=10) as client:
-                    await client.post(url, json=payload)
-            except Exception as send_err:
-                logger.warning("Не удалось отправить Telegram-уведомление админу: %s", send_err)
-        raise
-
-    except Exception as e:
-        alert = f"❌ Не удалось подключиться к базе данных ({provider}): {e}"
-        logger.critical(alert)
-        if settings.admin_id and settings.bot_token:
-            url = f"https://api.telegram.org/bot{settings.bot_token}/sendMessage"
-            payload = {"chat_id": settings.admin_id, "text": alert, "parse_mode": "HTML"}
-            try:
-                async with httpx.AsyncClient(timeout=10) as client:
-                    await client.post(url, json=payload)
-            except Exception as send_err:
-                logger.warning("Не удалось отправить Telegram-уведомление админу: %s", send_err)
-        raise   # прерываем запуск, потому что без БД бот не сможет работать
-
-    # Шаг 1: Выполняем все миграции через временное соединение
-    async with asyncpg.create_pool(database_url, min_size=1, max_size=1, command_timeout=15) as migration_pool:
-        async with migration_pool.acquire() as conn:
-            await create_tables(conn)
-            await _run_migrations(conn)
-            await init_redis()
-
-    # Шаг 2: Создаём основной пул
-    db_pool = await asyncpg.create_pool(
-        database_url,
-        min_size=5,
-        max_size=20,
-        command_timeout=15,
-        max_inactive_connection_lifetime=300.0
-    )
-    logger.info("База данных Aiven инициализирована (пул 5-20, таймаут 15с).")
 
 async def _run_migrations(conn):
     """Все миграции, которые необходимо применить перед запуском."""
@@ -2609,8 +2499,6 @@ async def _show_main_menu(update, context, player, user, ctx):
         hint = "<b>💡 Твой первый шаг: нажми 🍬 Фармить и получи свои первые OAC!</b>"
     elif craft_count == 0:
         hint = "<b>💡 Попробуй 🌿 Крафт, чтобы создать свой первый Блант!</b>"
-    elif craft_count == 0:
-        hint = "<b>💡 Попробуй 🌿 Крафт, чтобы создать свой первый Блант!</b>"
     elif len(named) <= 1 and (player.balance or 0) >= GAME_CONFIG["named_blunt_cost"]:
         hint = "<b>💡 Готов к большему? Создай свой первый 💍 Именной блант! (50 OAC)</b>"
     elif is_veteran:
@@ -3458,8 +3346,10 @@ async def cancel_gift(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     context.user_data.pop("gifting_blunt_id", None)
-    # Вернёмся в меню или в список блантов – здесь просто в профиль
-    await profile_callback(update, context)
+    # Возврат в профиль: передаём управление через кнопку, а не прямой вызов
+    await query.message.edit_text("❌ Подарок отменён.", reply_markup=InlineKeyboardMarkup([[
+        InlineKeyboardButton("🔙 В профиль", callback_data="profile")
+    ]]))
 
 # Дунуть
 @error_handler
