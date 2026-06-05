@@ -1809,7 +1809,7 @@ class PerfectedCache:
 
     async def fetch(
         self,
-        redis_client: Optional[redis.Redis],
+        redis_client: Optional[aioredis.Redis],
         db_pool: asyncpg.Pool,
         cache_key: str,
         query: str,
