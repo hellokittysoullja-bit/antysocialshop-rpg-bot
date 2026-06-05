@@ -58,51 +58,6 @@ import copy
 # ============================================================
 # ДЕКОРАТОРЫ
 # ============================================================
-def safe_callback(func: Callable):
-    @wraps(func)
-    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        try:
-            return await func(update, context)
-        except Exception as e:
-            logger.error(f"Callback error in {func.__name__}: {e}", exc_info=True)
-            try:
-                await update.callback_query.answer(f"❌ Ошибка: {e}", show_alert=True)
-            except Exception:
-                pass
-            if settings.admin_id and "compute time quota exceeded" in str(e).lower():
-                try:
-                    await context.bot.send_message(
-                        chat_id=settings.admin_id,
-                        text=f"❌ <b>Лимит базы данных!</b>\nCallback: {func.__name__}\nРешение: дождитесь сброса."
-                    )
-                except Exception:
-                    pass
-    return wrapper
-
-def error_handler(func):
-    @wraps(func)
-    async def wrapper(update, context, *args, **kwargs):
-        try:
-            return await func(update, context, *args, **kwargs)
-        except Exception as e:
-            logger.error(f"Unhandled error in {func.__name__}:", exc_info=True)
-            if 'awaiting_named_blunt' in context.user_data:
-                context.user_data['awaiting_named_blunt'] = False
-            if update.callback_query:
-                await update.callback_query.answer("⚠️ Внутренняя ошибка. Админ уже в курсе.", show_alert=True)
-            else:
-                await context.bot.send_message(
-                    chat_id=update.effective_chat.id,
-                    text="⚠️ Что-то пошло не так. Попробуйте позже."
-                )
-            if settings.admin_id:
-                try:
-                    err_msg = f"🚨 <b>Ошибка в {func.__name__}</b>\n<code>{html.escape(str(e))}</code>"
-                    await context.bot.send_message(chat_id=settings.admin_id, text=err_msg, parse_mode='HTML')
-                except Exception:
-                    pass
-    return wrapper
-
 def rate_limit(seconds: int = 2):
     def decorator(func):
         @wraps(func)
@@ -238,22 +193,20 @@ def game_handler(func):
             return await func(update, context, *args, **new_kwargs)
         except asyncio.CancelledError:
             raise   # не глушим, чтобы корректно работала отмена задач
-        except Exception:
-            logger.exception(f"Критическая ошибка в {func.__name__}")
-            try:
-                if update.callback_query:
-                    await update.callback_query.answer("⚠️ Внутренняя ошибка. Админ уже уведомлён.", show_alert=True)
-                elif update.effective_message:
-                    await update.effective_message.reply_text("⚠️ Внутренняя ошибка. Админ уже уведомлён.")
-            except Exception:
-                pass
+        except Exception as e:
+            logger.error(f"Unhandled error in {func.__name__}:", exc_info=True)
+            # Сохраняем уникальную логику из старого error_handler
+            if 'awaiting_named_blunt' in context.user_data:
+                context.user_data['awaiting_named_blunt'] = False
+            if update.callback_query:
+                await update.callback_query.answer("⚠️ Внутренняя ошибка. Админ уже в курсе.", show_alert=True)
+            elif update.effective_message:
+                await update.effective_message.reply_text("⚠️ Что-то пошло не так. Попробуйте позже.")
             if settings.admin_id:
                 import traceback as tb_module
                 try:
-                    await context.bot.send_message(
-                        chat_id=settings.admin_id,
-                        text=f"🚨 {func.__name__}:\n{tb_module.format_exc()[:800]}"
-                    )
+                    err_msg = f"🚨 <b>Ошибка в {func.__name__}</b>\n<code>{html.escape(str(e))}</code>"
+                    await context.bot.send_message(chat_id=settings.admin_id, text=err_msg, parse_mode='HTML')
                 except Exception:
                     pass
     return wrapper
@@ -359,6 +312,7 @@ class Player(BaseModel):
     onboarding_step: int = 0
     exists: bool = False
     model_config = ConfigDict(populate_by_name=True)
+    pet_hunger: int = 100
     
 class PlayerRepository:
     """Репозиторий игроков с Circuit Breaker, кэшем и автоматическими ретраями."""
@@ -1420,11 +1374,6 @@ BLUNT_IMAGES = {
     "legendary": ""
 }
 
-async def init_db_pool():
-    global db_pool
-    database_url = os.getenv("DATABASE_URL_AIVEN")
-    if not database_url:
-        raise Exception("DATABASE_URL_AIVEN не установлена!")
 
     # ============================================================
     # 🔬 ДИАГНОСТИКА ПОДКЛЮЧЕНИЯ (логи + Telegram)
@@ -2177,7 +2126,9 @@ def get_rank_info(balance: int):
         return "🪓", "Рекрут"
 
 async def process_daily_login(user_id: int, context) -> None:
-    ctx = context.application.bot_data["ctx"]
+    ctx = context.bot_data.get("ctx")
+    if not ctx:
+        return
     today = date.today()
     player = await ctx.repo.get_by_id(user_id)
     if not player or not player.user_id:
@@ -2508,7 +2459,9 @@ def get_rank_progress(balance):
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ /start
 
 async def _handle_referral(update, context, uid, player):
-    ctx = context.application.bot_data["ctx"]
+    ctx = context.bot_data.get("ctx")
+    if not ctx:
+        return
     """Атомарно обрабатывает реферальную ссылку blunt_..."""
     if not context.args or not context.args[0].startswith("blunt_"):
         return
@@ -3174,13 +3127,8 @@ async def handle_craft_normal_v2(update, context, ctx, player):
     else:
         await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb, parse_mode='HTML')
 
-    # Достижения в фоне
-    background = context.application.bot_data.get("background")
-    if background:
-        asyncio.create_task(background.run(check_achievements(uid, context)))
-    else:
-        await check_achievements(uid, context)
-
+    asyncio.create_task(check_achievements(uid, context))
+    
     # Онбординг
     if player.onboarding_step == 2:
         player.onboarding_step = -1
@@ -3620,12 +3568,8 @@ async def do_smoke(update, context, ctx, player):
     ])
     await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
 
-    background = context.application.bot_data.get("background")
-    if background:
-        asyncio.create_task(background.run(check_achievements(uid, context)))
-    else:
-        await check_achievements(uid, context)
-
+    asyncio.create_task(check_achievements(uid, context))
+    
     if player.onboarding_step == 3:
         player.onboarding_step = -1
         await ctx.repo.save(player)
