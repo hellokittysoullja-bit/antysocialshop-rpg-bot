@@ -4131,7 +4131,7 @@ async def guild_info_callback(update, context):
     guild = player.guild
 
     # Безопасный подсчёт гильдий
-    cnt = await count_guilds()
+    cnt = await count_guilds(ctx)
     black_cnt = cnt.get("BLACK", 0) if isinstance(cnt, dict) else 0
     white_cnt = cnt.get("WHITE", 0) if isinstance(cnt, dict) else 0
 
