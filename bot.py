@@ -2895,6 +2895,12 @@ async def farm_callback_v2(update, context, ctx, player):
     uname = user.username or user.first_name
     now = datetime.now()
 
+    if update.callback_query:
+        try:
+            await update.callback_query.answer()
+        except Exception:
+            pass
+
     async def _farm(p, conn):
         if p.last_farm and (now - p.last_farm) < timedelta(hours=FARM_COOLDOWN_HOURS):
             remain = int((timedelta(hours=FARM_COOLDOWN_HOURS) - (now - p.last_farm)).seconds / 60)
@@ -2926,21 +2932,19 @@ async def farm_callback_v2(update, context, ctx, player):
     if status == "cooldown":
         remain = data[0]
         btn_text, btn_callback = get_next_action(player)
-    
+
         if btn_callback == "menu":
             message_text = f"<b>🍬 OAC копятся 🌱</b>\n\n<b>🍃 Подожди {remain} мин</b>"
         else:
             message_text = f"<b>🍬 OAC копятся 🌱</b>\n\n<b>🍃 Подожди {remain} мин</b>\n\n<b>💡 Совет:</b> <i>чем заняться прямо сейчас:</i>"
-    
+
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=message_text,
             parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(btn_text, callback_data=btn_callback)]])
         )
-    if update.callback_query:
-        await update.callback_query.answer()
-    return
+        return
 
     earned, crit, happy, medal_text, new_count, new_balance, old_balance = data
 
@@ -2953,16 +2957,8 @@ async def farm_callback_v2(update, context, ctx, player):
     else:
         await context.bot.send_message(chat_id=update.effective_chat.id, text=text, parse_mode='HTML')
 
-    # --- Фоновые задачи (не блокируют ответ игроку) ---
-    background = context.application.bot_data.get("background")
-    if background:
-        # Отправляем в фон — игрок не ждёт
-        asyncio.create_task(background.run(check_achievements(uid, context)))
-        asyncio.create_task(background.run(check_rank_up(context, uid, uname, old_balance, new_balance)))
-    else:
-        # Если менеджер ещё не готов (на старте), выполняем синхронно
-        await check_rank_up(context, uid, uname, old_balance, new_balance)
-        await check_achievements(uid, context)
+    asyncio.create_task(check_achievements(uid, context))
+    asyncio.create_task(check_rank_up(context, uid, uname, old_balance, new_balance))
 
     if player.onboarding_step == 1:
         player.onboarding_step = 2
