@@ -323,7 +323,7 @@ class PlayerRepository:
         self.cache = cache
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=5))
-    async def get_by_id(self, user_id: int) -> Player:
+    async def get_by_id(self, user_id: int, with_inventory: bool = True) -> Player:
         """Возвращает игрока из Redis → in‑memory → БД."""
         if not user_id or user_id <= 0:
             raise ValueError("Некорректный user_id при загрузке")
@@ -373,9 +373,13 @@ class PlayerRepository:
 
         if row:
             p = dict(row)
+            if with_inventory:
             p["inventory"] = _json_safe_load(p.get("inventory"), [])
-            p["profile_skins"] = _json_safe_load(p.get("profile_skins"), {})
-            p["pending_transfer"] = _json_safe_load(p.get("pending_transfer"), None)
+        else:
+            p["inventory"] = []
+        
+        p["profile_skins"] = _json_safe_load(p.get("profile_skins"), {})
+        p["pending_transfer"] = _json_safe_load(p.get("pending_transfer"), None)
             player = Player(**p)
             player.exists = True
             await self._cache_put(user_id, player)
@@ -408,7 +412,6 @@ class PlayerRepository:
         cols_sql = ", ".join(f'"{c}"' for c in columns)
         placeholders = ", ".join(f"${i+1}" for i in range(len(columns)))
         update_set = ", ".join(f'"{c}" = EXCLUDED."{c}"' for c in columns if c != "user_id")
-
         values = [getattr(player, col) for col in columns]
         for idx, col in enumerate(columns):
             if col in json_cols:
@@ -5735,66 +5738,69 @@ async def guild_shrine_callback(update, context, ctx):
 
 @cb(True)
 async def guild_join_handler(update, context, ctx):
-    logger.info("=== JOIN HANDLER CALLED ===")
     query = update.callback_query
     guild = "BLACK" if query.data == "guild_join_BLACK" else "WHITE"
     uid = query.from_user.id
 
-    player = await ctx.repo.get_by_id(uid, with_inventory=False)
-    if player is None:
-        await query.answer("Профиль не найден, начните с /start", show_alert=True)
-        return
+    try:
+        player = await ctx.repo.get_by_id(uid, with_inventory=False)
+        if player is None:
+            await query.answer("Профиль не найден, начните с /start", show_alert=True)
+            return
 
-    player.guild = guild
-    g_emoji = "🕯️" if guild == "BLACK" else "⚜️"
-    g_name = "Тёмная" if guild == "BLACK" else "Светлая"
+        player.guild = guild
+        g_emoji = "🕯️" if guild == "BLACK" else "⚜️"
+        g_name = "Тёмная" if guild == "BLACK" else "Светлая"
 
-    # === Онбординг: шаг 0 → шаг 1 ===
-    if player.onboarding_step == 0:
-        player.onboarding_step = 1
+        # === Онбординг: шаг 0 → шаг 1 ===
+        if player.onboarding_step == 0:
+            player.onboarding_step = 1
+            await ctx.repo.save(player)
+
+            kb1 = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🍬 Фармить", callback_data="farm")],
+                [InlineKeyboardButton("⏭️ Пропустить обучение", callback_data="skip_onboarding")]
+            ])
+            await safe_send_message(
+                context, uid,
+                "<b>🎓 Обучение (шаг 2 из 3)</b>\n\n"
+                "<b>🍬 Твой первый шаг — фарм!</b>\n\n"
+                "Нажми кнопку ниже, чтобы получить <b>OAC</b>.\n\n"
+                "<i>💡 OAC — главная валюта. Трать её на крафт, питомцев и свитки.</i>",
+                reply_markup=kb1, parse_mode='HTML'
+            )
+
+            await query.answer(f"✅ Ты вступил в {g_emoji} {g_name} Гильдию!", show_alert=True)
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+            return
+
+        # === Обычное вступление (без онбординга) ===
         await ctx.repo.save(player)
 
-        kb1 = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🍬 Фармить", callback_data="farm")],
-            [InlineKeyboardButton("⏭️ Пропустить обучение", callback_data="skip_onboarding")]
+        guild_name_genitive = "Тёмной Гильдии" if guild == "BLACK" else "Светлой Гильдии"
+        action_emoji = "🕯️" if guild == "BLACK" else "⚜️"
+        action_text = "Совершить первый Ритуал" if guild == "BLACK" else "Принести первую Исповедь"
+        action_cb = "ritual" if guild == "BLACK" else "confess"
+
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"{action_emoji} {action_text}", callback_data=action_cb)],
+            [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
         ])
-        await safe_send_message(
-            context, uid,
-            "<b>🎓 Обучение (шаг 2 из 3)</b>\n\n"
-            "<b>🍬 Твой первый шаг — фарм!</b>\n\n"
-            "Нажми кнопку ниже, чтобы получить <b>OAC</b>.\n\n"
-            "<i>💡 OAC — главная валюта. Трать её на крафт, питомцев и свитки.</i>",
-            reply_markup=kb1, parse_mode='HTML'
+
+        await query.message.edit_text(
+            f"<b><i>🕋 ГИЛЬДИЯ ПРИНЯЛА ТЕБЯ 🪽</i></b>\n\n"
+            f"✨ Отныне ты — часть <b>{guild_name_genitive}</b>.\n"
+            f"🩸 Искажение стало плотнее...\n\n"
+            f"<b>💡 Твой первый шаг:</b>",
+            reply_markup=kb,
+            parse_mode='HTML'
         )
-
-        await query.answer(f"✅ Ты вступил в {g_emoji} {g_name} Гильдию!", show_alert=True)
-        try:
-            await query.message.delete()
-        except Exception:
-            pass
-        return
-
-    # === Обычное вступление (без онбординга) ===
-    await ctx.repo.save(player)
-    
-    guild_name_genitive = "Тёмной Гильдии" if guild == "BLACK" else "Светлой Гильдии"
-    action_emoji = "🕯️" if guild == "BLACK" else "⚜️"
-    action_text = "Совершить первый Ритуал" if guild == "BLACK" else "Принести первую Исповедь"
-    action_cb = "ritual" if guild == "BLACK" else "confess"
-    
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"{action_emoji} {action_text}", callback_data=action_cb)],
-        [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
-    ])
-    
-    await query.message.edit_text(
-        f"<b><i>🕋 ГИЛЬДИЯ ПРИНЯЛА ТЕБЯ 🪽</i></b>\n\n"
-        f"✨ Отныне ты — часть <b>{guild_name_genitive}</b>.\n"
-        f"🩸 Искажение стало плотнее...\n\n"
-        f"<b>💡 Твой первый шаг:</b>",
-        reply_markup=kb,
-        parse_mode='HTML'
-    )
+    except Exception as e:
+        logger.error(f"Guild join error for {uid}: {e}", exc_info=True)
+        await query.answer(f"❌ Ошибка при вступлении: {e}", show_alert=True)
     
 # ============================================================
 # ОБРАБОТЧИКИ УДАЧИ, АЛХИМИИ, ПОДАРКОВ (прокси)
