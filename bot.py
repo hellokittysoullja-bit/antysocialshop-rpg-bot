@@ -373,7 +373,7 @@ class PlayerRepository:
 
         if row:
             p = dict(row)
-            if with_inventory:
+        if with_inventory:
             p["inventory"] = _json_safe_load(p.get("inventory"), [])
         else:
             p["inventory"] = []
