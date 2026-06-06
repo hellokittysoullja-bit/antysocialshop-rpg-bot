@@ -3714,31 +3714,6 @@ async def profile_callback(update, context, ctx, player):
     else:
         await msg.reply_text(text, reply_markup=kb, parse_mode='HTML')
 
-async def handle_set_bg(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    new_bg = query.data.replace("set_bg_", "")
-
-    async def _set(p, conn):
-        skins = p.profile_skins or {}
-        if not isinstance(skins, dict):
-            skins = {}
-        skins["active_background"] = new_bg
-        p.profile_skins = skins
-        return new_bg
-
-    result = await ctx.repo.atomic_update(user_id, _set)
-    if result is None:
-        await query.answer("Профиль не найден", show_alert=True)
-        return
-
-    await context.bot.send_message(
-        chat_id=query.message.chat.id,
-        text=f"✨ Фон «{new_bg}» активирован!"
-    )
-    await skins_menu_handler(update, context)
-
 # Все мои бланты
 @rate_limit(1)
 @game_handler
@@ -4064,74 +4039,6 @@ async def guild_info_callback(update, context):
     kb = InlineKeyboardMarkup(kb_rows)
 
     await edit_or_reply(update, context, text, reply_markup=kb, parse_mode='HTML')
-
-async def guild_shrine_callback(update, context):
-    ctx = context.bot_data.get("ctx")
-    if not ctx:
-        await update.effective_message.reply_text("⚠️ Контекст (ctx) игры временно недоступен. Это бывает при перезапуске. Попробуй позже.")
-        return
-    query = update.callback_query
-    await query.answer()
-    uid = query.from_user.id
-    player = await ctx.repo.get_by_id(uid)
-    if not player or not player.guild:
-        await query.answer("Ты не в гильдии.")
-        return
-
-    guild = player.guild
-    async with ctx.db_pool.acquire() as conn:
-        total_donated = await conn.fetchval(
-            "SELECT COALESCE(SUM(donated),0) FROM players WHERE guild=$1", guild
-        ) or 0
-
-    levels = [
-        {"level": 1, "cost": 0,      "bonus": 0},
-        {"level": 2, "cost": 15000,  "bonus": 5},
-        {"level": 3, "cost": 45000,  "bonus": 10},
-        {"level": 4, "cost": 100000, "bonus": 15},
-        {"level": 5, "cost": 250000, "bonus": 25},
-    ]
-
-    current_level = 1
-    for lvl in levels:
-        if total_donated >= lvl["cost"]:
-            current_level = lvl["level"]
-
-    if current_level < 5:
-        next_level = levels[current_level]
-        needed = next_level["cost"] - total_donated
-        progress = int(total_donated / next_level["cost"] * 100) if next_level["cost"] > 0 else 100
-    else:
-        next_level = None
-        needed = 0
-        progress = 100
-
-    bonus = levels[current_level-1]["bonus"]
-    bar = progress_bar(progress)
-
-    text = (
-        f"<b>🏛️ ХРАМ ГИЛЬДИИ</b>\n\n"
-        f"🫧 <b>{guild}</b> Гильдия\n"
-        f"🌱 Уровень: <b>{current_level}</b>/5\n"
-        f"🎉 Бонус фарма: <b>+{bonus}%</b>\n\n"
-    )
-    if current_level < 5:
-        text += (
-            f"<i>До уровня {current_level+1}:</i>\n"
-            f"<b>{bar} {progress}%</b>\n"
-            f"🍃 {total_donated} / {next_level['cost']} OAC\n\n"
-        )
-    else:
-        text += "<b>✨ Храм полностью возвышен! ✨</b>\n\n"
-
-    text += "<i>Каждое пожертвование усиливает всех членов гильдии.</i>"
-
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("💎 Внести 100 OAC", callback_data="shrine_donate_100"),
-         InlineKeyboardButton("💎 Внести 500 OAC", callback_data="shrine_donate_500")],
-        [InlineKeyboardButton("🔙 Назад", callback_data="guild_info")]
-    ])
-    await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
 
 async def guild_war_callback(update, context):
     ctx = context.application.bot_data["ctx"]
@@ -5649,6 +5556,7 @@ async def handle_set_title(update, context, ctx):
     await context.bot.send_message(chat_id=query.message.chat.id, text=f"✨ Титул «{new_title}» активирован!")
     await skins_menu_handler(update, context, ctx)
 
+@rate_limit(1)
 @cb
 async def handle_set_bg(update, context, ctx):
     query = update.callback_query
@@ -5663,9 +5571,9 @@ async def handle_set_bg(update, context, ctx):
     if result is None:
         await query.answer("Профиль не найден", show_alert=True)
         return
-    await context.bot.send_message(chat_id=query.message.chat.id, text=f"✨ Фон «{new_bg}» активирован!")
+    await safe_send_message(context, query.message.chat.id, f"✨ Фон «{new_bg}» активирован!")
     await skins_menu_handler(update, context)
-
+    
 @rate_limit(1)
 @game_handler
 async def blunt_details_handler(update, context, ctx, player):
@@ -5732,23 +5640,100 @@ async def share_blunt_handler(update, context, ctx, player):
                 f"📜 <b>Реакция:</b> <i>{item.get('reaction', '')}</i>\n\n<i>Присоединяйся к Искажению:</i>\n{ref_link}")
     else:
         text = f"Блант не найден.\n{ref_link}"
-    await context.bot.send_message(chat_id=query.message.chat.id, text=text, parse_mode='HTML')
+    await safe_send_message(context, query.message.chat.id, text, parse_mode='HTML')
 
-@cb
-async def shrine_donate_handler(update, context, ctx):
+@rate_limit(1)
+@game_handler
+async def shrine_donate_handler(update, context, ctx, player):
     query = update.callback_query
     amount = 100 if query.data == "shrine_donate_100" else 500
     uid = query.from_user.id
-    player = await ctx.repo.get_by_id(uid, with_inventory=False)
-    if player is None or player.balance < amount:
-        await query.answer("Недостаточно OAC или профиль не найден.", show_alert=True)
-        return
-    player.balance -= amount
-    player.donated = (player.donated or 0) + amount
-    await ctx.repo.save(player)
-    await send_whisper_dm(update, context, f"💎 Ты внёс {amount} OAC в Храм. Спасибо, Странник!")
 
+    async def _donate(p, conn):
+        if p.balance < amount:
+            return ("no_money",)
+        p.balance -= amount
+        p.donated = (p.donated or 0) + amount
+        return ("ok",)
+
+    result = await ctx.repo.atomic_update(uid, _donate)
+    if result is None:
+        await query.answer("Профиль не найден.", show_alert=True)
+        return
+    status = result[0]
+    if status == "no_money":
+        await query.answer("Недостаточно OAC.", show_alert=True)
+        return
+
+    await send_whisper_dm(update, context, f"💎 Ты внёс {amount} OAC в Храм. Спасибо, Странник!")
+    
 @cb
+async def guild_shrine_callback(update, context, ctx):
+    query = update.callback_query
+    uid = query.from_user.id
+
+    player = await ctx.repo.get_by_id(uid)
+    if not player or not player.guild:
+        await query.answer("Ты не в гильдии.", show_alert=True)
+        return
+
+    guild = player.guild
+    async with ctx.db_pool.acquire() as conn:
+        total_donated = await conn.fetchval(
+            "SELECT COALESCE(SUM(donated),0) FROM players WHERE guild=$1", guild
+        ) or 0
+
+    levels = [
+        {"level": 1, "cost": 0,      "bonus": 0},
+        {"level": 2, "cost": 15000,  "bonus": 5},
+        {"level": 3, "cost": 45000,  "bonus": 10},
+        {"level": 4, "cost": 100000, "bonus": 15},
+        {"level": 5, "cost": 250000, "bonus": 25},
+    ]
+
+    current_level = 1
+    for lvl in levels:
+        if total_donated >= lvl["cost"]:
+            current_level = lvl["level"]
+
+    if current_level < 5:
+        next_level = levels[current_level]
+        needed = next_level["cost"] - total_donated
+        progress = int(total_donated / next_level["cost"] * 100) if next_level["cost"] > 0 else 100
+    else:
+        next_level = None
+        needed = 0
+        progress = 100
+
+    bonus = levels[current_level-1]["bonus"]
+    bar = progress_bar(progress)
+
+    text = (
+        f"<b>🏛️ ХРАМ ГИЛЬДИИ</b>\n\n"
+        f"🫧 <b>{guild}</b> Гильдия\n"
+        f"🌱 Уровень: <b>{current_level}</b>/5\n"
+        f"🎉 Бонус фарма: <b>+{bonus}%</b>\n\n"
+    )
+    if current_level < 5:
+        text += (
+            f"<i>До уровня {current_level+1}:</i>\n"
+            f"<b>{bar} {progress}%</b>\n"
+            f"🍃 {total_donated} / {next_level['cost']} OAC\n\n"
+        )
+    else:
+        text += "<b>✨ Храм полностью возвышен! ✨</b>\n\n"
+
+    text += "<i>Каждое пожертвование усиливает всех членов гильдии.</i>"
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("💎 Внести 100 OAC", callback_data="shrine_donate_100"),
+         InlineKeyboardButton("💎 Внести 500 OAC", callback_data="shrine_donate_500")],
+        [InlineKeyboardButton("🔙 Назад", callback_data="guild_info")]
+    ])
+
+    await edit_or_reply(update, context, text, reply_markup=kb, parse_mode='HTML')
+
+@cb(True)
 async def guild_join_handler(update, context, ctx):
     query = update.callback_query
     guild = "BLACK" if query.data == "guild_join_BLACK" else "WHITE"
@@ -5768,32 +5753,29 @@ async def guild_join_handler(update, context, ctx):
         player.onboarding_step = 1
         await ctx.repo.save(player)
 
-        # Отправляем сообщение с обучением
         kb1 = InlineKeyboardMarkup([
             [InlineKeyboardButton("🍬 Фармить", callback_data="farm")],
             [InlineKeyboardButton("⏭️ Пропустить обучение", callback_data="skip_onboarding")]
         ])
-        await context.bot.send_message(
-            chat_id=uid,
-            text=("<b>🎓 Обучение (шаг 2 из 3)</b>\n\n"
-                  "<b>🍬 Твой первый шаг — фарм!</b>\n\n"
-                  "Нажми кнопку ниже, чтобы получить <b>OAC</b>.\n\n"
-                  "<i>💡 OAC — главная валюта. Трать её на крафт, питомцев и свитки.</i>"),
+        await safe_send_message(
+            context, uid,
+            "<b>🎓 Обучение (шаг 2 из 3)</b>\n\n"
+            "<b>🍬 Твой первый шаг — фарм!</b>\n\n"
+            "Нажми кнопку ниже, чтобы получить <b>OAC</b>.\n\n"
+            "<i>💡 OAC — главная валюта. Трать её на крафт, питомцев и свитки.</i>",
             reply_markup=kb1, parse_mode='HTML'
         )
 
-        # Показываем уведомление и удаляем ИСХОДНОЕ сообщение с кнопками вступления
         await query.answer(f"✅ Ты вступил в {g_emoji} {g_name} Гильдию!", show_alert=True)
         try:
             await query.message.delete()
         except Exception:
             pass
-        return   # ← жёстко выходим, никакого двойного сохранения
+        return
 
     # === Обычное вступление (без онбординга) ===
     await ctx.repo.save(player)
     
-    # === Склоняем названия гильдий
     guild_name_genitive = "Тёмной Гильдии" if guild == "BLACK" else "Светлой Гильдии"
     action_emoji = "🕯️" if guild == "BLACK" else "⚜️"
     action_text = "Совершить первый Ритуал" if guild == "BLACK" else "Принести первую Исповедь"
