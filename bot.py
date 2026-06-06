@@ -3182,8 +3182,6 @@ async def handle_named_name(update, context):
     finally:
         context.user_data['awaiting_named_blunt'] = False
 
-
-@error_handler
 async def handle_use_dust(update, context):
     # 1. Современный доступ к ctx
     ctx = context.bot_data.get("ctx")
@@ -3995,7 +3993,6 @@ async def top_scout_callback(update, context, ctx):
     await send_whisper_dm(update, context, text)
 
 # Гильдии
-@error_handler
 async def guild_info_callback(update, context):
     ctx = context.bot_data.get("ctx")
     if not ctx:
@@ -4068,7 +4065,6 @@ async def guild_info_callback(update, context):
 
     await edit_or_reply(update, context, text, reply_markup=kb, parse_mode='HTML')
 
-@error_handler
 async def guild_shrine_callback(update, context):
     ctx = context.bot_data.get("ctx")
     if not ctx:
@@ -4136,8 +4132,7 @@ async def guild_shrine_callback(update, context):
         [InlineKeyboardButton("🔙 Назад", callback_data="guild_info")]
     ])
     await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
-    
-@error_handler
+
 async def guild_war_callback(update, context):
     ctx = context.application.bot_data["ctx"]
     query = update.callback_query
@@ -4246,7 +4241,6 @@ async def confess_callback(update, context, ctx):
         parse_mode='HTML'
     )
 
-@error_handler
 async def rules_callback(update, context):
     user, msg = get_user_and_msg(update)
     text = (
@@ -4286,7 +4280,6 @@ async def rules_callback(update, context):
                 [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
             ]))
 
-@error_handler
 async def privilege_callback(update, context):
     ctx = context.application.bot_data["ctx"]
     user, msg = get_user_and_msg(update)
@@ -4425,7 +4418,6 @@ def _format_remaining(td):
 
 
 # ── Основной обработчик ─────────────────────────────────────
-@error_handler
 @rate_limit(2)
 async def luck_callback(update, context, action=None):
     ctx = context.application.bot_data["ctx"]
