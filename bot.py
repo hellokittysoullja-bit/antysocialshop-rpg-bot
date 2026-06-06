@@ -2434,8 +2434,8 @@ async def _create_new_player(update, context, uid, username):
     )
 
     guild_kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🕯️ Тёмная Гильдия", callback_data="guild_join_BLACK"),
-         InlineKeyboardButton("⚜️ Светлая Гильдия", callback_data="guild_join_WHITE")]
+        [InlineKeyboardButton("🕯️ Тёмная Гильдия (+50 🍬)", callback_data="guild_join_BLACK"),
+         InlineKeyboardButton("⚜️ Светлая Гильдия (+50 🍬)", callback_data="guild_join_WHITE")]
     ])
 
     await update.effective_message.reply_text(
@@ -3030,9 +3030,13 @@ async def handle_craft_normal_v2(update, context, ctx, player):
     if player.onboarding_step == 2:
         player.onboarding_step = -1
         await ctx.repo.save(player)
-        await context.bot.send_message(
-            chat_id=uid,
-            text="<b>🎉 Поздравляю! Ты освоил основы.</b>\n\n💎 Теперь ты можешь исследовать другие разделы меню."
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🎁 Забрать награду", callback_data="onboarding_reward")]
+        ])
+        await safe_send_message(
+            context, uid,
+            "<b>🎉 Поздравляю! Ты освоил основы.</b>\n\nНажми кнопку ниже, чтобы получить бонус за обучение!",
+            reply_markup=kb
         )
 
 @rate_limit(3)
@@ -3268,6 +3272,27 @@ async def cancel_named(update, context):
             pass
     await craft_callback(update, context)
     
+@rate_limit(1)
+@game_handler
+async def onboarding_reward(update, context, ctx, player):
+    query = update.callback_query
+    await query.answer()
+    async def _reward(p, conn):
+        p.balance += 30
+        p.blunts += 1
+        return ("ok", p.balance, p.blunts)
+    result = await ctx.repo.atomic_update(query.from_user.id, _reward)
+    if result:
+        _, new_bal, new_blunts = result
+        await query.message.edit_text(
+            f"🎁 Ты получил бонус: +30 OAC, +1 блант!\n\n"
+            f"Твой баланс: {new_bal} OAC, блантов: {new_blunts}\n\n"
+            f"🎉 Теперь ты можешь исследовать другие разделы меню.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🏰 В меню", callback_data="menu")
+            ]])
+        )
+    
 # ====== ФУНКЦИЯ ПЕРЕДАЧИ БЛАНТА (АТОМАРНАЯ, БЕЗОПАСНАЯ) =====
 class TransferError(Exception):
     pass
@@ -3460,14 +3485,6 @@ async def do_smoke(update, context, ctx, player):
     await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
 
     asyncio.create_task(check_achievements(uid, context))
-    
-    if player.onboarding_step == 3:
-        player.onboarding_step = -1
-        await ctx.repo.save(player)
-        await safe_send_message(
-            context, uid,
-            "<b>🎉 Поздравляю! Ты освоил основы.</b>\n\nТеперь ты можешь исследовать другие разделы меню."
-        )
 
 @rate_limit(3)
 async def ritual_callback(update, context):
@@ -5749,6 +5766,9 @@ async def guild_join_handler(update, context, ctx):
             return
 
         player.guild = guild
+        # Награда за вступление (только для новичков)
+        if player.onboarding_step == 0:
+            player.balance += 50
         g_emoji = "🕯️" if guild == "BLACK" else "⚜️"
         g_name = "Тёмная" if guild == "BLACK" else "Светлая"
 
@@ -5770,7 +5790,7 @@ async def guild_join_handler(update, context, ctx):
                 reply_markup=kb1, parse_mode='HTML'
             )
 
-            await query.answer(f"✅ Ты вступил в {g_emoji} {g_name} Гильдию!", show_alert=True)
+            await query.answer(f"✅ Ты вступил в {g_emoji} {g_name} Гильдию! +50 OAC 🍬", show_alert=True)
             try:
                 await query.message.delete()
             except Exception:
@@ -5910,6 +5930,7 @@ CALLBACKS: Dict[str, Callable] = {
     "pet_buy_dog": pet_buy_dog_handler,
     "pet_name_skip": pet_name_skip_handler,
     "pet_locked": pet_locked_handler,
+    "onboarding_reward": onboarding_reward,
 }
 
 EXACT_HANDLERS: Dict[str, Callable] = {
