@@ -5735,6 +5735,7 @@ async def guild_shrine_callback(update, context, ctx):
 
 @cb(True)
 async def guild_join_handler(update, context, ctx):
+    logger.info("=== JOIN HANDLER CALLED ===")
     query = update.callback_query
     guild = "BLACK" if query.data == "guild_join_BLACK" else "WHITE"
     uid = query.from_user.id
