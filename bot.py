@@ -5753,7 +5753,7 @@ async def guild_join_handler(update, context, ctx):
         g_name = "Тёмная" if guild == "BLACK" else "Светлая"
 
         # === Онбординг: шаг 0 → шаг 1 ===
-        if player.onboarding_step == 0:
+        if player.onboarding_step == 0 and player.farm_count == 0 and player.craft_count == 0:
             player.onboarding_step = 1
             await ctx.repo.save(player)
 
