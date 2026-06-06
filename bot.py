@@ -373,13 +373,13 @@ class PlayerRepository:
 
         if row:
             p = dict(row)
-        if with_inventory:
-            p["inventory"] = _json_safe_load(p.get("inventory"), [])
-        else:
-            p["inventory"] = []
-        
-        p["profile_skins"] = _json_safe_load(p.get("profile_skins"), {})
-        p["pending_transfer"] = _json_safe_load(p.get("pending_transfer"), None)
+            if with_inventory:
+                p["inventory"] = _json_safe_load(p.get("inventory"), [])
+            else:
+                p["inventory"] = []
+
+            p["profile_skins"] = _json_safe_load(p.get("profile_skins"), {})
+            p["pending_transfer"] = _json_safe_load(p.get("pending_transfer"), None)
             player = Player(**p)
             player.exists = True
             await self._cache_put(user_id, player)
