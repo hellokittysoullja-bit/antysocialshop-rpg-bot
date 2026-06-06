@@ -2824,9 +2824,10 @@ async def farm_callback_v2(update, context, ctx, player):
         else:
             message_text = f"<b>🍬 OAC копятся 🌱</b>\n\n<b>🍃 Подожди {remain} мин</b>\n\n<b>💡 Совет:</b> <i>чем заняться прямо сейчас</i>"
 
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=message_text,
+        await safe_send_message(
+            context,
+            update.effective_chat.id,
+            message_text,
             parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(btn_text, callback_data=btn_callback)]])
         )
@@ -2841,7 +2842,12 @@ async def farm_callback_v2(update, context, ctx, player):
     if anim_msg is not None:
         await anim_msg.edit_text(text, parse_mode='HTML')
     else:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=text, parse_mode='HTML')
+        await safe_send_message(
+            context,
+            update.effective_chat.id,
+            text,
+            parse_mode='HTML'
+        )
 
     asyncio.create_task(check_achievements(uid, context))
     asyncio.create_task(check_rank_up(context, uid, uname, old_balance, new_balance))
@@ -3351,22 +3357,16 @@ async def cancel_gift(update: Update, context: ContextTypes.DEFAULT_TYPE):
         InlineKeyboardButton("🔙 В профиль", callback_data="profile")
     ]]))
 
-# Дунуть
-@error_handler
-async def smoke_callback(update, context):
-    ctx = context.application.bot_data["ctx"]
+@rate_limit(1)
+@game_handler
+async def smoke_callback(update, context, ctx, player):
     user, msg = get_user_and_msg(update)
     uid = user.id
-    player = await ctx.repo.get_by_id(uid)
-    if not player or not player.user_id:
-        await msg.reply_text("Сначала активируйся: /start")
-        return
 
     if player.blunts < 1:
         empty_text = (
             "<b>💨 ДУНУТЬ</b>\n\n"
-            "<b>🌿 Твой свёрток пуст</b>\n"
-            "\n"
+            "<b>🌿 Твой свёрток пуст</b>\n\n"
             "<i>🎈 Скрути новый блант</i>"
         )
         empty_kb = InlineKeyboardMarkup([
@@ -3415,7 +3415,7 @@ async def do_smoke(update, context, ctx, player):
 
         if ctx.war_service:
             try:
-                await ctx.war_service.add_score(uid, WarAction.CRAFT, conn)
+                await ctx.war_service.add_score(uid, WarAction.SMOKE, conn)
             except Exception:
                 logger.exception("War service error, proceeding without points")
 
@@ -3463,19 +3463,20 @@ async def do_smoke(update, context, ctx, player):
     if player.onboarding_step == 3:
         player.onboarding_step = -1
         await ctx.repo.save(player)
-        await context.bot.send_message(
-            chat_id=uid,
-            text="<b>🎉 Поздравляю! Ты освоил основы.</b>\n\nТеперь ты можешь исследовать другие разделы меню."
+        await safe_send_message(
+            context, uid,
+            "<b>🎉 Поздравляю! Ты освоил основы.</b>\n\nТеперь ты можешь исследовать другие разделы меню."
         )
 
-# Ритуал (с защитой от None)
-@error_handler
 @rate_limit(3)
 async def ritual_callback(update, context):
-    ctx = context.application.bot_data["ctx"]
+    ctx = context.bot_data.get("ctx")
+    if not ctx:
+        await update.effective_message.reply_text("⚠️ Бот инициализируется, попробуйте позже.")
+        return
+
     user, msg = get_user_and_msg(update)
     uid = user.id
-    uname = html.escape(user.username or user.first_name)
     now = datetime.now()
 
     async def _ritual(player, conn):
@@ -3486,7 +3487,7 @@ async def ritual_callback(update, context):
             return ("cooldown", remain)
 
         reward = 150
-        if context.bot_data.get("happy_hour"):
+        if ctx.cache.get("happy_hour", False):
             reward *= HAPPY_HOUR_MULTIPLIER
         extra = 15 if random.random() < 0.1 else 0
 
@@ -3498,26 +3499,23 @@ async def ritual_callback(update, context):
         player.ritual_count = new_count
         player.last_ritual = now
 
-        # Военный счёт (новый сервис)
         await ctx.war_service.add_score(uid, WarAction.RITUAL, conn)
-
         return ("ok", reward, extra, medal_text, new_count, player.balance)
 
     result = await ctx.repo.atomic_update(uid, _ritual)
     if result is None:
         await msg.reply_text("Профиль не найден.")
         return
+
     status, *data = result
     if status == "wrong_guild":
         await send_whisper_dm(update, context, "❌ Только Тёмная Гильдия.")
         return
     if status == "cooldown":
         remain = data[0]
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=f"<b>🕯️ Тёмный алтарь истощён 🌙</b>\n\n<b>🗝️ Жди {remain} ч</b>",
-            parse_mode='HTML'
-        )
+        await safe_send_message(context, update.effective_chat.id,
+            f"<b>🕯️ Тёмный алтарь истощён 🌙</b>\n\n<b>🗝️ Жди {remain} ч</b>",
+            parse_mode='HTML')
         return
 
     reward, extra, medal_text, new_count, new_balance = data
@@ -3536,14 +3534,16 @@ async def ritual_callback(update, context):
     if anim_msg is not None:
         await anim_msg.edit_text(text, parse_mode='HTML')
     else:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=text, parse_mode='HTML')
+        await safe_send_message(context, update.effective_chat.id, text, parse_mode='HTML')
 
     await check_achievements(uid, context)
 
 # КУСТИК (с защитой от None)
-@error_handler
 async def collect_callback(update, context):
-    ctx = context.application.bot_data["ctx"]
+    ctx = context.bot_data.get("ctx")
+    if not ctx:
+        await update.effective_message.reply_text("⚠️ Бот инициализируется, попробуйте позже.")
+        return
     user, msg = get_user_and_msg(update)
     uid = user.id
     uname = html.escape(user.username or user.first_name)
@@ -3559,15 +3559,14 @@ async def collect_callback(update, context):
         last_collect = _to_datetime(player.passive_collected)
         hrs = (now - last_collect).total_seconds() / 3600 if last_collect else 0
         earned = int(hrs * 30 * lvl)
-        if context.bot_data.get("happy_hour"):
+        if ctx.cache.get("happy_hour", False):
             earned *= HAPPY_HOUR_MULTIPLIER
         if earned < 1:
             return ("not_ready",)
         player.balance += earned
         player.passive_collected = now
 
-        war_service = context.bot_data["war_service"]
-        await war_service.add_score_raw(uid, earned, conn)
+        await ctx.war_service.add_score_raw(uid, earned, conn)
 
         return ("ok", earned, player.balance)
 
@@ -3580,16 +3579,18 @@ async def collect_callback(update, context):
         await send_whisper_dm(update, context, "❌ Доступно с ранга ⚔️ Ветеран (5000 OAC 🍬)")
         return
     if status == "activated":
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="<b>🪴 Авто‑сборщик активирован 💎</b>\n\n<b>🌱 Загляни позже</b>",
+        await safe_send_message(
+            context,
+            update.effective_chat.id,
+            "<b>🪴 Авто‑сборщик активирован 💎</b>\n\n<b>🌱 Загляни позже</b>",
             parse_mode='HTML'
         )
         return
     if status == "not_ready":
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="<b>🪴 Кустик ещё не созрел 💎</b>\n\n<b>🌱 Загляни позже</b>",
+        await safe_send_message(
+            context,
+            update.effective_chat.id,
+            "<b>🪴 Кустик ещё не созрел 💎</b>\n\n<b>🌱 Загляни позже</b>",
             parse_mode='HTML'
         )
         return
