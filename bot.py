@@ -1202,11 +1202,18 @@ async def check_achievements(user_id: int, context, ctx: AppContext = None) -> N
                         )
                         await _award_achievement_rewards(user_id, player, ach.get("reward", ""), context, ctx)
                         current_awarded.add(ach_id)
+                    if getattr(player, 'onboarding_step', -1) != -1:
+                        # Короткое сообщение для тех, кто ещё в обучении
+                        messages_to_send.append(
+                            f"<b>🏆 {ach['emoji']} «{ach['name']}»</b>\n"
+                            f"<i>— достижение разблокировано!</i>"
+                        )
+                    else:
+                        # Полное сообщение для опытных игроков
                         messages_to_send.append(
                             f"<b>🕊️ СВИТОК ДОСТИЖЕНИЙ 🏆</b>\n\n"
-                            f"<b>🎉 Достижение разблокировано!</b>\n\n"
-                            f"<i>{ach['emoji']} «{ach['name']}» {ach['emoji']}</i>\n\n"
-                            f"<b>📜 Запись добавлена! 💎</b>"
+                            f"<b>🎉 Достижение разблокировано!💎</b>\n\n"
+                            f"<i>{ach['emoji']} «{ach['name']}» {ach['emoji']}</i>"
                         )
     
             # lunar_lord
@@ -1233,11 +1240,27 @@ async def check_achievements(user_id: int, context, ctx: AppContext = None) -> N
                 except pybreaker.CircuitBreakerError:
                     pass
     
-    for msg in messages_to_send:
-        try:
-            await context.bot.send_message(chat_id=user_id, text=msg, parse_mode='HTML')
-        except Exception as e:
-            logger.error(f"Achievement notify error: {e}")
+if messages_to_send:
+    player = await ctx.repo.get_by_id(user_id)
+    if player and getattr(player, 'onboarding_step', -1) != -1:
+        # Красивое и компактное уведомление для новичков
+        for msg in messages_to_send:
+            try:
+                await safe_send_message(
+                    context,
+                    user_id,
+                    msg,
+                    parse_mode='HTML'
+                )
+            except Exception as e:
+                logger.error(f"Achievement notify error: {e}")
+    else:
+        # Стандартный вывод после обучения
+        for msg in messages_to_send:
+            try:
+                await context.bot.send_message(chat_id=user_id, text=msg, parse_mode='HTML')
+            except Exception as e:
+                logger.error(f"Achievement notify error: {e}")
                 
 async def check_rank_up(context, user_id, username, old_balance, new_balance):
     old_idx = 0
@@ -2420,19 +2443,20 @@ async def _create_new_player(update, context, uid, username):
             await create_named_blunt(uid, new_name, ctx=ctx, conn=conn)
 
     welcome_text = (
-        "🎁 Смотритель дарует тебе <code>800</code> 🍬 и твой первый именной блант!\n\n"
-        "<b>🎉 Добро пожаловать в Гильдию Antysocialshop!</b>\n\n"
-        "<b>🎓 Обучение [▓░░░] (шаг 1 из 3)</b>\n\n"
-        "<b>⚔️ Выбери фракцию</b> — получи <b>+ 50 OAC </b> сразу!\n"
-        "Твой выбор определит твои дальнейшие возможности.\n\n"
+        "<b>🎉 Добро пожаловать в Гильдию Antysocialshop!</b>\n"
+        "<i>Здесь курят бланты, поклоняются древним богам и воюют за OAC.</i>\n\n"
+        "🎁 <b>Смотритель дарует тебе</b> <code>800</code> 🍬 <b>и твой первый именной блант!</b>\n\n"
+        "<b>🎓 ОБУЧЕНИЕ [▓░░░] 1/3</b>\n\n"
+        "⚔️ <b>ВЫБЕРИ ФРАКЦИЮ — ПОЛУЧИ +50 OAC СРАЗУ!</b>\n\n"
         "🕯️ <b>Тёмная Гильдия</b>\n"
         "• Особое умение: Ритуал 🔮\n"
-        "• Стиль: Стабильность и тёмная магия\n\n"
+        "• Стабильность и тёмная магия\n\n"
         "⚜️ <b>Светлая Гильдия</b>\n"
         "• Особое умение: Исповедь 🪽\n"
-        "• Стиль: Азарт и благосклонность удачи"
+        "• Азарт и благосклонность удачи\n\n"
+        "👉 <i>Твой выбор определит твои возможности.</i>"
     )
-
+    
     guild_kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🕯️ Тёмная Гильдия (+50 🍬)", callback_data="guild_join_BLACK"),
          InlineKeyboardButton("⚜️ Светлая Гильдия (+50 🍬)", callback_data="guild_join_WHITE")]
@@ -2792,7 +2816,7 @@ async def farm_callback_v2(update, context, ctx, player):
 
     async def _farm(p, conn):
         if p.last_farm and (now - p.last_farm) < timedelta(hours=FARM_COOLDOWN_HOURS):
-            remain = int((timedelta(hours=FARM_COOLDOWN_HOURS) - (now - p.last_farm)).seconds / 60)
+            remain = math.ceil((timedelta(hours=FARM_COOLDOWN_HOURS) - (now - p.last_farm)).seconds / 60)
             return ("cooldown", remain)
 
         old_balance = p.balance
@@ -2858,22 +2882,20 @@ async def farm_callback_v2(update, context, ctx, player):
     if player.onboarding_step == 1:
         player.onboarding_step = 2
         await ctx.repo.save(player)
-        kb2 = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🌿 Крафт", callback_data="craft")],
-            [InlineKeyboardButton("⏭️ Пропустить обучение", callback_data="skip_onboarding")]
-        ])
-        await context.bot.send_message(
-            chat_id=uid,
-            text=(
-                "<b>🎓 Обучение (шаг 3 из 3)</b>\n\n"
-                "<b>🌿 Отлично! Теперь создай свой первый блант.</b>\n\n"
-                "Нажми «Крафт» и выбери «Обычный блант».\n\n"
-                "<i>💡 Бланты нужны, чтобы активировать случайный эффект.</i>"
-            ),
-            reply_markup=kb2,
+        await safe_send_message(
+            context, uid,
+            "<b>🎓 ОБУЧЕНИЕ [▓▓▓░] 3/3</b>\n\n"
+            "<b>🌿 Отлично! Теперь создадим твой первый блант.</b>\n"
+            "Нажми кнопку ниже, чтобы <b>сразу создать обычный блант</b>.\n\n"
+            "<i>💡 Бланты нужны, чтобы активировать случайный эффект.</i>\n"
+            "<b>🎁 Сразу после — бонус за обучение!</b>",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🌿 Крафт", callback_data="craft_normal")],
+                [InlineKeyboardButton("⏭️ Пропустить шаг", callback_data="skip_onboarding")]
+            ]),
             parse_mode='HTML'
         )
-    
+
 # ============================================================
 # КРАФТ ОБЫЧНЫХ И ИМЕННЫХ БЛАНТОВ – атомарное создание блантов
 # ============================================================
@@ -5776,20 +5798,25 @@ async def guild_join_handler(update, context, ctx):
         if player.onboarding_step == 0 and player.farm_count == 0 and player.craft_count == 0:
             player.onboarding_step = 1
             await ctx.repo.save(player)
-
+        
+            # Социальное доказательство — количество согильдийцев
+            cnt = await count_guilds(ctx)
+            online = cnt.get(guild, 0)
+        
             kb1 = InlineKeyboardMarkup([
                 [InlineKeyboardButton("🍬 Фармить", callback_data="farm")],
                 [InlineKeyboardButton("⏭️ Пропустить обучение", callback_data="skip_onboarding")]
             ])
             await safe_send_message(
                 context, uid,
-                "<b>🎓 Обучение [▓▓░░] (шаг 2 из 3)</b>\n\n"
-                "<b>🍬 Твой первый шаг — фарм!</b>\n\n"
+                f"🕋 <b>Ты в {g_name} Гильдии!</b> Сейчас в ней <b>{online}</b> странников.\n\n"
+                "<b>🎓 ОБУЧЕНИЕ [▓▓░░] 2/3</b>\n\n"
+                "<b>🍬 Твой первый шаг — фарм!</b>\n"
                 "Нажми кнопку ниже, чтобы получить <b>OAC</b>.\n\n"
                 "<i>💡 OAC — главная валюта. Трать её на крафт, питомцев и свитки.</i>",
                 reply_markup=kb1, parse_mode='HTML'
             )
-
+        
             await query.answer(f"✅ Ты вступил в {g_emoji} {g_name} Гильдию! +50 OAC 🍬", show_alert=True)
             try:
                 await query.message.delete()
