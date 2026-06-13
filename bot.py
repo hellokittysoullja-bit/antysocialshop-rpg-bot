@@ -6,7 +6,7 @@ def log_uncaught(exc_type, exc_value, exc_tb):
     time.sleep(2)   # даём время Render прочитать
     sys.__excepthook__(exc_type, exc_value, exc_tb)
 sys.excepthook = log_uncaught
-import asyncio, json, logging, os, sys, time, random, re, hashlib, html, enum, uuid, copy
+import asyncio, json, logging, os, sys, time, random, re, hashlib, html, enum, uuid, copy, math
 from datetime import datetime, timedelta, date, time as time_module, timezone
 from threading import Thread
 from typing import Optional, List, Any, Dict, Tuple, NamedTuple, Callable
