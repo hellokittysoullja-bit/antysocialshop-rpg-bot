@@ -1240,27 +1240,27 @@ async def check_achievements(user_id: int, context, ctx: AppContext = None) -> N
                 except pybreaker.CircuitBreakerError:
                     pass
     
-if messages_to_send:
-    player = await ctx.repo.get_by_id(user_id)
-    if player and getattr(player, 'onboarding_step', -1) != -1:
-        # Красивое и компактное уведомление для новичков
-        for msg in messages_to_send:
-            try:
-                await safe_send_message(
-                    context,
-                    user_id,
-                    msg,
-                    parse_mode='HTML'
-                )
-            except Exception as e:
-                logger.error(f"Achievement notify error: {e}")
-    else:
-        # Стандартный вывод после обучения
-        for msg in messages_to_send:
-            try:
-                await context.bot.send_message(chat_id=user_id, text=msg, parse_mode='HTML')
-            except Exception as e:
-                logger.error(f"Achievement notify error: {e}")
+    if messages_to_send:
+        player = await ctx.repo.get_by_id(user_id)
+        if player and getattr(player, 'onboarding_step', -1) != -1:
+            # Красивое и компактное уведомление для новичков
+            for msg in messages_to_send:
+                try:
+                    await safe_send_message(
+                        context,
+                        user_id,
+                        msg,
+                        parse_mode='HTML'
+                    )
+                except Exception as e:
+                    logger.error(f"Achievement notify error: {e}")
+        else:
+            # Стандартный вывод после обучения
+            for msg in messages_to_send:
+                try:
+                    await context.bot.send_message(chat_id=user_id, text=msg, parse_mode='HTML')
+                except Exception as e:
+                    logger.error(f"Achievement notify error: {e}")
                 
 async def check_rank_up(context, user_id, username, old_balance, new_balance):
     old_idx = 0
