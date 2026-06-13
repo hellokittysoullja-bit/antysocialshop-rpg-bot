@@ -5224,7 +5224,7 @@ async def pet_preview(update, context, ctx):
         await query.message.edit_text(f"Твой питомец: {player.pet}{name_str}")
     else:
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton(f"🐕 Купить Песика ({ctx.settings.pet_config['dog']['price']} 🍬)", callback_data="pet_buy_dog")],
+            [InlineKeyboardButton(f"🐕 Купить Песика ({PET_CONFIG['dog']['price']} 🍬)", callback_data="pet_buy_dog")],
             [InlineKeyboardButton("🔙 Назад", callback_data="menu")]
         ])
         await query.message.edit_text(
@@ -5245,11 +5245,11 @@ async def pet_buy_dog_handler(update, context, ctx):
     if status == "already_have":
         await query.answer("У тебя уже есть питомец!")
     elif status == "no_money":
-        await query.answer(f"Недостаточно OAC. Нужно {ctx.settings.pet_config['dog']['price']} 🍬")
+        await query.answer(f"Недостаточно OAC. Нужно {PET_CONFIG['dog']['price']} 🍬")
     else:
         context.user_data['awaiting_pet_name'] = True
         await query.message.edit_text(
-            f"<b>🐕 Песик ждёт имя!</b>\n\nВведи имя (до {ctx.settings.pet_config['dog']['max_name_len']} символов).\nДля отмены нажми кнопку ниже.",
+            f"<b>🐕 Песик ждёт имя!</b>\n\nВведи имя (до {PET_CONFIG['dog']['max_name_len']} символов).\nДля отмены нажми кнопку ниже.",
             parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Пропустить", callback_data="pet_name_skip")]])
         )
@@ -5258,18 +5258,19 @@ async def pet_buy_dog_handler(update, context, ctx):
 async def pet_name_skip_handler(update, context, ctx):
     query = update.callback_query
     context.user_data.pop('awaiting_pet_name', None)
-    await query.message.edit_text("Питомец останется без имени.")
+    await query.message.edit_text("🐕 Хорошо, твой питомец будет просто Песиком!")
 
 async def handle_pet_name(update, context):
-    ctx: AppContext = context.application.bot_data.get("ctx")
+    ctx = context.bot_data.get("ctx")
     if not ctx:
+        await update.message.reply_text("⚠️ Игра инициализируется (отсуствие контекста ctx), попробуйте позже.")
         return
-    name = update.message.text.strip()[:ctx.settings.pet_config["dog"]["max_name_len"]]
+    name = update.message.text.strip()[:PET_CONFIG["dog"]["max_name_len"]]
     if not name:
         await update.message.reply_text("❌ Имя не может быть пустым.")
         return
-    if len(update.message.text.strip()) > ctx.settings.pet_config["dog"]["max_name_len"]:
-        await update.message.reply_text(f"⚠️ Имя обрезано до {ctx.settings.pet_config['dog']['max_name_len']} символов.")
+    if len(update.message.text.strip()) > PET_CONFIG["dog"]["max_name_len"]:
+        await update.message.reply_text(f"⚠️ Имя обрезано до {PET_CONFIG['dog']['max_name_len']} символов.")
 
     uid = update.effective_user.id
     success = await ctx.pet_service.set_name(uid, name)
