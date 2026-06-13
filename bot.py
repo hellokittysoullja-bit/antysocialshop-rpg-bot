@@ -1202,19 +1202,18 @@ async def check_achievements(user_id: int, context, ctx: AppContext = None) -> N
                         )
                         await _award_achievement_rewards(user_id, player, ach.get("reward", ""), context, ctx)
                         current_awarded.add(ach_id)
-                    if getattr(player, 'onboarding_step', -1) != -1:
-                        # Короткое сообщение для тех, кто ещё в обучении
-                        messages_to_send.append(
-                            f"<b>🏆 {ach['emoji']} «{ach['name']}»</b>\n"
-                            f"<i>— достижение разблокировано!</i>"
-                        )
-                    else:
-                        # Полное сообщение для опытных игроков
-                        messages_to_send.append(
-                            f"<b>🕊️ СВИТОК ДОСТИЖЕНИЙ 🏆</b>\n\n"
-                            f"<b>🎉 Достижение разблокировано!💎</b>\n\n"
-                            f"<i>{ach['emoji']} «{ach['name']}» {ach['emoji']}</i>"
-                        )
+
+                        if getattr(player, 'onboarding_step', -1) != -1:
+                            messages_to_send.append(
+                                f"<b>🏆 {ach['emoji']} «{ach['name']}»</b>\n"
+                                f"<i>— достижение разблокировано!</i>"
+                            )
+                        else:
+                            messages_to_send.append(
+                                f"<b>🕊️ СВИТОК ДОСТИЖЕНИЙ 🏆</b>\n\n"
+                                f"<b>🎉 Достижение разблокировано!💎</b>\n\n"
+                                f"<i>{ach['emoji']} «{ach['name']}» {ach['emoji']}</i>"
+                            )
     
             # lunar_lord
             rows2 = await conn.fetch("SELECT ach_id FROM achievements_awarded WHERE user_id=$1", user_id)
