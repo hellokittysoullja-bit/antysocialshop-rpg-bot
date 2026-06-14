@@ -2831,6 +2831,7 @@ async def farm_callback_v2(update, context, ctx, player):
         medal_text, medal_bonus = get_medal_text_and_reward(old_count, new_count, FARM_MEDALS)
 
         p.balance += earned + medal_bonus
+        p.daily_progress["farm"] = True
         p.farm_count = new_count
         p.last_farm = now
         p.last_farm_date = date.today()
@@ -3055,6 +3056,7 @@ async def handle_craft_normal_v2(update, context, ctx, player):
         p.balance -= GAME_CONFIG["craft_cost"]
         p.blunts += 1
         p.craft_count = new_count
+        p.daily_progress["craft"] = True
 
         if random.random() < 0.05:
             p.blunts += 1
@@ -3513,6 +3515,7 @@ async def do_smoke(update, context, ctx, player):
             p.blunts -= 1
         p.smoke_count = new_count
         p.balance = (p.balance or 0) + earned + medal_bonus
+        p.daily_progress["smoke"] = True
         p.inhaled = 1
 
         if ctx.war_service:
@@ -3590,6 +3593,7 @@ async def ritual_callback(update, context):
         medal_text, medal_bonus = get_medal_text_and_reward(old_count, new_count, RITUAL_MEDALS)
 
         player.balance += reward + extra + medal_bonus
+        player.daily_progress["guild_action"] = True
         player.ritual_count = new_count
         player.last_ritual = now
 
@@ -4209,6 +4213,7 @@ async def confess_callback(update, context, ctx):
         if r < 0.70:
             reward = random.randint(100, 200)
             p.balance = (p.balance or 0) + reward
+            p.daily_progress["guild_action"] = True
             return ("ok", f"<b><i>⚜️ ИСПОВЕДЬ</i></b>\n\nБлагословение! +{reward} OAC.")
         elif r < 0.95:
             p.m_essence = (p.m_essence or 0) + 1
