@@ -2812,60 +2812,82 @@ def _format_farm_message(earned: int, crit: bool, happy: bool,
                          medal_text: str, new_count: int, target: int,
                          new_balance: int) -> str:
 
-    # Крит
-    crit_emoji = "🍬" if not crit else ("💥 (x10!)" if earned >= FARM_MAX * 10 else "🍬🍬")
+    # 1. Крит-эмодзи
+    if not crit:
+        crit_emoji = "🍬"
+    elif earned >= FARM_MAX * 10:
+        crit_emoji = "💥 (x10!)"
+    else:
+        crit_emoji = "🍬🍬"
 
-    # Медальный бар
+    # 2. Медальный прогресс-бар
     medal_bar = get_medal_progress(new_count, FARM_MEDALS).strip().split('\n')[0]
 
-    # Ранг – три строки
+    # 3. Ранг – три строки
     lines = get_rank_progress(new_balance).strip().split('\n')
     rank_header = lines[0]
-    rank_bar = lines[1] if len(lines) > 1 else ""
-    rank_details = lines[2] if len(lines) > 2 else ""
+    rank_bar_raw = lines[1] if len(lines) > 1 else ""
+    rank_details_raw = lines[2] if len(lines) > 2 else ""
 
-    # Жирные названия рангов (не иконки!)
+    # 4. Очистка от любого HTML
+    def strip_html(s: str) -> str:
+        return re.sub(r'<[^>]+>', '', s)
+
+    rank_bar_clean = strip_html(rank_bar_raw).replace('🎯', '').strip()
+    rank_details_clean = strip_html(rank_details_raw)
+
+    # 5. Жирные названия рангов (не иконки)
     if " → " in rank_header:
-        prefix = rank_header.split("Ранг:")[0] + "Ранг:" if "Ранг:" in rank_header else ""
-        rest = rank_header.split("Ранг:", 1)[1] if "Ранг:" in rank_header else rank_header
+        prefix = ""
+        rest = rank_header
+        if "Ранг:" in rank_header:
+            prefix = rank_header.split("Ранг:")[0] + "Ранг:"
+            rest = rank_header.split("Ранг:", 1)[1]
         left, right = rest.split(" → ")
         left_parts = left.strip().split()
         if left_parts:
-            left_parts[-1] = f"<b>{left_parts[-1]}</b>"
+            left_parts[-1] = f"<b>{strip_html(left_parts[-1])}</b>"
         right_parts = right.strip().split()
         if len(right_parts) >= 2:
-            right_parts[1] = f"<b>{right_parts[1]}</b>"
+            right_parts[1] = f"<b>{strip_html(right_parts[1])}</b>"
         rank_header = f"{prefix} {' '.join(left_parts)} → {' '.join(right_parts)}"
 
-    # Жирный процент
-    if rank_bar:
-        *bar_parts, percent = rank_bar.replace('🎯', '').strip().split()
+    # 6. Жирный процент
+    rank_bar = ""
+    if rank_bar_clean:
+        *bar_parts, percent = rank_bar_clean.split()
         rank_bar = f"{' '.join(bar_parts)} <b>{percent}</b>" if bar_parts else percent
 
-    # Моноширинные цифры
-    if rank_details:
-        words = rank_details.split()
-        wrapped = 0
-        for i, w in enumerate(words):
-            if w.isdigit() and wrapped < 2:
-                words[i] = f"<code>{w}</code>"
-                wrapped += 1
-        rank_details = ' '.join(words)
+    # 7. Моноширинные числа (первые два)
+    rank_details = ""
+    if rank_details_clean:
+        nums = [w for w in rank_details_clean.split() if w.isdigit()]
+        if len(nums) >= 2:
+            for n in nums[:2]:
+                rank_details_clean = rank_details_clean.replace(n, f"<code>{n}</code>", 1)
+        rank_details = rank_details_clean
 
-    # Медальный текст жирным
+    # 8. Медальный текст – жирный, если без HTML
     if '<' not in medal_text:
         medal_text = f"<b>{medal_text}</b>"
 
-    # Сборка
-    return (
-        f"💎 Ты нафармил: <b>+{earned} OAC</b> {crit_emoji}\n"
-        f"⚜️ У тебя: <b><code>{new_balance}</code> OAC 🎉</b>\n\n"
+    # 9. Happy hour
+    happy_str = " 🌟x2" if happy else ""
+
+    # 10. Сборка (без пустых строк)
+    msg = (
+        f"💎 Ты нафармил: <b>+{earned} OAC</b> {crit_emoji}{happy_str}\n"
+        f"⚜️ У тебя: <b>{new_balance} OAC 🎉</b>\n\n"
         f"{medal_text}\n"
         f"🎯 <b>Фарминг: {new_count}/{target}</b>  {medal_bar}\n\n"
         f"{rank_header}\n"
-        f"{rank_bar}\n"
-        f"{rank_details}\n" if rank_details else ""
     )
+    if rank_bar:
+        msg += f"{rank_bar}\n"
+    if rank_details:
+        msg += f"{rank_details}\n"
+
+    return msg
     
 @rate_limit(3)
 @game_handler
