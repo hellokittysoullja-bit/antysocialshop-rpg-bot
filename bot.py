@@ -463,7 +463,7 @@ class PlayerRepository:
                     "inventory", "invited_by", "profile_skins", "login_streak",
                     "last_login_date", "oath", "keys", "check_count", "m_essence",
                     "lab_chests", "lab_deaths", "alchemy_count", "last_lab_attempt",
-                    "donated", "pending_transfer", "lab_depth", "pet", "pet_name", "exists",
+                    "donated", "pending_transfer", "daily_progress", "lab_depth", "pet", "pet_name", "exists",
                 ]
                 cols_sql = ", ".join(f'"{c}"' for c in columns)
                 row = await conn.fetchrow(
@@ -478,6 +478,7 @@ class PlayerRepository:
                 p["inventory"] = _json_safe_load(p.get("inventory"), [])
                 p["profile_skins"] = _json_safe_load(p.get("profile_skins"), {})
                 p["pending_transfer"] = _json_safe_load(p.get("pending_transfer"), None)
+                p["daily_progress"] = _json_safe_load(p.get("daily_progress"), {})
                 player = Player(**p)
 
                 result = await update_func(player, conn)
