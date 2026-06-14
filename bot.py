@@ -2808,101 +2808,64 @@ def _calculate_farm_reward(player, context) -> tuple[int, bool, bool]:
 
     return earned, crit, happy
 
-
 def _format_farm_message(earned: int, crit: bool, happy: bool,
                          medal_text: str, new_count: int, target: int,
                          new_balance: int) -> str:
-    """Формирует стильное HTML‑сообщение с акцентами."""
 
-    # ── Крит-эмодзи ──────────────────────────────────────────
-    if crit:
-        if earned >= FARM_MAX * 10:
-            crit_emoji = "💥 (x10!)"
-        else:
-            crit_emoji = "🍬🍬"
-    else:
-        crit_emoji = "🍬"
+    # Крит
+    crit_emoji = "🍬" if not crit else ("💥 (x10!)" if earned >= FARM_MAX * 10 else "🍬🍬")
 
-    # ── Прогресс-бар медалей ─────────────────────────────────
-    raw_medal = get_medal_progress(new_count, FARM_MEDALS)
-    medal_bar = raw_medal.strip().split('\n')[0].strip()
+    # Медальный бар
+    medal_bar = get_medal_progress(new_count, FARM_MEDALS).strip().split('\n')[0]
 
-    # ── Ранг: получаем три строки ────────────────────────────
-    raw_rank = get_rank_progress(new_balance)
-    rank_lines = raw_rank.strip().split('\n')
+    # Ранг – три строки
+    lines = get_rank_progress(new_balance).strip().split('\n')
+    rank_header = lines[0]
+    rank_bar = lines[1] if len(lines) > 1 else ""
+    rank_details = lines[2] if len(lines) > 2 else ""
 
-    # Строка 0: заголовок ранга
-    rank_header = rank_lines[0].strip() if len(rank_lines) > 0 else ""
-
-    # Делаем жирными только слова после иконок (если есть " → ")
+    # Жирные названия рангов (не иконки!)
     if " → " in rank_header:
-        # Ищем "Ранг: " или аналогичный префикс, оставляем остаток
-        if "Ранг:" in rank_header:
-            prefix, rest = rank_header.split("Ранг:", 1)
-            prefix += "Ранг:"
-        else:
-            prefix, rest = rank_header[:0], rank_header
-        # rest = " ⚔️ Ветеран → 🪦 Призрак" примерно
-        if " → " in rest:
-            left_side, right_side = rest.split(" → ", 1)
-            # Делаем жирным последнее слово в left_side (название ранга)
-            left_parts = left_side.strip().split()
-            if left_parts:
-                left_parts[-1] = f"<b>{left_parts[-1]}</b>"
-                left_side = " ".join(left_parts)
-            # Аналогично справа
-            right_parts = right_side.strip().split()
-            if right_parts:
-                right_parts[0] = f"<b>{right_parts[0]}</b>"
-                right_side = " ".join(right_parts)
-            rank_header = f"{prefix} {left_side} → {right_side}"
+        prefix = rank_header.split("Ранг:")[0] + "Ранг:" if "Ранг:" in rank_header else ""
+        rest = rank_header.split("Ранг:", 1)[1] if "Ранг:" in rank_header else rank_header
+        left, right = rest.split(" → ")
+        left_parts = left.strip().split()
+        if left_parts:
+            left_parts[-1] = f"<b>{left_parts[-1]}</b>"
+        right_parts = right.strip().split()
+        if len(right_parts) >= 2:
+            right_parts[1] = f"<b>{right_parts[1]}</b>"
+        rank_header = f"{prefix} {' '.join(left_parts)} → {' '.join(right_parts)}"
 
-    # Строка 1: прогресс-бар с процентом
-    if len(rank_lines) > 1:
-        rank_bar_raw = rank_lines[1].strip()
-        rank_bar_raw = rank_bar_raw.replace('🎯', '').strip()
-        # Выделяем жирным проценты
-        parts = rank_bar_raw.split()
-        if len(parts) >= 2:
-            # процент — последний элемент
-            percent = parts[-1]
-            bar_part = " ".join(parts[:-1])
-            rank_bar = f"{bar_part} <b>{percent}</b>"
-        else:
-            rank_bar = rank_bar_raw
-    else:
-        rank_bar = ""
+    # Жирный процент
+    if rank_bar:
+        *bar_parts, percent = rank_bar.replace('🎯', '').strip().split()
+        rank_bar = f"{' '.join(bar_parts)} <b>{percent}</b>" if bar_parts else percent
 
-    # Строка 2: числа X / Y OAC 💎
-    if len(rank_lines) > 2:
-        details_line = rank_lines[2].strip()
-        # Найдём два числа и завернём их в <code>
-        import re
-        numbers = re.findall(r'\d+', details_line)
-        if len(numbers) >= 2:
-            for num in numbers[:2]:
-                details_line = details_line.replace(num, f"<code>{num}</code>", 1)
-        rank_details = details_line
-    else:
-        rank_details = ""
+    # Моноширинные цифры
+    if rank_details:
+        words = rank_details.split()
+        wrapped = 0
+        for i, w in enumerate(words):
+            if w.isdigit() and wrapped < 2:
+                words[i] = f"<code>{w}</code>"
+                wrapped += 1
+        rank_details = ' '.join(words)
 
-    # ── Медальный текст: не трогаем, если уже с HTML ─────────
+    # Медальный текст жирным
     if '<' not in medal_text:
         medal_text = f"<b>{medal_text}</b>"
 
-    # ── Сборка ────────────────────────────────────────────────
-    msg = (
+    # Сборка
+    return (
         f"💎 Ты нафармил: <b>+{earned} OAC</b> {crit_emoji}\n"
         f"⚜️ У тебя: <b><code>{new_balance}</code> OAC 🎉</b>\n\n"
         f"{medal_text}\n"
         f"🎯 <b>Фарминг: {new_count}/{target}</b>  {medal_bar}\n\n"
         f"{rank_header}\n"
         f"{rank_bar}\n"
+        f"{rank_details}\n" if rank_details else ""
     )
-    if rank_details:
-        msg += f"{rank_details}\n"
-
-    return msg
     
 @rate_limit(3)
 @game_handler
