@@ -2200,10 +2200,10 @@ async def get_main_menu_keyboard(user_id, ctx=None):
     balance = player.balance if player else 0
     now_dt = datetime.now()
 
-    # ── Кнопки с кулдаунами ──
-    farm_text = _format_cooldown(player, now_dt, "farm")
-    ritual_text = _format_cooldown(player, now_dt, "ritual")
-    lab_text = _format_cooldown(player, now_dt, "lab")
+    # ── Кнопки ──
+    farm_text = "🍬 Фармить"
+    ritual_text = "🕯️ Ритуал" if player and player.guild == "BLACK" else ""
+    lab_text = "🏛️ Лабиринт"
 
     # ── Кнопки условий ──
     bush_btn = (
@@ -3026,9 +3026,9 @@ def _format_normal_craft_message(medal_text: str, new_count: int, target: int,
         f"💎 Потрачено: <b>15 OAC 🍬</b>\n"
         f"⚜️ У тебя: <b>{new_balance} OAC 🍬</b>\n\n"
         f"{medal_text}"
-        f"<b>🎯 Крафтинг:</b> {new_count}/{target}\n"
-        f"{progress_bar_str}\n\n"
-        f"<b>🍃 Блантов в свёртке:</b> <b>{blunts}</b>"
+        f"🎯 Крафтинг: <b>{new_count} / {target}</b>\n"
+        f"<b>{progress_bar_str}</b>\n\n"
+        f"🍃 Блантов в свёртке: <b>{blunts}</b>"
     )
 
 
@@ -3501,7 +3501,7 @@ async def smoke_callback(update, context, ctx, player):
             await msg.reply_text(empty_text, reply_markup=empty_kb, parse_mode='HTML')
         return
 
-    main_text = f"<b>💨 ДУНУТЬ</b>\n\n🌿 <i>блантов в свёртке:</i> <b>{player.blunts}</b>"
+    main_text = f"<b>💨 ДУНУТЬ</b>\n\n🌿 Блантов в свёртке: <b>{player.blunts}</b>"
     main_kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("💨 Дунуть", callback_data="do_smoke")],
         [InlineKeyboardButton("🔙 Назад", callback_data="menu")]
