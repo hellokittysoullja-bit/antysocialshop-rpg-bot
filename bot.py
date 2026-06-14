@@ -2794,10 +2794,17 @@ def _calculate_farm_reward(player, context) -> tuple[int, bool, bool]:
     if happy:
         earned *= HAPPY_HOUR_MULTIPLIER
 
-    # Критический удар (x10) с шансом 1%
-    crit = random.randint(1, 100) == 1
-    if crit:
+    # Крит x2 – 5% шанс
+    # Крит x10 – 1% шанс
+    roll = random.randint(1, 100)
+    if roll == 1:
+        crit = True
         earned *= 10
+    elif roll <= 5:
+        crit = True
+        earned *= 2
+    else:
+        crit = False
 
     return earned, crit, happy
 
