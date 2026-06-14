@@ -2805,19 +2805,31 @@ def _calculate_farm_reward(player, context) -> tuple[int, bool, bool]:
 def _format_farm_message(earned: int, crit: bool, happy: bool,
                          medal_text: str, new_count: int, target: int,
                          new_balance: int) -> str:
-    """Формирует HTML-сообщение с результатами фарма."""
-    crit_str = " (крит x10!)" if crit else ""
-    happy_str = " 🌟x2" if happy else ""
-    progress_bar_str = get_medal_progress(new_count, FARM_MEDALS)
-    rank_progress = get_rank_progress(new_balance)
+    """Формирует чистое, сбалансированное HTML-сообщение."""
+
+    # Крит-эмодзи без дублей
+    if crit:
+        if earned >= FARM_MAX * 10:
+            crit_emoji = "💥 (x10!)"
+        else:
+            crit_emoji = "🍬🍬 (x2!)"
+    else:
+        crit_emoji = "🍬"
+
+    # Happy hour (закомментирован, включишь когда нужно)
+    # happy_str = " 🌟x2" if happy else ""
+    happy_str = ""
+
+    # Прогресс-бары без переносов
+    medal_bar = get_medal_progress(new_count, FARM_MEDALS).replace('\n', ' ')
+    rank_bar = get_rank_progress(new_balance).replace('\n', ' ')
 
     return (
-        f"💎 Ты нафармил: <b>+{earned} OAC</b> 🍬{crit_str}{happy_str}\n\n"
+        f"💎 Ты нафармил: <b>+{earned} OAC</b> {crit_emoji}{happy_str}\n"
         f"⚜️ У тебя: <b>{new_balance} OAC 🎉</b>\n\n"
-        f"{medal_text}"
-        f"<b>🎯 Фарминг: {new_count}/{target}</b>\n"
-        f"{progress_bar_str}\n\n"
-        f"{rank_progress}"
+        f"{medal_text}\n"
+        f"🎯 <b>Фарминг: {new_count}/{target}</b>  {medal_bar}\n\n"
+        f"⚜️ <b>Ранг:</b> {rank_bar}"
     )
     
 @rate_limit(3)
@@ -2920,7 +2932,7 @@ async def farm_callback_v2(update, context, ctx, player):
                 f"<b>🍬 OAC копятся 🌱</b>\n\n"
                 f"{timer_emoji} {timer_text}\n\n"
                 f"📊 <b>Прогресс дня:</b>\n{progress_line}\n\n"
-                f"💡 <i>{advice}</i>"
+                f"💡 <b>Совет:</b> {advice}"
             )
     
         await safe_send_message(
