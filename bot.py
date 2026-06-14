@@ -2836,21 +2836,25 @@ def _format_farm_message(earned: int, crit: bool, happy: bool,
     rank_bar_clean = strip_html(rank_bar_raw).replace('🎯', '').strip()
     rank_details_clean = strip_html(rank_details_raw)
 
-    # 5. Жирные названия рангов (не иконки)
-    if " → " in rank_header:
+# 5. Жирные названия рангов (не иконки) – сначала очищаем от любого HTML
+    rank_header_clean = strip_html(rank_header)
+    if " → " in rank_header_clean:
         prefix = ""
-        rest = rank_header
-        if "Ранг:" in rank_header:
-            prefix = rank_header.split("Ранг:")[0] + "Ранг:"
-            rest = rank_header.split("Ранг:", 1)[1]
+        rest = rank_header_clean
+        if "Ранг:" in rank_header_clean:
+            prefix = rank_header_clean.split("Ранг:")[0] + "Ранг:"
+            rest = rank_header_clean.split("Ранг:", 1)[1]
         left, right = rest.split(" → ")
         left_parts = left.strip().split()
         if left_parts:
-            left_parts[-1] = f"<b>{strip_html(left_parts[-1])}</b>"
+            left_parts[-1] = f"<b>{left_parts[-1]}</b>"
         right_parts = right.strip().split()
         if len(right_parts) >= 2:
-            right_parts[1] = f"<b>{strip_html(right_parts[1])}</b>"
+            right_parts[1] = f"<b>{right_parts[1]}</b>"
         rank_header = f"{prefix} {' '.join(left_parts)} → {' '.join(right_parts)}"
+    else:
+        # если не удалось распарсить, оставляем очищенный вариант
+        rank_header = rank_header_clean
 
     # 6. Жирный процент
     rank_bar = ""
