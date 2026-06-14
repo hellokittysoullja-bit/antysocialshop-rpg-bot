@@ -2812,9 +2812,9 @@ def _calculate_farm_reward(player, context) -> tuple[int, bool, bool]:
 def _format_farm_message(earned: int, crit: bool, happy: bool,
                          medal_text: str, new_count: int, target: int,
                          new_balance: int) -> str:
-    """Чистое, сбалансированное HTML‑сообщение."""
+    """Формирует стильное HTML‑сообщение с акцентами."""
 
-    # 1. Эмодзи крита
+    # ── Крит-эмодзи ──────────────────────────────────────────
     if crit:
         if earned >= FARM_MAX * 10:
             crit_emoji = "💥 (x10!)"
@@ -2823,29 +2823,81 @@ def _format_farm_message(earned: int, crit: bool, happy: bool,
     else:
         crit_emoji = "🍬"
 
-    # 2. Прогресс‑бар фарминга: только первая строка (▓░░░░ 12%)
+    # ── Прогресс-бар медалей ─────────────────────────────────
     raw_medal = get_medal_progress(new_count, FARM_MEDALS)
-    medal_lines = raw_medal.strip().split('\n')
-    medal_bar = medal_lines[0].strip()   # первая строка – бар + процент
+    medal_bar = raw_medal.strip().split('\n')[0].strip()
 
-    # 3. Прогресс‑бар ранга: отделяем бар (вторая строка) от описания
+    # ── Ранг: получаем три строки ────────────────────────────
     raw_rank = get_rank_progress(new_balance)
     rank_lines = raw_rank.strip().split('\n')
-    # Обычно: "⚜️ Ранг: ... → ...", "▓▓▓▓░░░░░░ 41%", "11277 / 20000 OAC 💎"
-    # Нам нужны только вторая и третья строки, если они есть
-    if len(rank_lines) >= 2:
-        rank_bar = rank_lines[1].strip()
+
+    # Строка 0: заголовок ранга
+    rank_header = rank_lines[0].strip() if len(rank_lines) > 0 else ""
+
+    # Делаем жирными только слова после иконок (если есть " → ")
+    if " → " in rank_header:
+        # Ищем "Ранг: " или аналогичный префикс, оставляем остаток
+        if "Ранг:" in rank_header:
+            prefix, rest = rank_header.split("Ранг:", 1)
+            prefix += "Ранг:"
+        else:
+            prefix, rest = rank_header[:0], rank_header
+        # rest = " ⚔️ Ветеран → 🪦 Призрак" примерно
+        if " → " in rest:
+            left_side, right_side = rest.split(" → ", 1)
+            # Делаем жирным последнее слово в left_side (название ранга)
+            left_parts = left_side.strip().split()
+            if left_parts:
+                left_parts[-1] = f"<b>{left_parts[-1]}</b>"
+                left_side = " ".join(left_parts)
+            # Аналогично справа
+            right_parts = right_side.strip().split()
+            if right_parts:
+                right_parts[0] = f"<b>{right_parts[0]}</b>"
+                right_side = " ".join(right_parts)
+            rank_header = f"{prefix} {left_side} → {right_side}"
+
+    # Строка 1: прогресс-бар с процентом
+    if len(rank_lines) > 1:
+        rank_bar_raw = rank_lines[1].strip()
+        rank_bar_raw = rank_bar_raw.replace('🎯', '').strip()
+        # Выделяем жирным проценты
+        parts = rank_bar_raw.split()
+        if len(parts) >= 2:
+            # процент — последний элемент
+            percent = parts[-1]
+            bar_part = " ".join(parts[:-1])
+            rank_bar = f"{bar_part} <b>{percent}</b>"
+        else:
+            rank_bar = rank_bar_raw
     else:
         rank_bar = ""
-    rank_details = rank_lines[2].strip() if len(rank_lines) >= 3 else ""
 
-    # 4. Собираем финальный текст
+    # Строка 2: числа X / Y OAC 💎
+    if len(rank_lines) > 2:
+        details_line = rank_lines[2].strip()
+        # Найдём два числа и завернём их в <code>
+        import re
+        numbers = re.findall(r'\d+', details_line)
+        if len(numbers) >= 2:
+            for num in numbers[:2]:
+                details_line = details_line.replace(num, f"<code>{num}</code>", 1)
+        rank_details = details_line
+    else:
+        rank_details = ""
+
+    # ── Медальный текст: не трогаем, если уже с HTML ─────────
+    if '<' not in medal_text:
+        medal_text = f"<b>{medal_text}</b>"
+
+    # ── Сборка ────────────────────────────────────────────────
     msg = (
         f"💎 Ты нафармил: <b>+{earned} OAC</b> {crit_emoji}\n"
-        f"⚜️ У тебя: <b>{new_balance} OAC 🎉</b>\n\n"
-        f"{medal_text}"
+        f"⚜️ У тебя: <b><code>{new_balance}</code> OAC 🎉</b>\n\n"
+        f"{medal_text}\n"
         f"🎯 <b>Фарминг: {new_count}/{target}</b>  {medal_bar}\n\n"
-        f"⚜️ <b>Ранг:</b> {rank_bar}\n"
+        f"{rank_header}\n"
+        f"{rank_bar}\n"
     )
     if rank_details:
         msg += f"{rank_details}\n"
