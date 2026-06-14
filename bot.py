@@ -313,6 +313,7 @@ class Player(BaseModel):
     exists: bool = False
     model_config = ConfigDict(populate_by_name=True)
     pet_hunger: int = 100
+    daily_progress: dict = Field(default_factory=dict)
     
 class PlayerRepository:
     """Репозиторий игроков с Circuit Breaker, кэшем и автоматическими ретраями."""
@@ -362,7 +363,7 @@ class PlayerRepository:
                 "inventory", "invited_by", "profile_skins", "login_streak",
                 "last_login_date", "oath", "keys", "check_count", "m_essence",
                 "lab_chests", "lab_deaths", "alchemy_count", "last_lab_attempt",
-                "donated", "pending_transfer", "lab_depth", "pet", "pet_name", "exists",
+                "donated", "daily_progress", "pending_transfer", "lab_depth", "pet", "pet_name", "exists",
             ]
             cols_sql = ", ".join(f'"{c}"' for c in columns)
             row = await db_breaker.call(
@@ -380,6 +381,7 @@ class PlayerRepository:
 
             p["profile_skins"] = _json_safe_load(p.get("profile_skins"), {})
             p["pending_transfer"] = _json_safe_load(p.get("pending_transfer"), None)
+            p["daily_progress"] = _json_safe_load(p.get("daily_progress"), {})
             player = Player(**p)
             player.exists = True
             await self._cache_put(user_id, player)
@@ -406,9 +408,9 @@ class PlayerRepository:
             "inventory", "invited_by", "profile_skins", "login_streak",
             "last_login_date", "oath", "keys", "check_count", "m_essence",
             "lab_chests", "lab_deaths", "alchemy_count", "last_lab_attempt",
-            "donated", "pending_transfer", "lab_depth", "pet", "pet_name", "exists",
+            "donated", "daily_progress", "pending_transfer", "lab_depth", "pet", "pet_name", "exists",
         ]
-        json_cols = {"inventory", "profile_skins", "pending_transfer"}
+        json_cols = {"inventory", "profile_skins", "pending_transfer", "daily_progress"}
         cols_sql = ", ".join(f'"{c}"' for c in columns)
         placeholders = ", ".join(f"${i+1}" for i in range(len(columns)))
         update_set = ", ".join(f'"{c}" = EXCLUDED."{c}"' for c in columns if c != "user_id")
@@ -2831,6 +2833,7 @@ async def farm_callback_v2(update, context, ctx, player):
         medal_text, medal_bonus = get_medal_text_and_reward(old_count, new_count, FARM_MEDALS)
 
         p.balance += earned + medal_bonus
+        p.daily_progress = p.daily_progress or {}
         p.daily_progress["farm"] = True
         p.farm_count = new_count
         p.last_farm = now
@@ -3056,6 +3059,7 @@ async def handle_craft_normal_v2(update, context, ctx, player):
         p.balance -= GAME_CONFIG["craft_cost"]
         p.blunts += 1
         p.craft_count = new_count
+        p.daily_progress = p.daily_progress or {}
         p.daily_progress["craft"] = True
 
         if random.random() < 0.05:
@@ -3515,6 +3519,7 @@ async def do_smoke(update, context, ctx, player):
             p.blunts -= 1
         p.smoke_count = new_count
         p.balance = (p.balance or 0) + earned + medal_bonus
+        p.daily_progress = p.daily_progress or {}
         p.daily_progress["smoke"] = True
         p.inhaled = 1
 
@@ -3593,6 +3598,7 @@ async def ritual_callback(update, context):
         medal_text, medal_bonus = get_medal_text_and_reward(old_count, new_count, RITUAL_MEDALS)
 
         player.balance += reward + extra + medal_bonus
+        player.daily_progress = player.daily_progress or {}
         player.daily_progress["guild_action"] = True
         player.ritual_count = new_count
         player.last_ritual = now
@@ -4213,6 +4219,7 @@ async def confess_callback(update, context, ctx):
         if r < 0.70:
             reward = random.randint(100, 200)
             p.balance = (p.balance or 0) + reward
+            p.daily_progress = p.daily_progress or {}
             p.daily_progress["guild_action"] = True
             return ("ok", f"<b><i>⚜️ ИСПОВЕДЬ</i></b>\n\nБлагословение! +{reward} OAC.")
         elif r < 0.95:
