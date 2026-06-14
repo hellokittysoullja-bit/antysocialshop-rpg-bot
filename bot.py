@@ -1516,6 +1516,19 @@ async def _run_migrations(conn):
         );
     """)
     
+    # Ну тип жто БД длЯЯЯ daily_progress
+    await conn.execute("""
+    DO $$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name='players' AND column_name='daily_progress'
+        ) THEN
+            ALTER TABLE players ADD COLUMN daily_progress JSONB DEFAULT '{}';
+        END IF;
+    END $$;
+""")
+    
     # Питомцы и exists
     await conn.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS pet TEXT DEFAULT '';")
     await conn.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS pet_name TEXT DEFAULT '';")
