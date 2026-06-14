@@ -2812,32 +2812,45 @@ def _calculate_farm_reward(player, context) -> tuple[int, bool, bool]:
 def _format_farm_message(earned: int, crit: bool, happy: bool,
                          medal_text: str, new_count: int, target: int,
                          new_balance: int) -> str:
-    """Формирует чистое, сбалансированное HTML-сообщение."""
+    """Чистое, сбалансированное HTML‑сообщение."""
 
-    # Крит-эмодзи без дублей
+    # 1. Эмодзи крита
     if crit:
         if earned >= FARM_MAX * 10:
             crit_emoji = "💥 (x10!)"
         else:
-            crit_emoji = "🍬🍬 (x2!)"
+            crit_emoji = "🍬🍬"
     else:
         crit_emoji = "🍬"
 
-    # Happy hour (закомментирован, включишь когда нужно)
-    # happy_str = " 🌟x2" if happy else ""
-    happy_str = ""
+    # 2. Прогресс‑бар фарминга: только первая строка (▓░░░░ 12%)
+    raw_medal = get_medal_progress(new_count, FARM_MEDALS)
+    medal_lines = raw_medal.strip().split('\n')
+    medal_bar = medal_lines[0].strip()   # первая строка – бар + процент
 
-    # Прогресс-бары без переносов
-    medal_bar = get_medal_progress(new_count, FARM_MEDALS).replace('\n', ' ')
-    rank_bar = get_rank_progress(new_balance).replace('\n', ' ')
+    # 3. Прогресс‑бар ранга: отделяем бар (вторая строка) от описания
+    raw_rank = get_rank_progress(new_balance)
+    rank_lines = raw_rank.strip().split('\n')
+    # Обычно: "⚜️ Ранг: ... → ...", "▓▓▓▓░░░░░░ 41%", "11277 / 20000 OAC 💎"
+    # Нам нужны только вторая и третья строки, если они есть
+    if len(rank_lines) >= 2:
+        rank_bar = rank_lines[1].strip()
+    else:
+        rank_bar = ""
+    rank_details = rank_lines[2].strip() if len(rank_lines) >= 3 else ""
 
-    return (
-        f"💎 Ты нафармил: <b>+{earned} OAC</b> {crit_emoji}{happy_str}\n"
+    # 4. Собираем финальный текст
+    msg = (
+        f"💎 Ты нафармил: <b>+{earned} OAC</b> {crit_emoji}\n"
         f"⚜️ У тебя: <b>{new_balance} OAC 🎉</b>\n\n"
-        f"{medal_text}\n"
+        f"{medal_text}"
         f"🎯 <b>Фарминг: {new_count}/{target}</b>  {medal_bar}\n\n"
-        f"⚜️ <b>Ранг:</b> {rank_bar}"
+        f"⚜️ <b>Ранг:</b> {rank_bar}\n"
     )
+    if rank_details:
+        msg += f"{rank_details}\n"
+
+    return msg
     
 @rate_limit(3)
 @game_handler
