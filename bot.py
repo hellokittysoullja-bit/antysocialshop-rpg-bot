@@ -2812,8 +2812,8 @@ def _format_farm_message(earned: int, crit: bool, happy: bool,
     rank_progress = get_rank_progress(new_balance)
 
     return (
-        f"<b>💎 Ты нафармил: +{earned} oac</b> 🍬{crit_str}{happy_str}\n\n"
-        f"<b>⚜️ у тебя:</b> <b>{new_balance} oac 🎉</b>\n\n"
+        f"💎 Ты нафармил: <b>+{earned} OAC</b> 🍬{crit_str}{happy_str}\n\n"
+        f"⚜️ У тебя: <b>{new_balance} OAC 🎉</b>\n\n"
         f"{medal_text}"
         f"<b>🎯 Фарминг: {new_count}/{target}</b>\n"
         f"{progress_bar_str}\n\n"
@@ -2902,10 +2902,10 @@ async def farm_callback_v2(update, context, ctx, player):
             timer_text = f"<b>Уже скоро!</b> Осталось подождать {remain} мин"
         elif remain <= 15:
             timer_emoji = "⌛️"
-            timer_text = f"<b>Подожди {remain} мин</b>"
+            timer_text = f"Подожди <b>{remain} мин</b>"
         else:
             timer_emoji = "⏳"
-            timer_text = f"<b>Подожди {remain} мин</b>"
+            timer_text = f"Подожди <b>{remain} мин</b>"
     
         # Сообщение
         if done == total:
@@ -3023,8 +3023,8 @@ def _format_normal_craft_message(medal_text: str, new_count: int, target: int,
     progress_bar_str = get_medal_progress(new_count, CRAFT_MEDALS)
     return (
         f"<b>🌿 БЛАНТ СКРУЧЕН!</b>\n\n"
-        f"<b>💎 Потрачено:</b> <b>15 OAC 🍬</b>\n"
-        f"<b>⚜️ У тебя:</b> <b>{new_balance} OAC 🍬</b>\n\n"
+        f"💎 Потрачено: <b>15 OAC 🍬</b>\n"
+        f"⚜️ У тебя: <b>{new_balance} OAC 🍬</b>\n\n"
         f"{medal_text}"
         f"<b>🎯 Крафтинг:</b> {new_count}/{target}\n"
         f"{progress_bar_str}\n\n"
@@ -3238,11 +3238,11 @@ async def handle_named_name(update, context):
         reaction = item["reaction"]
 
         caption = (
-            f"<b>💍 БЛАНТ СОТКАН</b>\n\n"
-            f"🩸 <i>Ты вплёл в <b>Искажение</b> свой именной блант:</i>\n"
+            f"<b>💍 ИМЕННОЙ БЛАНТ СОТКАН</b>\n\n"
+            f"🩸 Ты вплёл в <b>Искажение</b> свой именной блант:\n"
             f"{color} <b><i>«{name_escaped}»</i></b> <i>Редкость:</i> <b>{item['rarity']}</b>\n\n"
-            f"💎 <i>Он навсегда останется в твоей коллекции.</i>\n\n"
-            f"🩸 <i>{reaction}</i>"
+            f"💎 Он навсегда останется в твоей коллекции.\n\n"
+            f"🕯️ <i>{reaction}</i>"
         )
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("🔗 Поделиться", callback_data=f"share_blunt_{blunt_id}")],
