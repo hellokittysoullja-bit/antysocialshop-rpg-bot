@@ -2536,38 +2536,43 @@ async def _show_main_menu(update, context, player, user, ctx):
     kb, _ = await get_main_menu_keyboard(player.user_id, ctx=ctx)
     await update.effective_message.reply_text(menu_text, reply_markup=kb, parse_mode='HTML')
     
-def get_next_action(player) -> tuple[str, str]:
-    """
-    Возвращает (текст_кнопки, callback_data) для рекомендации во время кулдауна.
-    Приоритет: незавершённый онбординг → обычные подсказки.
-    """
-    step = player.onboarding_step or 0
+def get_next_action(player, exclude_callback: str = None) -> tuple[str, str, str]:
+    progress = getattr(player, 'daily_progress', {}) or {}
+    balance = getattr(player, 'balance', 0) or 0
+    guild = getattr(player, 'guild', None)
+    has_pet = bool(getattr(player, 'pet', ''))
+    is_veteran = balance >= 5000
 
-    # === ЭТАПЫ ОНБОРДИНГА (обучение не закончено) ===
-    if step != -1:
-        if step == 0:
-            return ("🕋 Выбрать Гильдию", "guild_info")
-        elif step == 1:
-            return ("🍬 Фармить OAC", "farm")
-        elif step == 2:
-            return ("🌿 Создать первый блант", "craft")
-        # Если появятся новые шаги, их легко добавить сюда
+    # Динамический тотал действий
+    total_actions = 5 if (is_veteran and has_pet) else 4
+    done = sum(1 for k in ["farm", "craft", "smoke", "guild_action"] if progress.get(k))
+    if is_veteran and has_pet and progress.get("pet"):
+        done += 1
 
-    # === ОБЫЧНЫЕ РЕКОМЕНДАЦИИ (онбординг завершён) ===
-    if (player.blunts or 0) < 2:
-        return ("🌿 Скрутить блант", "craft")
-    if not player.guild:
-        return ("🕋 Вступить в Гильдию", "guild_info")
+    # Приоритет №1: Гильдия
+    if not guild and exclude_callback != "guild_info":
+        return ("🕋 Выбрать Гильдию", "guild_info", "Выбери собственную Гильдию, и открой Войну ⚔️ Гильдий, Ритуалы 🔮 или Исповеди! 🪽")
 
-    now = datetime.now(timezone.utc)
-    last_lab = player.last_lab_attempt
-    if not last_lab or (now - last_lab) > timedelta(hours=GAME_CONFIG["lab_cooldown_hours"]):
-        return ("🏛️ Исследовать Лабиринт", "lab_start")
+    # Приоритет №2: Всё готово
+    if done == total_actions:
+        return ("🎁 ЗАБРАТЬ +50 OAC", "profile", "🎉 Всё готово! Награда ждёт тебя в профиле!")
 
-    if player.pet and (player.pet_hunger or 100) < 50:
-        return ("🐾 Покормить питомца", "pet_preview")
+    # Приоритет №3: Незавершённые дела
+    if not progress.get("farm") and exclude_callback != "farm":
+        return ("🍬 Фармить", "farm", "🍬 Фарм — основа роста. Заполни шкалу!")
+    if not progress.get("craft") and exclude_callback != "craft":
+        return ("🌿 Крафтить", "craft", "🌿 Скрути блант — получишь случайный эффект!")
+    if not progress.get("smoke") and exclude_callback != "smoke":
+        return ("💨 Дунуть", "smoke", "🧿 Испытай удачу — выкури блант!")
+    if guild and not progress.get("guild_action") and exclude_callback != "guild_action":
+        if guild == "BLACK":
+            return ("🕯️ Ритуал", "ritual", "🕯️ Тёмная магия ждёт тебя!")
+        elif guild == "WHITE":
+            return ("⚜️ Исповедь", "confess", "🪽 Светлая удача улыбнётся тебе!")
+    if is_veteran and has_pet and not progress.get("pet") and exclude_callback != "pet_preview":
+        return ("🐾 Покормить питомца", "pet_preview", "Твой питомец проголодался! Покорми его.")
 
-    return ("🏰 В меню", "menu")
+    return ("🏰 В меню", "menu", "Все дела пока недоступны. Загляни позже!")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ctx = context.bot_data.get("ctx")
@@ -2843,13 +2848,63 @@ async def farm_callback_v2(update, context, ctx, player):
     status, *data = result
     if status == "cooldown":
         remain = data[0]
-        btn_text, btn_callback = get_next_action(player)
-
-        if btn_callback == "menu":
-            message_text = f"<b>🍬 OAC копятся 🌱</b>\n\n<b>🍃 Подожди {remain} мин</b>"
+        btn_text, btn_callback, advice = get_next_action(player, exclude_callback="farm")
+    
+        progress = getattr(player, 'daily_progress', {}) or {}
+        balance = getattr(player, 'balance', 0) or 0
+        guild = getattr(player, 'guild', None)
+        has_pet = bool(getattr(player, 'pet', ''))
+        is_veteran = balance >= 5000
+    
+        # Динамический прогресс-бар
+        guild_emoji = "🕯️" if guild == "BLACK" else "⚜️" if guild == "WHITE" else "🕋"
+        actions_emojis = {
+            "farm": "🍬",
+            "craft": "🌿",
+            "smoke": "💨",
+            "guild_action": guild_emoji,
+        }
+        if is_veteran and has_pet:
+            actions_emojis["pet"] = "🐾"
+    
+        total = len(actions_emojis)
+        done = sum(1 for k in actions_emojis if progress.get(k))
+    
+        progress_icons = []
+        for key, emoji in actions_emojis.items():
+            if progress.get(key):
+                progress_icons.append(f"{emoji}✅")
+            else:
+                progress_icons.append(f"{emoji}⬜️")
+        progress_line = " ".join(progress_icons)
+    
+        # Таймер
+        if remain <= 5:
+            timer_emoji = "⚠️"
+            timer_text = f"<b>Уже скоро!</b> Осталось подождать {remain} мин"
+        elif remain <= 15:
+            timer_emoji = "⌛️"
+            timer_text = f"<b>Подожди {remain} мин</b>"
         else:
-            message_text = f"<b>🍬 OAC копятся 🌱</b>\n\n<b>🍃 Подожди {remain} мин</b>\n\n<b>💡 Совет:</b> <i>чем заняться прямо сейчас</i>"
-
+            timer_emoji = "⏳"
+            timer_text = f"<b>Подожди {remain} мин</b>"
+    
+        # Сообщение
+        if done == total:
+            message_text = (
+                f"<b>🍬 OAC копятся 🌱</b>\n\n"
+                f"{timer_emoji} {timer_text}\n\n"
+                f"📊 <b>Прогресс дня:</b>\n{progress_line}\n\n"
+                f"🎉 <b>Всё готово! Забери +50 OAC в профиле!</b>"
+            )
+        else:
+            message_text = (
+                f"<b>🍬 OAC копятся 🌱</b>\n\n"
+                f"{timer_emoji} {timer_text}\n\n"
+                f"📊 <b>Прогресс дня:</b>\n{progress_line}\n\n"
+                f"💡 <i>{advice}</i>"
+            )
+    
         await safe_send_message(
             context,
             update.effective_chat.id,
