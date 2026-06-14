@@ -52,7 +52,7 @@ callback_duration = Histogram('bot_callback_duration_seconds', 'Callback duratio
 rate_limited_requests = Counter('bot_rate_limited_requests', 'Rate limited requests')
 
 import httpx
-
+import re
 import copy
 
 # ============================================================
