@@ -4144,8 +4144,9 @@ async def top_scout_callback(update, context, ctx):
 async def guild_info_callback(update, context):
     ctx = context.bot_data.get("ctx")
     if not ctx:
-        await update.effective_message.reply_text("⚠️ Контекст (ctx) игры временно недоступен. Это бывает при перезапуске. Попробуй позже.")
+        await update.effective_message.reply_text("⚠️ Бот инициализируется, попробуйте позже.")
         return
+
     user, msg = get_user_and_msg(update)
     uid = user.id
     player = await ctx.repo.get_by_id(uid)
@@ -4164,28 +4165,82 @@ async def guild_info_callback(update, context):
     async with ctx.db_pool.acquire() as conn:
         black_donated = await conn.fetchval("SELECT COALESCE(SUM(donated),0) FROM players WHERE guild='BLACK'") or 0
         white_donated = await conn.fetchval("SELECT COALESCE(SUM(donated),0) FROM players WHERE guild='WHITE'") or 0
-    target = 50000
-    black_perc = min(100, max(0, int(black_donated / target * 100)))
-    white_perc = min(100, max(0, int(white_donated / target * 100)))
 
-    def safe_progress_bar(perc):
-        perc = max(0, min(100, perc))
-        filled = perc // 10
-        return "▓" * filled + "░" * (10 - filled)
+    # Уровни и бонусы храма
+    temple_levels = [
+        {"level": 1, "cost": 0, "bonus": 0, "name": "Алтарь"},
+        {"level": 2, "cost": 15000, "bonus": 5, "name": "Святилище"},
+        {"level": 3, "cost": 45000, "bonus": 10, "name": "Храм"},
+        {"level": 4, "cost": 100000, "bonus": 15, "name": "Цитадель"},
+        {"level": 5, "cost": 250000, "bonus": 25, "name": "Обитель Богов"},
+    ]
 
-    text = (
-        f"<b>🕋 ГИЛЬДИИ</b>\n\n"
-        f"🕯️ <b>Тёмная Гильдия: {black_cnt}</b> странников\n"
-        f"<b>{safe_progress_bar(black_perc)} {black_perc}%</b>\n\n"
-        f"⚜️ <b>Светлая Гильдия: {white_cnt}</b> странников\n"
-        f"<b>{safe_progress_bar(white_perc)} {white_perc}%</b>\n\n"
-    )
+    text = "<b>🕋 ГИЛЬДИИ</b>\n\n"
+
+    for guild_name, donated in [("BLACK", black_donated), ("WHITE", white_donated)]:
+        current_level = 1
+        next_cost = temple_levels[1]["cost"]
+        bonus = 0
+        for lvl in temple_levels:
+            if donated >= lvl["cost"]:
+                current_level = lvl["level"]
+                bonus = lvl["bonus"]
+                if current_level < 5:
+                    next_cost = temple_levels[current_level]["cost"]
+                else:
+                    next_cost = 0
+            else:
+                break
+        
+        guild_emoji = "🕯️" if guild_name == "BLACK" else "⚜️"
+        guild_label = "Тёмная" if guild_name == "BLACK" else "Светлая"
+        members = cnt.get(guild_name, 0)
+        
+        text += f"{guild_emoji} <b>{guild_label} Гильдия</b>\n"
+        text += f"👥 <b>{members}</b> странников\n"
+        
+        # Цветные прогресс-бары для каждой гильдии
+        if guild_name == "BLACK":
+            filled_char = "🟣"
+            empty_char = "⬛️"
+        else:
+            filled_char = "🟡"
+            empty_char = "⬜️"
+        
+        if current_level < 5:
+            progress = int(donated / next_cost * 100) if next_cost > 0 else 100
+            filled_count = progress // 10
+            empty_count = 10 - filled_count
+            bar = filled_char * filled_count + empty_char * empty_count
+            level_name = temple_levels[current_level]["name"]
+            next_level_name = temple_levels[current_level + 1]["name"]
+            text += f"🏛️ <b>{level_name}</b> → <b>{next_level_name}</b>\n"
+            text += f"<b>{bar} {progress}%</b>\n"
+            text += f"⚡ +{bonus}% к фарму\n"
+            text += f"💎 {donated} / {next_cost} OAC\n"
+        else:
+            filled_char = "🟣" if guild_name == "BLACK" else "🟡"
+            bar = filled_char * 10
+            level_name = temple_levels[5]["name"]
+            text += f"🏛️ <b>{level_name}</b> (Макс.)\n"
+            text += f"<b>{bar} 100%</b>\n"
+            text += f"⚡ +{bonus}% к фарму\n"
+            text += f"💎 {donated} OAC\n"
+        
+        text += "\n"
+
+    # Твой статус в гильдии
+    if guild:
+        g_emoji = "🕯️" if guild == "BLACK" else "⚜️"
+        g_name = "Тёмная" if guild == "BLACK" else "Светлая"
+        text += f"✨ Ты состоишь в {g_emoji} <b>{g_name} Гильдии</b>.\n"
+    else:
+        text += "🔮 <i>Ты пока не в Гильдии. Выбери сторону!</i>\n"
 
     kb_rows = []
     if guild:
         g_emoji = "🕯️" if guild == "BLACK" else "⚜️"
         g_name = "Тёмная" if guild == "BLACK" else "Светлая"
-        text += f"Ты состоишь в {g_emoji} <b>{g_name} Гильдии</b>.\n"
         if guild == "BLACK":
             if player.last_ritual:
                 last_ritual = _to_datetime(player.last_ritual)
@@ -4199,7 +4254,7 @@ async def guild_info_callback(update, context):
             else:
                 kb_rows.append([InlineKeyboardButton("🕯️ Ритуал", callback_data="ritual")])
         elif guild == "WHITE":
-            kb_rows.append([InlineKeyboardButton("⚜️ Исповедь", callback_data="repent")])
+            kb_rows.append([InlineKeyboardButton("⚜️ Исповедь", callback_data="confess")])
         kb_rows.append([
             InlineKeyboardButton("🏛️ Храм", callback_data="guild_shrine"),
             InlineKeyboardButton("⚔️ Война", callback_data="guild_war")
