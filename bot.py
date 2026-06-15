@@ -3011,13 +3011,14 @@ def _format_craft_menu_text(balance: int, blunts: int, craft_count: int,
                             medal_name: str, target: int, m_essence: int) -> str:
     """HTML‑текст меню крафта."""
     text = (
-        f"<b>🌱 КРАФТ БЛАНТА</b>\n\n"
-        f"<b>💎 у тебя: {balance} оас 🍬</b>\n\n"
-        f"<b>🌿 Блантов в свёртке: {blunts}</b>\n"
-        f"<b>🎯 Крафтинг: {craft_count}/{target} | {medal_name}</b>\n\n"
-        f"<b>🌿 Блант — 15 OAC 🍬</b>\n"
+        f"<b>🌱 КРАФТ БЛАНТОВ</b>\n\n"
+        f"<b>💎 У тебя: {balance} OAC 🍬</b>\n\n"
+        f"<b>🗞️ Блантов в свёртке: {blunts}</b>\n"
+        f"<b>🎯 Крафтинг: {craft_count}/{target} | {medal_name}</b>\n"
+        f"<b>🌿 Блант — 15 OAC 🍬</b>\n\n"
         f"<b>💍 Именной блант — 50 OAC 🍬</b>\n"
-        f"<b>Шансы:</b> <i>🟢 55% | 🔵 30% | 🟣 13% | 🟡 2%</i>"
+        f"<b>Шансы:</b>\n" 
+        f"<i>🟢 55% | 🔵 30% | 🟣 13% | 🟡 2%</i>"
     )
     if m_essence > 0:
         text += f"\n\n<b>💠 у тебя есть Кристальная Пыль</b> (<i>{m_essence} доза</i>)"
@@ -3929,7 +3930,9 @@ async def achievements_callback(update: Update, context: ContextTypes.DEFAULT_TY
     start = page * per_page
     chunk = all_ach[start:start + per_page]
 
-    text = f"<b>🏆 ДОСТИЖЕНИЯ</b> ({page+1}/{total_pages})\n\n"
+    unlocked_count = len(awarded_ids)
+    total_achievements = len(ACHIEVEMENTS)
+    text = f"<b>🏆 ДОСТИЖЕНИЯ</b> ({unlocked_count}/{total_achievements})\n\n"
     for ach in chunk:
         ach_id = ach["id"]
         unlocked = ach_id in awarded_ids
