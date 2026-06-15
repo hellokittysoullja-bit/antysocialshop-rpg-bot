@@ -2223,7 +2223,7 @@ async def get_main_menu_keyboard(user_id, ctx=None):
         keyboard.append([InlineKeyboardButton("🪴 Куст", callback_data="collect")])
     keyboard.append([
         InlineKeyboardButton("👤 Профиль", callback_data="profile"),
-        InlineKeyboardButton("🏆 Достижения", callback_data="achievements"),
+        InlineKeyboardButton("🏆 Достижения", callback_data="achievements_menu"),
         InlineKeyboardButton("🏅 Лидеры", callback_data="top")
     ])
 
@@ -3831,7 +3831,7 @@ async def profile_callback(update, context, ctx, player):
         kb_rows.append([InlineKeyboardButton(f"💍 Все именные бланты ({len(named)})", callback_data="my_blunts")])
     kb_rows.append([InlineKeyboardButton("📜 Кодекс", callback_data="rules")])
     kb_rows.append([InlineKeyboardButton("🎨 Кастомизация", callback_data="skins_menu"),
-                    InlineKeyboardButton("🏆 Достижения", callback_data="achievements")])
+                    InlineKeyboardButton("🏆 Достижения", callback_data="achievements_profile")])
     kb_rows.append([InlineKeyboardButton("🏰 В меню", callback_data="menu")])
     kb = InlineKeyboardMarkup(kb_rows)
 
@@ -3958,7 +3958,11 @@ async def achievements_callback(update: Update, context: ContextTypes.DEFAULT_TY
         nav.append(InlineKeyboardButton("➡️", callback_data=f"ach_page_{page+1}"))
     if nav:
         kb_rows.append(nav)
-    kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="profile")])
+    if query.data == "achievements_profile":
+        back_cb = "profile"
+    else:
+        back_cb = "menu"
+    kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data=back_cb)])
     await edit_or_reply(update, context, text, reply_markup=InlineKeyboardMarkup(kb_rows))
 
 @rate_limit(1)
