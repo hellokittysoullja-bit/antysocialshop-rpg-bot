@@ -2811,16 +2811,8 @@ def _calculate_farm_reward(player, context) -> tuple[int, bool, bool]:
 def _format_farm_message(earned: int, crit: bool, happy: bool,
                          medal_text: str, new_count: int, target: int,
                          new_balance: int) -> str:
-    """
-    Формирует сообщение о фарминге для Telegram.
-    - Все большие числа (≥1000) получают пробелы между разрядами.
-    - Happy hour закомментирован, но можно включить одной строкой.
-    """
-    # Вспомогательная функция для форматирования чисел с пробелами
-    def _fmt(n: int) -> str:
-        return f"{n:,}".replace(",", " ")
-
-    # 1. Крит-эмодзи
+    """Сообщение после фарма – чистая структура, как в крафте."""
+    # Крит-эмодзи
     if not crit:
         crit_emoji = "🍬"
     elif earned >= FARM_MAX * 10:
@@ -2828,67 +2820,22 @@ def _format_farm_message(earned: int, crit: bool, happy: bool,
     else:
         crit_emoji = "🍬🍬"
 
-    # 2. Happy hour — раскомментируй строку ниже, когда понадобится
+    # Happy hour (закомментирован)
     # happy_str = " 🌟x2" if happy else ""
     happy_str = ""
 
-    # 3. Медальный прогресс-бар и процент
-    medal_percent = int(new_count / target * 100) if target > 0 else 0
-    filled = medal_percent // 10
-    empty = 10 - filled
-    medal_bar = "▓" * filled + "░" * empty
+    # Прогресс-бары
+    progress_bar_str = get_medal_progress(new_count, FARM_MEDALS)
+    rank_progress = get_rank_progress(new_balance)
 
-    # 4. Жирное название медали (если пришло без HTML)
-    if medal_text.strip() and '<' not in medal_text:
-        medal_text = f"<b>{medal_text.strip()}</b>"
-    else:
-        medal_text = medal_text.strip()
-
-    # 5. Ранг — расчёт на лету
-    rank_name = "Рекрут"
-    next_rank_name = ""
-    next_threshold = 0
-    for i, (emoji, threshold, _) in enumerate(RANKS):
-        if new_balance >= threshold:
-            rank_name = emoji.split(' ', 1)[1] if ' ' in emoji else emoji
-            if i + 1 < len(RANKS):
-                next_emoji = RANKS[i+1][0]
-                next_rank_name = next_emoji.split(' ', 1)[1] if ' ' in next_emoji else next_emoji
-                next_threshold = RANKS[i+1][1]
-        else:
-            next_emoji = emoji
-            next_rank_name = emoji.split(' ', 1)[1] if ' ' in emoji else emoji
-            next_threshold = threshold
-            break
-
-    # 6. Прогресс-бар ранга и процент
-    if next_threshold > 0:
-        current_threshold = 0
-        for emoji, threshold, _ in RANKS:
-            if new_balance >= threshold:
-                current_threshold = threshold
-        if current_threshold > 0:
-            rank_percent = int((new_balance - current_threshold) / (next_threshold - current_threshold) * 100)
-        else:
-            rank_percent = int(new_balance / next_threshold * 100)
-        rank_filled = rank_percent // 10
-        rank_empty = 10 - rank_filled
-        rank_bar = "▓" * rank_filled + "░" * rank_empty
-        rank_details = f"<code>{_fmt(new_balance)} / {_fmt(next_threshold)}</code> OAC 💎"
-    else:
-        rank_bar = "▓" * 10
-        rank_percent = 100
-        rank_details = f"<code>{_fmt(new_balance)}</code> OAC 💎"
-
-    # 7. Сборка сообщения
+    # Сборка сообщения
     msg = (
-        f"💎 Ты нафармил: <b>+{_fmt(earned)} OAC</b> {crit_emoji}{happy_str}\n"
-        f"⚜️ У тебя: <b>{_fmt(new_balance)} OAC 🎉</b>\n\n"
-        f"{medal_text}\n"
-        f"🎯 <b>Фарминг: {_fmt(new_count)}/{_fmt(target)}</b>  {medal_bar} <b>{medal_percent}%</b>\n\n"
-        f"⚜️ Ранг: ⚔️ <b>{rank_name}</b> → 🪦 <b>{next_rank_name}</b>\n"
-        f"{rank_bar} <b>{rank_percent}%</b>\n"
-        f"{rank_details}\n"
+        f"💎 <b>Ты нафармил: +{earned} OAC</b> {crit_emoji}{happy_str}\n"
+        f"⚜️ <b>У тебя: {new_balance} OAC 🎉</b>\n\n"
+        f"{medal_text}"
+        f"🎯 <b>Фарминг: {new_count} / {target}</b>\n"
+        f"{progress_bar_str}\n\n"
+        f"{rank_progress}"
     )
     return msg
     
