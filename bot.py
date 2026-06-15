@@ -602,7 +602,7 @@ class WarAction(enum.Enum):
     LAB_WIN = "lab_win"
     LAB_DEATH = "lab_death"
     RITUAL = "ritual"
-    CONFESS = "confess"
+    REPENT = "repent"
     DAILY = "daily"
 
 
@@ -620,7 +620,7 @@ class WarConfig(BaseModel):
         WarAction.LAB_WIN: 80,
         WarAction.LAB_DEATH: 0,
         WarAction.RITUAL: 0,
-        WarAction.CONFESS: 0,
+        WarAction.REPENT: 0,
         WarAction.DAILY: 0,
     })
 
@@ -2584,7 +2584,7 @@ def get_next_action(player, exclude_callback: str = None) -> tuple[str, str, str
         if guild == "BLACK":
             return ("🕯️ Ритуал", "ritual", "🕯️ Тёмная магия ждёт тебя!")
         elif guild == "WHITE":
-            return ("⚜️ Исповедь", "confess", "🪽 Светлая удача улыбнётся тебе!")
+            return ("⚜️ Исповедь", "repent", "🪽 Светлая удача улыбнётся тебе!")
     if is_veteran and has_pet and not progress.get("pet") and exclude_callback != "pet_preview":
         return ("🐾 Покормить питомца", "pet_preview", "Твой питомец проголодался! Покорми его.")
 
@@ -4199,7 +4199,7 @@ async def guild_info_callback(update, context):
             else:
                 kb_rows.append([InlineKeyboardButton("🕯️ Ритуал", callback_data="ritual")])
         elif guild == "WHITE":
-            kb_rows.append([InlineKeyboardButton("⚜️ Исповедь", callback_data="confess")])
+            kb_rows.append([InlineKeyboardButton("⚜️ Исповедь", callback_data="repent")])
         kb_rows.append([
             InlineKeyboardButton("🏛️ Храм", callback_data="guild_shrine"),
             InlineKeyboardButton("⚔️ Война", callback_data="guild_war")
@@ -4269,11 +4269,11 @@ async def guild_war_callback(update, context):
     await edit_or_reply(update, context, text, reply_markup=kb, parse_mode='HTML')
 
 @cb
-async def confess_callback(update, context, ctx):
+async def repent_callback(update, context, ctx):
     query = update.callback_query
     uid = query.from_user.id
 
-    async def _confess(p, conn):
+    async def _repent(p, conn):
         if not p or not p.user_id:
             return ("no_player",)
         if p.guild != "WHITE":
@@ -4297,7 +4297,7 @@ async def confess_callback(update, context, ctx):
             await create_named_blunt(uid, name, rarity="legendary", ctx=ctx, player=p)
             return ("ok", f"<b><i>⚜️ ИСПОВЕДЬ</i></b>\n\n🌟 Чудо! Легендарный блант «{name}»!")
 
-    result = await ctx.repo.atomic_update(uid, _confess)
+    result = await ctx.repo.atomic_update(uid, _repent)
 
     if not result:
         await query.answer("Профиль не найден. Напиши /start", show_alert=True)
@@ -5964,7 +5964,7 @@ async def guild_join_handler(update, context, ctx):
         guild_name_genitive = "Тёмной Гильдии" if guild == "BLACK" else "Светлой Гильдии"
         action_emoji = "🕯️" if guild == "BLACK" else "⚜️"
         action_text = "Совершить первый Ритуал" if guild == "BLACK" else "Принести первую Исповедь"
-        action_cb = "ritual" if guild == "BLACK" else "confess"
+        action_cb = "ritual" if guild == "BLACK" else "repent"
 
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton(f"{action_emoji} {action_text}", callback_data=action_cb)],
@@ -6017,7 +6017,7 @@ TEXT_COMMAND_HANDLERS = {
     "collect": collect_callback,
     "check": check_blunt,
     "guild": guild_info_callback,
-    "repent": confess_callback,
+    "repent": repent_callback,
     "lab": lab_enter,
     "pet": pet_preview,
     "shop": shop_callback,
@@ -6034,8 +6034,7 @@ TEXT_COMMAND_HANDLERS = {
     "профиль": profile_callback,
     "сбор": collect_callback,
     "правила": rules_callback,
-    "исповедь": confess_callback,
-    "repent": confess_callback,       # повтор, но не страшно
+    "исповедь": repent_callback,
     "гильдия": guild_info_callback,
     "привилегия": privilege_callback,
     "каталог": catalog_callback,
@@ -6075,7 +6074,7 @@ CALLBACKS: Dict[str, Callable] = {
     "lab_enter_confirm": lab_enter_confirm,
     "guild_shrine": guild_shrine_callback,
     "guild_war": guild_war_callback,
-    "confess": confess_callback,
+    "repent": repent_callback,
     "shop": shop_callback,
     "bush_preview": bush_preview_handler,
     "activate_menu": activate_menu_handler,
