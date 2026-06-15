@@ -6026,6 +6026,7 @@ TEXT_COMMAND_HANDLERS = {
     "debugpet": debug_pet,
     "checkbluntpics": check_blunt_pics,
     # Текстовые сокращения (без слеша)
+    "меню": start,
     "фарм": farm_callback_v2,
     "крафт": craft_callback_v2,
     "дунуть": smoke_callback,
