@@ -4179,54 +4179,50 @@ async def guild_info_callback(update, context):
 
     for guild_name, donated in [("BLACK", black_donated), ("WHITE", white_donated)]:
         current_level = 1
-        next_cost = temple_levels[1]["cost"]
         bonus = 0
         for lvl in temple_levels:
             if donated >= lvl["cost"]:
                 current_level = lvl["level"]
                 bonus = lvl["bonus"]
-                if current_level < 5:
-                    next_cost = temple_levels[current_level]["cost"]
-                else:
-                    next_cost = 0
             else:
                 break
-        
+
         guild_emoji = "🕯️" if guild_name == "BLACK" else "⚜️"
         guild_label = "Тёмная" if guild_name == "BLACK" else "Светлая"
         members = cnt.get(guild_name, 0)
-        
+
         text += f"{guild_emoji} <b>{guild_label} Гильдия</b>\n"
-        text += f"👥 <b>{members}</b> странников\n"
-        
-        # Цветные прогресс-бары для каждой гильдии
+        text += f"👥 <b>{members} странников</b>\n"
+
+        # Цветные эмодзи для каждой гильдии
         if guild_name == "BLACK":
-            filled_char = "🟣"
+            filled_char = "🔮"
             empty_char = "⬛️"
         else:
-            filled_char = "🟡"
+            filled_char = "🪽"
             empty_char = "⬜️"
-        
+
         if current_level < 5:
-            progress = int(donated / next_cost * 100) if next_cost > 0 else 100
+            next_cost = temple_levels[current_level]["cost"]
+            progress = int(donated / next_cost * 100) if next_cost > 0 else 0
             filled_count = progress // 10
             empty_count = 10 - filled_count
             bar = filled_char * filled_count + empty_char * empty_count
-            level_name = temple_levels[current_level]["name"]
-            next_level_name = temple_levels[current_level + 1]["name"]
+            level_name = temple_levels[current_level - 1]["name"]
+            next_level_name = temple_levels[current_level]["name"]
             text += f"🏛️ <b>{level_name}</b> → <b>{next_level_name}</b>\n"
             text += f"<b>{bar} {progress}%</b>\n"
-            text += f"⚡ +{bonus}% к фарму\n"
-            text += f"💎 {donated} / {next_cost} OAC\n"
+            # Строки поменяны местами: сначала OAC, потом бонус
+            text += f"<b>💎 {donated} / {next_cost} OAC</b>\n"
+            text += f"<b>⚡ +{bonus}% к фарму</b>\n"
         else:
-            filled_char = "🟣" if guild_name == "BLACK" else "🟡"
             bar = filled_char * 10
-            level_name = temple_levels[5]["name"]
+            level_name = temple_levels[4]["name"]
             text += f"🏛️ <b>{level_name}</b> (Макс.)\n"
             text += f"<b>{bar} 100%</b>\n"
-            text += f"⚡ +{bonus}% к фарму\n"
-            text += f"💎 {donated} OAC\n"
-        
+            text += f"<b>💎 {donated} OAC</b>\n"
+            text += f"<b>⚡ +{bonus}% к фарму</b>\n"
+
         text += "\n"
 
     # Твой статус в гильдии
