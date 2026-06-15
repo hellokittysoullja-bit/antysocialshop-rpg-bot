@@ -3909,10 +3909,37 @@ async def my_blunts_callback(update, context, ctx, player, page=0):
 
     await edit_or_reply(update, context, text, reply_markup=InlineKeyboardMarkup(kb_rows))
 
-async def achievements_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, page=0):
-    ctx = context.application.bot_data["ctx"]
+async def achievements_callback(update, context, page=0):
+    ctx = context.bot_data.get("ctx")
+    if not ctx:
+        await update.callback_query.answer("⚠️ Бот инициализируется, попробуйте позже.")
+        return
+
     query = update.callback_query
+    await query.answer()
     uid = query.from_user.id
+    data = query.data
+
+    # Определяем, откуда пришёл игрок, и номер страницы
+    if data == "achievements_menu":
+        page = 0
+        back_cb = "menu"
+    elif data == "achievements_profile":
+        page = 0
+        back_cb = "profile"
+    elif data.startswith("achievements_page_"):
+        page = int(data.split("_")[-1])
+        # Источник (меню/профиль) сохраняем в user_data при первом входе
+        back_cb = context.user_data.get('ach_source', 'menu')
+    else:
+        # На всякий случай, если пришёл старый формат
+        page = 0
+        back_cb = "menu"
+
+    # Сохраняем источник, если это первый вход из меню/профиля
+    if data in ("achievements_menu", "achievements_profile"):
+        context.user_data['ach_source'] = "profile" if data == "achievements_profile" else "menu"
+
     player = await ctx.repo.get_by_id(uid)
     if not player or not player.user_id:
         await query.answer("Профиль не найден.", show_alert=True)
@@ -3953,9 +3980,9 @@ async def achievements_callback(update: Update, context: ContextTypes.DEFAULT_TY
     kb_rows = []
     nav = []
     if page > 0:
-        nav.append(InlineKeyboardButton("⬅️", callback_data=f"ach_page_{page-1}"))
+        nav.append(InlineKeyboardButton("⬅️", callback_data=f"achievements_page_{page-1}"))
     if page < total_pages - 1:
-        nav.append(InlineKeyboardButton("➡️", callback_data=f"ach_page_{page+1}"))
+        nav.append(InlineKeyboardButton("➡️", callback_data=f"achievements_page_{page+1}"))
     if nav:
         kb_rows.append(nav)
     if query.data == "achievements_profile":
@@ -6086,6 +6113,7 @@ PREFIX_HANDLERS: Dict[str, Callable] = {
     "set_title_": handle_set_title,
     "set_bg_": handle_set_bg,
     "lab_attack_": handle_lab_option,
+    "achievements_": achievements_callback,
 }
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
