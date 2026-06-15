@@ -3932,7 +3932,7 @@ async def achievements_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
     unlocked_count = len(awarded_ids)
     total_achievements = len(ACHIEVEMENTS)
-    text = f"<b>🏆 ДОСТИЖЕНИЯ</b> ({unlocked_count}/{total_achievements})\n\n"
+    text = f"<b>🏆 ДОСТИЖЕНИЯ</b> ({unlocked_count} / {total_achievements})\n\n"
     for ach in chunk:
         ach_id = ach["id"]
         unlocked = ach_id in awarded_ids
