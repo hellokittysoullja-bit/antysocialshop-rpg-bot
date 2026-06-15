@@ -2205,12 +2205,7 @@ async def get_main_menu_keyboard(user_id, ctx=None):
     ritual_text = "🕯️ Ритуал" if player and player.guild == "BLACK" else ""
     lab_text = "🏛️ Лабиринт"
 
-    # ── Кнопки условий ──
-    bush_btn = (
-        InlineKeyboardButton("🪴 Куст", callback_data="collect")
-        if balance >= 5000
-        else InlineKeyboardButton("🪴 Куст 🔒", callback_data="bush_preview")
-    )
+# ── Кнопки условий ──
     pet_btn = (
         InlineKeyboardButton("🐾 Питомец", callback_data="pet_preview")
         if has_rank(balance, "Ветеран")
@@ -2222,10 +2217,15 @@ async def get_main_menu_keyboard(user_id, ctx=None):
         [InlineKeyboardButton(farm_text, callback_data="farm")],
         [InlineKeyboardButton("🌿 Крафт", callback_data="craft"),
          InlineKeyboardButton("💨 Дунуть", callback_data="smoke")],
-        [bush_btn],
-        [InlineKeyboardButton("⚜️ Профиль", callback_data="profile"),
-         InlineKeyboardButton("🏆 Лидеры", callback_data="top")],
     ]
+    # Куст добавляем только для Ветеранов
+    if balance >= 5000:
+        keyboard.append([InlineKeyboardButton("🪴 Куст", callback_data="collect")])
+    keyboard.append([
+        InlineKeyboardButton("👤 Профиль", callback_data="profile"),
+        InlineKeyboardButton("🏆 Достижения", callback_data="achievements"),
+        InlineKeyboardButton("🏅 Лидеры", callback_data="top")
+    ])
 
     # Группа гильдия + питомец + (опционально ритуал)
     guild_row = [InlineKeyboardButton("🕋 Гильдия", callback_data="guild_info")]
