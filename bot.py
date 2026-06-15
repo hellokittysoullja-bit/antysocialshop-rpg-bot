@@ -5318,9 +5318,38 @@ async def show_lab_death(update, context):
 async def welcome_new_member(update, context):
     for member in update.message.new_chat_members:
         if member.is_bot: continue
-        await update.message.reply_text(
-            f"<b><i>🕯️ ДОБРО ПОЖАЛОВАТЬ</i></b>\n\n⚜️ <b>{html.escape(member.username or member.first_name)}</b>, добро пожаловать в <b><i>Гильдию</i></b>\n<i>Твой первый /farm уже ждёт</i>"
+        username = member.username or member.first_name
+        ctx = context.bot_data.get("ctx")
+        online = 0
+        player_guild = None
+        if ctx:
+            try:
+                cnt = await count_guilds(ctx)
+                online = cnt.get("BLACK", 0) + cnt.get("WHITE", 0)
+                player = await ctx.repo.get_by_id(member.id)
+                if player:
+                    player_guild = player.guild
+            except: pass
+
+        welcome_text = (
+            f"<b><i>🕯️⚜️ ДОБРО ПОЖАЛОВАТЬ В ЧАТ, СТРАННИК! ⚜️🕯️</i></b>\n\n"
+            f"🪽 <b>{html.escape(username)}</b>, ты переступил порог Гильдии.\n\n"
+            f"🌿 Твой первый /farm уже готов и ждёт тебя.\n"
+            f"🍬 OAC ждут своего владельца.\n\n"
+            f"👥 Сегодня с нами в игре уже <b>{online}</b> душ."
         )
+
+        if player_guild:
+            keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton("🍬 Начать фарм", callback_data="farm")
+            ]])
+        else:
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🕯️ Тёмная Гильдия (+50 🍬)", callback_data="guild_join_BLACK"),
+                 InlineKeyboardButton("⚜️ Светлая Гильдия (+50 🍬)", callback_data="guild_join_WHITE")]
+            ])
+
+        await safe_send_message(context, update.message.chat.id, welcome_text, reply_markup=keyboard, parse_mode='HTML')
 
 logger = logging.getLogger(__name__)
 
