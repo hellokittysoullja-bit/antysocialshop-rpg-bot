@@ -3748,9 +3748,12 @@ async def gift_blunt_start(update, context, ctx, player):
     )
     context.user_data['gift_msg_id'] = sent_msg.message_id
     context.user_data['gift_chat_id'] = chat_id
-    # 6. Таймер автосброса
+# 6. Таймер автосброса (используем существующую _cleanup_gift_request с задержкой)
+    async def _delayed_cleanup():
+        await asyncio.sleep(300)
+        await _cleanup_gift_request(context)
     context.application.create_task(
-        _clear_gift_state_after(uid, context, 300, blunt_id),
+        _delayed_cleanup(),
         name=f"gift_clear_{uid}_{blunt_id}"
     )
 
