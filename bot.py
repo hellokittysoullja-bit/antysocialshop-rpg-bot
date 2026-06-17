@@ -3563,36 +3563,54 @@ async def handle_gift_recipient(update: Update, context: ContextTypes.DEFAULT_TY
 
     # ---------- Поиск получателя с защитой от долгого ответа БД ----------
     recipient_id = None
-    if text.startswith("@"):
-        username = text[1:].lower()
-        try:
-            async with asyncio.timeout(3.0):
-                async with ctx.db_pool.acquire() as conn:
-                    row = await conn.fetchrow(
-                        "SELECT user_id FROM players WHERE LOWER(username) = $1", username
-                    )
-                    if row:
-                        recipient_id = row['user_id']
-        except asyncio.TimeoutError:
-            logger.error("Таймаут при поиске получателя дарения")
-            await update.message.reply_text("⚠️ Сервер занят, попробуй через пару секунд.")
-            await _cleanup_gift_request(context)
-            return
-        except Exception as e:
-            logger.exception("Ошибка поиска получателя дарения")
-            await update.message.reply_text("⚠️ Не удалось проверить игрока. Попробуй позже.")
-            await _cleanup_gift_request(context)
-            return
-    else:
-        try:
+    text = update.message.text.strip() if update.message.text else ""
+
+    # Сначала пытаемся вытащить user_id из entities (если тегнули человека)
+    if update.message.entities:
+        for entity in update.message.entities:
+            if entity.type == "text_mention":
+                recipient_id = entity.user.id
+                break
+            elif entity.type == "mention":
+                # обычный @username – обработаем ниже
+                pass
+
+    # Если по entities не найден, пробуем распарсить текст
+    if not recipient_id:
+        if text.startswith("@"):
+            username = text[1:].lower()
+            try:
+                async with asyncio.timeout(3.0):
+                    async with ctx.db_pool.acquire() as conn:
+                        row = await conn.fetchrow(
+                            "SELECT user_id FROM players WHERE LOWER(username) = $1", username
+                        )
+                        if row:
+                            recipient_id = row['user_id']
+            except asyncio.TimeoutError:
+                logger.error("Таймаут поиска получателя")
+                await update.message.reply_text("⚠️ Сервер занят, попробуй через пару секунд.")
+                await _cleanup_gift_request(context)
+                return
+            except Exception as e:
+                logger.exception("Ошибка поиска получателя")
+                await update.message.reply_text("⚠️ Не удалось проверить игрока.")
+                await _cleanup_gift_request(context)
+                return
+        elif text.isdigit():
             recipient_id = int(text)
-        except ValueError:
-            pass
+        else:
+            # Не @, не число – возможно, тег без username, entities не отработали? На всякий случай подскажем
+            await update.message.reply_text(
+                "❌ Используй <b>@username</b> или <b>числовой ID</b> игрока.\n"
+                "Если у игрока нет @username, попроси его отправить команду /id и введи полученный ID.",
+                parse_mode='HTML'
+            )
+            return
 
     if not recipient_id:
         await update.message.reply_text(
-            "❌ Игрок не найден. Проверь @username или ID.\n"
-            "Попробуй ещё раз или нажми «Отмена»."
+            "❌ Игрок не найден. Проверь @username или ID.\nПопробуй ещё раз или нажми «Отмена»."
         )
         return
 
