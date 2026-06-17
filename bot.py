@@ -3527,8 +3527,28 @@ async def transfer_blunt(sender_id: int, receiver_id: int, blunt_id: str, ctx: A
         raise TransferError("Внутренняя ошибка передачи") from e
 
 # ===== НОВЫЕ ФУНКЦИИ ДЛЯ ОБМЕНА БЛАНТАМИ =====
+import asyncio
+import asyncpg
+from html import escape as html_escape
+
+logger = logging.getLogger("bot")
+
+async def _cleanup_gift_request(context: ContextTypes.DEFAULT_TYPE):
+    msg_id = context.user_data.pop('gift_msg_id', None)
+    chat_id = context.user_data.pop('gift_chat_id', None)
+    if msg_id and chat_id:
+        try:
+            await asyncio.wait_for(
+                context.bot.delete_message(chat_id, msg_id),
+                timeout=2.0
+            )
+        except Exception:
+            pass
+    context.user_data.pop('gifting_blunt_id', None)
+    context.user_data.pop('gifting_blunt_name', None)
+
 @rate_limit(2)
-async def handle_gift_recipient(update, context):
+async def handle_gift_recipient(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ctx = context.bot_data.get("ctx")
     if not ctx:
         return
@@ -3537,19 +3557,31 @@ async def handle_gift_recipient(update, context):
     if not context.user_data.get('gifting_blunt_id'):
         return
 
-    blunt_id = context.user_data['gifting_blunt_id']   # не pop!
+    blunt_id = context.user_data['gifting_blunt_id']
+    blunt_name = context.user_data.get('gifting_blunt_name', '???')
     text = update.message.text.strip()
 
-    # Ищем получателя
+    # ---------- Поиск получателя с защитой от долгого ответа БД ----------
     recipient_id = None
     if text.startswith("@"):
         username = text[1:].lower()
         try:
-            recipient = await ctx.repo.get_by_username(username)
-            if recipient:
-                recipient_id = recipient.user_id
-        except AttributeError:
-            await update.message.reply_text("❌ Поиск по username временно не работает. Используй числовой ID.")
+            async with asyncio.timeout(3.0):
+                async with ctx.db_pool.acquire() as conn:
+                    row = await conn.fetchrow(
+                        "SELECT user_id FROM players WHERE LOWER(username) = $1", username
+                    )
+                    if row:
+                        recipient_id = row['user_id']
+        except asyncio.TimeoutError:
+            logger.error("Таймаут при поиске получателя дарения")
+            await update.message.reply_text("⚠️ Сервер занят, попробуй через пару секунд.")
+            await _cleanup_gift_request(context)
+            return
+        except Exception as e:
+            logger.exception("Ошибка поиска получателя дарения")
+            await update.message.reply_text("⚠️ Не удалось проверить игрока. Попробуй позже.")
+            await _cleanup_gift_request(context)
             return
     else:
         try:
@@ -3558,58 +3590,73 @@ async def handle_gift_recipient(update, context):
             pass
 
     if not recipient_id:
-        await update.message.reply_text("❌ Игрок не найден. Проверь @username или ID.\nПопробуй ещё раз или нажми «Отмена».")
+        await update.message.reply_text(
+            "❌ Игрок не найден. Проверь @username или ID.\n"
+            "Попробуй ещё раз или нажми «Отмена»."
+        )
         return
 
-    # Проверяем, что блант все ещё у отправителя (перед атомарной операцией)
-    player = await ctx.repo.get_by_id(uid)
-    inv = player.inventory or [] if player else []
-    blunt = next((it for it in inv if it.get("id") == blunt_id), None)
-    if not blunt:
-        await update.message.reply_text("❌ Блант уже не у тебя.")
-        context.user_data.pop('gifting_blunt_id', None)  # сбросить состояние
-        return
+    # ---------- Атомарная передача с ретраями ----------
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            await transfer_blunt(uid, recipient_id, blunt_id, ctx)
+            break
+        except SameUserError:
+            await update.message.reply_text("❌ Нельзя подарить блант самому себе. Введи другого получателя или нажми «Отмена».")
+            return
+        except BluntNotFound:
+            await update.message.reply_text("❌ Блант не найден в твоём инвентаре.")
+            await _cleanup_gift_request(context)
+            return
+        except TransferError as e:
+            cause = e.__cause__
+            if cause is not None and isinstance(cause, asyncpg.exceptions.SerializationError) and attempt < max_retries - 1:
+                await asyncio.sleep(0.1 * (2 ** attempt))
+                continue
+            logger.exception("Ошибка передачи бланта")
+            await update.message.reply_text(f"❌ Ошибка: {e}")
+            await _cleanup_gift_request(context)
+            return
+        except Exception as e:
+            logger.exception("Неожиданная ошибка при передаче бланта")
+            await update.message.reply_text("⚠️ Внутренняя ошибка. Попробуй позже.")
+            await _cleanup_gift_request(context)
+            return
 
-    # Всё готово — выполняем передачу
-    try:
-        await transfer_blunt(uid, recipient_id, blunt_id, ctx)
-    except SameUserError:
-        await update.message.reply_text("❌ Нельзя подарить блант самому себе.")
-        return
-    except BluntNotFound:
-        await update.message.reply_text("❌ Блант не найден в твоём инвентаре.")
-        context.user_data.pop('gifting_blunt_id', None)
-        return
-    except TransferError as e:
-        await update.message.reply_text(f"❌ Ошибка: {e}")
-        return
-
-    # Успех — теперь можно удалить запрос и выдать результат
-    msg_id = context.user_data.pop('gift_msg_id', None)
-    chat_id = context.user_data.pop('gift_chat_id', None)
+    # ---------- Успех ----------
+    msg_id = context.user_data.get('gift_msg_id')
+    chat_id = context.user_data.get('gift_chat_id')
     if msg_id and chat_id:
         try:
-            await context.bot.delete_message(chat_id, msg_id)
-        except:
-            pass
-    context.user_data.pop('gifting_blunt_id', None)
-
-    await update.message.reply_text(
-        f"✅ Блант «{html.escape(blunt['name'])}» успешно подарен игроку {text}!",
-        parse_mode='HTML'
-    )
-
-async def _clear_gift_state_after(uid, context, delay, blunt_id):
-    await asyncio.sleep(delay)
-    if context.user_data.get('gifting_blunt_id') == blunt_id:
-        context.user_data.pop('gifting_blunt_id', None)
-        old_msg_id = context.user_data.pop('gift_msg_id', None)
-        old_chat_id = context.user_data.pop('gift_chat_id', None)   # <-- добавлено
-        if old_msg_id and old_chat_id:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=f"✅ Блант «{html.escape(blunt_name)}» успешно подарен игроку {text}!",
+                parse_mode='HTML'
+            )
+            context.user_data.pop('gift_msg_id', None)
+            context.user_data.pop('gift_chat_id', None)
+        except Exception:
             try:
-                await context.bot.delete_message(old_chat_id, old_msg_id)   # <-- исправлено
+                await context.bot.delete_message(chat_id, msg_id)
             except Exception:
                 pass
+            finally:
+                context.user_data.pop('gift_msg_id', None)
+                context.user_data.pop('gift_chat_id', None)
+            await update.message.reply_text(
+                f"✅ Блант «{html.escape(blunt_name)}» успешно подарен игроку {text}!",
+                parse_mode='HTML'
+            )
+    else:
+        await update.message.reply_text(
+            f"✅ Блант «{html.escape(blunt_name)}» успешно подарен игроку {text}!",
+            parse_mode='HTML'
+        )
+
+    context.user_data.pop('gifting_blunt_id', None)
+    context.user_data.pop('gifting_blunt_name', None)
 
 @rate_limit(2)
 @game_handler
@@ -3618,18 +3665,25 @@ async def gift_blunt_start(update, context, ctx, player):
     await query.answer()
     uid = query.from_user.id
     blunt_id = query.data.replace("gift_blunt_", "")
+    prev_blunt_id = context.user_data.get('gifting_blunt_id')
+    if prev_blunt_id == blunt_id:
+        await query.answer("Ты уже даришь этот блант. Введи @username получателя.", show_alert=True)
+        return
     chat_id = query.message.chat.id
 
 # 1. Сброс предыдущего состояния дарения (если вдруг осталось)
-    if 'gifting_blunt_id' in context.user_data:
-            old_msg_id = context.user_data.pop('gift_msg_id', None)
-            old_chat_id = context.user_data.pop('gift_chat_id', None)   # <-- добавить
+    if prev_blunt_id and prev_blunt_id != blunt_id:
+            old_msg_id = context.user_data.get('gift_msg_id')
+            old_chat_id = context.user_data.get('gift_chat_id')
             if old_msg_id and old_chat_id:
                 try:
-                    await context.bot.delete_message(old_chat_id, old_msg_id)   # <-- заменить
-                except:
+                    await context.bot.delete_message(old_chat_id, old_msg_id)
+                    context.user_data.pop('gift_msg_id', None)
+                    context.user_data.pop('gift_chat_id', None)
+                except Exception:
                     pass
             context.user_data.pop('gifting_blunt_id', None)
+            context.user_data.pop('gifting_blunt_name', None)
 
     # 2. FOMO-бонус (твой оригинальный блок без изменений)
     fomo_blunt_id = context.user_data.get('fomo_blunt_id')
@@ -3658,10 +3712,9 @@ async def gift_blunt_start(update, context, ctx, player):
     if not blunt:
         await query.answer("Этот блант тебе больше не принадлежит.", show_alert=True)
         return
-
     # 4. Сохраняем состояние
     context.user_data['gifting_blunt_id'] = blunt_id
-
+    context.user_data['gifting_blunt_name'] = blunt.get('name', '???')
     # 5. Отправляем запрос в тот же чат
     sent_msg = await context.bot.send_message(
         chat_id=chat_id,
@@ -3677,9 +3730,11 @@ async def gift_blunt_start(update, context, ctx, player):
     )
     context.user_data['gift_msg_id'] = sent_msg.message_id
     context.user_data['gift_chat_id'] = chat_id
-
     # 6. Таймер автосброса
-    asyncio.create_task(_clear_gift_state_after(uid, context, 300, blunt_id))
+    context.application.create_task(
+        _clear_gift_state_after(uid, context, 300, blunt_id),
+        name=f"gift_clear_{uid}_{blunt_id}"
+    )
 
 @rate_limit(1)
 async def cancel_gift(update, context):
