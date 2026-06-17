@@ -1,5 +1,5 @@
 # bot.py — ANTY SOCIAL SHOP RPG v8.0 ENTERPRISE
-import sys, traceback, time
+import sys, traceback, time, random
 def log_uncaught(exc_type, exc_value, exc_tb):
     traceback.print_exception(exc_type, exc_value, exc_tb, file=sys.stderr)
     sys.stderr.flush()
@@ -1299,7 +1299,7 @@ WHISPERS = [
     "⚔️ Война гильдий уже близко – готовься."
 ]
 NEURO_STATUSES = ["Альфа-ритмы нестабильны", "Сенсорная депривация 80%", "Фаза быстрого сна", "Нейро-шунт активен", "Предел синаптической проводимости", "Резонанс с Искажением: 12%"]
-FUNNY_REACTIONS = ["Выглядит как NFT, который никто не купит.", "Даже Бездна от такого закашлялась.", "Это не блант, это крик души.", "Искажение занесло это название в чёрный список.", "10/10, лучший блант для того чтобы спрятать его подальше.", "Пахнет так, будто его скрутил сам Ктулху.", "Этот блант вызывает желание помыть руки.", "С таким названием только в Бездну.", "Я бы такое не выкурил, но звучит гордо."]
+FUNNY_REACTIONS = ["Выглядит как NFT, если которым не поделиться — он навсегда останется обычным", "Даже Бездна от такого названия закашлялась. Жми "Поделиться"!", "Этот блант настолько ужасен, что его нужно срочно подарить кому-нибудь", "Искажение занесло это название в чёрный список.", "10/10, лучший блант для того чтобы осчастливить врага. Подари его кому-то!.", "Пахнет так, будто его скрутил сам Ктулху. Поделись им, осчастливь кого-то.", "Этот блант вызывает желание помыть руки.", "Этот блант создан, чтобы его увидели все. Не прячь позор — монетизируй.", "Если оставишь это себе, OAC начнут плакать. Подари — и они засмеются."]
 RANKS = [("🪓 Рекрут", 0, 0), ("⚔️ Ветеран", 5000, 1500), ("🪦 Призрак", 20000, 6000), ("🪬 Некромант", 50000, 15000)]
 ACHIEVEMENTS = [
     {"id": "farm_1", "name": "Первый Шаг", "emoji": "🕯️", "desc": "Совершить 1 фарм очков (АнтиСошл)", "reward": "Титул 🕯️"},
@@ -3177,17 +3177,11 @@ async def handle_craft_named(update, context, ctx, player):
     await query.message.delete()
     sent_msg = await context.bot.send_message(
         chat_id=query.message.chat.id,
-        text="<b>💍 ИМЕННОЙ БЛАНТ</b>\n\n<i>Введи имя своего Бланта (до 25 символов)</i>",
+        text="<b>💍 ИМЕННОЙ БЛАНТ</b>\n\n<i>Введи имя своего NFT Бланта (до 25 символов)</i>",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel_named")]]),
         parse_mode='HTML'
     )
     context.user_data['awaiting_named_blunt_msg_id'] = sent_msg.message_id
-
-
-async def _clear_named_blunt_state_after(uid, context, delay):
-    """Сбрасывает состояние ввода именного бланта через delay секунд."""
-    await asyncio.sleep(delay)
-    context.user_data['awaiting_named_blunt'] = False
 
 async def handle_named_name(update, context):
     ctx = context.bot_data.get("ctx")
@@ -3257,18 +3251,62 @@ async def handle_named_name(update, context):
         color = {"legendary": "🟡", "epic": "🟣", "rare": "🔵"}.get(item["rarity"], "🟢")
         reaction = item["reaction"]
 
+        # ──  ФИНАЛ ПОСЛЕ УСПЕШНОГО КРАФТА ──
+        original_name = name
+        meme_prefixes = ["ЫХЦВ", "АХАХАХ", "ЛОЛ", "ААА", "XxX_", "_ОВЕРДОЗ", "69", "ЖЫЫЫРНЫЙ", "1337_"]
+        meme_name = f"{random.choice(meme_prefixes)} {original_name}"[:25]
+        item["name"] = meme_name
+        item["original_name"] = original_name  # сохраним оригинал, если нужно
+        color = {"legendary": "🟡", "epic": "🟣", "rare": "🔵"}.get(item["rarity"], "🟢")
+        
         caption = (
-            f"<b>💍 ИМЕННОЙ БЛАНТ СОТКАН</b>\n\n"
-            f"🩸 Ты вплёл в <b>Искажение</b> свой именной блант:\n"
-            f"{color} <b><i>«{name_escaped}»</i></b> <i>Редкость:</i> <b>{item['rarity']}</b>\n\n"
-            f"💎 Он навсегда останется в твоей коллекции.\n\n"
-            f"🕯️ <i>{reaction}</i>"
+            f"<b>🎉 ТЫ СОЗДАЛ ИМЕННОЙ БЛАНТ!💍</b>\n\n"
+            f"{color}<b><i>«{html.escape(meme_name)}»</i></b>\n"
+            f"Редкость: <i>{item['rarity']}</i>\n\n"
+            f"💎 Он навсегда останется в <b>твоей коллекции</b>.\n\n"
+            f"🕯️ <i>{reaction}</i>\n\n"
+            f"💬 Этот блант достоин того, чтобы его <b>увидели друзья. Действуй!</b>"
         )
+        
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔗 Поделиться", callback_data=f"share_blunt_{blunt_id}")],
-            [InlineKeyboardButton("🔙 В Крафт", callback_data="craft"),
-             InlineKeyboardButton("🏰 В меню", callback_data="menu")]
-        ])
+            [
+                InlineKeyboardButton("🎁 Подарить", callback_data=f"gift_blunt_{blunt_id}"),
+                InlineKeyboardButton("🔗 Поделиться", callback_data=f"share_blunt_{blunt_id}")
+                    ],
+                    [InlineKeyboardButton("🔙 В меню", callback_data="menu")]
+                ])
+        
+        sent_img = await safe_send_blunt_image(
+            context, update.effective_chat.id, item["rarity"], caption=caption, reply_markup=kb
+        )
+        if not sent_img:
+            await update.message.reply_text(caption, reply_markup=kb, parse_mode='HTML')
+        
+        # FOMO-бонус: запускаем таймер и отправляем сообщение
+        async def fomo_reminder():
+            await asyncio.sleep(300)  # 5 минут
+            player_check = await ctx.repo.get_by_id(uid)
+            if player_check:
+                inv_now = player_check.inventory or []
+                if any(it.get("id") == blunt_id for it in inv_now):
+                    try:
+                        await context.bot.send_message(uid, "⌛ Твой именной блантик всё ещё скучает. Подари или поделись им, пока не поздно!")
+                    except:
+                        pass
+        asyncio.create_task(fomo_reminder())
+        
+        await asyncio.sleep(0.5)
+        bonus_msg = await context.bot.send_message(
+            uid,
+            "⚡ <b>БОНУС ЗА СКОРОСТЬ!</b>\n\n"
+            "Если ты <b>подаришь</b> или <b>поделишься</b> этим блантом за 5 минут, получишь <b>+10 OAC</b> на счёт.\n"
+            "Просто нажми одну из кнопок выше!",
+            parse_mode='HTML'
+        )
+        
+        context.user_data['fomo_bonus_msg'] = bonus_msg.message_id
+        context.user_data['fomo_blunt_id'] = blunt_id
+        context.user_data['fomo_start'] = time.time()
 
         sent = await safe_send_blunt_image(
             context,
@@ -3365,16 +3403,10 @@ async def handle_use_dust(update, context):
 
     await check_achievements(uid, context)
 
-
-async def clear_named_blunt_state(context):
-    user_id = getattr(context.job, "data", None)
-    if user_id is None:
-        return
-    try:
-        context.application.user_data[user_id]["awaiting_named_blunt"] = False
-    except Exception:
-        pass
-
+async def _clear_named_blunt_state_after(uid, context, delay):
+    """Сбрасывает состояние ввода именного бланта через delay секунд."""
+    await asyncio.sleep(delay)
+    context.user_data['awaiting_named_blunt'] = False
 
 async def cancel_named(update, context):
     query = update.callback_query
@@ -3475,29 +3507,89 @@ async def transfer_blunt(sender_id: int, receiver_id: int, blunt_id: str, ctx: A
         raise TransferError("Внутренняя ошибка передачи") from e
 
 # ===== НОВЫЕ ФУНКЦИИ ДЛЯ ОБМЕНА БЛАНТАМИ =====
-async def gift_blunt_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+import random
+from html import escape as html_escape
+
+async def _clear_gift_state_after(uid, context, delay):
+    await asyncio.sleep(delay)
+    context.user_data.pop('gifting_blunt_id', None)
+    context.user_data.pop('gift_msg_id', None)
+
+@rate_limit(2)
+@game_handler
+async def gift_blunt_start(update, context, ctx, player):
     query = update.callback_query
     await query.answer()
+    uid = query.from_user.id
     blunt_id = query.data.replace("gift_blunt_", "")
+    
+# ── ЗАЩИТА: если уже есть активный запрос на дарение, отменяем предыдущий ──
+    if 'gifting_blunt_id' in context.user_data:
+        old_msg_id = context.user_data.pop('gift_msg_id', None)
+        if old_msg_id:
+            try:
+                await context.bot.delete_message(uid, old_msg_id)
+            except:
+                pass
+        context.user_data.pop('gifting_blunt_id', None)
+
+# ── FOMO-БОНУС ──
+    if 'fomo_blunt_id' in context.user_data and context.user_data['fomo_blunt_id'] == blunt_id:
+        elapsed = time.time() - context.user_data.get('fomo_start', 0)
+        if elapsed <= 300:
+            async with ctx.db_pool.acquire() as conn:
+                await ctx.repo.add_balance(uid, 10, conn)
+            bonus_msg_id = context.user_data.pop('fomo_bonus_msg', None)
+            if bonus_msg_id:
+                try: await context.bot.delete_message(uid, bonus_msg_id)
+                except: pass
+            context.user_data.pop('fomo_blunt_id', None)
+            context.user_data.pop('fomo_start', None)
+            await context.bot.send_message(uid, "✅ Бонус +10 OAC за скорость начислен!")
+
+    inv = player.inventory or []
+    blunt = next((it for it in inv if it.get("id") == blunt_id and it.get("type") == "named"), None)
+    if not blunt:
+        await query.answer("Этот блант тебе больше не принадлежит.", show_alert=True)
+        return
+
+    # Запрет дарить уже подаренный блант
+    if 'gifted_by' in blunt:
+        await query.answer("Этот блант уже был подарен, его нельзя передать снова.", show_alert=True)
+        return
+
     context.user_data["gifting_blunt_id"] = blunt_id
-    await query.message.edit_text(
+    sent_msg = await query.message.edit_text(
         "🎁 <b>ПОДАРИТЬ БЛАНТ</b>\n\n"
-        "Введи <b>@username</b> или <b>числовой ID</b> игрока, которому хочешь передать блант.\n"
+        "Введи <b>@username</b> или <b>числовой ID</b> игрока.\n"
         "Для отмены нажми кнопку ниже.",
         parse_mode='HTML',
         reply_markup=InlineKeyboardMarkup([[
             InlineKeyboardButton("❌ Отмена", callback_data="cancel_gift")
         ]])
     )
+    context.user_data['gift_msg_id'] = sent_msg.message_id
+    asyncio.create_task(_clear_gift_state_after(uid, context, 300))
 
-async def cancel_gift(update: Update, context: ContextTypes.DEFAULT_TYPE):
+@rate_limit(1)
+async def cancel_gift(update, context):
     query = update.callback_query
     await query.answer()
-    context.user_data.pop("gifting_blunt_id", None)
-    # Возврат в профиль: передаём управление через кнопку, а не прямой вызов
-    await query.message.edit_text("❌ Подарок отменён.", reply_markup=InlineKeyboardMarkup([[
-        InlineKeyboardButton("🔙 В профиль", callback_data="profile")
-    ]]))
+    # Удаляем сообщение с запросом
+    msg_id = context.user_data.pop('gift_msg_id', None)
+    if msg_id:
+        try:
+            await context.bot.delete_message(chat_id=query.message.chat.id, message_id=msg_id)
+        except:
+            pass
+    context.user_data.pop('gifting_blunt_id', None)
+    # Показываем кнопку возврата
+    await query.message.edit_text(
+        "❌ Подарок отменён.",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("🔙 В профиль", callback_data="profile")
+        ]])
+    )
 
 @rate_limit(1)
 @game_handler
@@ -3895,6 +3987,7 @@ async def my_blunts_callback(update, context, ctx, player, page=0):
         row = [
             InlineKeyboardButton(f"💍 Детали ({i})", callback_data=f"blunt_details_{item['id']}"),
             InlineKeyboardButton("🔗", callback_data=f"share_blunt_{item['id']}")
+            InlineKeyboardButton("🎁 Подарить", callback_data=f"gift_blunt_{item['id']}")
         ]
         kb_rows.append(row)
 
