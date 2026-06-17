@@ -1,5 +1,6 @@
 # bot.py — ANTY SOCIAL SHOP RPG v8.0 ENTERPRISE
 import sys, traceback, time, random
+from html import escape as html_escape
 from blunt_name_generator import mutate_name
 def log_uncaught(exc_type, exc_value, exc_tb):
     traceback.print_exception(exc_type, exc_value, exc_tb, file=sys.stderr)
@@ -3526,19 +3527,89 @@ async def transfer_blunt(sender_id: int, receiver_id: int, blunt_id: str, ctx: A
         raise TransferError("Внутренняя ошибка передачи") from e
 
 # ===== НОВЫЕ ФУНКЦИИ ДЛЯ ОБМЕНА БЛАНТАМИ =====
-import random
-from html import escape as html_escape
+from path.to.transfer import transfer_blunt, TransferError, BluntNotFound, SameUserError
+
+@rate_limit(2)
+async def handle_gift_recipient(update, context):
+    ctx = context.bot_data.get("ctx")
+    if not ctx:
+        return
+
+    uid = update.effective_user.id
+    if not context.user_data.get('gifting_blunt_id'):
+        return
+
+    blunt_id = context.user_data['gifting_blunt_id']   # не pop!
+    text = update.message.text.strip()
+
+    # Ищем получателя
+    recipient_id = None
+    if text.startswith("@"):
+        username = text[1:].lower()
+        try:
+            recipient = await ctx.repo.get_by_username(username)
+            if recipient:
+                recipient_id = recipient.user_id
+        except AttributeError:
+            await update.message.reply_text("❌ Поиск по username временно не работает. Используй числовой ID.")
+            return
+    else:
+        try:
+            recipient_id = int(text)
+        except ValueError:
+            pass
+
+    if not recipient_id:
+        await update.message.reply_text("❌ Игрок не найден. Проверь @username или ID.\nПопробуй ещё раз или нажми «Отмена».")
+        return
+
+    # Проверяем, что блант все ещё у отправителя (перед атомарной операцией)
+    player = await ctx.repo.get_by_id(uid)
+    inv = player.inventory or [] if player else []
+    blunt = next((it for it in inv if it.get("id") == blunt_id), None)
+    if not blunt:
+        await update.message.reply_text("❌ Блант уже не у тебя.")
+        context.user_data.pop('gifting_blunt_id', None)  # сбросить состояние
+        return
+
+    # Всё готово — выполняем передачу
+    try:
+        await transfer_blunt(uid, recipient_id, blunt_id, ctx)
+    except SameUserError:
+        await update.message.reply_text("❌ Нельзя подарить блант самому себе.")
+        return
+    except BluntNotFound:
+        await update.message.reply_text("❌ Блант не найден в твоём инвентаре.")
+        context.user_data.pop('gifting_blunt_id', None)
+        return
+    except TransferError as e:
+        await update.message.reply_text(f"❌ Ошибка: {e}")
+        return
+
+    # Успех — теперь можно удалить запрос и выдать результат
+    msg_id = context.user_data.pop('gift_msg_id', None)
+    chat_id = context.user_data.pop('gift_chat_id', None)
+    if msg_id and chat_id:
+        try:
+            await context.bot.delete_message(chat_id, msg_id)
+        except:
+            pass
+    context.user_data.pop('gifting_blunt_id', None)
+
+    await update.message.reply_text(
+        f"✅ Блант «{html.escape(blunt['name'])}» успешно подарен игроку {text}!",
+        parse_mode='HTML'
+    )
 
 async def _clear_gift_state_after(uid, context, delay, blunt_id):
-    """Сбрасывает состояние дарения через delay секунд, только если оно всё ещё указывает на тот же блант."""
     await asyncio.sleep(delay)
-    # Сверяем blunt_id – если за время ожидания игрок начал другое дарение, не трогаем
     if context.user_data.get('gifting_blunt_id') == blunt_id:
         context.user_data.pop('gifting_blunt_id', None)
         old_msg_id = context.user_data.pop('gift_msg_id', None)
-        if old_msg_id:
+        old_chat_id = context.user_data.pop('gift_chat_id', None)   # <-- добавлено
+        if old_msg_id and old_chat_id:
             try:
-                await context.bot.delete_message(uid, old_msg_id)
+                await context.bot.delete_message(old_chat_id, old_msg_id)   # <-- исправлено
             except Exception:
                 pass
 
@@ -3546,25 +3617,26 @@ async def _clear_gift_state_after(uid, context, delay, blunt_id):
 @game_handler
 async def gift_blunt_start(update, context, ctx, player):
     query = update.callback_query
-    await query.answer()                      # немедленный ответ, чтобы callback не истёк
+    await query.answer()
     uid = query.from_user.id
     blunt_id = query.data.replace("gift_blunt_", "")
+    chat_id = query.message.chat.id
 
-    # 1. Сброс предыдущего состояния дарения (если вдруг осталось)
+# 1. Сброс предыдущего состояния дарения (если вдруг осталось)
     if 'gifting_blunt_id' in context.user_data:
-        old_msg_id = context.user_data.pop('gift_msg_id', None)
-        if old_msg_id:
-            try:
-                await context.bot.delete_message(uid, old_msg_id)
-            except Exception:
-                pass
-        context.user_data.pop('gifting_blunt_id', None)
+            old_msg_id = context.user_data.pop('gift_msg_id', None)
+            old_chat_id = context.user_data.pop('gift_chat_id', None)   # <-- добавить
+            if old_msg_id and old_chat_id:
+                try:
+                    await context.bot.delete_message(old_chat_id, old_msg_id)   # <-- заменить
+                except:
+                    pass
+            context.user_data.pop('gifting_blunt_id', None)
 
-    # 2. FOMO-бонус: забираем маркеры ДО начисления (атомарная защита от двойного срабатывания)
+    # 2. FOMO-бонус (твой оригинальный блок без изменений)
     fomo_blunt_id = context.user_data.get('fomo_blunt_id')
     fomo_start = context.user_data.get('fomo_start')
     if fomo_blunt_id == blunt_id:
-        # Сразу удаляем маркеры, чтобы повторный вход не увидел их
         context.user_data.pop('fomo_blunt_id', None)
         context.user_data.pop('fomo_start', None)
         bonus_msg_id = context.user_data.pop('fomo_bonus_msg', None)
@@ -3576,29 +3648,25 @@ async def gift_blunt_start(update, context, ctx, player):
                 return p
             await ctx.repo.atomic_update(uid, _add_fomo_bonus)
             await context.bot.send_message(uid, "✅ Бонус +10 OAC за скорость начислен!")
-        # Удаляем сообщение-напоминание (если ещё существует)
         if bonus_msg_id:
             try:
                 await context.bot.delete_message(uid, bonus_msg_id)
             except Exception:
                 pass
-                
-    # 3. Быстрая предпроверка бланта (основная защита — в transfer_blunt)
+
+    # 3. Проверка наличия бланта
     inv = player.inventory or []
     blunt = next((it for it in inv if it.get("id") == blunt_id and it.get("type") == "named"), None)
     if not blunt:
         await query.answer("Этот блант тебе больше не принадлежит.", show_alert=True)
         return
 
-    # 4. Удаляем исходное сообщение и создаём новое текстовое для ввода получателя
-    try:
-        await query.message.delete()
-    except Exception:
-        pass
+    # 4. Сохраняем состояние
+    context.user_data['gifting_blunt_id'] = blunt_id
 
-    context.user_data["gifting_blunt_id"] = blunt_id
+    # 5. Отправляем запрос в тот же чат
     sent_msg = await context.bot.send_message(
-        chat_id=uid,
+        chat_id=chat_id,
         text=(
             "🎁 <b>ПОДАРИТЬ БЛАНТ</b>\n\n"
             "Введи <b>@username</b> или <b>числовой ID</b> игрока.\n"
@@ -3610,39 +3678,30 @@ async def gift_blunt_start(update, context, ctx, player):
         ]])
     )
     context.user_data['gift_msg_id'] = sent_msg.message_id
+    context.user_data['gift_chat_id'] = chat_id
 
-    # 5. Таймер автосброса (с проверкой, что состояние не изменилось)
+    # 6. Таймер автосброса
     asyncio.create_task(_clear_gift_state_after(uid, context, 300, blunt_id))
 
 @rate_limit(1)
 async def cancel_gift(update, context):
     query = update.callback_query
     await query.answer()
+    uid = query.from_user.id
 
-    # 1. Удаляем сообщение с запросом (если оно ещё есть)
     msg_id = context.user_data.pop('gift_msg_id', None)
-    if msg_id:
+    chat_id = context.user_data.pop('gift_chat_id', None)
+    if msg_id and chat_id:
         try:
-            await context.bot.delete_message(chat_id=query.message.chat.id, message_id=msg_id)
-        except Exception:
+            await context.bot.delete_message(chat_id, msg_id)
+        except:
             pass
 
-    # 2. Удаляем текущее сообщение (с кнопкой «Отмена»)
-    try:
-        await query.message.delete()
-    except Exception:
-        pass
-
-    # 3. Сбрасываем состояние дарения
     context.user_data.pop('gifting_blunt_id', None)
-    # 4. Отправляем новое сообщение с подтверждением отмены и кнопкой возврата
-    await context.bot.send_message(
-        chat_id=query.message.chat.id,
-        text="❌ Подарок отменён.",
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("🔙 В профиль", callback_data="profile")
-        ]])
-    )
+
+    # В группе дополнительно ничего не пишем, в личке — покажем меню (опционально)
+    if query.message.chat.type == "private":
+        await query.message.edit_text("❌ Подарок отменён.")
 
 @rate_limit(1)
 @game_handler
