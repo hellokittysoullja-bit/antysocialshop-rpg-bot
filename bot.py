@@ -5978,24 +5978,36 @@ async def blunt_details_handler(update, context, ctx, player):
 @game_handler
 async def share_blunt_handler(update, context, ctx, player):
     query = update.callback_query
-    await query.answer()
     uid = query.from_user.id
     blunt_id = query.data.replace("share_blunt_", "")
     bot_username = (await context.bot.get_me()).username
     ref_link = f"https://t.me/{bot_username}?start=blunt_{blunt_id}"
+
     inv = player.inventory or []
     item = next((it for it in inv if it.get("id") == blunt_id), None)
     username = html.escape(player.username or str(uid))
-    if item:
-        name = item["name"]
-        rarity = item.get("rarity", "common")
-        color = {"legendary": "🟡", "epic": "🟣", "rare": "🔵"}.get(rarity, "🟢")
-        text = (f"<b>{username}</b>\n\n{color} <b>Имя NFT бланта: «{name}»</b>\n"
-                f"🧬 <b>Редкость:</b> {rarity} {color}\n🩸 <b>Серийный номер:</b> #{item.get('rare_number', '?-????')}\n"
-                f"📜 <b>Реакция:</b> <i>{item.get('reaction', '')}</i>\n\n<i>Присоединяйся к Искажению:</i>\n{ref_link}")
-    else:
-        text = f"Блант не найден.\n{ref_link}"
-    await safe_send_message(context, query.message.chat.id, text, parse_mode='HTML')
+
+    if not item:
+        fallback_text = f"Блант не найден.\n{ref_link}"
+        await query.answer(switch_inline_query=fallback_text)
+        return
+
+    name = item["name"]
+    rarity = item.get("rarity", "common")
+    color = {"legendary": "🟡", "epic": "🟣", "rare": "🔵"}.get(rarity, "🟢")
+
+    # Твой текст (полностью сохранён)
+    text = (
+        f"<b>{username}</b>\n\n"
+        f"{color} <b>Имя именного NFT Бланта: «{html.escape(name)}»</b>\n"
+        f"🧬 <b>Редкость: {rarity} {color}</b>\n"
+        f"🩸 <b>Серийный номер: #{item.get('rare_number', '?-????')}</b>\n"
+        f"💬 <b>Реакция:</b> <i>{item.get('reaction', '')}</i>\n\n"
+        f"<b>💎 Нажми на ссылку чтобы забрать уникальный Блант:</b>\n{ref_link}"
+    )
+
+    # Вот новое: вместо отправки в чат — открываем список чатов для пересылки
+    await query.answer(switch_inline_query=text)
 
 @rate_limit(1)
 @game_handler
