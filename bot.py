@@ -1,5 +1,6 @@
 # bot.py — ANTY SOCIAL SHOP RPG v8.0 ENTERPRISE
 import sys, traceback, time, random
+from blunt_name_generator import mutate_name, generate_reaction
 def log_uncaught(exc_type, exc_value, exc_tb):
     traceback.print_exception(exc_type, exc_value, exc_tb, file=sys.stderr)
     sys.stderr.flush()
@@ -3261,21 +3262,37 @@ async def handle_named_name(update, context):
         color = {"legendary": "🟡", "epic": "🟣", "rare": "🔵"}.get(item["rarity"], "🟢")
         reaction = item["reaction"]
 
-        # ──  ФИНАЛ ПОСЛЕ УСПЕШНОГО КРАФТА ──
+# === НОВОЕ: ГЕНЕРАЦИЯ ЧЕРЕЗ НАШ МОДУЛЬ ===
         original_name = name
-        meme_prefixes = ["ЫХЦВ", "АХАХАХ", "ЛОЛ", "ААА", "XxX_", "_ОВЕРДОЗ", "69", "ЖЫЫЫРНЫЙ", "1337_"]
-        meme_name = f"{random.choice(meme_prefixes)} {original_name}"[:25]
+        meme_name = mutate_name(original_name)          # вместо старого meme_prefixes
+        new_reaction = generate_reaction(original_name)
+
+        # Обновляем объект бланта (он потом сохранится в БД)
         item["name"] = meme_name
-        item["original_name"] = original_name  # сохраним оригинал, если нужно
+        item["original_name"] = original_name
+        item["reaction"] = new_reaction
         color = {"legendary": "🟡", "epic": "🟣", "rare": "🔵"}.get(item["rarity"], "🟢")
-        
+
         caption = (
             f"<b>💍 ТЫ СОЗДАЛ ИМЕННОЙ БЛАНТ! 🎉</b>\n\n"
             f"{color}<b><i>«{html.escape(meme_name)}»</i></b>\n"
             f"Редкость: <b>{item['rarity']}</b> {color}\n\n"
             f"💎 Он навсегда останется в <b>твоей коллекции</b>.\n\n"
-            f"🕯️ <i>{reaction}</i>\n\n"
+            f"🕯️ <i>{new_reaction}</i>\n\n"
             f"💬 Этот блант достоин того, чтобы его <b>увидели друзья. Действуй!</b>"
+        )
+        
+        # --- Текст для кнопки «Поделиться» ---
+        bot_username = (await context.bot.get_me()).username
+        ref_link = f"https://t.me/{bot_username}?start=blunt_{blunt_id}"
+        
+        share_text = (
+            f"<b>{html.escape(player.username or 'игрок')}</b>\n\n"
+            f"{color} <b>Имя именного NFT Бланта: «{html.escape(meme_name)}»</b>\n"
+            f"🧬 <b>Редкость: {item['rarity']} {color}</b>\n"
+            f"🩸 <b>Серийный номер: #{item.get('rare_number', '?-????')}</b>\n"
+            f"💬 <b>Реакция:</b> <i>{reaction}</i>\n\n"
+            f"<b>💎 Нажми на ссылку чтобы забрать уникальный Блант:</b>\n{ref_link}"
         )
         
         kb = InlineKeyboardMarkup([
