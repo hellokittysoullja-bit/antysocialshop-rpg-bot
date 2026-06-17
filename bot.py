@@ -1,6 +1,6 @@
 # bot.py — ANTY SOCIAL SHOP RPG v8.0 ENTERPRISE
 import sys, traceback, time, random
-from blunt_name_generator import mutate_name, generate_reaction
+from blunt_name_generator import mutate_name
 def log_uncaught(exc_type, exc_value, exc_tb):
     traceback.print_exception(exc_type, exc_value, exc_tb, file=sys.stderr)
     sys.stderr.flush()
@@ -3260,32 +3260,27 @@ async def handle_named_name(update, context):
         blunt_id = item["id"]
         name_escaped = html.escape(name)
         color = {"legendary": "🟡", "epic": "🟣", "rare": "🔵"}.get(item["rarity"], "🟢")
-        reaction = item["reaction"]
+        reaction = item["reaction"]          # <-- твоя реакция из БД, не трогаем
 
-# === НОВОЕ: ГЕНЕРАЦИЯ ЧЕРЕЗ НАШ МОДУЛЬ ===
+        # === ГЕНЕРАЦИЯ ИМЕНИ (реакцию не меняем) ===
         original_name = name
-        meme_name = mutate_name(original_name)          # вместо старого meme_prefixes
-        new_reaction = generate_reaction(original_name)
-
-        # Обновляем объект бланта (он потом сохранится в БД)
+        meme_name = mutate_name(original_name)
         item["name"] = meme_name
         item["original_name"] = original_name
-        item["reaction"] = new_reaction
-        color = {"legendary": "🟡", "epic": "🟣", "rare": "🔵"}.get(item["rarity"], "🟢")
 
         caption = (
             f"<b>💍 ТЫ СОЗДАЛ ИМЕННОЙ БЛАНТ! 🎉</b>\n\n"
             f"{color}<b><i>«{html.escape(meme_name)}»</i></b>\n"
             f"Редкость: <b>{item['rarity']}</b> {color}\n\n"
             f"💎 Он навсегда останется в <b>твоей коллекции</b>.\n\n"
-            f"🕯️ <i>{new_reaction}</i>\n\n"
+            f"🕯️ <i>{reaction}</i>\n\n"
             f"💬 Этот блант достоин того, чтобы его <b>увидели друзья. Действуй!</b>"
         )
-        
+
         # --- Текст для кнопки «Поделиться» ---
         bot_username = (await context.bot.get_me()).username
         ref_link = f"https://t.me/{bot_username}?start=blunt_{blunt_id}"
-        
+
         share_text = (
             f"<b>{html.escape(player.username or 'игрок')}</b>\n\n"
             f"{color} <b>Имя именного NFT Бланта: «{html.escape(meme_name)}»</b>\n"
@@ -3294,24 +3289,24 @@ async def handle_named_name(update, context):
             f"💬 <b>Реакция:</b> <i>{reaction}</i>\n\n"
             f"<b>💎 Нажми на ссылку чтобы забрать уникальный Блант:</b>\n{ref_link}"
         )
-        
+
         kb = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton("🎁 Подарить", callback_data=f"gift_blunt_{blunt_id}"),
                 InlineKeyboardButton("🔗 Поделиться", switch_inline_query=share_text)
-                    ],
-                    [InlineKeyboardButton("🔙 В меню", callback_data="menu")]
-                ])
-        
+            ],
+            [InlineKeyboardButton("🔙 В меню", callback_data="menu")]
+        ])
+
         sent_img = await safe_send_blunt_image(
             context, update.effective_chat.id, item["rarity"], caption=caption, reply_markup=kb
         )
         if not sent_img:
             await update.message.reply_text(caption, reply_markup=kb, parse_mode='HTML')
-        
-        # FOMO-бонус: запускаем таймер и отправляем сообщение
+
+        # FOMO-бонус (без изменений)
         async def fomo_reminder():
-            await asyncio.sleep(300)  # 5 минут
+            await asyncio.sleep(300)
             player_check = await ctx.repo.get_by_id(uid)
             if player_check:
                 inv_now = player_check.inventory or []
@@ -3321,7 +3316,7 @@ async def handle_named_name(update, context):
                     except:
                         pass
         asyncio.create_task(fomo_reminder())
-        
+
         await asyncio.sleep(0.5)
         bonus_msg = await context.bot.send_message(
             uid,
@@ -3330,7 +3325,7 @@ async def handle_named_name(update, context):
             "Просто нажми одну из кнопок выше!",
             parse_mode='HTML'
         )
-        
+
         context.user_data['fomo_bonus_msg'] = bonus_msg.message_id
         context.user_data['fomo_blunt_id'] = blunt_id
         context.user_data['fomo_start'] = time.time()
