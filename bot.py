@@ -5943,7 +5943,8 @@ async def blunt_details_handler(update, context, ctx, player):
     reaction = item.get("reaction", "")
     text = (
         f"<b>💎 ДЕТАЛИ NFT БЛАНТА</b>\n\n"
-        f"{color} <b>«{name}»</b>\n"
+        f"{color} <b>«{html.escape(name)}»</b>\n"
+        f"Оригинальное имя:<b>«{name}»</b>\n"
         f"<b>Редкость:</b> <i>{rarity}</i> {color}\n\n"
         f"🩸 <b>Серийный номер:</b> <i>#{rare_number}</i>\n\n"
         f"🔗 <b>Хеш:</b> <i>{hash_code}</i>\n\n"
