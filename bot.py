@@ -3527,8 +3527,6 @@ async def transfer_blunt(sender_id: int, receiver_id: int, blunt_id: str, ctx: A
         raise TransferError("Внутренняя ошибка передачи") from e
 
 # ===== НОВЫЕ ФУНКЦИИ ДЛЯ ОБМЕНА БЛАНТАМИ =====
-from path.to.transfer import transfer_blunt, TransferError, BluntNotFound, SameUserError
-
 @rate_limit(2)
 async def handle_gift_recipient(update, context):
     ctx = context.bot_data.get("ctx")
