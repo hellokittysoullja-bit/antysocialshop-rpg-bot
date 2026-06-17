@@ -2521,22 +2521,22 @@ async def _show_main_menu(update, context, player, user, ctx):
     whisper = random.choice(WHISPERS)
 
     # Приветствие и гильдия
-    back = f"<b>⚔️ С возвращением в Гильдию, {rank_display} {html.escape(display_name)}</b>\n\n"
+    back = f"<b>⚔️ С возвращением в Гильдию, {rank_display} {html.escape(display_name)}</b>\n"
     if guild == "BLACK":
         back += "<b>🔮 Ты — часть Темной Гильдии. 🕯️Ритуалы ждут тебя</b>\n"
     elif guild == "WHITE":
         back += "<b>🔮 Ты — часть Светлой Гильдии. ⚜️Исповедь очищает душу и ждёт тебя</b>\n"
     else:
         back += (
-            "<b>🕯️⚜️ Ты ещё не выбрал сторону!</b>\n"
-            "🔮 Гильдия откроет ритуалы, исповеди и войну\n"
-            "👉 <b>Нажми кнопку «🕋 Гильдии» в меню.</b>\n"
+            "<b>🕯️⚜️ Ты ещё не ВЫБРАЛ сторону!</b>\n"
+            "🔮 Гильдия откроет <b>ритуалы, исповеди и войну</b>\n"
+            "👉 <b>Нажми кнопку «🕋 Гильдии» в меню чтобы ВСТУПИТЬ.</b>\n"
         )
 
     # Мотивационная строка
     if next_threshold > 0:
         gap = next_threshold - bal
-        back += f"\n<b>🎉 До следующего ранга {next_rank_emoji} {next_rank_name} осталось {gap} OAC 🍬!</b>"
+        back += f"\n📈 До следующего ранга <b>{next_rank_emoji} {next_rank_name}</b> осталось — <b>{gap} OAC 🍬!</b>"
     else:
         back += f"\n<b>⚡ Ты достиг вершины! Твой ранг — {rank_emoji} {rank_name}.</b>"
 
@@ -2555,7 +2555,7 @@ async def _show_main_menu(update, context, player, user, ctx):
     elif len(named) <= 1 and (player.balance or 0) >= GAME_CONFIG["named_blunt_cost"]:
         hint = "<b>💡 Готов к большему? Создай свой первый 💍 Именной блант! (50 OAC)</b>"
     elif is_veteran:
-        hint = "<b>💡 Исследуй 🔮 Алхимию и корми своего 🐾 питомца!</b>"
+        hint = "💡 Исследуй <b>🔮 Алхимию</b> и корми своего 🐾 <b>питомца!</b>"
     else:
         hint = "<b>💡 Исследуй 🏛️ Лабиринт! Он полон опасностей и наград.</b>"
 
