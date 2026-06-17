@@ -3317,17 +3317,7 @@ async def handle_named_name(update, context):
         context.user_data['fomo_bonus_msg'] = bonus_msg.message_id
         context.user_data['fomo_blunt_id'] = blunt_id
         context.user_data['fomo_start'] = time.time()
-
-        sent = await safe_send_blunt_image(
-            context,
-            update.effective_chat.id,
-            item["rarity"],
-            caption=caption,
-            reply_markup=kb
-        )
-        if not sent:
-            await update.message.reply_text(caption, reply_markup=kb, parse_mode='HTML')
-
+        
         # ── Оповещение в канал (закомментировано) ──
         # try:
         #     uname = html.escape(user.username or user.first_name)
@@ -3532,8 +3522,8 @@ async def gift_blunt_start(update, context, ctx, player):
     await query.answer()
     uid = query.from_user.id
     blunt_id = query.data.replace("gift_blunt_", "")
-    
-# ── ЗАЩИТА: если уже есть активный запрос на дарение, отменяем предыдущий ──
+
+    # ── ЗАЩИТА: если уже есть активный запрос на дарение, отменяем предыдущий ──
     if 'gifting_blunt_id' in context.user_data:
         old_msg_id = context.user_data.pop('gift_msg_id', None)
         if old_msg_id:
@@ -3543,16 +3533,21 @@ async def gift_blunt_start(update, context, ctx, player):
                 pass
         context.user_data.pop('gifting_blunt_id', None)
 
-# ── FOMO-БОНУС ──
+    # ── FOMO-БОНУС ──
     if 'fomo_blunt_id' in context.user_data and context.user_data['fomo_blunt_id'] == blunt_id:
         elapsed = time.time() - context.user_data.get('fomo_start', 0)
         if elapsed <= 300:
-            async with ctx.db_pool.acquire() as conn:
-                await ctx.repo.add_balance(uid, 10, conn)
+            async def _add_fomo_bonus(p, conn):
+                p.balance += 10
+                return p
+            await ctx.repo.atomic_update(uid, _add_fomo_bonus)
+
             bonus_msg_id = context.user_data.pop('fomo_bonus_msg', None)
             if bonus_msg_id:
-                try: await context.bot.delete_message(uid, bonus_msg_id)
-                except: pass
+                try:
+                    await context.bot.delete_message(uid, bonus_msg_id)
+                except:
+                    pass
             context.user_data.pop('fomo_blunt_id', None)
             context.user_data.pop('fomo_start', None)
             await context.bot.send_message(uid, "✅ Бонус +10 OAC за скорость начислен!")
