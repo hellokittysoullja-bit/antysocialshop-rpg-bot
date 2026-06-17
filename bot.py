@@ -3270,9 +3270,9 @@ async def handle_named_name(update, context):
         color = {"legendary": "🟡", "epic": "🟣", "rare": "🔵"}.get(item["rarity"], "🟢")
         
         caption = (
-            f"<b>💍 ТЫ СОЗДАЛ ИМЕННОЙ БЛАНТ!</b>\n\n"
+            f"<b>💍 ТЫ СОЗДАЛ ИМЕННОЙ БЛАНТ! 🎉</b>\n\n"
             f"{color}<b><i>«{html.escape(meme_name)}»</i></b>\n"
-            f"🎉 Редкость: <b>{item['rarity']}</b>{color}\n\n"
+            f"Редкость: <b>{item['rarity']}</b> {color}\n\n"
             f"💎 Он навсегда останется в <b>твоей коллекции</b>.\n\n"
             f"🕯️ <i>{reaction}</i>\n\n"
             f"💬 Этот блант достоин того, чтобы его <b>увидели друзья. Действуй!</b>"
