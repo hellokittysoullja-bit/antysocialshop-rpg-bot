@@ -3996,7 +3996,7 @@ async def my_blunts_callback(update, context, ctx, player, page=0):
     for i, item in enumerate(page_blunts, 1):
         row = [
             InlineKeyboardButton(f"💍 Детали ({i})", callback_data=f"blunt_details_{item['id']}"),
-            InlineKeyboardButton("🔗", callback_data=f"share_blunt_{item['id']}")
+            InlineKeyboardButton("🔗", callback_data=f"share_blunt_{item['id']}"),
             InlineKeyboardButton("🎁 Подарить", callback_data=f"gift_blunt_{item['id']}")
         ]
         kb_rows.append(row)
