@@ -2521,11 +2521,11 @@ async def _show_main_menu(update, context, player, user, ctx):
     whisper = random.choice(WHISPERS)
 
     # Приветствие и гильдия
-    back = f"<b>⚔️ С возвращением в Гильдию, {rank_display} {html.escape(display_name)}</b>\n"
+    back = f"⚔️ С возвращением в <b>Гильдию, {rank_display} {html.escape(display_name)}</b>\n"
     if guild == "BLACK":
-        back += "<b>🔮 Ты — часть Темной Гильдии. 🕯️Ритуалы ждут тебя</b>\n"
+        back += "🔮 Ты — часть <b>Темной Гильдии. 🕯️Ритуалы ждут тебя</b>\n"
     elif guild == "WHITE":
-        back += "<b>🔮 Ты — часть Светлой Гильдии. ⚜️Исповедь очищает душу и ждёт тебя</b>\n"
+        back += "🪽 Ты — часть <b>Светлой Гильдии. ⚜️Исповедь очищает душу и ждёт тебя</b>\n"
     else:
         back += (
             "<b>🕯️⚜️ Ты ещё не ВЫБРАЛ сторону!</b>\n"
