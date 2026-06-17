@@ -3492,6 +3492,9 @@ async def transfer_blunt(sender_id: int, receiver_id: int, blunt_id: str, ctx: A
                         break
                 if not item:
                     raise BluntNotFound("Блант не найден или не является именным")
+                    # Запрет дарить уже подаренный блант (даже в гонке)
+                if 'gifted_by' in item:
+                    raise TransferError("Этот блант уже был подарен и не может быть передан повторно")
 
                 initial_len = len(sender.inventory)
                 sender.inventory.remove(item)
@@ -3506,7 +3509,11 @@ async def transfer_blunt(sender_id: int, receiver_id: int, blunt_id: str, ctx: A
                     "user_id": str(receiver_id),
                     "since": datetime.now(timezone.utc).isoformat()
                 })
-
+                # Держим историю не длиннее 10 записей (экономия места в БД)
+                if len(item["owner_history"]) > 10:
+                    item["owner_history"] = item["owner_history"][-10:]
+                # Пометка, что блант подарен – запрещает последующие передачи
+                item['gifted_by'] = str(receiver_id)
                 receiver.inventory.append(item)
                 await ctx.repo.save(sender, conn=conn)
                 await ctx.repo.save(receiver, conn=conn)
@@ -3522,87 +3529,116 @@ async def transfer_blunt(sender_id: int, receiver_id: int, blunt_id: str, ctx: A
 import random
 from html import escape as html_escape
 
-async def _clear_gift_state_after(uid, context, delay):
+async def _clear_gift_state_after(uid, context, delay, blunt_id):
+    """Сбрасывает состояние дарения через delay секунд, только если оно всё ещё указывает на тот же блант."""
     await asyncio.sleep(delay)
-    context.user_data.pop('gifting_blunt_id', None)
-    context.user_data.pop('gift_msg_id', None)
+    # Сверяем blunt_id – если за время ожидания игрок начал другое дарение, не трогаем
+    if context.user_data.get('gifting_blunt_id') == blunt_id:
+        context.user_data.pop('gifting_blunt_id', None)
+        old_msg_id = context.user_data.pop('gift_msg_id', None)
+        if old_msg_id:
+            try:
+                await context.bot.delete_message(uid, old_msg_id)
+            except Exception:
+                pass
 
 @rate_limit(2)
 @game_handler
 async def gift_blunt_start(update, context, ctx, player):
     query = update.callback_query
-    await query.answer()
+    await query.answer()                      # немедленный ответ, чтобы callback не истёк
     uid = query.from_user.id
     blunt_id = query.data.replace("gift_blunt_", "")
 
-    # ── ЗАЩИТА: если уже есть активный запрос на дарение, отменяем предыдущий ──
+    # 1. Сброс предыдущего состояния дарения (если вдруг осталось)
     if 'gifting_blunt_id' in context.user_data:
         old_msg_id = context.user_data.pop('gift_msg_id', None)
         if old_msg_id:
             try:
                 await context.bot.delete_message(uid, old_msg_id)
-            except:
+            except Exception:
                 pass
         context.user_data.pop('gifting_blunt_id', None)
 
-    # ── FOMO-БОНУС ──
-    if 'fomo_blunt_id' in context.user_data and context.user_data['fomo_blunt_id'] == blunt_id:
-        elapsed = time.time() - context.user_data.get('fomo_start', 0)
+    # 2. FOMO-бонус: забираем маркеры ДО начисления (атомарная защита от двойного срабатывания)
+    fomo_blunt_id = context.user_data.get('fomo_blunt_id')
+    fomo_start = context.user_data.get('fomo_start')
+    if fomo_blunt_id == blunt_id:
+        # Сразу удаляем маркеры, чтобы повторный вход не увидел их
+        context.user_data.pop('fomo_blunt_id', None)
+        context.user_data.pop('fomo_start', None)
+        bonus_msg_id = context.user_data.pop('fomo_bonus_msg', None)
+
+        elapsed = time.time() - (fomo_start or 0)
         if elapsed <= 300:
             async def _add_fomo_bonus(p, conn):
                 p.balance += 10
                 return p
             await ctx.repo.atomic_update(uid, _add_fomo_bonus)
-
-            bonus_msg_id = context.user_data.pop('fomo_bonus_msg', None)
-            if bonus_msg_id:
-                try:
-                    await context.bot.delete_message(uid, bonus_msg_id)
-                except:
-                    pass
-            context.user_data.pop('fomo_blunt_id', None)
-            context.user_data.pop('fomo_start', None)
             await context.bot.send_message(uid, "✅ Бонус +10 OAC за скорость начислен!")
-
+        # Удаляем сообщение-напоминание (если ещё существует)
+        if bonus_msg_id:
+            try:
+                await context.bot.delete_message(uid, bonus_msg_id)
+            except Exception:
+                pass
+                
+    # 3. Быстрая предпроверка бланта (основная защита — в transfer_blunt)
     inv = player.inventory or []
     blunt = next((it for it in inv if it.get("id") == blunt_id and it.get("type") == "named"), None)
     if not blunt:
         await query.answer("Этот блант тебе больше не принадлежит.", show_alert=True)
         return
 
-    # Запрет дарить уже подаренный блант
-    if 'gifted_by' in blunt:
-        await query.answer("Этот блант уже был подарен, его нельзя передать снова.", show_alert=True)
-        return
+    # 4. Удаляем исходное сообщение и создаём новое текстовое для ввода получателя
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
 
     context.user_data["gifting_blunt_id"] = blunt_id
-    sent_msg = await query.message.edit_text(
-        "🎁 <b>ПОДАРИТЬ БЛАНТ</b>\n\n"
-        "Введи <b>@username</b> или <b>числовой ID</b> игрока.\n"
-        "Для отмены нажми кнопку ниже.",
+    sent_msg = await context.bot.send_message(
+        chat_id=uid,
+        text=(
+            "🎁 <b>ПОДАРИТЬ БЛАНТ</b>\n\n"
+            "Введи <b>@username</b> или <b>числовой ID</b> игрока.\n"
+            "Для отмены нажми кнопку ниже."
+        ),
         parse_mode='HTML',
         reply_markup=InlineKeyboardMarkup([[
             InlineKeyboardButton("❌ Отмена", callback_data="cancel_gift")
         ]])
     )
     context.user_data['gift_msg_id'] = sent_msg.message_id
-    asyncio.create_task(_clear_gift_state_after(uid, context, 300))
+
+    # 5. Таймер автосброса (с проверкой, что состояние не изменилось)
+    asyncio.create_task(_clear_gift_state_after(uid, context, 300, blunt_id))
 
 @rate_limit(1)
 async def cancel_gift(update, context):
     query = update.callback_query
     await query.answer()
-    # Удаляем сообщение с запросом
+
+    # 1. Удаляем сообщение с запросом (если оно ещё есть)
     msg_id = context.user_data.pop('gift_msg_id', None)
     if msg_id:
         try:
             await context.bot.delete_message(chat_id=query.message.chat.id, message_id=msg_id)
-        except:
+        except Exception:
             pass
+
+    # 2. Удаляем текущее сообщение (с кнопкой «Отмена»)
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+
+    # 3. Сбрасываем состояние дарения
     context.user_data.pop('gifting_blunt_id', None)
-    # Показываем кнопку возврата
-    await query.message.edit_text(
-        "❌ Подарок отменён.",
+    # 4. Отправляем новое сообщение с подтверждением отмены и кнопкой возврата
+    await context.bot.send_message(
+        chat_id=query.message.chat.id,
+        text="❌ Подарок отменён.",
         reply_markup=InlineKeyboardMarkup([[
             InlineKeyboardButton("🔙 В профиль", callback_data="profile")
         ]])
