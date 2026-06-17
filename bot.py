@@ -4832,7 +4832,10 @@ def _format_remaining(td):
 # ── Основной обработчик ─────────────────────────────────────
 @rate_limit(2)
 async def luck_callback(update, context, action=None):
-    ctx = context.application.bot_data["ctx"]
+    ctx = context.bot_data.get("ctx")
+    if not ctx:
+        await update.effective_message.reply_text("⚠️ Бот инициализируется, попробуйте позже.")
+        return
     user, msg = get_user_and_msg(update)
     uid = user.id
     player = await ctx.repo.get_by_id(uid)
@@ -4888,7 +4891,7 @@ async def _process_wheel(update, context, uid, player, cfg, ctx):
                 break
         if ptype == "jackpot" and random.random() < 0.5:
             prize *= 2
-        if context.bot_data.get("happy_hour") and ptype in ("oac", "jackpot"):
+        if ctx.cache.get("happy_hour") and ptype in ("oac", "jackpot"):
             prize *= HAPPY_HOUR_MULTIPLIER
 
         if ptype in ("oac", "jackpot"):
@@ -4897,8 +4900,8 @@ async def _process_wheel(update, context, uid, player, cfg, ctx):
             p.blunts += prize
         p.last_daily = datetime.now()
 
-        if war_service and ptype in ("oac", "jackpot"):
-            await war_service.add_score_raw(uid, prize, conn)
+        if ctx.war_service and ptype in ("oac", "jackpot"):
+            await ctx.war_service.add_score_raw(uid, prize, conn)
 
         return prize, ptype, p.balance
 
@@ -5011,7 +5014,7 @@ async def _process_alchemy_confirm(update, context, uid, player, cfg, ctx):
             res = "<b>🌫️ Грязный Выхлоп...</b>\n\nБланты сгорели без следа."
 
         if ctx.war_service:
-            await war_service.add_score(uid, WarAction.ALCHEMY, conn)
+            await ctx.war_service.add_score(uid, WarAction.ALCHEMY, conn)
         return (AlchemyResult.SUCCESS, res)
 
     result = await ctx.repo.atomic_update(uid, _alchemy)
