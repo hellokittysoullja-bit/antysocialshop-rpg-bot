@@ -3281,7 +3281,7 @@ async def handle_named_name(update, context):
         kb = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton("🎁 Подарить", callback_data=f"gift_blunt_{blunt_id}"),
-                InlineKeyboardButton("🔗 Поделиться", callback_data=f"share_blunt_{blunt_id}")
+                InlineKeyboardButton("🔗 Поделиться", switch_inline_query=share_text)
                     ],
                     [InlineKeyboardButton("🔙 В меню", callback_data="menu")]
                 ])
@@ -5997,7 +5997,7 @@ async def share_blunt_handler(update, context, ctx, player):
     color = {"legendary": "🟡", "epic": "🟣", "rare": "🔵"}.get(rarity, "🟢")
 
     # Твой текст (полностью сохранён)
-    text = (
+    share_text = (
         f"<b>{username}</b>\n\n"
         f"{color} <b>Имя именного NFT Бланта: «{html.escape(name)}»</b>\n"
         f"🧬 <b>Редкость: {rarity} {color}</b>\n"
@@ -6007,7 +6007,7 @@ async def share_blunt_handler(update, context, ctx, player):
     )
 
     # Вот новое: вместо отправки в чат — открываем список чатов для пересылки
-    await query.answer(switch_inline_query=text)
+    await query.answer(switch_inline_query=share_text)
 
 @rate_limit(1)
 @game_handler
