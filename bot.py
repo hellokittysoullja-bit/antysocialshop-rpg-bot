@@ -2227,49 +2227,43 @@ async def get_main_menu_keyboard(user_id, ctx=None):
         InlineKeyboardButton("💨 Дунуть", callback_data="smoke")
     ])
 
-    # 3. АДАПТИВНЫЙ РЯД
-    row3 = []
-
-    # --- Кнопка прогресса дня ---
+# --- Кнопка прогресса дня (ОТДЕЛЬНЫЙ РЯД) ---
     progress = getattr(player, 'daily_progress', {}) or {}
-    # Базовые действия: фарм, крафт, дым
     total_actions = 3
     if guild:
-        total_actions += 1   # ритуал или исповедь
+        total_actions += 1
     if is_veteran and has_pet:
-        total_actions += 1   # питомец
+        total_actions += 1
     done = sum(1 for v in progress.values() if v)
 
     if done == total_actions and total_actions > 0:
-        row3.append(InlineKeyboardButton("🎁 Забрать Награду", callback_data="profile"))
+        keyboard.append([InlineKeyboardButton("🎁 Забрать Награду", callback_data="profile")])
     elif done > 0:
-        row3.append(InlineKeyboardButton(f"📋 Задания ({done}/{total_actions})", callback_data="daily_quest_hub"))
+        keyboard.append([InlineKeyboardButton(f"📋 Задания ({done}/{total_actions})", callback_data="daily_quest_hub")])
     else:
-        row3.append(InlineKeyboardButton("📈 Развитие", callback_data="daily_quest_hub"))
+        keyboard.append([InlineKeyboardButton("📈 Развитие", callback_data="daily_quest_hub")])
 
-    # --- Кнопка гильдии ---
+    # --- Кнопки гильдии и мира (ОДИН РЯД) ---
+    row4 = []
     if not guild:
-        row3.append(InlineKeyboardButton("🕋 Вступить в Гильдию", callback_data="guild_info"))
+        row4.append(InlineKeyboardButton("🕋 Вступить в Гильдию", callback_data="guild_info"))
     elif guild == "BLACK":
-        # Простая проверка кулдауна ритуала
         last_ritual = player.last_ritual
         if not last_ritual or (now_dt - last_ritual) >= timedelta(hours=24):
-            row3.append(InlineKeyboardButton("🕯️ Ритуал", callback_data="ritual"))
+            row4.append(InlineKeyboardButton("🕯️ Ритуал", callback_data="ritual"))
         else:
             diff = timedelta(hours=24) - (now_dt - last_ritual)
             hrs, mins = int(diff.seconds // 3600), int((diff.seconds % 3600) // 60)
             cooldown_str = f"({hrs}ч {mins}м)" if hrs > 0 else f"({mins}м)"
-            row3.append(InlineKeyboardButton(f"🕯️ Ритуал {cooldown_str}", callback_data="ritual"))
+            row4.append(InlineKeyboardButton(f"🕯️ Ритуал {cooldown_str}", callback_data="ritual"))
     elif guild == "WHITE":
-        row3.append(InlineKeyboardButton("⚜️ Исповедь", callback_data="repent"))
+        row4.append(InlineKeyboardButton("⚜️ Исповедь", callback_data="repent"))
 
-    # --- Кнопка "Мир" с динамической иконкой ---
     world_icon = "🌍"
     if guild == "BLACK": world_icon = "🕯️"
     elif guild == "WHITE": world_icon = "⚜️"
-    row3.append(InlineKeyboardButton(f"{world_icon} Мир", callback_data="world_hub"))
-
-    keyboard.append(row3)
+    row4.append(InlineKeyboardButton(f"{world_icon} Мир", callback_data="world_hub"))
+    keyboard.append(row4)
 
     kb = InlineKeyboardMarkup(keyboard)
     _menu_cache[user_id] = (now, kb, whisper)
