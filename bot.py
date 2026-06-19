@@ -531,7 +531,8 @@ class Settings(BaseSettings):
     phantom_threshold: int = 20000
     necromant_threshold: int = 50000
     lab_cooldown_hours: int = 12
-    ritual_cooldown_hours: int = 24
+    ritual_cooldown_hours: int = 12
+    repent_cooldown_hours: int = 12
 
     @property
     def webhook_url(self) -> str:
@@ -567,6 +568,7 @@ GAME_CONFIG = {
     "named_blunt_cost": 50,
     "farm_cooldown_hours": settings.farm_cooldown_hours,
     "ritual_cooldown_hours": settings.ritual_cooldown_hours,
+    "repent_cooldown_hours": settings.repent_cooldown_hours,
     "lab_cooldown_hours": settings.lab_cooldown_hours,
     "veteran_threshold": settings.veteran_threshold,
     "phantom_threshold": settings.phantom_threshold,
@@ -2150,6 +2152,13 @@ MAIN_MENU_COOLDOWNS = {
         "format": "hrs",
         "guild_only": "BLACK",
     },
+    "repent": {
+        "text": "⚜️ Исповедь",
+        "cooldown_hours": settings.repent_cooldown_hours,
+        "last_attr": "last_repent",
+        "format": "hrs",
+        "guild_only": "WHITE",
+    },
     "lab": {
         "text": "🏛️ Лабиринт",
         "cooldown_hours": settings.lab_cooldown_hours,    # ← было 12
@@ -2257,11 +2266,11 @@ async def get_main_menu_keyboard(user_id, ctx=None):
             cooldown_str = f"({hrs}ч {mins}м)" if hrs > 0 else f"({mins}м)"
             row4.append(InlineKeyboardButton(f"🕯️ Ритуал {cooldown_str}", callback_data="ritual"))
     elif guild == "WHITE":
-        last_confess = getattr(player, 'last_confess', None)
-        if not last_confess or (now_dt - last_confess) >= timedelta(hours=12):
+        last_repent = getattr(player, 'last_repent', None)
+        if not last_repent or (now_dt - last_repent) >= timedelta(hours=12):
             row4.append(InlineKeyboardButton("⚜️ Исповедь", callback_data="repent"))
         else:
-            diff = timedelta(hours=12) - (now_dt - last_confess)
+            diff = timedelta(hours=12) - (now_dt - last_repent)
             hrs, mins = int(diff.seconds // 3600), int((diff.seconds % 3600) // 60)
             cooldown_str = f"({hrs}ч {mins}м)" if hrs > 0 else f"({mins}м)"
             row4.append(InlineKeyboardButton(f"⚜️ Исповедь {cooldown_str}", callback_data="repent"))
@@ -4712,14 +4721,21 @@ async def repent_callback(update, context, ctx):
     uid = query.from_user.id
 
     async def _repent(p, conn):
+        now = datetime.now()
+        if p.last_repent and (now - p.last_repent) < timedelta(hours=12):
+            remain = timedelta(hours=12) - (now - p.last_repent)
+            hrs, mins = int(remain.seconds // 3600), int((remain.seconds % 3600) // 60)
+            return ("cooldown", f"Исповедь будет доступна через {hrs} ч {mins} мин")
+    
         if not p or not p.user_id:
             return ("no_player",)
         if p.guild != "WHITE":
             return ("wrong_guild",)
         if (p.blunts or 0) < 1:
             return ("no_blunts",)
-
+    
         p.blunts -= 1
+        p.last_repent = datetime.now() 
         r = random.random()
         if r < 0.70:
             reward = random.randint(100, 200)
