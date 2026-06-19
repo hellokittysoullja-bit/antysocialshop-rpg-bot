@@ -6566,7 +6566,7 @@ CALLBACKS: Dict[str, Callable] = {
     "pet_name_skip": pet_name_skip_handler,
     "pet_locked": pet_locked_handler,
     "onboarding_reward": onboarding_reward,
-    "daily_quest_hub": daily_quest_hub_handler,
+    "daily_quest_hub": daily_quest_hub,
     "world_hub": world_hub_handler,
 }
 
