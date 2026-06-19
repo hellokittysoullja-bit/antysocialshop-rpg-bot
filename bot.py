@@ -2276,8 +2276,8 @@ async def get_main_menu_keyboard(user_id, ctx=None):
             row4.append(InlineKeyboardButton(f"⚜️ Исповедь {cooldown_str}", callback_data="repent"))
 
     world_icon = "🌍"
-    if guild == "BLACK": world_icon = "🕯️"
-    elif guild == "WHITE": world_icon = "⚜️"
+    if guild == "BLACK": world_icon = "🌍"
+    elif guild == "WHITE": world_icon = "🌍"
     row4.append(InlineKeyboardButton(f"{world_icon} Мир", callback_data="world_hub"))
     keyboard.append(row4)
 
