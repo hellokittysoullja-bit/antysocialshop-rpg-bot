@@ -2211,46 +2211,65 @@ async def get_main_menu_keyboard(user_id, ctx=None):
     player = await ctx.repo.get_by_id(user_id) if ctx else None
     balance = player.balance if player else 0
     now_dt = datetime.now()
+    guild = player.guild if player else None
+    has_pet = bool(player.pet) if player else False
+    is_veteran = balance >= 5000
 
-    # ── Кнопки ──
-    farm_text = "🍬 Фармить"
-    ritual_text = "🕯️ Ритуал" if player and player.guild == "BLACK" else ""
-    lab_text = "🏛️ Лабиринт"
+    keyboard = []
 
-# ── Кнопки условий ──
-    pet_btn = (
-        InlineKeyboardButton("🐾 Питомец", callback_data="pet_preview")
-        if has_rank(balance, "Ветеран")
-        else InlineKeyboardButton("🐾 Питомец 🔒", callback_data="pet_locked")
-    )
+    # 1. ГЛАВНОЕ ДЕЙСТВИЕ (с кулдауном)
+    farm_text = _format_cooldown(player, now_dt, "farm")
+    keyboard.append([InlineKeyboardButton(farm_text, callback_data="farm")])
 
-    # ── Сборка клавиатуры ──
-    keyboard = [
-        [InlineKeyboardButton(farm_text, callback_data="farm")],
-        [InlineKeyboardButton("🌿 Крафт", callback_data="craft"),
-         InlineKeyboardButton("💨 Дунуть", callback_data="smoke")],
-    ]
-    # Куст добавляем только для Ветеранов
-    if balance >= 5000:
-        keyboard.append([InlineKeyboardButton("🪴 Куст", callback_data="collect")])
+    # 2. ПАНЕЛЬ БЫСТРЫХ ДЕЙСТВИЙ
     keyboard.append([
-        InlineKeyboardButton("👤 Профиль", callback_data="profile"),
-        InlineKeyboardButton("🏆 Достижения", callback_data="achievements_menu"),
-        InlineKeyboardButton("🏅 Лидеры", callback_data="top")
+        InlineKeyboardButton("🌿 Крафт", callback_data="craft"),
+        InlineKeyboardButton("💨 Дунуть", callback_data="smoke")
     ])
 
-    # Группа гильдия + питомец + (опционально ритуал)
-    guild_row = [InlineKeyboardButton("🕋 Гильдия", callback_data="guild_info")]
-    if ritual_text:                         # <-- если кнопка ритуала сгенерировалась
-        guild_row.append(InlineKeyboardButton(ritual_text, callback_data="ritual"))
-    guild_row.append(pet_btn)
-    keyboard.append(guild_row)
+    # 3. АДАПТИВНЫЙ РЯД
+    row3 = []
 
-    keyboard.append([
-        InlineKeyboardButton("🎲 Удача", callback_data="luck"),
-        InlineKeyboardButton(lab_text, callback_data="lab_start"),
-    ])
-    keyboard.append([InlineKeyboardButton("🛒 Магазин", callback_data="shop")])
+    # --- Кнопка прогресса дня ---
+    progress = getattr(player, 'daily_progress', {}) or {}
+    # Базовые действия: фарм, крафт, дым
+    total_actions = 3
+    if guild:
+        total_actions += 1   # ритуал или исповедь
+    if is_veteran and has_pet:
+        total_actions += 1   # питомец
+    done = sum(1 for v in progress.values() if v)
+
+    if done == total_actions and total_actions > 0:
+        row3.append(InlineKeyboardButton("🎁 Забрать Награду", callback_data="profile"))
+    elif done > 0:
+        row3.append(InlineKeyboardButton(f"📋 Задания ({done}/{total_actions})", callback_data="daily_quest_hub"))
+    else:
+        row3.append(InlineKeyboardButton("📈 Развитие", callback_data="daily_quest_hub"))
+
+    # --- Кнопка гильдии ---
+    if not guild:
+        row3.append(InlineKeyboardButton("🕋 Вступить в Гильдию", callback_data="guild_info"))
+    elif guild == "BLACK":
+        # Простая проверка кулдауна ритуала
+        last_ritual = player.last_ritual
+        if not last_ritual or (now_dt - last_ritual) >= timedelta(hours=24):
+            row3.append(InlineKeyboardButton("🕯️ Ритуал", callback_data="ritual"))
+        else:
+            diff = timedelta(hours=24) - (now_dt - last_ritual)
+            hrs, mins = int(diff.seconds // 3600), int((diff.seconds % 3600) // 60)
+            cooldown_str = f"({hrs}ч {mins}м)" if hrs > 0 else f"({mins}м)"
+            row3.append(InlineKeyboardButton(f"🕯️ Ритуал {cooldown_str}", callback_data="ritual"))
+    elif guild == "WHITE":
+        row3.append(InlineKeyboardButton("⚜️ Исповедь", callback_data="confess"))
+
+    # --- Кнопка "Мир" с динамической иконкой ---
+    world_icon = "🌍"
+    if guild == "BLACK": world_icon = "🕯️"
+    elif guild == "WHITE": world_icon = "⚜️"
+    row3.append(InlineKeyboardButton(f"{world_icon} Мир", callback_data="world_hub"))
+
+    keyboard.append(row3)
 
     kb = InlineKeyboardMarkup(keyboard)
     _menu_cache[user_id] = (now, kb, whisper)
@@ -2258,6 +2277,86 @@ async def get_main_menu_keyboard(user_id, ctx=None):
 
 def get_back_to_menu_keyboard():
     return InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
+
+@cb
+async def world_hub(update, context, ctx):
+    query = update.callback_query
+    await query.answer()
+    player = await ctx.repo.get_by_id(query.from_user.id)
+    guild = player.guild if player else None
+    balance = player.balance if player else 0
+    is_veteran = balance >= 5000
+
+    kb_rows = []
+
+    # Гильдия — простое название, как раньше
+    if not guild:
+        kb_rows.append([InlineKeyboardButton("🕋 Вступить в Гильдию", callback_data="guild_info")])
+    else:
+        kb_rows.append([InlineKeyboardButton("🕋 Гильдия", callback_data="guild_info")])
+
+    # Куст — только для ветеранов
+    if is_veteran:
+        kb_rows.append([InlineKeyboardButton("🪴 Куст", callback_data="collect")])
+
+    # Питомец
+    pet_btn = (
+        InlineKeyboardButton("🐾 Питомец", callback_data="pet_preview")
+        if is_veteran
+        else InlineKeyboardButton("🐾 Питомец 🔒", callback_data="pet_locked")
+    )
+    kb_rows.append([pet_btn])
+
+    kb_rows.append([InlineKeyboardButton("🎲 Удача", callback_data="luck")])
+    kb_rows.append([InlineKeyboardButton("🏛️ Лабиринт", callback_data="lab_start")])
+    kb_rows.append([InlineKeyboardButton("🛒 Магазин", callback_data="shop")])
+    kb_rows.append([InlineKeyboardButton("🏰 В меню", callback_data="menu")])
+    kb = InlineKeyboardMarkup(kb_rows)
+    await query.message.edit_text("<b>🌍 МИР</b>\n\nМир ждёт твоего следа.", reply_markup=kb, parse_mode='HTML')
+
+@cb
+async def daily_quest_hub(update, context, ctx):
+    query = update.callback_query
+    await query.answer()
+    player = await ctx.repo.get_by_id(query.from_user.id)
+    progress = getattr(player, 'daily_progress', {}) or {}
+    guild = player.guild
+    has_pet = bool(player.pet)
+    is_veteran = (player.balance or 0) >= 5000
+
+    actions = [
+        ("🍬 Фармить", "farm"),
+        ("🌿 Крафт", "craft"),
+        ("💨 Дунуть", "smoke"),
+    ]
+    if guild:
+        actions.append(("🕯️ Ритуал" if guild == "BLACK" else "⚜️ Исповедь", "ritual" if guild == "BLACK" else "confess"))
+    if is_veteran and has_pet:
+        actions.append(("🐾 Питомец", "pet_preview"))
+
+    kb_rows = []
+    done = 0
+    for label, cb_data in actions:
+        if cb_data in ("ritual", "confess"):
+            is_done = progress.get("guild_action", False)
+        else:
+            is_done = progress.get(cb_data, False)
+        if is_done:
+            done += 1
+        icon = "✅" if is_done else "⬜️"
+        kb_rows.append([InlineKeyboardButton(f"{icon} {label}", callback_data=cb_data)])
+
+    kb_rows.append([
+        InlineKeyboardButton("👤 Профиль", callback_data="profile"),
+        InlineKeyboardButton("🏆 Достижения", callback_data="achievements_menu"),
+        InlineKeyboardButton("🏅 Лидеры", callback_data="top")
+    ])
+    kb_rows.append([InlineKeyboardButton("🏰 В меню", callback_data="menu")])
+
+    total_actions = len(actions)
+    kb = InlineKeyboardMarkup(kb_rows)
+    text = f"<b>📋 ЗАДАНИЯ ДНЯ ({done}/{total_actions})</b>\n\nВыбери, что хочешь сделать:"
+    await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
 
 # ========== ОБРАБОТЧИКИ КОМАНД (полный, надёжный, с лабиринтом) ==========
 logger = logging.getLogger(__name__)   # ← 
@@ -6467,6 +6566,8 @@ CALLBACKS: Dict[str, Callable] = {
     "pet_name_skip": pet_name_skip_handler,
     "pet_locked": pet_locked_handler,
     "onboarding_reward": onboarding_reward,
+    "daily_quest_hub": daily_quest_hub_handler,
+    "world_hub": world_hub_handler,
 }
 
 EXACT_HANDLERS: Dict[str, Callable] = {
