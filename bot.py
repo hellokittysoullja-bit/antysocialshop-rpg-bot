@@ -6567,7 +6567,7 @@ CALLBACKS: Dict[str, Callable] = {
     "pet_locked": pet_locked_handler,
     "onboarding_reward": onboarding_reward,
     "daily_quest_hub": daily_quest_hub,
-    "world_hub": world_hub_handler,
+    "world_hub": world_hub,
 }
 
 EXACT_HANDLERS: Dict[str, Callable] = {
