@@ -2261,7 +2261,7 @@ async def get_main_menu_keyboard(user_id, ctx=None):
             cooldown_str = f"({hrs}ч {mins}м)" if hrs > 0 else f"({mins}м)"
             row3.append(InlineKeyboardButton(f"🕯️ Ритуал {cooldown_str}", callback_data="ritual"))
     elif guild == "WHITE":
-        row3.append(InlineKeyboardButton("⚜️ Исповедь", callback_data="confess"))
+        row3.append(InlineKeyboardButton("⚜️ Исповедь", callback_data="repent"))
 
     # --- Кнопка "Мир" с динамической иконкой ---
     world_icon = "🌍"
@@ -2330,14 +2330,14 @@ async def daily_quest_hub(update, context, ctx):
         ("💨 Дунуть", "smoke"),
     ]
     if guild:
-        actions.append(("🕯️ Ритуал" if guild == "BLACK" else "⚜️ Исповедь", "ritual" if guild == "BLACK" else "confess"))
+        actions.append(("🕯️ Ритуал" if guild == "BLACK" else "⚜️ Исповедь", "ritual" if guild == "BLACK" else "repent"))
     if is_veteran and has_pet:
         actions.append(("🐾 Питомец", "pet_preview"))
 
     kb_rows = []
     done = 0
     for label, cb_data in actions:
-        if cb_data in ("ritual", "confess"):
+        if cb_data in ("ritual", "repent"):
             is_done = progress.get("guild_action", False)
         else:
             is_done = progress.get(cb_data, False)
@@ -4628,7 +4628,7 @@ async def guild_info_callback(update, context):
             else:
                 kb_rows.append([InlineKeyboardButton("🕯️ Ритуал", callback_data="ritual")])
         elif guild == "WHITE":
-            kb_rows.append([InlineKeyboardButton("⚜️ Исповедь", callback_data="confess")])
+            kb_rows.append([InlineKeyboardButton("⚜️ Исповедь", callback_data="repent")])
         kb_rows.append([
             InlineKeyboardButton("🏛️ Храм", callback_data="guild_shrine"),
             InlineKeyboardButton("⚔️ Война", callback_data="guild_war")
