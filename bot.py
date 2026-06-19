@@ -4227,8 +4227,7 @@ async def profile_callback(update, context, ctx, player):
     if len(named) > 2:
         kb_rows.append([InlineKeyboardButton(f"💍 Все именные бланты ({len(named)})", callback_data="my_blunts")])
     kb_rows.append([InlineKeyboardButton("📜 Кодекс", callback_data="rules")])
-    kb_rows.append([InlineKeyboardButton("🎨 Кастомизация", callback_data="skins_menu"),
-                    InlineKeyboardButton("🏆 Достижения", callback_data="achievements_profile")])
+    kb_rows.append([InlineKeyboardButton("🎨 Кастомизация", callback_data="skins_menu")])
     kb_rows.append([InlineKeyboardButton("🏰 В меню", callback_data="menu")])
     kb = InlineKeyboardMarkup(kb_rows)
 
