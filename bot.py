@@ -2252,25 +2252,27 @@ async def get_main_menu_keyboard(user_id, ctx=None):
     else:
         keyboard.append([InlineKeyboardButton("📈 Развитие", callback_data="daily_quest_hub")])
 
-    # --- Кнопки гильдии и мира (ОДИН РЯД) ---
+# --- Кнопки гильдии и мира (ОДИН РЯД) ---
     row4 = []
     if not guild:
         row4.append(InlineKeyboardButton("🕋 Вступить в Гильдию", callback_data="guild_info"))
     elif guild == "BLACK":
         last_ritual = player.last_ritual
-        if not last_ritual or (now_dt - last_ritual) >= timedelta(hours=12):
+        cd = GAME_CONFIG["ritual_cooldown_hours"]
+        if not last_ritual or (now_dt - last_ritual) >= timedelta(hours=cd):
             row4.append(InlineKeyboardButton("🕯️ Ритуал", callback_data="ritual"))
         else:
-            diff = timedelta(hours=12) - (now_dt - last_ritual)
+            diff = timedelta(hours=cd) - (now_dt - last_ritual)
             hrs, mins = int(diff.seconds // 3600), int((diff.seconds % 3600) // 60)
             cooldown_str = f"({hrs}ч {mins}м)" if hrs > 0 else f"({mins}м)"
             row4.append(InlineKeyboardButton(f"🕯️ Ритуал {cooldown_str}", callback_data="ritual"))
     elif guild == "WHITE":
         last_repent = getattr(player, 'last_repent', None)
-        if not last_repent or (now_dt - last_repent) >= timedelta(hours=12):
+        cd = GAME_CONFIG["repent_cooldown_hours"]
+        if not last_repent or (now_dt - last_repent) >= timedelta(hours=cd):
             row4.append(InlineKeyboardButton("⚜️ Исповедь", callback_data="repent"))
         else:
-            diff = timedelta(hours=12) - (now_dt - last_repent)
+            diff = timedelta(hours=cd) - (now_dt - last_repent)
             hrs, mins = int(diff.seconds // 3600), int((diff.seconds % 3600) // 60)
             cooldown_str = f"({hrs}ч {mins}м)" if hrs > 0 else f"({mins}м)"
             row4.append(InlineKeyboardButton(f"⚜️ Исповедь {cooldown_str}", callback_data="repent"))
@@ -4722,8 +4724,8 @@ async def repent_callback(update, context, ctx):
 
     async def _repent(p, conn):
         now = datetime.now()
-        if p.last_repent and (now - p.last_repent) < timedelta(hours=12):
-            remain = timedelta(hours=12) - (now - p.last_repent)
+    if p.last_repent and (now - p.last_repent) < timedelta(hours=GAME_CONFIG["repent_cooldown_hours"]):
+        remain = timedelta(hours=GAME_CONFIG["repent_cooldown_hours"]) - (now - p.last_repent)
             hrs, mins = int(remain.seconds // 3600), int((remain.seconds % 3600) // 60)
             return ("cooldown", f"Исповедь будет доступна через {hrs} ч {mins} мин")
     
