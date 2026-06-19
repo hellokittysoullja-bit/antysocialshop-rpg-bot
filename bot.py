@@ -2249,15 +2249,22 @@ async def get_main_menu_keyboard(user_id, ctx=None):
         row4.append(InlineKeyboardButton("🕋 Вступить в Гильдию", callback_data="guild_info"))
     elif guild == "BLACK":
         last_ritual = player.last_ritual
-        if not last_ritual or (now_dt - last_ritual) >= timedelta(hours=24):
+        if not last_ritual or (now_dt - last_ritual) >= timedelta(hours=12):
             row4.append(InlineKeyboardButton("🕯️ Ритуал", callback_data="ritual"))
         else:
-            diff = timedelta(hours=24) - (now_dt - last_ritual)
+            diff = timedelta(hours=12) - (now_dt - last_ritual)
             hrs, mins = int(diff.seconds // 3600), int((diff.seconds % 3600) // 60)
             cooldown_str = f"({hrs}ч {mins}м)" if hrs > 0 else f"({mins}м)"
             row4.append(InlineKeyboardButton(f"🕯️ Ритуал {cooldown_str}", callback_data="ritual"))
     elif guild == "WHITE":
-        row4.append(InlineKeyboardButton("⚜️ Исповедь", callback_data="repent"))
+        last_confess = getattr(player, 'last_confess', None)
+        if not last_confess or (now_dt - last_confess) >= timedelta(hours=12):
+            row4.append(InlineKeyboardButton("⚜️ Исповедь", callback_data="repent"))
+        else:
+            diff = timedelta(hours=12) - (now_dt - last_confess)
+            hrs, mins = int(diff.seconds // 3600), int((diff.seconds % 3600) // 60)
+            cooldown_str = f"({hrs}ч {mins}м)" if hrs > 0 else f"({mins}м)"
+            row4.append(InlineKeyboardButton(f"⚜️ Исповедь {cooldown_str}", callback_data="repent"))
 
     world_icon = "🌍"
     if guild == "BLACK": world_icon = "🕯️"
@@ -2318,38 +2325,46 @@ async def daily_quest_hub(update, context, ctx):
     has_pet = bool(player.pet)
     is_veteran = (player.balance or 0) >= 5000
 
-    actions = [
-        ("🍬 Фармить", "farm"),
-        ("🌿 Крафт", "craft"),
-        ("💨 Дунуть", "smoke"),
-    ]
-    if guild:
-        actions.append(("🕯️ Ритуал" if guild == "BLACK" else "⚜️ Исповедь", "ritual" if guild == "BLACK" else "repent"))
-    if is_veteran and has_pet:
-        actions.append(("🐾 Питомец", "pet_preview"))
-
-    kb_rows = []
+    # --- Считаем прогресс ---
     done = 0
-    for label, cb_data in actions:
-        if cb_data in ("ritual", "repent"):
-            is_done = progress.get("guild_action", False)
-        else:
-            is_done = progress.get(cb_data, False)
-        if is_done:
-            done += 1
-        icon = "✅" if is_done else "⬜️"
-        kb_rows.append([InlineKeyboardButton(f"{icon} {label}", callback_data=cb_data)])
+    lines = []
+    # Базовые действия
+    for label, key in [("🍬 Фармить", "farm"), ("🌿 Крафт", "craft"), ("💨 Дунуть", "smoke")]:
+        is_done = progress.get(key, False)
+        if is_done: done += 1
+        lines.append(f"{'✅' if is_done else '⬜️'} {label}")
+    # Гильдия
+    if guild:
+        is_done = progress.get("guild_action", False)
+        if is_done: done += 1
+        lines.append(f"{'✅' if is_done else '⬜️'} {'🕯️ Ритуал' if guild == 'BLACK' else '⚜️ Исповедь'}")
+    # Питомец
+    if is_veteran and has_pet:
+        is_done = progress.get("pet", False)
+        if is_done: done += 1
+        lines.append(f"{'✅' if is_done else '⬜️'} 🐾 Питомец")
 
-    kb_rows.append([
-        InlineKeyboardButton("👤 Профиль", callback_data="profile"),
-        InlineKeyboardButton("🏆 Достижения", callback_data="achievements_menu"),
-        InlineKeyboardButton("🏅 Лидеры", callback_data="top")
+    total_actions = len(lines)
+
+    # --- Логика текста ---
+    if done == 0 and total_actions > 0:
+        text = (
+            f"<b>📋 ЗАДАНИЯ ДНЯ (0/{total_actions})</b>\n\n"
+            "<i>Начни выполнять действия в главном меню, чтобы заполнить шкалу и получить +50 OAC!</i>\n\n"
+            "Выбери, куда пойти дальше:"
+        )
+    else:
+        text = f"<b>📋 ЗАДАНИЯ ДНЯ ({done}/{total_actions})</b>\n\n" + "\n".join(lines)
+        text += "\n\n<i>Выполняй действия в главном меню, чтобы заполнить шкалу!</i>"
+
+    # --- Кнопки навигации ---
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("👤 Профиль", callback_data="profile"),
+         InlineKeyboardButton("🏆 Достижения", callback_data="achievements_menu"),
+         InlineKeyboardButton("🏅 Лидеры", callback_data="top")],
+        [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
     ])
-    kb_rows.append([InlineKeyboardButton("🏰 В меню", callback_data="menu")])
-
-    total_actions = len(actions)
-    kb = InlineKeyboardMarkup(kb_rows)
-    text = f"<b>📋 ЗАДАНИЯ ДНЯ ({done}/{total_actions})</b>\n\nВыбери, что хочешь сделать:"
+    
     await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
 
 # ========== ОБРАБОТЧИКИ КОМАНД (полный, надёжный, с лабиринтом) ==========
