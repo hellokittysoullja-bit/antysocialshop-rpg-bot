@@ -4531,6 +4531,15 @@ async def repent_callback(update, context, ctx):
     await query.answer()
     uid = query.from_user.id
 
+# 🚀 ВРЕМЕННАЯ ДИАГНОСТИКА – удалить после отладки
+    try:
+        await context.bot.send_message(
+            chat_id=settings.admin_id,  # твой Telegram ID
+            text=f"🟢 REPENT CALLED\nUser: {uid}\nGuild: {getattr(player, 'guild', '?')}"
+        )
+    except Exception as e:
+        logger.error(f"Failed to send debug msg: {e}")
+
     async def _repent(p, conn):
         now = datetime.now()
         cooldown_hours = GAME_CONFIG.get("repent_cooldown_hours", 12)
