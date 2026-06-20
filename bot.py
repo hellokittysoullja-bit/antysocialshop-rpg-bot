@@ -4531,11 +4531,17 @@ async def repent_callback(update, context, ctx):
     await query.answer()
     uid = query.from_user.id
 
-# 🚀 ВРЕМЕННАЯ ДИАГНОСТИКА – удалить после отладки
+    # ✅ Загружаем игрока
+    player = await ctx.repo.get_by_id(uid)
+    if not player:
+        await query.answer("Профиль не найден. Напиши /start", show_alert=True)
+        return
+
+    # 🚀 ВРЕМЕННАЯ ДИАГНОСТИКА – теперь player существует
     try:
         await context.bot.send_message(
-            chat_id=settings.admin_id,  # твой Telegram ID
-            text=f"🟢 REPENT CALLED\nUser: {uid}\nGuild: {getattr(player, 'guild', '?')}"
+            chat_id=settings.admin_id,
+            text=f"🟢 REPENT CALLED\nUser: {uid}\nGuild: {player.guild}"   # ✅ player уже определён
         )
     except Exception as e:
         logger.error(f"Failed to send debug msg: {e}")
