@@ -2202,91 +2202,6 @@ def _format_cooldown(player, now, key: str) -> str:
         mins = int((remain.total_seconds() % 3600) // 60)
         return f"{text} ⏳ {hrs} ч {mins} мин"
 
-
-_menu_cache = {}
-
-def invalidate_menu_cache(user_id: int):
-    """Сброс кэша меню для конкретного пользователя."""
-    _menu_cache.pop(user_id, None)
-
-async def get_main_menu_keyboard(user_id, ctx=None): 
-    now = time.time()
-    if user_id in _menu_cache:
-        cached_time, kb, whisper = _menu_cache[user_id]
-        if now - cached_time < 2:
-            return kb, whisper
-
-    whisper = random.choice(WHISPERS)
-    player = await ctx.repo.get_by_id(user_id) if ctx else None
-    balance = player.balance if player else 0
-    now_dt = datetime.now()
-    guild = player.guild if player else None
-    has_pet = bool(player.pet) if player else False
-    is_veteran = balance >= 5000
-
-    keyboard = []
-
-    # 1. ГЛАВНОЕ ДЕЙСТВИЕ (с кулдауном)
-    farm_text = _format_cooldown(player, now_dt, "farm")
-    keyboard.append([InlineKeyboardButton(farm_text, callback_data="farm")])
-
-    # 2. ПАНЕЛЬ БЫСТРЫХ ДЕЙСТВИЙ
-    keyboard.append([
-        InlineKeyboardButton("🌿 Крафт", callback_data="craft"),
-        InlineKeyboardButton("💨 Дунуть", callback_data="smoke")
-    ])
-
-# --- Кнопка прогресса дня (ОТДЕЛЬНЫЙ РЯД) ---
-    progress = getattr(player, 'daily_progress', {}) or {}
-    total_actions = 3
-    if guild:
-        total_actions += 1
-    if is_veteran and has_pet:
-        total_actions += 1
-    done = sum(1 for v in progress.values() if v)
-
-    if done == total_actions and total_actions > 0:
-        keyboard.append([InlineKeyboardButton("🎁 Забрать Награду", callback_data="profile")])
-    elif done > 0:
-        keyboard.append([InlineKeyboardButton(f"📋 Задания ({done}/{total_actions})", callback_data="daily_quest_hub")])
-    else:
-        keyboard.append([InlineKeyboardButton("📈 Развитие", callback_data="daily_quest_hub")])
-
-# --- Кнопки гильдии и мира (ОДИН РЯД) ---
-    row4 = []
-    if not guild:
-        row4.append(InlineKeyboardButton("🕋 Вступить в Гильдию", callback_data="guild_info"))
-    elif guild == "BLACK":
-        last_ritual = player.last_ritual
-        cd = GAME_CONFIG["ritual_cooldown_hours"]
-        if not last_ritual or (now_dt - last_ritual) >= timedelta(hours=cd):
-            row4.append(InlineKeyboardButton("🕯️ Ритуал", callback_data="ritual"))
-        else:
-            diff = timedelta(hours=cd) - (now_dt - last_ritual)
-            hrs, mins = int(diff.seconds // 3600), int((diff.seconds % 3600) // 60)
-            cooldown_str = f"({hrs}ч {mins}м)" if hrs > 0 else f"({mins}м)"
-            row4.append(InlineKeyboardButton(f"🕯️ Ритуал {cooldown_str}", callback_data="ritual"))
-    elif guild == "WHITE":
-        last_repent = getattr(player, 'last_repent', None)
-        cd = GAME_CONFIG["repent_cooldown_hours"]
-        if not last_repent or (now_dt - last_repent) >= timedelta(hours=cd):
-            row4.append(InlineKeyboardButton("⚜️ Исповедь", callback_data="repent"))
-        else:
-            diff = timedelta(hours=cd) - (now_dt - last_repent)
-            hrs, mins = int(diff.seconds // 3600), int((diff.seconds % 3600) // 60)
-            cooldown_str = f"({hrs}ч {mins}м)" if hrs > 0 else f"({mins}м)"
-            row4.append(InlineKeyboardButton(f"⚜️ Исповедь {cooldown_str}", callback_data="repent"))
-
-    world_icon = "🌍"
-    if guild == "BLACK": world_icon = "🌍"
-    elif guild == "WHITE": world_icon = "🌍"
-    row4.append(InlineKeyboardButton(f"{world_icon} Мир", callback_data="world_hub"))
-    keyboard.append(row4)
-
-    kb = InlineKeyboardMarkup(keyboard)
-    _menu_cache[user_id] = (now, kb, whisper)
-    return kb, whisper
-
 def get_back_to_menu_keyboard():
     return InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
 
@@ -2562,75 +2477,6 @@ async def _create_new_player(update, context, uid, username):
         reply_markup=guild_kb,
         parse_mode='HTML'
     )
-
-async def _show_main_menu(update, context, player, user, ctx):
-    """Формирует и отправляет главное меню."""
-    bal = player.balance
-    guild = player.guild
-
-    # Определение текущего и следующего ранга
-    rank_emoji, rank_name = "🪓", "Рекрут"
-    next_rank_emoji, next_rank_name, next_threshold = "", "", 0
-    for i, (emoji, threshold, _) in enumerate(RANKS):
-        if bal >= threshold:
-            rank_emoji = emoji.split(' ', 1)[0]
-            rank_name = emoji.split(' ', 1)[1] if ' ' in emoji else emoji
-            if i + 1 < len(RANKS):
-                next_rank_emoji = RANKS[i+1][0].split(' ', 1)[0]
-                next_rank_name = RANKS[i+1][0].split(' ', 1)[1] if ' ' in RANKS[i+1][0] else RANKS[i+1][0]
-                next_threshold = RANKS[i+1][1]
-        else:
-            next_rank_emoji = emoji.split(' ', 1)[0]
-            next_rank_name = emoji.split(' ', 1)[1] if ' ' in emoji else emoji
-            next_threshold = threshold
-            break
-
-    display_name = user.first_name or user.username or "Странник"
-    rank_display = f"{rank_emoji} {rank_name}" if rank_name else rank_emoji
-    whisper = random.choice(WHISPERS)
-
-    # Приветствие и гильдия
-    back = f"⚔️ С возвращением в <b>Гильдию, {rank_display} {html.escape(display_name)}</b>\n"
-    if guild == "BLACK":
-        back += "🔮 Ты — часть <b>Темной Гильдии. 🕯️Ритуалы ждут тебя</b>\n"
-    elif guild == "WHITE":
-        back += "🪽 Ты — часть <b>Светлой Гильдии. ⚜️Исповедь очищает душу и ждёт тебя</b>\n"
-    else:
-        back += (
-            "<b>🕯️⚜️ Ты ещё не ВЫБРАЛ сторону!</b>\n"
-            "🔮 Гильдия откроет <b>ритуалы, исповеди и войну</b>\n"
-            "👉 <b>Нажми кнопку «🕋 Гильдии» в меню чтобы ВСТУПИТЬ.</b>\n"
-        )
-
-    # Мотивационная строка
-    if next_threshold > 0:
-        gap = next_threshold - bal
-        back += f"\n📈 До следующего ранга <b>{next_rank_emoji} {next_rank_name}</b> осталось — <b>{gap} OAC 🍬!</b>"
-    else:
-        back += f"\n<b>⚡ Ты достиг вершины! Твой ранг — {rank_emoji} {rank_name}.</b>"
-
-    # Подсказка для новичков
-    farm_count = player.farm_count
-    craft_count = player.craft_count
-    is_veteran = bal >= 5000
-    
-    # Список именных блантов для проверки
-    named = [it for it in (player.inventory or []) if it.get("type") == "named"]
-    
-    if farm_count == 0:
-        hint = "<b>💡 Твой первый шаг: нажми 🍬 Фармить и получи свои первые OAC!</b>"
-    elif craft_count == 0:
-        hint = "<b>💡 Попробуй 🌿 Крафт, чтобы создать свой первый Блант!</b>"
-    elif len(named) <= 1 and (player.balance or 0) >= GAME_CONFIG["named_blunt_cost"]:
-        hint = "<b>💡 Готов к большему? Создай свой первый 💍 Именной блант! (50 OAC)</b>"
-    elif is_veteran:
-        hint = "💡 Исследуй <b>🔮 Алхимию</b> и корми своего 🐾 <b>питомца!</b>"
-    else:
-        hint = "<b>💡 Исследуй 🏛️ Лабиринт! Он полон опасностей и наград.</b>"
-
-    menu_text = f"<b>🎮 ГЛАВНОЕ МЕНЮ</b>\n\n<i>{whisper}</i>\n\n" + back + "\n\n" + hint
-    kb, _ = await get_main_menu_keyboard(player.user_id, ctx=ctx)
-    await update.effective_message.reply_text(menu_text, reply_markup=kb, parse_mode='HTML')
     
 def get_next_action(player, exclude_callback: str = None) -> tuple[str, str, str]:
     progress = getattr(player, 'daily_progress', {}) or {}
@@ -2688,7 +2534,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             asyncio.create_task(process_daily_login(uid, context))
 
             # Меню отправляем немедленно:
-            await _show_main_menu(update, context, player, user, ctx)
+            text, kb = await build_main_menu(player, ctx, context, full_mode=True)
+            await update.effective_message.reply_text(text, reply_markup=kb, parse_mode='HTML')
     except Exception as e:
         logger.exception("start failed")
         await update.effective_message.reply_text("⚠️ Произошла ошибка. Попробуйте позже.")
@@ -2974,7 +2821,7 @@ async def farm_callback_v2(update, context, ctx, player):
         is_veteran = balance >= 5000
     
         # Динамический прогресс-бар
-        guild_emoji = "🕯️" if guild == "BLACK" else "⚜️" if guild == "WHITE" else "🕋"
+        guild_emoji = "🕯️" if guild == "BLACK" else "⚜️" if guild == "WHITE" else "🏰"
         actions_emojis = {
             "farm": "🍬",
             "craft": "🌿",
@@ -4521,7 +4368,7 @@ async def guild_info_callback(update, context):
         {"level": 5, "cost": 250000, "bonus": 25, "name": "Обитель Богов"},
     ]
 
-    text = "<b>🕋 ГИЛЬДИИ</b>\n\n"
+    text = "<b>🏰 ГИЛЬДИИ</b>\n\n"
 
     for guild_name, donated in [("BLACK", black_donated), ("WHITE", white_donated)]:
         current_level = 1
@@ -4672,8 +4519,8 @@ async def repent_callback(update, context, ctx):
 
     async def _repent(p, conn):
         now = datetime.now()
-    if p.last_repent and (now - p.last_repent) < timedelta(hours=GAME_CONFIG["repent_cooldown_hours"]):
-        remain = timedelta(hours=GAME_CONFIG["repent_cooldown_hours"]) - (now - p.last_repent)
+        if p.last_repent and (now - p.last_repent) < timedelta(hours=GAME_CONFIG["repent_cooldown_hours"]):
+            remain = timedelta(hours=GAME_CONFIG["repent_cooldown_hours"]) - (now - p.last_repent)
             hrs, mins = int(remain.seconds // 3600), int((remain.seconds % 3600) // 60)
             return ("cooldown", f"Исповедь будет доступна через {hrs} ч {mins} мин")
     
@@ -4685,7 +4532,7 @@ async def repent_callback(update, context, ctx):
             return ("no_blunts",)
     
         p.blunts -= 1
-        p.last_repent = datetime.now() 
+        p.last_repent = datetime.now()
         r = random.random()
         if r < 0.70:
             reward = random.randint(100, 200)
@@ -4740,7 +4587,7 @@ async def rules_callback(update, context):
         "<b>💍 ИМЕННЫЕ БЛАНТЫ</b>\n"
         "💎 Создай свой <b>вечный именной Блант</b> через меню «Крафт».\n"
         "<i>Он не курится, получает редкость и навсегда остаётся в твоей коллекции.</i>\n\n"
-        "<b>🕋 ГИЛЬДИИ И РАЗВИТИЕ</b>\n"
+        "<b>🏰 ГИЛЬДИИ И РАЗВИТИЕ</b>\n"
         "🕯️ <b>Тёмная Гильдия:</b> <code>/ritual</code> (+150 OAC раз в 24 ч) — <i>«Ритуалы укрепляют нити»</i>\n"
         "⚜️ <b>Светлая Гильдия:</b> 20% шанс сохранить блант при 💨, <code>/repent</code> — <i>исповедь</i>\n"
         "🪴 <b>Куст:</b> пассивный доход с ранга ⚔️ Ветеран\n"
@@ -6052,15 +5899,13 @@ async def debug_pet(update, context, ctx):
 # ───────────────────────────────────────────────
 # НОВАЯ ГЛАВНАЯ ПАНЕЛЬ (КАРТА 3, СОСТОЯНИЯ А–З)
 # ───────────────────────────────────────────────
-
-async def build_main_menu(player, ctx, context=None):
+async def build_main_menu(player, ctx, context=None, full_mode=False):
     now = datetime.now()
     guild = player.guild
     balance = player.balance or 0
     has_pet = bool(player.pet)
     is_veteran = balance >= 5000
 
-    # ── Прогресс заданий ──
     progress = getattr(player, 'daily_progress', {}) or {}
     tasks = {"farm": "🍬", "craft": "🌿", "smoke": "💨"}
     if guild:
@@ -6072,70 +5917,116 @@ async def build_main_menu(player, ctx, context=None):
     done = sum(1 for k in tasks if progress.get(k))
     reward_claimed = progress.get("reward_claimed", False)
 
-    # ── Текст сообщения ──
+    # ── ТЕКСТ ──
     whisper = random.choice(WHISPERS)
     lines = [f"<i>{whisper}</i>"]
-    display_name = html.escape(player.username or "Странник")
-    if guild:
-        g_emoji = "🕯️" if guild == "BLACK" else "⚜️"
-        g_name = "Тёмной" if guild == "BLACK" else "Светлой"
-        lines.append(f"🫧 Ты в {g_emoji} <b>{g_name} Гильдии</b>, {display_name}")
-    else:
-        lines.append(f"🫧 <b>{display_name}</b>, добро пожаловать в Гильдию")
 
-    # Возврат после паузы >7 дней (одноразово)
+    display_name = html.escape(player.username or "Странник")
+
+    if full_mode:
+        # Полный текст (при старте)
+        rank_emoji, rank_name = "🪓", "Рекрут"
+        next_rank_emoji, next_rank_name, next_threshold = "", "", 0
+        for i, (emoji, threshold, _) in enumerate(RANKS):
+            if balance >= threshold:
+                rank_emoji = emoji.split(' ', 1)[0]
+                rank_name = emoji.split(' ', 1)[1] if ' ' in emoji else emoji
+                if i + 1 < len(RANKS):
+                    next_rank_emoji = RANKS[i+1][0].split(' ', 1)[0]
+                    next_rank_name = RANKS[i+1][0].split(' ', 1)[1] if ' ' in RANKS[i+1][0] else RANKS[i+1][0]
+                    next_threshold = RANKS[i+1][1]
+            else:
+                next_rank_emoji = emoji.split(' ', 1)[0]
+                next_rank_name = emoji.split(' ', 1)[1] if ' ' in emoji else emoji
+                next_threshold = threshold
+                break
+
+        if guild:
+            g_emoji = "🕯️" if guild == "BLACK" else "⚜️"
+            g_name = "Тёмной" if guild == "BLACK" else "Светлой"
+            lines.append(f"⚔️ С возвращением в <b>Гильдию, {rank_emoji} {rank_name} {display_name}</b>")
+            lines.append(f"{g_emoji} Ты — часть <b>{g_name} Гильдии.</b>")
+        else:
+            lines.append(f"⚔️ <b>{display_name}</b>, добро пожаловать в Гильдию")
+            lines.append("🕯️⚜️ Ты ещё не выбрал сторону! Гильдия откроет ритуалы, исповеди и войну.")
+
+        if next_threshold > 0:
+            gap = next_threshold - balance
+            lines.append(f"📈 До следующего ранга <b>{next_rank_emoji} {next_rank_name}</b> осталось — <b>{gap} OAC 🍬!</b>")
+        else:
+            lines.append(f"⚡ Ты достиг вершины! Твой ранг — {rank_emoji} {rank_name}.")
+
+        # Подсказка новичкам
+        farm_count = player.farm_count or 0
+        craft_count = player.craft_count or 0
+        named = [it for it in (player.inventory or []) if it.get("type") == "named"]
+        if farm_count == 0:
+            hint = "💡 Твой первый шаг: нажми 🍬 Фармить и получи свои первые OAC!"
+        elif craft_count == 0:
+            hint = "💡 Попробуй 🌿 Крафт, чтобы создать свой первый Блант!"
+        elif len(named) <= 1 and balance >= GAME_CONFIG["named_blunt_cost"]:
+            hint = "💡 Готов к большему? Создай свой первый 💍 Именной блант! (50 OAC)"
+        elif is_veteran:
+            hint = "💡 Исследуй 🔮 Алхимию и корми своего 🐾 питомца!"
+        else:
+            hint = "💡 Исследуй 🏛️ Лабиринт! Он полон опасностей и наград."
+        lines.append(hint)
+
+    # Общие краткие сообщения (всегда)
     if context and context.user_data.get("return_after_pause"):
         lines.append("🎁 <b>Пока вас не было: накопились задания и готова награда</b>")
         context.user_data["return_after_pause"] = False
 
-    # Напоминание о гильдии на 3-й день одиночке
     if not guild and (player.login_streak or 0) == 3:
         lines.append("🏰 Гильдии помогают расти быстрее — загляните")
 
     text = "\n".join(lines)
 
-    # ── Клавиатура по рядам ──
+    # ── КЛАВИАТУРА ──
     keyboard = []
 
-    # Ряд 0: ✨ Все возможности ›
     if player.onboarding_step != -1:
         keyboard.append([InlineKeyboardButton("✨ Все возможности ›", callback_data="all_features")])
 
-    # Ряд 1: динамическая шапка (исправлено!)
     if not reward_claimed and total > 0:
         if done == total:
             keyboard.append([InlineKeyboardButton("🎁 Забрать награду!", callback_data="claim_reward")])
         elif done > 0:
-            bar_filled = max(1, int(done / total * 5))  # минимум 1 блок если есть прогресс
+            bar_filled = max(1, int(done / total * 5))
             bar_empty = max(0, 5 - bar_filled)
             bar_text = "⚠️ Задания " + "▰" * bar_filled + "▱" * bar_empty + f" {done}/{total}"
             keyboard.append([InlineKeyboardButton(bar_text, callback_data="daily_quest_hub")])
-        # если done == 0, ряд не показывается совсем
+        else:
+            keyboard.append([InlineKeyboardButton("🍬 Фармить", callback_data="farm")])
+    elif reward_claimed or total == 0:
+        keyboard.append([InlineKeyboardButton("🍬 Фармить", callback_data="farm")])
 
-    # Ряд 2: ядро цикла
-    row2 = [
-        InlineKeyboardButton("🍬 Фармить", callback_data="farm"),
-        InlineKeyboardButton("🌿 Крафт ›", callback_data="craft"),
-        InlineKeyboardButton("💨 Дунуть", callback_data="smoke"),
-    ]
+    if (not reward_claimed and total > 0 and done == 0) or (reward_claimed or total == 0):
+        row2 = [
+            InlineKeyboardButton("🌿 Крафт ›", callback_data="craft"),
+            InlineKeyboardButton("💨 Дунуть", callback_data="smoke"),
+        ]
+    else:
+        row2 = [
+            InlineKeyboardButton("🍬 Фармить", callback_data="farm"),
+            InlineKeyboardButton("🌿 Крафт ›", callback_data="craft"),
+            InlineKeyboardButton("💨 Дунуть", callback_data="smoke"),
+        ]
     keyboard.append(row2)
 
-    # Ряд 3: Ритуал / Исповедь
     if guild:
         keyboard.append([InlineKeyboardButton(
             "🕯️ Ритуал" if guild == "BLACK" else "⚜️ Исповедь",
             callback_data="ritual" if guild == "BLACK" else "repent"
         )])
 
-    # Ряд 4: навигация
     keyboard.append([
-        InlineKeyboardButton("🏰 Гильдия ›", callback_data="guild_info"),
-        InlineKeyboardButton("📊 Прогресс ›", callback_data="progress_hub"),
         InlineKeyboardButton("🌍 Мир ›", callback_data="world_hub"),
+        InlineKeyboardButton("📊 Прогресс ›", callback_data="progress_hub"),
+        InlineKeyboardButton("🏰 Гильдия ›", callback_data="guild_info"),
     ])
 
     return text, InlineKeyboardMarkup(keyboard)
-
 
 # ── Обработчик меню (редактирование сообщения) ──
 @cb
@@ -6198,6 +6089,78 @@ async def progress_hub_handler(update, context, ctx):
 
     text = f"<b>📊 ЛИЧНЫЙ ПРОГРЕСС</b>\n\n{comparison_line}"
     await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
+
+@cb
+async def daily_quest_hub(update, context, ctx):
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+    player = await ctx.repo.get_by_id(uid)
+    if not player:
+        return
+
+    progress = getattr(player, 'daily_progress', {}) or {}
+    guild = player.guild
+    has_pet = bool(player.pet)
+    is_veteran = (player.balance or 0) >= 5000
+
+    tasks = []
+    tasks.append(("🍬 Фармить", "farm"))
+    tasks.append(("🌿 Крафт", "craft"))
+    tasks.append(("💨 Дунуть", "smoke"))
+    if guild:
+        label = "🕯️ Ритуал" if guild == "BLACK" else "⚜️ Исповедь"
+        tasks.append((label, "guild"))
+    if is_veteran and has_pet:
+        tasks.append(("🐾 Покормить питомца", "pet"))
+
+    total = len(tasks)
+    done = sum(1 for _, key in tasks if progress.get(key))
+
+    text = f"<b>📋 ЗАДАНИЯ ДНЯ ({done}/{total})</b>\n\n"
+    kb_rows = []
+
+    for label, key in tasks:
+        is_done = progress.get(key, False)
+        if is_done:
+            text += f"✅ {label}\n"
+            # кнопку не добавляем
+        else:
+            text += f"⬜️ {label}\n"
+            kb_rows.append([InlineKeyboardButton(label, callback_data=f"quest_{key}")])
+
+    kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="menu")])
+    kb = InlineKeyboardMarkup(kb_rows)
+    await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
+
+# ─── Маршрутизатор заданий (вызывается при нажатии на кнопку задания) ───
+async def handle_quest_action(update, context):
+    ctx = context.bot_data.get("ctx")
+    query = update.callback_query
+    action = query.data.replace("quest_", "")
+    uid = query.from_user.id
+
+    if action == "farm":
+        await farm_callback_v2(update, context)
+    elif action == "craft":
+        await handle_craft_normal_v2(update, context)
+    elif action == "smoke":
+        await do_smoke(update, context)
+    elif action == "guild":
+        player = await ctx.repo.get_by_id(uid)
+        if player and player.guild == "BLACK":
+            await ritual_callback(update, context)
+        elif player and player.guild == "WHITE":
+            await repent_callback(update, context)
+        else:
+            await query.answer("Сначала вступи в Гильдию", show_alert=True)
+    elif action == "pet":
+        await feed_pet_handler(update, context)
+    else:
+        await query.answer("Неизвестное задание", show_alert=True)
+
+    # Обновляем экран заданий после любой попытки
+    await daily_quest_hub(update, context)
 
 # ── Забирание награды (обновлённый профиль с наградой) ──
 @cb
@@ -6598,7 +6561,7 @@ async def guild_join_handler(update, context, ctx):
             ])
             await safe_send_message(
                 context, uid,
-                f"🕋 <b>Ты в {g_name} Гильдии!</b> Сейчас в ней <b>{online}</b> странников.\n\n"
+                f"🏰 <b>Ты в {g_name} Гильдии!</b> Сейчас в ней <b>{online}</b> странников.\n\n"
                 "<b>🎓 ОБУЧЕНИЕ [▓▓░░] 2/3</b>\n\n"
                 "<b>🍬 Твой первый шаг — фарм!</b>\n"
                 "Нажми кнопку ниже, чтобы получить <b>OAC</b>.\n\n"
@@ -6627,7 +6590,7 @@ async def guild_join_handler(update, context, ctx):
         ])
 
         await query.message.edit_text(
-            f"<b><i>🕋 ГИЛЬДИЯ ПРИНЯЛА ТЕБЯ 🪽</i></b>\n\n"
+            f"<b><i>🏰 ГИЛЬДИЯ ПРИНЯЛА ТЕБЯ 🪽</i></b>\n\n"
             f"✨ Отныне ты — часть <b>{guild_name_genitive}</b>.\n"
             f"🩸 Искажение стало плотнее...\n\n"
             f"<b>💡 Твой первый шаг:</b>",
