@@ -4537,70 +4537,40 @@ async def repent_callback(update, context, ctx):
     uid = query.from_user.id
 
     async def _repent(p, conn):
-        now = datetime.now(timezone.utc)
+        now = datetime.now()
         cooldown_hours = GAME_CONFIG.get("repent_cooldown_hours", 12)
-
-        # Кулдаун
         if p.last_repent and (now - p.last_repent) < timedelta(hours=cooldown_hours):
             remain = timedelta(hours=cooldown_hours) - (now - p.last_repent)
             hrs, rem = divmod(int(remain.total_seconds()), 3600)
             mins = rem // 60
             return ("cooldown", f"⏳ Исповедь через {hrs} ч {mins} мин")
 
-        # Проверки
         if p.guild != "WHITE":
             return ("wrong_guild", "❌ Только Светлая Гильдия.")
         if (p.blunts or 0) < 1:
             return ("no_blunts", "❌ Нет блантов. Скрути!")
 
-        # Расход бланта и обновление счётчика
         p.blunts -= 1
         p.last_repent = now
-        p.daily_progress = p.daily_progress or {}
-        p.repent_count = (p.repent_count or 0) + 1
-
-        old_count = p.repent_count - 1
-        new_count = p.repent_count
-        medal_text, medal_bonus = get_medal_text_and_reward(old_count, new_count, REPENT_MEDALS)
-
-        # Случайный исход
+        p.daily_progress = p.daily_progress or {}   # ← добавить!
         r = random.random()
-        reward = 0
-        result_line = ""
-
         if r < 0.70:
             reward = random.randint(100, 200)
-            p.balance += reward + medal_bonus
+            p.balance += reward
             p.daily_progress["guild_action"] = True
-            result_line = f"Исповедь принесла тебе <b>+{reward} OAC</b> 🍬"
+            return ("ok", f"<b>⚜️ ИСПОВЕДЬ</b>\n\nБлагословение! +{reward} OAC.")
         elif r < 0.95:
             p.m_essence = (p.m_essence or 0) + 1
-            result_line = "Ты получил 💠 <b>+1 Кристальную Пыль</b>"
+            return ("ok", "<b>⚜️ ИСПОВЕДЬ</b>\n\nТы получил 💠 Кристальную Пыль.")
         else:
             name = random.choice(["Крик Бездны", "Пепел Короля", "Шёпот Склепа"])
             await create_named_blunt(uid, name, rarity="legendary", ctx=ctx, player=p, conn=conn)
-            result_line = f"🌟 Чудо! Легендарный блант <b>«{name}»</b>"
-
-        target = get_medal_target(new_count, REPENT_MEDALS)
-        progress_bar_str = get_medal_progress(new_count, REPENT_MEDALS)
-
-        full_text = (
-            f"<b>⚜️ ИСПОВЕДЬ ПРИНЯТА</b>\n\n"
-            f"{result_line}\n"
-            f"<b>⚜️ У тебя:</b> <b>{p.balance} OAC 🕊️</b>\n\n"
-            f"<i>«Твоя душа очистилась...»</i>\n"
-            f"{medal_text}\n"
-            f"<b>🕊️ Исповеди:</b> {new_count}/{target}\n"
-            f"<b>{progress_bar_str}</b>"
-        )
-
-        return ("ok", full_text)
+            return ("ok", f"<b>⚜️ ИСПОВЕДЬ</b>\n\n🌟 Чудо! Легендарный блант «{name}»!")
 
     result = await ctx.repo.atomic_update(uid, _repent)
 
     if result is None:
-        await edit_or_reply(
-            update, context,
+        await query.message.edit_text(
             "❌ Профиль не найден. Напиши /start",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
         )
@@ -4608,36 +4578,17 @@ async def repent_callback(update, context, ctx):
 
     status, data = result[0], result[1] if len(result) > 1 else ""
 
-    # Ошибки – показываем без анимации
-    if status in ("wrong_guild", "no_blunts", "cooldown"):
-        await edit_or_reply(
-            update, context,
+    try:
+        await query.message.edit_text(
             data,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="guild_info")]]),
             parse_mode='HTML'
         )
-        return
-
-    # Успех – анимация + результат
-    anim_msg = await animate_progress_bar(update, context, title="🕊️ Исповедь...", duration=0.6, steps=4)
-    if anim_msg is not None:
-        await anim_msg.edit_text(
-            data,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="guild_info")]]),
-            parse_mode='HTML'
-        )
-    else:
-        # Если анимация не удалась (например, сообщение не отправлено)
-        await safe_send_message(
-            context,
-            update.effective_chat.id,
-            data,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="guild_info")]]),
-            parse_mode='HTML'
-        )
-
-    # Проверка достижений
-    await check_achievements(uid, context)
+    except BadRequest as e:
+        if "message is not modified" in str(e).lower():
+            pass
+        else:
+            raise
 
 async def rules_callback(update, context):
     user, msg = get_user_and_msg(update)
