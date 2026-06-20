@@ -4531,78 +4531,59 @@ async def repent_callback(update, context, ctx):
     await query.answer()
     uid = query.from_user.id
 
-    # ✅ Загружаем игрока
-    player = await ctx.repo.get_by_id(uid)
-    if not player:
-        await query.answer("Профиль не найден. Напиши /start", show_alert=True)
-        return
-
-    # 🚀 ВРЕМЕННАЯ ДИАГНОСТИКА – теперь player существует
-    try:
-        await context.bot.send_message(
-            chat_id=settings.admin_id,
-            text=f"🟢 REPENT CALLED\nUser: {uid}\nGuild: {player.guild}"   # ✅ player уже определён
-        )
-    except Exception as e:
-        logger.error(f"Failed to send debug msg: {e}")
-
     async def _repent(p, conn):
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         cooldown_hours = GAME_CONFIG.get("repent_cooldown_hours", 12)
         if p.last_repent and (now - p.last_repent) < timedelta(hours=cooldown_hours):
             remain = timedelta(hours=cooldown_hours) - (now - p.last_repent)
-            hrs, mins = int(remain.seconds // 3600), int((remain.seconds % 3600) // 60)
-            return ("cooldown", f"Исповедь будет доступна через {hrs} ч {mins} мин")
-    
-        if not p or not p.user_id:
-            return ("no_player",)
+            hrs, rem = divmod(int(remain.total_seconds()), 3600)
+            mins = rem // 60
+            return ("cooldown", f"⏳ Исповедь через {hrs} ч {mins} мин")
+
         if p.guild != "WHITE":
-            return ("wrong_guild",)
+            return ("wrong_guild", "❌ Только Светлая Гильдия.")
         if (p.blunts or 0) < 1:
-            return ("no_blunts",)
-    
+            return ("no_blunts", "❌ Нет блантов. Скрути!")
+
         p.blunts -= 1
-        p.last_repent = datetime.now()
+        p.last_repent = now
+        p.daily_progress = p.daily_progress or {}   # ← добавить!
         r = random.random()
         if r < 0.70:
             reward = random.randint(100, 200)
-            p.balance = (p.balance or 0) + reward
-            p.daily_progress = p.daily_progress or {}
+            p.balance += reward
             p.daily_progress["guild_action"] = True
-            return ("ok", f"<b><i>⚜️ ИСПОВЕДЬ</i></b>\n\nБлагословение! +{reward} OAC.")
+            return ("ok", f"<b>⚜️ ИСПОВЕДЬ</b>\n\nБлагословение! +{reward} OAC.")
         elif r < 0.95:
             p.m_essence = (p.m_essence or 0) + 1
-            return ("ok", "<b><i>⚜️ ИСПОВЕДЬ</i></b>\n\nТы получил 💠 Кристальную Пыль.")
+            return ("ok", "<b>⚜️ ИСПОВЕДЬ</b>\n\nТы получил 💠 Кристальную Пыль.")
         else:
-            name = random.choice(["Крик Бездны","Пепел Короля","Шёпот Склепа"])
-            await create_named_blunt(uid, name, rarity="legendary", ctx=ctx, player=p)
-            return ("ok", f"<b><i>⚜️ ИСПОВЕДЬ</i></b>\n\n🌟 Чудо! Легендарный блант «{name}»!")
+            name = random.choice(["Крик Бездны", "Пепел Короля", "Шёпот Склепа"])
+            await create_named_blunt(uid, name, rarity="legendary", ctx=ctx, player=p, conn=conn)
+            return ("ok", f"<b>⚜️ ИСПОВЕДЬ</b>\n\n🌟 Чудо! Легендарный блант «{name}»!")
 
     result = await ctx.repo.atomic_update(uid, _repent)
 
-    if not result:
-        await query.answer("Профиль не найден. Напиши /start", show_alert=True)
+    if result is None:
+        await query.message.edit_text(
+            "❌ Профиль не найден. Напиши /start",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
+        )
         return
 
-    status, *rest = result
-    data = rest[0] if rest else ""
+    status, data = result[0], result[1] if len(result) > 1 else ""
 
-    if status == "no_player":
-        await query.answer("Профиль не найден. Напиши /start", show_alert=True)
-        return
-    if status == "wrong_guild":
-        await query.answer("Только для Светлой Гильдии.", show_alert=True)
-        return
-    if status == "no_blunts":
-        await query.answer("Нужен 1 блант.", show_alert=True)
-        return
-
-    # Успех
-    await query.message.edit_text(
-        data,
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="guild_info")]]),
-        parse_mode='HTML'
-    )
+    try:
+        await query.message.edit_text(
+            data,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="guild_info")]]),
+            parse_mode='HTML'
+        )
+    except BadRequest as e:
+        if "message is not modified" in str(e).lower():
+            pass
+        else:
+            raise
 
 async def rules_callback(update, context):
     user, msg = get_user_and_msg(update)
