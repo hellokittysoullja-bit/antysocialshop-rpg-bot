@@ -6695,7 +6695,7 @@ CALLBACKS: Dict[str, Callable] = {
     "guild_war": guild_war_callback,
     "repent": repent_callback,
     "shop": shop_callback,
-    "bush_preview": bush_pureview_handler,
+    "bush_preview": bush_preview_handler,
     "activate_menu": activate_menu_handler,
     "skins_menu": skins_menu_handler,
     "choose_title": choose_title_handler,
@@ -6712,9 +6712,9 @@ CALLBACKS: Dict[str, Callable] = {
     "onboarding_reward": onboarding_reward,
     "daily_quest_hub": daily_quest_hub,
     "world_hub": world_hub,
-    "progress_hub": progress_hub,
-    "all_features": all_features,
-    "claim_reward": claim_reward,
+    "progress_hub": progress_hub_handler,
+    "all_features": all_features_handler,
+    "claim_reward": claim_reward_handler,
 }
 
 EXACT_HANDLERS: Dict[str, Callable] = {
@@ -6737,6 +6737,7 @@ PREFIX_HANDLERS: Dict[str, Callable] = {
     "set_bg_": handle_set_bg,
     "lab_attack_": handle_lab_option,
     "achievements_": achievements_callback,
+    "quest_": handle_quest_action,
 }
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
