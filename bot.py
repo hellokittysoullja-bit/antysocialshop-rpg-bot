@@ -1544,6 +1544,17 @@ async def _run_migrations(conn):
             END IF;
         END $$;
     """)
+    await conn.execute("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='players' AND column_name='last_repent'
+            ) THEN
+                ALTER TABLE players ADD COLUMN last_repent TIMESTAMP;
+            END IF;
+        END $$;
+    """)
     
     # Питомцы и exists
     await conn.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS pet TEXT DEFAULT '';")
