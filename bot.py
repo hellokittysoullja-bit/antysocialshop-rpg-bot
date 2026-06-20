@@ -6147,7 +6147,7 @@ async def daily_quest_hub(update, context, ctx):
     tasks.append(("💨 Дунуть", "smoke"))
     if guild:
         label = "🕯️ Ритуал" if guild == "BLACK" else "⚜️ Исповедь"
-        tasks.append((label, "guild"))
+        tasks.append((label, "guild_action"))
     if is_veteran and has_pet:
         tasks.append(("🐾 Покормить питомца", "pet"))
 
@@ -6183,7 +6183,7 @@ async def handle_quest_action(update, context):
         await handle_craft_normal_v2(update, context)
     elif action == "smoke":
         await do_smoke(update, context)
-    elif action == "guild":
+    elif action == "guild_action":
         player = await ctx.repo.get_by_id(uid)
         if player and player.guild == "BLACK":
             await ritual_callback(update, context)
@@ -6192,7 +6192,7 @@ async def handle_quest_action(update, context):
         else:
             await query.answer("Сначала вступи в Гильдию", show_alert=True)
     elif action == "pet":
-        await feed_pet_handler(update, context)
+        await pet_preview(update, context)
     else:
         await query.answer("Неизвестное задание", show_alert=True)
 
