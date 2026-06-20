@@ -405,7 +405,7 @@ class PlayerRepository:
 
         columns = [
             "user_id", "username", "balance", "blunts", "guild", "last_farm",
-            "last_ritual", "last_daily", "titles", "last_farm_date", "passive_level",
+            "last_ritual", "last_repent", "last_daily", "titles", "last_farm_date", "passive_level",
             "passive_collected", "karma", "inhaled", "smoke_count", "farm_count",
             "craft_count", "ritual_count", "referral_count", "last_berserk",
             "inventory", "invited_by", "profile_skins", "login_streak",
@@ -460,7 +460,7 @@ class PlayerRepository:
             async with conn.transaction():
                 columns = [
                     "user_id", "username", "balance", "blunts", "guild", "last_farm",
-                    "last_ritual", "last_daily", "titles", "last_farm_date", "passive_level",
+                    "last_ritual", "last_repent", "last_daily", "titles", "last_farm_date", "passive_level",
                     "passive_collected", "karma", "inhaled", "smoke_count", "farm_count",
                     "craft_count", "ritual_count", "referral_count", "last_berserk",
                     "inventory", "invited_by", "profile_skins", "login_streak",
@@ -1597,6 +1597,7 @@ async def create_tables(conn):
             guild TEXT DEFAULT NULL,
             last_farm TIMESTAMP,
             last_ritual TIMESTAMP,
+            last_repent TIMESTAMP,
             last_daily TIMESTAMP,
             titles TEXT DEFAULT '',
             last_farm_date DATE,
@@ -4532,8 +4533,9 @@ async def repent_callback(update, context, ctx):
 
     async def _repent(p, conn):
         now = datetime.now()
-        if p.last_repent and (now - p.last_repent) < timedelta(hours=GAME_CONFIG["repent_cooldown_hours"]):
-            remain = timedelta(hours=GAME_CONFIG["repent_cooldown_hours"]) - (now - p.last_repent)
+        cooldown_hours = GAME_CONFIG.get("repent_cooldown_hours", 12)
+        if p.last_repent and (now - p.last_repent) < timedelta(hours=cooldown_hours):
+            remain = timedelta(hours=cooldown_hours) - (now - p.last_repent)
             hrs, mins = int(remain.seconds // 3600), int((remain.seconds % 3600) // 60)
             return ("cooldown", f"Исповедь будет доступна через {hrs} ч {mins} мин")
     
