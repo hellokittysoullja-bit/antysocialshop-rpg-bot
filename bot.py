@@ -6051,11 +6051,23 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
         ]
     keyboard.append(row2)
 
+    # ===== АДАПТИВНАЯ КНОПКА ГИЛЬДИИ =====
     if guild:
-        keyboard.append([InlineKeyboardButton(
-            "🕯️ Ритуал" if guild == "BLACK" else "⚜️ Исповедь",
-            callback_data="ritual" if guild == "BLACK" else "repent"
-        )])
+        now = datetime.now()
+        if guild == "BLACK":
+            last_time = player.last_ritual
+            cooldown = GAME_CONFIG["ritual_cooldown_hours"]
+            label = "🕯️ Ритуал"
+            callback = "ritual"
+        else:  # WHITE
+            last_time = player.last_repent
+            cooldown = GAME_CONFIG["repent_cooldown_hours"]
+            label = "⚜️ Исповедь"
+            callback = "repent"
+        
+        # Показываем кнопку ТОЛЬКО если доступно
+        if not last_time or (now - last_time) >= timedelta(hours=cooldown):
+            keyboard.append([InlineKeyboardButton(label, callback_data=callback)])
 
     keyboard.append([
         InlineKeyboardButton("🌍 Мир ›", callback_data="world_hub"),
@@ -6228,7 +6240,7 @@ async def claim_reward_handler(update, context, ctx):
 
     # Начисляем награду атомарно
     async def _reward(p, conn):
-        p.balance += 50
+        p.balance += 100
         p.daily_progress["reward_claimed"] = True
         return p.balance
 
@@ -6236,7 +6248,7 @@ async def claim_reward_handler(update, context, ctx):
     if result:
         await context.bot.send_message(
             chat_id=query.message.chat.id,
-            text="🎁 <b>Награда получена!</b>\n+50 OAC 🍬\n\nОтличная работа!",
+            text="🎁 <b>Награда получена!</b>\n<b>+100 OAC 🍬</b>\n\nОтличная работа!",
             parse_mode='HTML'
         )
 
