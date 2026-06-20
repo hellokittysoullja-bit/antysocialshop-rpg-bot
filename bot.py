@@ -5919,12 +5919,19 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
 
     # ── ТЕКСТ ──
     whisper = random.choice(WHISPERS)
-    lines = [f"<i>{whisper}</i>"]
-
     display_name = html.escape(player.username or "Странник")
 
     if full_mode:
-        # Полный текст (при старте)
+        # Полный текст (при старте) — используется оригинальное оформление
+        lines = []
+
+        # Заголовок меню и шёпот (пункт 5 и оригинальная структура)
+        lines.append("<b>🎮 ГЛАВНОЕ МЕНЮ</b>")
+        lines.append("")
+        lines.append(f"<i>{whisper}</i>")
+        lines.append("")
+
+        # Определение текущего и следующего ранга (логика без изменений)
         rank_emoji, rank_name = "🪓", "Рекрут"
         next_rank_emoji, next_rank_name, next_threshold = "", "", 0
         for i, (emoji, threshold, _) in enumerate(RANKS):
@@ -5941,38 +5948,52 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
                 next_threshold = threshold
                 break
 
-        if guild:
-            g_emoji = "🕯️" if guild == "BLACK" else "⚜️"
-            g_name = "Тёмной" if guild == "BLACK" else "Светлой"
-            lines.append(f"⚔️ С возвращением в <b>Гильдию, {rank_emoji} {rank_name} {display_name}</b>")
-            lines.append(f"{g_emoji} Ты — часть <b>{g_name} Гильдии.</b>")
-        else:
-            lines.append(f"⚔️ <b>{display_name}</b>, добро пожаловать в Гильдию")
-            lines.append("🕯️⚜️ Ты ещё не выбрал сторону! Гильдия откроет ритуалы, исповеди и войну.")
+        rank_display = f"{rank_emoji} {rank_name}" if rank_name else rank_emoji
 
+        # Приветствие и гильдия (пункты 1, 2, 3 — возвращены к оригиналу)
+        lines.append(f"⚔️ С возвращением в <b>Гильдию, {rank_display} {display_name}</b>")
+        if guild == "BLACK":
+            lines.append("🔮 Ты — часть <b>Темной Гильдии. 🕯️Ритуалы ждут тебя</b>")
+        elif guild == "WHITE":
+            lines.append("🪽 Ты — часть <b>Светлой Гильдии. ⚜️Исповедь очищает душу и ждёт тебя</b>")
+        else:
+            lines.append("<b>🕯️⚜️ Ты ещё не ВЫБРАЛ сторону!</b>")
+            lines.append("🔮 Гильдия откроет <b>ритуалы, исповеди и войну</b>")
+            lines.append("👉 <b>Нажми кнопку «🏰 Гильдии» в меню чтобы ВСТУПИТЬ.</b>")
+
+        lines.append("")  # отступ перед мотивационной строкой
+
+        # Мотивационная строка (до следующего ранга)
         if next_threshold > 0:
             gap = next_threshold - balance
             lines.append(f"📈 До следующего ранга <b>{next_rank_emoji} {next_rank_name}</b> осталось — <b>{gap} OAC 🍬!</b>")
         else:
-            lines.append(f"⚡ Ты достиг вершины! Твой ранг — {rank_emoji} {rank_name}.")
+            lines.append(f"<b>⚡ Ты достиг вершины! Твой ранг — {rank_emoji} {rank_name}.</b>")
 
-        # Подсказка новичкам
+        lines.append("")  # отступ перед подсказкой
+
+        # Подсказка для новичков (пункт 4 — возвращено жирное оформление)
         farm_count = player.farm_count or 0
         craft_count = player.craft_count or 0
         named = [it for it in (player.inventory or []) if it.get("type") == "named"]
+
         if farm_count == 0:
-            hint = "💡 Твой первый шаг: нажми 🍬 Фармить и получи свои первые OAC!"
+            hint = "<b>💡 Твой первый шаг: нажми 🍬 Фармить и получи свои первые OAC!</b>"
         elif craft_count == 0:
-            hint = "💡 Попробуй 🌿 Крафт, чтобы создать свой первый Блант!"
+            hint = "<b>💡 Попробуй 🌿 Крафт, чтобы создать свой первый Блант!</b>"
         elif len(named) <= 1 and balance >= GAME_CONFIG["named_blunt_cost"]:
-            hint = "💡 Готов к большему? Создай свой первый 💍 Именной блант! (50 OAC)"
+            hint = "<b>💡 Готов к большему? Создай свой первый 💍 Именной блант! (50 OAC)</b>"
         elif is_veteran:
-            hint = "💡 Исследуй 🔮 Алхимию и корми своего 🐾 питомца!"
+            hint = "💡 Исследуй <b>🔮 Алхимию</b> и корми своего 🐾 <b>питомца!</b>"
         else:
-            hint = "💡 Исследуй 🏛️ Лабиринт! Он полон опасностей и наград."
+            hint = "<b>💡 Исследуй 🏛️ Лабиринт! Он полон опасностей и наград.</b>"
         lines.append(hint)
 
-    # Общие краткие сообщения (всегда)
+    else:
+        # Краткий режим (без изменений)
+        lines = [f"<i>{whisper}</i>"]
+
+    # Общие краткие сообщения (всегда) — новые фичи оставлены
     if context and context.user_data.get("return_after_pause"):
         lines.append("🎁 <b>Пока вас не было: накопились задания и готова награда</b>")
         context.user_data["return_after_pause"] = False
@@ -5982,7 +6003,7 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
 
     text = "\n".join(lines)
 
-    # ── КЛАВИАТУРА ──
+    # ── КЛАВИАТУРА (без изменений) ──
     keyboard = []
 
     if player.onboarding_step != -1:
