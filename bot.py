@@ -360,7 +360,7 @@ class PlayerRepository:
 
             columns = [
                 "user_id", "username", "balance", "blunts", "guild", "last_farm",
-                "last_ritual", "last_daily", "titles", "last_farm_date", "passive_level",
+                "last_ritual", "last_repent", "last_daily", "titles", "last_farm_date", "passive_level",
                 "passive_collected", "karma", "inhaled", "smoke_count", "farm_count",
                 "craft_count", "ritual_count", "referral_count", "last_berserk",
                 "inventory", "invited_by", "profile_skins", "login_streak",
@@ -2156,7 +2156,7 @@ MAIN_MENU_COOLDOWNS = {
     "repent": {
         "text": "⚜️ Исповедь",
         "cooldown_hours": GAME_CONFIG["repent_cooldown_hours"],
-        "last_attr": "last_confess",
+        "last_attr": "last_repent",
         "format": "hrs",
         "guild_only": "WHITE",
     },
