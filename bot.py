@@ -280,6 +280,7 @@ class Player(BaseModel):
     guild: Optional[str] = None
     last_farm: Optional[datetime] = None
     last_ritual: Optional[datetime] = None
+    last_repent: Optional[datetime] = None
     last_daily: Optional[datetime] = None
     titles: str = ""
     last_farm_date: Optional[date] = None
@@ -2141,27 +2142,27 @@ async def process_daily_login(user_id: int, context) -> None:
 MAIN_MENU_COOLDOWNS = {
     "farm": {
         "text": "🍬 Фармить",
-        "cooldown_hours": settings.farm_cooldown_hours,   # ← раньше было FARM_COOLDOWN_HOURS
+        "cooldown_hours": GAME_CONFIG["farm_cooldown_hours"],
         "last_attr": "last_farm",
         "format": "min",
     },
     "ritual": {
         "text": "🕯️ Ритуал",
-        "cooldown_hours": settings.ritual_cooldown_hours, # ← было 24
+        "cooldown_hours": GAME_CONFIG["ritual_cooldown_hours"],
         "last_attr": "last_ritual",
         "format": "hrs",
         "guild_only": "BLACK",
     },
     "repent": {
         "text": "⚜️ Исповедь",
-        "cooldown_hours": settings.repent_cooldown_hours,
-        "last_attr": "last_repent",
+        "cooldown_hours": GAME_CONFIG["repent_cooldown_hours"],
+        "last_attr": "last_confess",
         "format": "hrs",
         "guild_only": "WHITE",
     },
     "lab": {
         "text": "🏛️ Лабиринт",
-        "cooldown_hours": settings.lab_cooldown_hours,    # ← было 12
+        "cooldown_hours": GAME_CONFIG["lab_cooldown_hours"],
         "last_attr": "last_lab_attempt",
         "format": "full",
     },
