@@ -2763,7 +2763,7 @@ def _format_farm_message(earned: int, crit: bool, happy: bool,
     elif earned >= FARM_MAX * 10:
         crit_emoji = "💥 (x10!)"
     else:
-        crit_emoji = "🍬🍬"
+        crit_emoji = "🍬(x2)"
 
     # Happy hour (закомментирован)
     # happy_str = " 🌟x2" if happy else ""
