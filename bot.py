@@ -4527,6 +4527,7 @@ async def guild_war_callback(update, context):
 @cb
 async def repent_callback(update, context, ctx):
     query = update.callback_query
+    await query.answer()
     uid = query.from_user.id
 
     async def _repent(p, conn):
@@ -4569,9 +4570,6 @@ async def repent_callback(update, context, ctx):
     status, *rest = result
     data = rest[0] if rest else ""
 
-    if status == "cooldown":
-        await safe_send_message(context, update.effective_chat.id, data, parse_mode='HTML')
-        return
     if status == "no_player":
         await query.answer("Профиль не найден. Напиши /start", show_alert=True)
         return
