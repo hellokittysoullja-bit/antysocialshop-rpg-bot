@@ -1557,6 +1557,9 @@ async def _run_migrations(conn):
             END IF;
         END $$;
     """)
+
+    # Исповедь медали миграция 
+    await conn.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS repent_count INTEGER DEFAULT 0;")
     
     # Питомцы и exists
     await conn.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS pet TEXT DEFAULT '';")
