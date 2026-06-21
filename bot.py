@@ -1566,13 +1566,15 @@ async def _run_migrations(conn):
     await conn.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS pet_name TEXT DEFAULT '';")
     await conn.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS \"exists\" BOOLEAN DEFAULT TRUE;")
 
-    # ===== ОПТИМИЗАЦИЯ ХРАНЕНИЯ (Render Free Tier) =====
+# ===== ОПТИМИЗАЦИЯ ХРАНЕНИЯ (Render Free Tier) =====
+    # JSONB поля — сжатие + хранение вне таблицы при размере > 2KB
     await conn.execute("ALTER TABLE players ALTER COLUMN inventory SET STORAGE EXTENDED;")
     await conn.execute("ALTER TABLE players ALTER COLUMN profile_skins SET STORAGE EXTENDED;")
-    await conn.execute("ALTER TABLE players SET (autovacuum_vacuum_scale_factor = 0.01);")
-    await conn.execute("ALTER TABLE players SET (autovacuum_vacuum_threshold = 50);")
-    await conn.execute("ALTER TABLE players SET (autovacuum_vacuum_cost_limit = 200);")
+    await conn.execute("ALTER TABLE players ALTER COLUMN daily_progress SET STORAGE EXTENDED;")
+    
+    # Autovacuum — агрессивная очистка для Free Tier
 
+    
     # === Финальная проверка целостности ===
     try:
         await conn.execute("SELECT 1 FROM war_state LIMIT 1")
@@ -1586,12 +1588,6 @@ async def _run_migrations(conn):
     await conn.execute("ALTER TABLE players SET (autovacuum_vacuum_scale_factor = 0.01)")
     await conn.execute("ALTER TABLE players SET (autovacuum_vacuum_threshold = 50)")
     await conn.execute("ALTER TABLE players SET (autovacuum_vacuum_cost_limit = 200)")
-    
-    # В конце _run_migrations():
-await conn.execute("CREATE INDEX IF NOT EXISTS idx_players_guild ON players(guild)")
-await conn.execute("CREATE INDEX IF NOT EXISTS idx_players_balance ON players(balance DESC)")
-await conn.execute("CREATE INDEX IF NOT EXISTS idx_players_last_farm ON players(last_farm)")
-await conn.execute("CREATE INDEX IF NOT EXISTS idx_players_last_daily ON players(last_daily)")
     
 async def close_db_pool():
     global db_pool
@@ -1720,7 +1716,7 @@ class PerfectedCache:
     - Устойчив к падению Redis
     - Полностью типобезопасен
     """
-    def __init__(self, default_ttl: int = 300, stale_ttl: int = 600):
+    def __init__(self, default_ttl: int = 120, stale_ttl: int = 600):
         self._pending: Dict[str, asyncio.Task] = {}
         self._default_ttl = default_ttl
         self._stale_ttl = stale_ttl
@@ -6162,21 +6158,6 @@ async def daily_quest_hub(update, context, ctx):
     guild = player.guild
     has_pet = bool(player.pet)
     is_veteran = (player.balance or 0) >= 5000
-    
-# ===== СБРОС ЗАДАНИЙ ПРИ НОВОМ ДНЕ =====
-    today = date.today()
-    last_date = progress.get("date")
-    if last_date != today.isoformat():
-        player.daily_progress = {"date": today.isoformat()}
-        await ctx.repo.save(player)
-        progress = player.daily_progress
-        
-# ===== ЗАЩИТА ОТ РАЗРАСТАНИЯ =====
-    if len(progress) > 10:
-        allowed_keys = {"date", "reward_claimed", "farm", "craft", "smoke", "guild_action", "pet"}
-        progress = {k: v for k, v in progress.items() if k in allowed_keys}
-        player.daily_progress = progress
-        await ctx.repo.save(player)
 
     tasks = []
     tasks.append(("🍬 Фармить", "farm"))
@@ -6254,20 +6235,11 @@ async def claim_reward_handler(update, context, ctx):
     player = await ctx.repo.get_by_id(uid)
     if not player:
         return
-        
 
     progress = getattr(player, 'daily_progress', {}) or {}
     if progress.get("reward_claimed"):
         await query.answer("Награда уже получена!", show_alert=True)
         return
-        
-# ===== СБРОС ЗАДАНИЙ ПРИ НОВОМ ДНЕ =====
-    today = date.today()
-    last_date = progress.get("date")
-    if last_date != today.isoformat():
-        player.daily_progress = {"date": today.isoformat()}
-        await ctx.repo.save(player)
-        progress = player.daily_progress
 
     # Проверяем, все ли задания выполнены
     tasks = {"farm", "craft", "smoke"}
