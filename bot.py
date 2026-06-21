@@ -6132,44 +6132,197 @@ async def progress_hub_handler(update, context, ctx):
     await query.answer()
     uid = query.from_user.id
 
-    player = await ctx.repo.get_by_id(uid)
-    comparison_line = ""
+    try:
+        player = await ctx.repo.get_by_id(uid)
+        if not player or not player.exists:
+            await query.answer("❌ Профиль не найден!", show_alert=True)
+            return
 
-    if player:
+        balance = player.balance or 0
+        username = html_escape(player.username or str(uid))
+
+        # ===== 1. РАНГ И ПРОГРЕСС =====
+        rank_emoji, rank_name = "🪓", "Рекрут"
+        next_rank_emoji, next_rank_name, next_threshold = "", "", 0
+        for i, (emoji, threshold, _) in enumerate(RANKS):
+            if balance >= threshold:
+                rank_emoji = emoji.split(' ', 1)[0]
+                rank_name = emoji.split(' ', 1)[1] if ' ' in emoji else emoji
+                if i + 1 < len(RANKS):
+                    next_rank_emoji = RANKS[i+1][0].split(' ', 1)[0]
+                    next_rank_name = RANKS[i+1][0].split(' ', 1)[1] if ' ' in RANKS[i+1][0] else RANKS[i+1][0]
+                    next_threshold = RANKS[i+1][1]
+            else:
+                next_rank_emoji = emoji.split(' ', 1)[0]
+                next_rank_name = emoji.split(' ', 1)[1] if ' ' in emoji else emoji
+                next_threshold = threshold
+                break
+
+        if next_threshold:
+            prev_threshold = RANKS[i][1] if i < len(RANKS)-1 else 0
+            progress_percent = int((balance - prev_threshold) / (next_threshold - prev_threshold) * 100) if next_threshold > prev_threshold else 100
+            progress_percent = min(100, max(0, progress_percent))
+            bar = "▓" * (progress_percent // 10) + "░" * (10 - progress_percent // 10)
+            rank_line = (
+                f"⚜️ Ранг: {rank_emoji} {rank_name} → {next_rank_emoji} {next_rank_name}\n"
+                f"<b>{balance} / {next_threshold} OAC</b>\n"
+                f"{bar} {progress_percent}%"
+            )
+        else:
+            rank_line = f"⚜️ Ранг: {rank_emoji} {rank_name} (Максимум!)"
+
+        # ===== 2. ЕЖЕДНЕВНЫЕ ЗАДАНИЯ =====
+        progress = getattr(player, 'daily_progress', {}) or {}
+        tasks = []
+        tasks.append(("🍬 Фармить", "farm"))
+        tasks.append(("🌿 Крафт", "craft"))
+        tasks.append(("💨 Дунуть", "smoke"))
+        
+        if player.guild:
+            label = "🕯️ Ритуал" if player.guild == "BLACK" else "⚜️ Исповедь"
+            tasks.append((label, "guild_action"))
+        
+        if (player.balance or 0) >= 5000 and player.pet:
+            tasks.append(("🐾 Покормить питомца", "pet"))
+        
+        total = len(tasks)
+        done = sum(1 for _, key in tasks if progress.get(key))
+        bar_tasks = "▓" * done + "░" * (total - done)
+        percent_tasks = int(done / total * 100) if total else 0
+        
+        # --- Единый заголовок ---
+        tasks_header = f"📋 Ежедневные задания: [{bar_tasks}] {done}/{total}  ({percent_tasks}%)"
+        
+        # --- Список заданий (с галочками) ---
+        tasks_list = []
+        for label, key in tasks:
+            if progress.get(key):
+                tasks_list.append(f"   ✅ {label}")
+            else:
+                tasks_list.append(f"   ⬜️ {label}")
+        tasks_text = "\n".join(tasks_list)
+        
+        # --- Если всё выполнено — радостный текст (всегда!) ---
+        if done == total:
+            tasks_block = f"{tasks_header}\n🎉 <b>ВСЕ ЗАДАНИЯ ВЫПОЛНЕНЫ!</b>"
+        else:
+            tasks_block = f"{tasks_header}\n{tasks_text}"
+
+        # ===== 3. СРАВНЕНИЕ С СОСЕДЯМИ =====
         my_balance = player.balance or 0
         async with ctx.db_pool.acquire() as conn:
-            above = await conn.fetchval(
-                "SELECT COUNT(*) FROM players WHERE balance > $1", my_balance
+            # ✅ добавлен user_id
+            above_row = await conn.fetchrow(
+                "SELECT user_id, username, balance FROM players WHERE balance > $1 ORDER BY balance ASC LIMIT 1",
+                my_balance
             )
             below_row = await conn.fetchrow(
-                "SELECT username, balance FROM players WHERE balance < $1 ORDER BY balance DESC LIMIT 1",
+                "SELECT user_id, username, balance FROM players WHERE balance < $1 ORDER BY balance DESC LIMIT 1",
                 my_balance
             )
-            above_row = await conn.fetchrow(
-                "SELECT username, balance FROM players WHERE balance > $1 ORDER BY balance ASC LIMIT 1",
-                my_balance
-            )
+            total_players = await conn.fetchval("SELECT COUNT(*) FROM players")
+            above_count = await conn.fetchval("SELECT COUNT(*) FROM players WHERE balance > $1", my_balance)
 
-        if below_row and below_row["balance"] is not None:
+        position = (above_count or 0) + 1
+        in_top10 = position <= 10
+
+        # ✅ безопасное формирование имени
+        def format_player(row):
+            if not row:
+                return "Игрок"
+            user_id = row.get("user_id")
+            username = row.get("username")
+            if username:
+                return f"@{html_escape(username)}"
+            elif user_id:
+                return f"ID{user_id}"
+            return "Игрок"
+
+        comparison_lines = []
+
+        if below_row:
             gap = my_balance - below_row["balance"]
-            comparison_line = f"🏅 Вы выше {html.escape(below_row['username'])} на {gap} очков (OAC)"
-        elif above_row and above_row["balance"] is not None:
+            name = format_player(below_row)
+            comparison_lines.append(f"⬇️ <b>Ниже вас:</b> {name} (отстаёт на {gap} OAC)")
+
+        if above_row:
             gap = above_row["balance"] - my_balance
-            comparison_line = f"🏅 До {html.escape(above_row['username'])} осталось {gap} очков (OAC)"
+            name = format_player(above_row)
+            comparison_lines.append(f"⬆️ <b>Выше вас:</b> {name} (нужно {gap} OAC для обгона)")
+
+        if not comparison_lines:
+            comparison_lines.append("🏅 Вы единственный в рейтинге!")
+
+        if in_top10:
+            comparison_lines.append(f"🎯 <b>Твоя позиция:</b> #{position} в топ-10!")
         else:
-            comparison_line = "🏅 Вы на вершине!"
-    else:
-        comparison_line = "🏅 Место в рейтинге пока не определено"
+            tenth_row = await conn.fetchrow(
+                "SELECT balance FROM players ORDER BY balance DESC LIMIT 1 OFFSET 9"
+            )
+            if tenth_row:
+                tenth_balance = tenth_row["balance"]
+                gap_top10 = tenth_balance - my_balance
+                if gap_top10 > 0:
+                    comparison_lines.append(f"🎯 До топ-10 осталось: {gap_top10} OAC")
+                else:
+                    comparison_lines.append("✅ Ты уже в топ-10!")
 
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("👤 Профиль ›", callback_data="profile"),
-         InlineKeyboardButton("🏆 Достижения ›", callback_data="achievements_menu"),
-         InlineKeyboardButton("🏅 Лидеры ›", callback_data="top")],
-        [InlineKeyboardButton("🔙 Назад", callback_data="menu")]
-    ])
+        comparison = "\n".join(comparison_lines)
 
-    text = f"<b>📊 ЛИЧНЫЙ ПРОГРЕСС</b>\n\n{comparison_line}"
-    await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
+        # ===== 4. СТАТИСТИКА =====
+        stats_lines = []
+        stats_lines.append(f"🌿 Блантов скручено: {player.craft_count or 0}")
+        stats_lines.append(f"💨 Выкурено: {player.smoke_count or 0}")
+
+        if player.guild == "BLACK":
+            stats_lines.append(f"🕯️ Ритуалов: {player.ritual_count or 0}")
+        elif player.guild == "WHITE":
+            stats_lines.append(f"⚜️ Исповедей: {player.repent_count or 0}")
+
+        stats_text = "\n".join(stats_lines)
+
+        # ===== 5. ДОСТИЖЕНИЯ =====
+        async with ctx.db_pool.acquire() as conn:
+            awarded = await conn.fetchval("SELECT COUNT(*) FROM achievements_awarded WHERE user_id=$1", uid)
+        total_ach = len(ACHIEVEMENTS)
+        ach_line = f"🏆 Достижений: {awarded or 0} / {total_ach}"
+
+        # ===== СБОРКА =====
+        text = (
+            f"<b>📊 ЛИЧНЫЙ ПРОГРЕСС</b>\n\n"
+            f"{rank_line}\n\n"
+            f"{tasks_block}\n\n"
+            f"🏅 В рейтинге:\n{comparison}\n\n"
+            f"{stats_text}\n\n"
+            f"{ach_line}"
+        )
+
+        kb_rows = [
+            [InlineKeyboardButton("👤 Профиль", callback_data="profile"),
+             InlineKeyboardButton("🏆 Достижения", callback_data="achievements_menu"),
+             InlineKeyboardButton("🏅 Лидеры", callback_data="top")]
+        ]
+        
+        if done == total and not progress.get("reward_claimed"):
+            kb_rows.insert(0, [InlineKeyboardButton("🎁 Забрать награду!", callback_data="claim_reward")])
+        
+        kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="menu")])
+        kb = InlineKeyboardMarkup(kb_rows)
+
+        await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
+
+    except Exception as e:
+        logger.exception("Ошибка в progress_hub_handler")
+        await query.answer("⚠️ Внутренняя ошибка. Попробуйте позже.", show_alert=True)
+        # Уведомление админу
+        if ctx.settings.admin_id:
+            try:
+                await context.bot.send_message(
+                    chat_id=ctx.settings.admin_id,
+                    text=f"🚨 Ошибка в progress_hub_handler для {uid}:\n{html_escape(str(e))}"
+                )
+            except:
+                pass
 
 @cb
 async def daily_quest_hub(update, context, ctx):
