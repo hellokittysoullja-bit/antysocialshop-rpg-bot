@@ -6262,7 +6262,7 @@ async def claim_reward_handler(update, context, ctx):
     if result:
         await context.bot.send_message(
             chat_id=query.message.chat.id,
-            text=""🎉 <b>НАГРАДА ПОЛУЧЕНА!🏅</b>\n\n<b>+100 OAC 🍬</b>\n\nОтличная работа!",",
+            text="🎉 <b>НАГРАДА ПОЛУЧЕНА!🏅</b>\n\n<b>+100 OAC 🍬</b>\n\nОтличная работа!",
             parse_mode='HTML'
         )
 
