@@ -2256,7 +2256,7 @@ async def world_hub(update, context, ctx):
 
     kb = InlineKeyboardMarkup(kb_rows)
     await query.message.edit_text(
-        "<b>🌍 МИР</b>\n\n<i>Древние земли ждут своего исследователя.</i>",
+            "<b>🏰 Главное Меню › 🌍 Мир</b>\n\n<i>Древние земли ждут своего исследователя.</i>",
         reply_markup=kb, parse_mode='HTML'
     )
 
@@ -4091,7 +4091,7 @@ async def my_blunts_callback(update, context, ctx, player, page=0):
     end = start + BLUNTS_PER_PAGE
     page_blunts = named[start:end]
 
-    text = f"<b>💎 ТВОИ ИМЕННЫЕ БЛАНТЫ ({page+1}/{total_pages})</b>\n\n"
+    text = f"<b>💎 ТВОИ ИМЕННЫЕ БЛАНТЫ ({total_named} всего, стр. {page+1}/{total_pages})</b>\n\n"
     for i, item in enumerate(page_blunts, 1):
         name = item["name"]
         rarity = item.get("rarity", "common")
@@ -4550,51 +4550,22 @@ async def repent_callback(update, context, ctx):
         if (p.blunts or 0) < 1:
             return ("no_blunts", "❌ Нет блантов. Скрути!")
 
-        # === ДОБАВЛЕНО: Счётчик исповедей (пункт 2) ===
         p.blunts -= 1
         p.last_repent = now
-        p.daily_progress = p.daily_progress or {}
-        p.repent_count = (p.repent_count or 0) + 1
-
-        # === ДОБАВЛЕНО: Медали и прогресс (пункты 3 и 4) ===
-        old_count = p.repent_count - 1
-        new_count = p.repent_count
-        medal_text, medal_bonus = get_medal_text_and_reward(old_count, new_count, REPENT_MEDALS)
-
-        # Случайный исход
+        p.daily_progress = p.daily_progress or {}   # ← добавить!
         r = random.random()
-        reward = 0
-        result_line = ""
-
         if r < 0.70:
             reward = random.randint(100, 200)
-            p.balance += reward + medal_bonus  # ← добавили medal_bonus
+            p.balance += reward
             p.daily_progress["guild_action"] = True
-            result_line = f"Исповедь принесла тебе <b>+{reward} OAC</b> 🍬"
+            return ("ok", f"<b>⚜️ ИСПОВЕДЬ</b>\n\nБлагословение! +{reward} OAC.")
         elif r < 0.95:
             p.m_essence = (p.m_essence or 0) + 1
-            result_line = "Ты получил 💠 <b>+1 Кристальную Пыль</b>"
+            return ("ok", "<b>⚜️ ИСПОВЕДЬ</b>\n\nТы получил 💠 Кристальную Пыль.")
         else:
             name = random.choice(["Крик Бездны", "Пепел Короля", "Шёпот Склепа"])
             await create_named_blunt(uid, name, rarity="legendary", ctx=ctx, player=p, conn=conn)
-            result_line = f"🌟 Чудо! Легендарный блант <b>«{name}»</b>"
-
-        # === ДОБАВЛЕНО: Прогресс-бар (пункт 4) ===
-        target = get_medal_target(new_count, REPENT_MEDALS)
-        progress_bar_str = get_medal_progress(new_count, REPENT_MEDALS)
-
-        # === ДОБАВЛЕНО: Красивый текст с цитатой (пункт 9) ===
-        full_text = (
-            f"<b>⚜️ ИСПОВЕДЬ ПРИНЯТА</b>\n\n"
-            f"{result_line}\n"
-            f"<b>⚜️ У тебя:</b> <b>{p.balance} OAC 🕊️</b>\n\n"
-            f"<i>«Твоя душа очистилась...»</i>\n"
-            f"{medal_text}\n"
-            f"<b>🕊️ Исповеди:</b> {new_count}/{target}\n"
-            f"<b>{progress_bar_str}</b>"
-        )
-
-        return ("ok", full_text)
+            return ("ok", f"<b>⚜️ ИСПОВЕДЬ</b>\n\n🌟 Чудо! Легендарный блант «{name}»!")
 
     result = await ctx.repo.atomic_update(uid, _repent)
 
@@ -4604,41 +4575,6 @@ async def repent_callback(update, context, ctx):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
         )
         return
-
-    status, data = result[0], result[1] if len(result) > 1 else ""
-
-    try:
-        # === ДОБАВЛЕНО: Анимация перед результатом (пункт 5) ===
-        if status == "ok":
-            anim_msg = await animate_progress_bar(update, context, title="🕊️ Исповедь...", duration=0.6, steps=4)
-            if anim_msg is not None:
-                await anim_msg.edit_text(
-                    data,
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="guild_info")]]),
-                    parse_mode='HTML'
-                )
-            else:
-                await query.message.edit_text(
-                    data,
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="guild_info")]]),
-                    parse_mode='HTML'
-                )
-        else:
-            # Ошибки показываем без анимации
-            await query.message.edit_text(
-                data,
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="guild_info")]]),
-                parse_mode='HTML'
-            )
-    except BadRequest as e:
-        if "message is not modified" in str(e).lower():
-            pass
-        else:
-            raise
-
-    # === ДОБАВЛЕНО: Проверка достижений (пункт 8) ===
-    if status == "ok":
-        await check_achievements(uid, context)
 
     status, data = result[0], result[1] if len(result) > 1 else ""
 
@@ -5189,6 +5125,7 @@ async def lab_enter(update, context):
             hrs = int(remain // 3600)
             mins = int((remain % 3600) // 60)
             text = (
+                f"<b>🏰 Главное Меню › 🌍 Мир › 🏛️ Лабиринт</b>\n\n"
                 f"<b>🏛️ ЛАБИРИНТ ИСКАЖЕНИЯ — ЭТАЖ {depth}</b>\n\n"
                 f"<i>– Портал откроется через <b>{hrs} ч {mins} мин</b>.</i>"
             )
@@ -5198,6 +5135,9 @@ async def lab_enter(update, context):
     total_rooms = 4 + depth
     text = (
         f"<b>🏛️ ЛАБИРИНТ ИСКАЖЕНИЯ — ЭТАЖ {depth}</b>\n\n"
+        f"📊 <i>Твоя статистика:</i>\n"
+        f"🎁 Сундуков открыто: {player.lab_chests}\n"
+        f"💀 Смертей: {player.lab_deaths}\n\n"
         f"🔮 <i>\"Ты стоишь у входа...\"</i> 🎁\n\n"
         f"<b>💎 1 попытка</b>\n"
         f"<b>⛓️‍💥 2 жизни</b>\n"
@@ -5791,7 +5731,7 @@ async def shop_callback(update, context, ctx):
         [InlineKeyboardButton("📦 Каталог", callback_data="catalog")],
         [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
     ])
-    await query.message.edit_text("<b>🛒 МАГАЗИН</b>", reply_markup=kb, parse_mode='HTML')
+    await query.message.edit_text("<b>🏰 Главное Меню › 🛒 Магазин</b>", reply_markup=kb, parse_mode='HTML')
 
 @cb
 async def setbluntpic(update, context, ctx):
@@ -6230,17 +6170,25 @@ async def daily_quest_hub(update, context, ctx):
     total = len(tasks)
     done = sum(1 for _, key in tasks if progress.get(key))
 
-    text = f"<b>📋 ЗАДАНИЯ ДНЯ ({done}/{total})</b>\n\n"
-    kb_rows = []
+        # ===== ПРОГРЕСС-БАР =====
+    bar = "▓" * done + "░" * (total - done)
+    percent = int(done / total * 100) if total > 0 else 0
 
+    # ===== ЗАГОЛОВОК С БАРОМ =====
+    text = f"<b>📋 ЗАДАНИЯ ДНЯ [{bar}] {done}/{total}</b>\n\n"
+    
+    # ===== СПИСОК ЗАДАНИЙ =====
+    kb_rows = []
     for label, key in tasks:
         is_done = progress.get(key, False)
         if is_done:
             text += f"✅ {label}\n"
-            # кнопку не добавляем
         else:
             text += f"⬜️ {label}\n"
             kb_rows.append([InlineKeyboardButton(label, callback_data=f"quest_{key}")])
+
+    # ===== ПРОЦЕНТ ПРОГРЕССА =====
+    text += f"\n🎯 <b>Прогресс: {percent}%</b>"
 
     kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="menu")])
     kb = InlineKeyboardMarkup(kb_rows)
@@ -6312,13 +6260,12 @@ async def claim_reward_handler(update, context, ctx):
     if result:
         await context.bot.send_message(
             chat_id=query.message.chat.id,
-            text="🎁 <b>Награда получена!</b>\n<b>+100 OAC 🍬</b>\n\nОтличная работа!",
+            text=""🎉 <b>НАГРАДА ПОЛУЧЕНА!🏅</b>\n\n<b>+100 OAC 🍬</b>\n\nОтличная работа!",",
             parse_mode='HTML'
         )
 
     # Обновляем главное меню
     await menu_handler(update, context, ctx)
-
 
 # ── Все возможности (для новичков) ──
 @cb
