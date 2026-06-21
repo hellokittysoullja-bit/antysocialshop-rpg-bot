@@ -6139,7 +6139,7 @@ async def progress_hub_handler(update, context, ctx):
         [InlineKeyboardButton("👤 Профиль ›", callback_data="profile"),
          InlineKeyboardButton("🏆 Достижения ›", callback_data="achievements_menu"),
          InlineKeyboardButton("🏅 Лидеры ›", callback_data="top")],
-        [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
+        [InlineKeyboardButton("🔙 Назад", callback_data="menu")]
     ])
 
     text = f"<b>📊 ЛИЧНЫЙ ПРОГРЕСС</b>\n\n{comparison_line}"
