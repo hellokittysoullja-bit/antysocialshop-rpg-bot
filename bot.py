@@ -6731,7 +6731,9 @@ TEXT_COMMAND_HANDLERS = {
     "give_oac": give_oac,
     "debugpet": debug_pet,
     "checkbluntpics": check_blunt_pics,
+    "broadcast": broadcast,
     # Текстовые сокращения (без слеша)
+    "старт": start,
     "меню": start,
     "фарм": farm_callback_v2,
     "крафт": craft_callback_v2,
