@@ -6248,7 +6248,7 @@ async def progress_hub_handler(update, context, ctx):
         if above_row:
             gap = above_row["balance"] - my_balance
             name = format_player(above_row)
-            comparison_lines.append(f"⬆️ <b>Выше вас:</b> {name}</b> (нужно {gap} OAC для обгона)")
+            comparison_lines.append(f"⬆️ <b>Выше вас: {name}</b> (нужно {gap} OAC для обгона)")
 
         if not comparison_lines:
             comparison_lines.append("🏅 Вы единственный в рейтинге!")
