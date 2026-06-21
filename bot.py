@@ -6164,12 +6164,12 @@ async def progress_hub_handler(update, context, ctx):
             progress_percent = min(100, max(0, progress_percent))
             bar = "▓" * (progress_percent // 10) + "░" * (10 - progress_percent // 10)
             rank_line = (
-                f"⚜️ Ранг: {rank_emoji} {rank_name} → {next_rank_emoji} {next_rank_name}\n"
+                f"<b>⚜️ Ранг: {rank_emoji} {rank_name} → {next_rank_emoji} {next_rank_name}</b>\n"
                 f"<b>{balance} / {next_threshold} OAC</b>\n"
-                f"{bar} {progress_percent}%"
+                f"{bar} <b>{progress_percent}</b>%"
             )
         else:
-            rank_line = f"⚜️ Ранг: {rank_emoji} {rank_name} (Максимум!)"
+            rank_line = f"<b>⚜️ Ранг: {rank_emoji} {rank_name}</b> (Максимум!)"
 
         # ===== 2. ЕЖЕДНЕВНЫЕ ЗАДАНИЯ =====
         progress = getattr(player, 'daily_progress', {}) or {}
@@ -6191,7 +6191,7 @@ async def progress_hub_handler(update, context, ctx):
         percent_tasks = int(done / total * 100) if total else 0
         
         # --- Единый заголовок ---
-        tasks_header = f"📋 Ежедневные задания: [{bar_tasks}] {done}/{total}  ({percent_tasks}%)"
+        tasks_header = f"<b>📋 Ежедневные задания: [{bar_tasks}] {done}/{total}  ({percent_tasks}%)</b>"
         
         # --- Список заданий (с галочками) ---
         tasks_list = []
@@ -6243,18 +6243,18 @@ async def progress_hub_handler(update, context, ctx):
         if below_row:
             gap = my_balance - below_row["balance"]
             name = format_player(below_row)
-            comparison_lines.append(f"⬇️ <b>Ниже вас:</b> {name} (отстаёт на {gap} OAC)")
+            comparison_lines.append(f"⬇️ <b>Ниже вас: {name}</b> (отстаёт на {gap} OAC)")
 
         if above_row:
             gap = above_row["balance"] - my_balance
             name = format_player(above_row)
-            comparison_lines.append(f"⬆️ <b>Выше вас:</b> {name} (нужно {gap} OAC для обгона)")
+            comparison_lines.append(f"⬆️ <b>Выше вас:</b> {name}</b> (нужно {gap} OAC для обгона)")
 
         if not comparison_lines:
             comparison_lines.append("🏅 Вы единственный в рейтинге!")
 
         if in_top10:
-            comparison_lines.append(f"🎯 <b>Твоя позиция:</b> #{position} в топ-10!")
+            comparison_lines.append(f"🎯 <b>Позиция в топе: #{position}</b>")
         else:
             tenth_row = await conn.fetchrow(
                 "SELECT balance FROM players ORDER BY balance DESC LIMIT 1 OFFSET 9"
@@ -6292,8 +6292,8 @@ async def progress_hub_handler(update, context, ctx):
             f"<b>📊 ЛИЧНЫЙ ПРОГРЕСС</b>\n\n"
             f"{rank_line}\n\n"
             f"{tasks_block}\n\n"
-            f"🏅 В рейтинге:\n{comparison}\n\n"
-            f"{stats_text}\n\n"
+            f"<b>🏅 В рейтинге:</b>\n{comparison}\n\n"
+            f"{stats_text}\n"
             f"{ach_line}"
         )
 
