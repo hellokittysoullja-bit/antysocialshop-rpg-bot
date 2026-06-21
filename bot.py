@@ -5850,6 +5850,32 @@ async def get_file_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
         fid = update.message.photo[-1].file_id
         await update.message.reply_text(fid)
 
+@cb
+async def broadcast(update, context, ctx):
+    if update.effective_user.id != ctx.settings.admin_id:
+        await update.message.reply_text("🔒 Только для администратора.")
+        return
+    
+    if not context.args:
+        await update.message.reply_text("📝 Используй: /broadcast Текст")
+        return
+    
+    text = " ".join(context.args)
+    
+    async with ctx.db_pool.acquire() as conn:
+        users = await conn.fetch("SELECT user_id FROM players")
+    
+    success = 0
+    for user in users:
+        try:
+            # ✅ Отправляем без HTML (чтобы не падать)
+            await context.bot.send_message(user["user_id"], text)
+            success += 1
+            await asyncio.sleep(0.03)
+        except Exception:
+            pass
+    
+    await update.message.reply_text(f"✅ Разослано {success} из {len(users)} игроков")
 # ============================================================
 # ОБРАБОТЧИК КОМАНД
 # ============================================================
