@@ -4572,7 +4572,7 @@ async def repent_callback(update, context, ctx):
             reward = random.randint(100, 200)
             p.balance += reward + medal_bonus  # ← добавили medal_bonus
             p.daily_progress["guild_action"] = True
-            result_line = f"Исповедь принесла тебе <b>+{reward} OAC</b> 🍬"
+            result_line = f"Исповедь принесла тебе <b>{reward} OAC</b> 🍬"
         elif r < 0.95:
             p.m_essence = (p.m_essence or 0) + 1
             result_line = "Ты получил 💠 <b>+1 Кристальную Пыль</b>"
@@ -4587,7 +4587,7 @@ async def repent_callback(update, context, ctx):
 
         # === ДОБАВЛЕНО: Красивый текст с цитатой (пункт 9) ===
         full_text = (
-            f"<b>⚜️ ИСПОВЕДЬ ПРИНЯТА</b>\n\n"
+            f"<b>⚜️ ИСПОВЕДЬ ПРИНЯТА🎉</b>\n\n"
             f"{result_line}\n"
             f"<b>⚜️ У тебя:</b> <b>{p.balance} OAC 🕊️</b>\n\n"
             f"<i>«Твоя душа очистилась...»</i>\n"
@@ -4609,20 +4609,16 @@ async def repent_callback(update, context, ctx):
 
     status, data = result[0], result[1] if len(result) > 1 else ""
 
-    
-    # Если статус "ok" – показываем анимацию, потом отправляем результат
     if status == "ok":
         anim_msg = await animate_progress_bar(update, context, title="🕊️ Исповедь...", duration=0.6, steps=4)
         if anim_msg is not None:
-            # Если анимация удалась – её и редактируем
             await anim_msg.edit_text(
                 data,
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="guild_info")]]),
                 parse_mode='HTML'
             )
         else:
-            # Если анимация не удалась – отправляем новое (а не редактируем старое)
-            await query.message.delete()  # удаляем старую кнопку
+            # Если анимация не удалась – отправляем новое сообщение
             await context.bot.send_message(
                 chat_id=update.effective_chat.id,
                 text=data,
@@ -4630,8 +4626,7 @@ async def repent_callback(update, context, ctx):
                 parse_mode='HTML'
             )
     else:
-        # Для ошибок (cooldown, wrong_guild, no_blunts) – просто отправляем новое сообщение
-        await query.message.delete()
+        # Ошибки – отправляем новое сообщение
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=data,
@@ -4639,7 +4634,6 @@ async def repent_callback(update, context, ctx):
             parse_mode='HTML'
         )
 
-    # === ДОБАВЛЕНО: Проверка достижений (пункт 8) ===
     if status == "ok":
         await check_achievements(uid, context)
 
