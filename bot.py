@@ -3236,18 +3236,21 @@ async def handle_named_name(update, context):
         ref_link = f"https://t.me/{bot_username}?start=blunt_{blunt_id}"
 
         share_text = (
-            f"{color} Имя NFT Бланта: «{html.escape(meme_name)}»\n"
-            f"💎 Редкость и серия: {item['rarity']} • #{item.get('rare_number', '?-????')}\n"
+            f"{color} ИМЯ NFT Бланта: «{html.escape(meme_name)}»\n"
+            f"💎 Редкость:\n"
+            f"{label} • #{item.get('rare_number', '?-????')}\n"
             f"👑 Первый владелец: {html.escape(player.username or 'игрок')}\n\n"
             f"💬 Реакция: {reaction}\n"
             f"🎁 ЗАБРАТЬ СЕБЕ ТАКОЙ ЖЕ:\n"
             f"{ref_link}"
         )
 
+        share_url = build_share_url(ref_link, share_text)
+        
         kb = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton("🎁 Подарить", callback_data=f"gift_blunt_{blunt_id}"),
-                InlineKeyboardButton("🔗 Поделиться", switch_inline_query=share_text)
+                InlineKeyboardButton("🔗 Поделиться", url=share_url)
             ],
             [InlineKeyboardButton("🔙 В меню", callback_data="menu")]
         ])
@@ -5939,6 +5942,11 @@ async def broadcast(update, context, ctx):
             pass
     
     await update.message.reply_text(f"✅ Разослано {success} из {len(users)} игроков")
+    
+from urllib.parse import quote
+
+def build_share_url(ref_link: str, share_text: str) -> str:
+    return f"https://t.me/share/url?url={quote(ref_link, safe='')}&text={quote(share_text, safe='')}"
 # ============================================================
 # ОБРАБОТЧИК КОМАНД
 # ============================================================
