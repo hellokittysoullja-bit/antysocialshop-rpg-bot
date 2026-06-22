@@ -1412,7 +1412,7 @@ class CraftStatus(Enum):
 BLUNTS_PER_PAGE = 3
 
 BLUNT_IMAGES = {
-    "common": "AgACAgIAAxkBAAIDkGoXK23K4y7Oq479b4xk4DN2IjQ-AAIiH2sb4L64SI9XnknrGFb-AQADAgADeAADOwQ",
+    "common": "",
     "rare": "",
     "epic": "",
     "legendary": ""
@@ -3204,11 +3204,29 @@ async def handle_named_name(update, context):
         item["name"] = meme_name
         item["original_name"] = original_name
 
+        # Локальная таблица (нигде больше не нужна)
+        rarity = item["rarity"]
+        
+        if rarity == "legendary":
+            label = "ЛЕГЕНДАРНЫЙ"
+            discovery = "0.17%"
+        elif rarity == "epic":
+            label = "ЭПИЧЕСКИЙ"
+            discovery = "0.7%"
+        elif rarity == "rare":
+            label = "РЕДКИЙ"
+            discovery = "1.4%"
+        else:
+            label = "ОБЫЧНЫЙ"
+            discovery = "3.5%"
+
         caption = (
-            f"<b>💍 ТЫ СОЗДАЛ ИМЕННОЙ БЛАНТ! 🎉</b>\n\n"
-            f"{color}<b><i>«{html.escape(meme_name)}»</i></b>\n"
-            f"Редкость: <b>{item['rarity']}</b> {color}\n\n"
+            f"<b>💍 ТЫ СОЗДАЛ ИМЕННОЙ БЛАНТ! 🎉</b>\n"
             f"💎 Он навсегда останется в <b>твоей коллекции</b>.\n\n"
+            f"{color}<b><i>«{html.escape(meme_name)}»</i></b>\n"
+            f"Редкость: <b>{label}</b> {color}\n"
+            f"👑 Первый владелец: {html.escape(player.username or 'игрок')}\n\n"
+            f"🌎 Обнаружен у <b>{discovery}</b> игроков\n\n"
             f"🕯️ <i>{reaction}</i>\n\n"
             f"💬 Этот блант достоин того, чтобы его <b>увидели друзья. Действуй!</b>"
         )
@@ -3218,12 +3236,12 @@ async def handle_named_name(update, context):
         ref_link = f"https://t.me/{bot_username}?start=blunt_{blunt_id}"
 
         share_text = (
-            f"<b>{html.escape(player.username or 'игрок')}</b>\n\n"
-            f"{color} <b>Имя именного NFT Бланта: «{html.escape(meme_name)}»</b>\n"
-            f"🧬 <b>Редкость: {item['rarity']} {color}</b>\n"
-            f"🩸 <b>Серийный номер: #{item.get('rare_number', '?-????')}</b>\n"
-            f"💬 <b>Реакция:</b> <i>{reaction}</i>\n\n"
-            f"<b>💎 Нажми на ссылку чтобы забрать уникальный Блант:</b>\n{ref_link}"
+            f"{color} Имя NFT Бланта: «{html.escape(meme_name)}»\n"
+            f"💎 Редкость и серия: {item['rarity']} • #{item.get('rare_number', '?-????')}\n"
+            f"👑 Первый владелец: {html.escape(player.username or 'игрок')}\n\n"
+            f"💬 Реакция: {reaction}\n"
+            f"🎁 ЗАБРАТЬ СЕБЕ ТАКОЙ ЖЕ:\n"
+            f"{ref_link}"
         )
 
         kb = InlineKeyboardMarkup([
