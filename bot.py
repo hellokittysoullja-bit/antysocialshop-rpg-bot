@@ -3233,12 +3233,14 @@ async def handle_named_name(update, context):
 
         # --- Текст для кнопки «Поделиться» ---
         bot_username = (await context.bot.get_me()).username
-        ref_link = f"https://t.me/{bot_username}?start=blunt_{blunt_id}"
-
+        short_code = generate_short_code()
+        # сохрани в базу пару: short_code -> blunt_id
+        ref_link = f"https://t.me/{bot_username}?start=b_{short_code}"
+        
         share_text = (
             f"{color} ИМЯ NFT Бланта: «{html.escape(meme_name)}»\n"
             f"💎 Редкость:\n"
-            f"{label} • #{item.get('rare_number', '?-????')}\n"
+            f"{color} {label} • #{item.get('rare_number', '?-????')}\n"
             f"👑 Первый владелец: {html.escape(player.username or 'игрок')}\n\n"
             f"💬 Реакция: {reaction}\n"
             f"🎁 ЗАБРАТЬ СЕБЕ ТАКОЙ ЖЕ:\n"
@@ -5947,6 +5949,13 @@ from urllib.parse import quote
 
 def build_share_url(ref_link: str, share_text: str) -> str:
     return f"https://t.me/share/url?url={quote(ref_link, safe='')}&text={quote(share_text, safe='')}"
+    
+import secrets
+import string
+
+def generate_short_code(length=6):
+    alphabet = string.ascii_letters + string.digits
+    return ''.join(secrets.choice(alphabet) for _ in range(length))
 # ============================================================
 # ОБРАБОТЧИК КОМАНД
 # ============================================================
