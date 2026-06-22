@@ -591,6 +591,18 @@ def has_rank(balance: int, rank_name: str = "Ветеран") -> bool:
 
 def ensure_player_exists(player) -> bool:
     return player is not None and getattr(player, 'exists', False)
+    
+from urllib.parse import quote
+
+def build_share_url(ref_link: str, share_text: str) -> str:
+    return f"https://t.me/share/url?url={quote(ref_link, safe='')}&text={quote(share_text, safe='')}"
+    
+import secrets
+import string
+
+def generate_short_code(length=6):
+    alphabet = string.ascii_letters + string.digits
+    return ''.join(secrets.choice(alphabet) for _ in range(length))
 
 # ── Исключения ──────────────────────────────────────────────
 class UnknownWarActionError(Exception):
@@ -5944,18 +5956,6 @@ async def broadcast(update, context, ctx):
             pass
     
     await update.message.reply_text(f"✅ Разослано {success} из {len(users)} игроков")
-    
-from urllib.parse import quote
-
-def build_share_url(ref_link: str, share_text: str) -> str:
-    return f"https://t.me/share/url?url={quote(ref_link, safe='')}&text={quote(share_text, safe='')}"
-    
-import secrets
-import string
-
-def generate_short_code(length=6):
-    alphabet = string.ascii_letters + string.digits
-    return ''.join(secrets.choice(alphabet) for _ in range(length))
 # ============================================================
 # ОБРАБОТЧИК КОМАНД
 # ============================================================
