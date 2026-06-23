@@ -3232,11 +3232,11 @@ async def handle_named_name(update, context):
             discovery = "3.5%"
 
         caption = (
-            f"<b>💍 ТЫ СОЗДАЛ ИМЕННОЙ БЛАНТ! 🎉</b>\n"
-            f"💎 Он навсегда останется в <b>твоей коллекции</b>.\n\n"
+            f"<b>💍 ТЫ СОЗДАЛ ИМЕННОЙ БЛАНТ!</b>\n"
+            f"🎉 Он навсегда останется в <b>твоей коллекции</b>.\n\n"
             f"{color}<b><i>«{html.escape(meme_name)}»</i></b>\n"
-            f"Редкость: <b>{label}</b> {color}\n"
-            f"👑 Первый владелец: {html.escape(player.username or 'игрок')}\n\n"
+            f"💎 Редкость: <b>{label} • #{item.get('rare_number', '?-????')}</b>\n"
+            f"👑 Первый владелец: <b>{html.escape(player.username or 'игрок')}</b>\n"
             f"🌎 Обнаружен у <b>{discovery}</b> игроков\n\n"
             f"🕯️ <i>{reaction}</i>\n\n"
             f"💬 Этот блант достоин того, чтобы его <b>увидели друзья. Действуй!</b>"
