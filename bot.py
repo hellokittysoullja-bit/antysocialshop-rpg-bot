@@ -593,8 +593,8 @@ def ensure_player_exists(player) -> bool:
     
 from urllib.parse import quote
 
-def build_share_url(ref_link: str, share_text: str) -> str:
-    return f"https://t.me/share/url?url={quote(ref_link, safe='')}&text={quote(share_text, safe='')}"
+def build_share_url(share_text: str) -> str:
+    return f"https://t.me/share/url?text={quote(share_text, safe='')}"
     
 import secrets
 import string
@@ -1100,7 +1100,7 @@ async def create_named_blunt(user_id: int, name: str, rarity: str = None, conn=N
         elif r < 0.45: rarity = "rare"
         else: rarity = "common"
     
-    clean_name = str(name or "").strip()[:25] or "Безымянный"
+    clean_name = str(name or "").strip()[:28] or "Безымянный"
     reaction = random.choice(FUNNY_REACTIONS)
     blunt_id = f"blunt_{user_id}_{int(datetime.now(timezone.utc).timestamp())}_{random.randint(1000,9999)}"
     hash_code = "0x" + hashlib.sha256((blunt_id + ":hash").encode()).hexdigest()[:16]
@@ -3148,7 +3148,7 @@ async def handle_named_name(update, context):
     try:
         user = update.effective_user
         uid = user.id
-        name = update.message.text.strip()[:25]
+        name = update.message.text.strip()[:28]
         if not name:
             await update.message.reply_text("❌ Имя не может быть пустым.")
             return
