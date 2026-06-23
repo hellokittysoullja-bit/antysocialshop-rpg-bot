@@ -508,7 +508,6 @@ class PlayerRepository:
             logger.warning("Не удалось обновить кэш для игрока %d: %s", user_id, e)
             self.cache.pop(user_id, None)
         
-from pydantic import Field
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_prefix="")
 
@@ -3251,15 +3250,14 @@ async def handle_named_name(update, context):
         
         share_text = (
             f"{color} ИМЯ NFT Бланта: «{html.escape(meme_name)}»\n"
-            f"💎 Редкость:\n"
-            f"{color} {label} • #{item.get('rare_number', '?-????')}\n"
+            f"💎 Редкость: {label} • #{item.get('rare_number', '?-????')}\n"
             f"👑 Первый владелец: {html.escape(player.username or 'игрок')}\n\n"
             f"💬 Реакция: {reaction}\n"
             f"🎁 ЗАБРАТЬ СЕБЕ ТАКОЙ ЖЕ:\n"
             f"{ref_link}"
         )
 
-        share_url = build_share_url(ref_link, share_text)
+        share_url = build_share_url(share_text)
         
         kb = InlineKeyboardMarkup([
             [
