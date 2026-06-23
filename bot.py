@@ -4234,7 +4234,7 @@ async def achievements_callback(update, context, page=0):
     if query.data == "achievements_profile":
         back_cb = "profile"
     else:
-        back_cb = "menu"
+        back_cb = "progress_hub"
     kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data=back_cb)])
     await edit_or_reply(update, context, text, reply_markup=InlineKeyboardMarkup(kb_rows))
 
