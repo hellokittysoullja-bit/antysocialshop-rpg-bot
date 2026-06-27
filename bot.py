@@ -1396,11 +1396,13 @@ QUEST_TEMPLATES = {
             {"label": "🍬 Фармить", "key": "farm", "target": 100},
             {"label": "🌿 Крафт", "key": "craft", "target": 3},
             {"label": "💨 Дунуть", "key": "smoke", "target": 2},
-            {"label": "🕯️ Ритуал", "key": "ritual", "target": 1},
+            {"label": "🕯️ Ритуал", "key": "ritual", "target": 1, "condition": "guild_black"},
             {"label": "🐾 Покормить питомца", "key": "pet", "target": 1, "condition": "is_veteran_and_has_pet"},
         ],
         "reward_oac": 150,
-        "reward_title": "Теневой охотник"
+        "reward_title": "Теневой охотник",
+        "reward_items": {},
+        "next_quest": "chapter2"
     },
     "chapter2": {
         "title": "ГЛАВА 2: «Пепел Короля»",
@@ -1414,7 +1416,8 @@ QUEST_TEMPLATES = {
         ],
         "reward_oac": 200,
         "reward_title": "Пепельный страж",
-        "reward_items": {"m_essence": 2}
+        "reward_items": {"m_essence": 2},
+        "next_quest": "chapter3"
     },
     "chapter3": {
         "title": "ГЛАВА 3: «Зов Бездны»",
@@ -1428,7 +1431,9 @@ QUEST_TEMPLATES = {
         ],
         "reward_oac": 180,
         "reward_title": "Бездны дитя",
-        "reward_skin": "Бездна"
+        "reward_skin": "Бездна",
+        "reward_items": {},  # добавлено для единообразия
+        "next_quest": None
     }
 }
 
@@ -6463,8 +6468,7 @@ async def daily_quest_hub(update, context, ctx):
     today = date.today().isoformat()
     progress = player.daily_progress or {}
     if progress.get("reset_date") != today:
-        # Сбрасываем все флаги, кроме reset_date
-        progress = {"reset_date": today}
+        progress = {"reset_date": today, "quest_id": "chapter1"}
         player.daily_progress = progress
         await ctx.repo.save(player)
 
@@ -6473,15 +6477,17 @@ async def daily_quest_hub(update, context, ctx):
     has_pet = bool(player.pet)
     is_veteran = (player.balance or 0) >= 5000
 
+    # Проверка условий
+    conditions = {
+        "is_veteran_and_has_pet": is_veteran and has_pet,
+    }
+    
     tasks = []
-    tasks.append(("🍬 Фармить", "farm"))
-    tasks.append(("🌿 Крафт", "craft"))
-    tasks.append(("💨 Дунуть", "smoke"))
-    if guild:
-        label = "🕯️ Ритуал" if guild == "BLACK" else "⚜️ Исповедь"
-        tasks.append((label, "guild_action"))
-    if is_veteran and has_pet:
-        tasks.append(("🐾 Покормить питомца", "pet"))
+    for task in template["tasks"]:
+        cond = task.get("condition")
+        if cond and not conditions.get(cond, False):
+            continue
+        tasks.append(task)
 
     total = len(tasks)
     done = sum(1 for _, key in tasks if progress.get(key))
