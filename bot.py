@@ -1437,20 +1437,20 @@ QUEST_TEMPLATES = {
                 "result_text": "🕊️ Ты отпустил духа. Свет коснулся твоей души.\n🌿 Ты стал БЛАГОДЕТЕЛЕМ РОЩИ."
             }
         ]
-    },
-        "chapter3_warrior": {
-    "title": "ГЛАВА 3: «Тропа войны»",
-    "description": "⚔️ Ты избрал путь воина. Веди гильдию к битве.",
-    "tasks": [
-        {"label": "⚔️ Тренировка", "key": "train", "target": 3},
-        {"label": "💨 Дунуть", "key": "smoke", "target": 5},
-        {"label": "💎 Пожертвовать", "key": "donate", "target": 300},
-        {"label": "🏛️ Лабиринт", "key": "lab", "target": 1},
-    ],
-    "reward_oac": 250,
-    "reward_title": "Вожак стаи",
-    "reward_items": {"war_essence": 1},
-    "next_quest": None
+    },   # ← вот здесь нужна запятая
+    "chapter3_warrior": {
+        "title": "ГЛАВА 3: «Тропа войны»",
+        "description": "⚔️ Ты избрал путь воина. Веди гильдию к битве.",
+        "tasks": [
+            {"label": "⚔️ Тренировка", "key": "train", "target": 3},
+            {"label": "💨 Дунуть", "key": "smoke", "target": 5},
+            {"label": "💎 Пожертвовать", "key": "donate", "target": 300},
+            {"label": "🏛️ Лабиринт", "key": "lab", "target": 1},
+        ],
+        "reward_oac": 250,
+        "reward_title": "Вожак стаи",
+        "reward_items": {"war_essence": 1},
+        "next_quest": None
     },
     "chapter3_benefactor": {
         "title": "ГЛАВА 3: «Дар исцеления»",
@@ -1466,7 +1466,7 @@ QUEST_TEMPLATES = {
         "reward_items": {"life_essence": 1},
         "next_quest": None
     }
-
+}
 
 def build_smoke_effect(roll, earned):
     for threshold, name, flavor, has_earned in SMOKE_EFFECTS:
