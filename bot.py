@@ -6339,41 +6339,62 @@ async def progress_hub_handler(update, context, ctx):
             rank_line = f"<b>⚜️ Ранг: {rank_emoji} {rank_name}</b> (Максимум!)"
 
         # ===== 2. ЕЖЕДНЕВНЫЕ ЗАДАНИЯ =====
+        from datetime import date
+        today = date.today().isoformat()
         progress = getattr(player, 'daily_progress', {}) or {}
-        tasks = []
-        tasks.append(("🍬 Фармить", "farm"))
-        tasks.append(("🌿 Крафт", "craft"))
-        tasks.append(("💨 Дунуть", "smoke"))
         
-        if player.guild:
-            label = "🕯️ Ритуал" if player.guild == "BLACK" else "⚜️ Исповедь"
-            tasks.append((label, "guild_action"))
+        # Сброс, если новый день
+        if progress.get("reset_date") != today:
+            progress = {"reset_date": today, "quest_id": "chapter1", "completed": False}
+            player.daily_progress = progress
+            await ctx.repo.save(player)
         
-        if (player.balance or 0) >= 5000 and player.pet:
-            tasks.append(("🐾 Покормить питомца", "pet"))
+        # Получаем текущий квест
+        quest_id = progress.get("quest_id", "chapter1")
+        template = QUEST_TEMPLATES.get(quest_id)
+        if not template:
+            quest_id = "chapter1"
+            template = QUEST_TEMPLATES[quest_id]
+            progress["quest_id"] = quest_id
+            player.daily_progress = progress
+            await ctx.repo.save(player)
         
-        total = len(tasks)
-        done = sum(1 for _, key in tasks if progress.get(key))
+        # Фильтруем задания по условиям
+        conditions = {
+            "guild_black": player.guild == "BLACK",
+            "guild_white": player.guild == "WHITE",
+            "is_veteran_and_has_pet": (player.balance or 0) >= 5000 and bool(player.pet),
+        }
+        filtered_tasks = []
+        for task in template["tasks"]:
+            cond = task.get("condition")
+            if cond and not conditions.get(cond, False):
+                continue
+            filtered_tasks.append(task)
+        
+        total = len(filtered_tasks)
+        done = sum(1 for task in filtered_tasks if progress.get(task["key"], False))
         bar_tasks = "▓" * done + "░" * (total - done)
         percent_tasks = int(done / total * 100) if total else 0
         
-        # --- Единый заголовок ---
+        # --- Заголовок квеста ---
         tasks_header = (
             f"<b>📋 Ежедневные задания:</b>\n"
             f"<b>📜 {template['title']}</b>\n"
             f"<b>[{bar_tasks}] {percent_tasks}% ({done}/{total} этапов)</b>\n"
-            f"🏆 <b>Сага: Глава {template['chapter_number']} из {template['total_chapters']}</b>"
+            f"🏆 <b>Сага: Глава {template['chapter']} из {template['total_chapters']}</b>"
         )
         
-        # --- Список заданий (с галочками) ---
+        # --- Список заданий (галочки) ---
         #tasks_list = []
-        #for label, key in tasks:
-            #if progress.get(key):
+        #for task in filtered_tasks:
+            #label = task["label"]
+            #if progress.get(task["key"], False):
                 #tasks_list.append(f"   ✅ {label}")
             #else:
                 #tasks_list.append(f"   ⬜️ {label}")
         #tasks_text = "\n".join(tasks_list)
-        
+     
         # --- Если всё выполнено — радостный текст (всегда!) ---
         if done == total:
             tasks_block = f"{tasks_header}\n🎉 <b>ВСЕ ЗАДАНИЯ ВЫПОЛНЕНЫ!</b>"
