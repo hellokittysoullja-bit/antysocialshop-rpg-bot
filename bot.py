@@ -6399,7 +6399,7 @@ async def progress_hub_handler(update, context, ctx):
         if done == total:
             tasks_block = f"{tasks_header}\n🎉 <b>ВСЕ ЗАДАНИЯ ВЫПОЛНЕНЫ!</b>"
         else:
-            tasks_block = f"{tasks_header}\n{tasks_text}"
+            tasks_block = f"{tasks_header}" #\n{tasks_text}
 
         # ===== 3. СРАВНЕНИЕ С СОСЕДЯМИ =====
         my_balance = player.balance or 0
