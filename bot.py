@@ -6621,8 +6621,9 @@ async def claim_reward_handler(update, context, ctx):
 
             chat_id=query.message.chat.id,
             text=(
-            f"🎉 <b>НАГРАДА ПОЛУЧЕНА!🏅</b>\n\n"
-            f"<b>📜 {template['title']} — пройдена! +100 OAC 🍬</b>\n\n"
+            f"🎉 <b>НАГРАДА ПОЛУЧЕНА!🏅</b>\n"
+            f"🌙 Тень отступила, лес благодарит тебя.\n\n"
+            f"<b>📜 {template['title']} — пройдена! +150 OAC 🍬</b>\n\n"
             f"Отличная работа!"
             ),
             parse_mode='HTML'
