@@ -6472,13 +6472,24 @@ async def daily_quest_hub(update, context, ctx):
         player.daily_progress = progress
         await ctx.repo.save(player)
 
-    progress = getattr(player, 'daily_progress', {}) or {}
+    # === ВЫБОР ШАБЛОНА (ЭТО БЫЛО ПРОПУЩЕНО) ===
+    quest_id = progress.get("quest_id", "chapter1")
+    template = QUEST_TEMPLATES.get(quest_id)
+    if not template:
+        quest_id = "chapter1"
+        template = QUEST_TEMPLATES[quest_id]
+        progress["quest_id"] = quest_id
+        player.daily_progress = progress
+        await ctx.repo.save(player)
+
     guild = player.guild
     has_pet = bool(player.pet)
     is_veteran = (player.balance or 0) >= 5000
 
     # Проверка условий
     conditions = {
+        "guild_black": guild == "BLACK",
+        "guild_white": guild == "WHITE",
         "is_veteran_and_has_pet": is_veteran and has_pet,
     }
     
@@ -6490,7 +6501,7 @@ async def daily_quest_hub(update, context, ctx):
         tasks.append(task)
 
     total = len(tasks)
-    done = sum(1 for _, key in tasks if progress.get(key))
+    done = sum(1 for task in tasks if progress.get(task["key"], False))
 
         # ===== ПРОГРЕСС-БАР =====
     bar = "▓" * done + "░" * (total - done)
@@ -6503,7 +6514,9 @@ async def daily_quest_hub(update, context, ctx):
     
     # ===== СПИСОК ЗАДАНИЙ =====
     kb_rows = []
-    for label, key in tasks:
+    for task in tasks:
+        label = task["label"]
+        key = task["key"]
         is_done = progress.get(key, False)
         if is_done:
             text += f"✅ {label}\n"
