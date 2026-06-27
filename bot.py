@@ -1414,28 +1414,59 @@ QUEST_TEMPLATES = {
             {"label": "💎 Пожертвовать", "key": "donate", "target": 200},
             {"label": "🏛️ Лабиринт", "key": "lab", "target": 1},
         ],
-        "reward_oac": 200,
-        "reward_title": "Пепельный страж",
-        "reward_items": {"m_essence": 2},
-        "next_quest": "chapter3"
+        "reward_oac": 0,
+        "reward_title": None,
+        "reward_items": {},
+        "choices": [
+            {
+                "label": "⚔️ Взять клинок",
+                "archetype": "warrior",
+                "next_quest": "chapter3_warrior",
+                "reward_title": "Воитель Теней",
+                "reward_oac": 250,
+                "reward_items": {"claw_of_beast": 1},
+                "result_text": "⚔️ Ты сжал клинок. Сила предков наполнила тебя.\n🛡️ Ты стал ВОИТЕЛЕМ ТЕНЕЙ."
+            },
+            {
+                "label": "🕊️ Отпустить с миром",
+                "archetype": "benefactor",
+                "next_quest": "chapter3_benefactor",
+                "reward_title": "Благодетель Рощи",
+                "reward_oac": 250,
+                "reward_items": {"seed_of_life": 1},
+                "result_text": "🕊️ Ты отпустил духа. Свет коснулся твоей души.\n🌿 Ты стал БЛАГОДЕТЕЛЕМ РОЩИ."
+            }
+        ]
     },
-    "chapter3": {
-        "title": "ГЛАВА 3: «Зов Бездны»",
-        "description": "🌀 Бездна зовёт тебя. Спустись в Лабиринт и вернись с добычей.",
+        "chapter3_warrior": {
+    "title": "ГЛАВА 3: «Тропа войны»",
+    "description": "⚔️ Ты избрал путь воина. Веди гильдию к битве.",
+    "tasks": [
+        {"label": "⚔️ Тренировка", "key": "train", "target": 3},
+        {"label": "💨 Дунуть", "key": "smoke", "target": 5},
+        {"label": "💎 Пожертвовать", "key": "donate", "target": 300},
+        {"label": "🏛️ Лабиринт", "key": "lab", "target": 1},
+    ],
+    "reward_oac": 250,
+    "reward_title": "Вожак стаи",
+    "reward_items": {"war_essence": 1},
+    "next_quest": None
+    },
+    "chapter3_benefactor": {
+        "title": "ГЛАВА 3: «Дар исцеления»",
+        "description": "🌿 Ты выбрал путь мира. Исцели раны мира.",
         "tasks": [
-            {"label": "🏛️ Лабиринт", "key": "lab", "target": 1},
-            {"label": "🍬 Фармить", "key": "farm", "target": 300},
             {"label": "🌿 Крафт", "key": "craft", "target": 10},
-            {"label": "💨 Дунуть", "key": "smoke", "target": 5},
+            {"label": "🍬 Фармить", "key": "farm", "target": 300},
             {"label": "⚜️ Исповедь", "key": "repent", "target": 1},
+            {"label": "🐾 Покормить питомца", "key": "pet", "target": 1, "condition": "is_veteran_and_has_pet"},
         ],
-        "reward_oac": 180,
-        "reward_title": "Бездны дитя",
-        "reward_skin": "Бездна",
-        "reward_items": {},  # добавлено для единообразия
+        "reward_oac": 250,
+        "reward_title": "Хранитель сада",
+        "reward_items": {"life_essence": 1},
         "next_quest": None
     }
-}
+
 
 def build_smoke_effect(roll, earned):
     for threshold, name, flavor, has_earned in SMOKE_EFFECTS:
@@ -6468,7 +6499,8 @@ async def daily_quest_hub(update, context, ctx):
     today = date.today().isoformat()
     progress = player.daily_progress or {}
     if progress.get("reset_date") != today:
-        progress = {"reset_date": today, "quest_id": "chapter1"}
+        current_quest = progress.get("quest_id", "chapter1")
+        progress = {"reset_date": today, "quest_id": current_quest}
         player.daily_progress = progress
         await ctx.repo.save(player)
 
@@ -6506,6 +6538,22 @@ async def daily_quest_hub(update, context, ctx):
         # ===== ПРОГРЕСС-БАР =====
     bar = "▓" * done + "░" * (total - done)
     percent = int(done / total * 100) if total > 0 else 0
+    
+    # ===== ЕСЛИ ВСЕ ЗАДАНИЯ ВЫПОЛНЕНЫ И ЕСТЬ ВЫБОР =====
+    if done == total and template.get("choices"):
+        text = f"<b>📋 ЗАДАНИЯ ДНЯ [▓▓▓▓▓] {done}/{total}</b>\n\n"
+        text += f"<b>📜 {template['title']}</b>\n"
+        text += f"{template['description']}\n\n"
+        text += "🎯 <b>Прогресс: 100%</b>\n\n"
+        text += "<b>Что ты сделаешь?</b>"
+
+        kb_rows = []
+        for i, choice in enumerate(template["choices"]):
+            kb_rows.append([InlineKeyboardButton(choice["label"], callback_data=f"choice_{i}")])
+        kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="menu")])
+        kb = InlineKeyboardMarkup(kb_rows)
+        await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
+        return
 
     # ===== НОВЫЙ заголовок =====
     text = f"<b>📋 ЗАДАНИЯ ДНЯ [{bar}] {done}/{total}</b>\n\n"
@@ -6538,29 +6586,28 @@ async def handle_quest_action(update, context):
     action = query.data.replace("quest_", "")
     uid = query.from_user.id
 
+    if action.startswith("choice_"):
+        await handle_choice(update, context, ctx)
+        return
+
+    player = await ctx.repo.get_by_id(uid)  
+    if not player and action not in ["farm", "craft", "smoke", "pet"]:
+        await query.answer("Игрок не найден", show_alert=True)
+        return
+
     if action == "farm":
         await farm_callback_v2(update, context)
     elif action == "craft":
         await handle_craft_normal_v2(update, context)
     elif action == "smoke":
         await do_smoke(update, context)
-    elif action == "guild_action":
-        player = await ctx.repo.get_by_id(uid)
-        if player and player.guild == "BLACK":
-            await ritual_callback(update, context)
-        elif player and player.guild == "WHITE":
-            await repent_callback(update, context)
-        else:
-            await query.answer("Сначала вступи в Гильдию", show_alert=True)
-    elif action == "ritual":                   # ← теперь на том же уровне
-        player = await ctx.repo.get_by_id(uid)
-        if player and player.guild == "BLACK":
+    elif action == "ritual":
+        if player.guild == "BLACK":
             await ritual_callback(update, context)
         else:
             await query.answer("Ты не в Тёмной Гильдии", show_alert=True)
-    elif action == "repent":                   # ← теперь на том же уровне
-        player = await ctx.repo.get_by_id(uid)
-        if player and player.guild == "WHITE":
+    elif action == "repent":
+        if player.guild == "WHITE":
             await repent_callback(update, context)
         else:
             await query.answer("Ты не в Светлой Гильдии", show_alert=True)
@@ -6568,7 +6615,7 @@ async def handle_quest_action(update, context):
         await pet_preview(update, context)
     else:
         await query.answer("Неизвестное задание", show_alert=True)
-
+        
     # Обновляем экран заданий после любой попытки
     await daily_quest_hub(update, context, ctx)
 
