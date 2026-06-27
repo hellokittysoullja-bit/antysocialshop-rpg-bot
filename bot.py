@@ -1391,6 +1391,8 @@ SMOKE_EFFECTS = [
 QUEST_TEMPLATES = {
     "chapter1": {
         "title": "ГЛАВА 1: «Тень в лесу»",
+        "chapter_number": 1,
+        "total_chapters": 3,
         "description": "🌙 Ты слышишь шёпот из чащи. Кто-то зовёт тебя на помощь.",
         "tasks": [
             {"label": "🍬 Фармить", "key": "farm", "target": 100},
@@ -1406,6 +1408,9 @@ QUEST_TEMPLATES = {
     },
     "chapter2": {
         "title": "ГЛАВА 2: «Пепел Короля»",
+        "chapter_number": 2,
+        "total_chapters": 3,
+        
         "description": "🔥 Древний король восстал из пепла. Ты должен успокоить его дух.",
         "tasks": [
             {"label": "🌿 Крафт", "key": "craft", "target": 5},
@@ -1437,9 +1442,11 @@ QUEST_TEMPLATES = {
                 "result_text": "🕊️ Ты отпустил духа. Свет коснулся твоей души.\n🌿 Ты стал БЛАГОДЕТЕЛЕМ РОЩИ."
             }
         ]
-    },   # ← вот здесь нужна запятая
+    },  
     "chapter3_warrior": {
         "title": "ГЛАВА 3: «Тропа войны»",
+        "chapter_number": 3,
+        "total_chapters": 3,
         "description": "⚔️ Ты избрал путь воина. Веди гильдию к битве.",
         "tasks": [
             {"label": "⚔️ Тренировка", "key": "train", "target": 3},
@@ -1454,6 +1461,8 @@ QUEST_TEMPLATES = {
     },
     "chapter3_benefactor": {
         "title": "ГЛАВА 3: «Дар исцеления»",
+        "chapter_number": 3,
+        "total_chapters": 3,
         "description": "🌿 Ты выбрал путь мира. Исцели раны мира.",
         "tasks": [
             {"label": "🌿 Крафт", "key": "craft", "target": 10},
@@ -6574,6 +6583,9 @@ async def daily_quest_hub(update, context, ctx):
 
     # ===== ПРОЦЕНТ ПРОГРЕССА =====
     text += f"\n🎯 <b>Прогресс: {percent}%</b>"
+    
+    if template.get("chapter_number") and template.get("total_chapters"):
+        text += f"\n🏆 <b>Сага: Глава {template['chapter_number']} из {template['total_chapters']}</b>"
 
     kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="menu")])
     kb = InlineKeyboardMarkup(kb_rows)
