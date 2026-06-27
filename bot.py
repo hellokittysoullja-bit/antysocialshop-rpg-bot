@@ -6360,17 +6360,19 @@ async def progress_hub_handler(update, context, ctx):
         # --- Единый заголовок ---
         tasks_header = (
             f"<b>📋 Ежедневные задания:</b>\n"
-            f"<b>[{bar_tasks}] {done}/{total}  ({percent_tasks}%)</b>"
+            f"<b>📜 {template['title']}</b>\n"
+            f"<b>[{bar_tasks}] {percent_tasks}% ({done}/{total} этапов)</b>\n"
+            f"🏆 <b>Сага: Глава {template['chapter_number']} из {template['total_chapters']}</b>"
         )
         
         # --- Список заданий (с галочками) ---
-        tasks_list = []
-        for label, key in tasks:
-            if progress.get(key):
-                tasks_list.append(f"   ✅ {label}")
-            else:
-                tasks_list.append(f"   ⬜️ {label}")
-        tasks_text = "\n".join(tasks_list)
+        #tasks_list = []
+        #for label, key in tasks:
+            #if progress.get(key):
+                #tasks_list.append(f"   ✅ {label}")
+            #else:
+                #tasks_list.append(f"   ⬜️ {label}")
+        #tasks_text = "\n".join(tasks_list)
         
         # --- Если всё выполнено — радостный текст (всегда!) ---
         if done == total:
