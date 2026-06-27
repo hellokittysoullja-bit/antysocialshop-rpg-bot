@@ -1393,7 +1393,7 @@ QUEST_TEMPLATES = {
         "title": "ГЛАВА 1: «Тень в лесу»",
         "chapter_number": 1,
         "total_chapters": 3,
-        "description": "🌙 Ты слышишь шёпот из чащи. Кто-то зовёт тебя на помощь.",
+        "description": "🌙 «Ты слышишь шёпот из чащи. Кто-то зовёт тебя на помощь.»",
         "tasks": [
             {"label": "🍬 Фармить", "key": "farm", "target": 100},
             {"label": "🌿 Крафт", "key": "craft", "target": 3},
