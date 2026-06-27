@@ -6414,6 +6414,16 @@ async def daily_quest_hub(update, context, ctx):
     if not player:
         return
 
+# ===== ЕЖЕДНЕВНЫЙ СБРОС =====
+    from datetime import date
+    today = date.today().isoformat()
+    progress = player.daily_progress or {}
+    if progress.get("reset_date") != today:
+        # Сбрасываем все флаги, кроме reset_date
+        progress = {"reset_date": today}
+        player.daily_progress = progress
+        await ctx.repo.save(player)
+
     progress = getattr(player, 'daily_progress', {}) or {}
     guild = player.guild
     has_pet = bool(player.pet)
@@ -6485,7 +6495,7 @@ async def handle_quest_action(update, context):
         await query.answer("Неизвестное задание", show_alert=True)
 
     # Обновляем экран заданий после любой попытки
-    await daily_quest_hub(update, context)
+    await daily_quest_hub(update, context, ctx)
 
 # ── Забирание награды (обновлённый профиль с наградой) ──
 @cb
