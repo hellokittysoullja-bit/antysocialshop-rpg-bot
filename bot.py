@@ -1388,6 +1388,50 @@ SMOKE_EFFECTS = [
     (1.0,  "🧘 Глубокое Озарение", "«Ты понял, что блант — это ключ к разгадке бытия»", False),
 ]
 
+QUEST_TEMPLATES = {
+    "chapter1": {
+        "title": "ГЛАВА 1: «Тень в лесу»",
+        "description": "🌙 Ты слышишь шёпот из чащи. Кто-то зовёт тебя на помощь.",
+        "tasks": [
+            {"label": "🍬 Фармить", "key": "farm", "target": 100},
+            {"label": "🌿 Крафт", "key": "craft", "target": 3},
+            {"label": "💨 Дунуть", "key": "smoke", "target": 2},
+            {"label": "🕯️ Ритуал", "key": "ritual", "target": 1},
+            {"label": "🐾 Покормить питомца", "key": "pet", "target": 1, "condition": "is_veteran_and_has_pet"},
+        ],
+        "reward_oac": 150,
+        "reward_title": "Теневой охотник"
+    },
+    "chapter2": {
+        "title": "ГЛАВА 2: «Пепел Короля»",
+        "description": "🔥 Древний король восстал из пепла. Ты должен успокоить его дух.",
+        "tasks": [
+            {"label": "🌿 Крафт", "key": "craft", "target": 5},
+            {"label": "💨 Дунуть", "key": "smoke", "target": 5},
+            {"label": "🕯️ Ритуал", "key": "ritual", "target": 3},
+            {"label": "💎 Пожертвовать", "key": "donate", "target": 200},
+            {"label": "🏛️ Лабиринт", "key": "lab", "target": 1},
+        ],
+        "reward_oac": 200,
+        "reward_title": "Пепельный страж",
+        "reward_items": {"m_essence": 2}
+    },
+    "chapter3": {
+        "title": "ГЛАВА 3: «Зов Бездны»",
+        "description": "🌀 Бездна зовёт тебя. Спустись в Лабиринт и вернись с добычей.",
+        "tasks": [
+            {"label": "🏛️ Лабиринт", "key": "lab", "target": 1},
+            {"label": "🍬 Фармить", "key": "farm", "target": 300},
+            {"label": "🌿 Крафт", "key": "craft", "target": 10},
+            {"label": "💨 Дунуть", "key": "smoke", "target": 5},
+            {"label": "⚜️ Исповедь", "key": "repent", "target": 1},
+        ],
+        "reward_oac": 180,
+        "reward_title": "Бездны дитя",
+        "reward_skin": "Бездна"
+    }
+}
+
 def build_smoke_effect(roll, earned):
     for threshold, name, flavor, has_earned in SMOKE_EFFECTS:
         if roll < threshold:
@@ -6448,8 +6492,8 @@ async def daily_quest_hub(update, context, ctx):
 
     # ===== НОВЫЙ заголовок =====
     text = f"<b>📋 ЗАДАНИЯ ДНЯ [{bar}] {done}/{total}</b>\n\n"
-    text += f"<b>📜 ГЛАВА 1: «Тень в лесу»</b>\n"
-    text += "🌙 Ты слышишь шёпот из чащи. Кто-то зовёт тебя на помощь.\n\n"
+    text += f"<b>📜 {template['title']}</b>\n"
+    text += f"{template['description']}\n\n"
     
     # ===== СПИСОК ЗАДАНИЙ =====
     kb_rows = []
