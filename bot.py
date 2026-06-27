@@ -6382,7 +6382,7 @@ async def progress_hub_handler(update, context, ctx):
             f"<b>📋 Ежедневные задания:</b>\n"
             f"<b>📜 {template['title']}</b>\n"
             f"<b>[{bar_tasks}] {percent_tasks}% ({done}/{total} этапов)</b>\n"
-            f"🏆 <b>Сага: Глава {template['chapter']} из {template['total_chapters']}</b>"
+            f"🏆 <b>Сага: Глава {template['chapter_number']} из {template['total_chapters']}</b>"
         )
         
         # --- Список заданий (галочки) ---
@@ -6399,7 +6399,7 @@ async def progress_hub_handler(update, context, ctx):
         if done == total:
             tasks_block = f"{tasks_header}\n🎉 <b>ВСЕ ЗАДАНИЯ ВЫПОЛНЕНЫ!</b>"
         else:
-            tasks_block = f"{tasks_header}" #\n{tasks_text}
+            tasks_block = f"{tasks_header}\n{tasks_text}"
 
         # ===== 3. СРАВНЕНИЕ С СОСЕДЯМИ =====
         my_balance = player.balance or 0
