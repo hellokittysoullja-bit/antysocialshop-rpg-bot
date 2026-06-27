@@ -6552,6 +6552,18 @@ async def handle_quest_action(update, context):
             await repent_callback(update, context)
         else:
             await query.answer("Сначала вступи в Гильдию", show_alert=True)
+    elif action == "ritual":                   # ← теперь на том же уровне
+        player = await ctx.repo.get_by_id(uid)
+        if player and player.guild == "BLACK":
+            await ritual_callback(update, context)
+        else:
+            await query.answer("Ты не в Тёмной Гильдии", show_alert=True)
+    elif action == "repent":                   # ← теперь на том же уровне
+        player = await ctx.repo.get_by_id(uid)
+        if player and player.guild == "WHITE":
+            await repent_callback(update, context)
+        else:
+            await query.answer("Ты не в Светлой Гильдии", show_alert=True)
     elif action == "pet":
         await pet_preview(update, context)
     else:
@@ -6573,33 +6585,50 @@ async def claim_reward_handler(update, context, ctx):
 
     progress = getattr(player, 'daily_progress', {}) or {}
     if progress.get("reward_claimed"):
-        await query.answer("Награда уже получена!", show_alert=True)
+        await query.answer("Награда уже получена сегодня!", show_alert=True)
         return
 
-    # Проверяем, все ли задания выполнены
-    tasks = {"farm", "craft", "smoke"}
-    if player.guild:
-        tasks.add("guild_action")
-    if (player.balance or 0) >= 5000 and player.pet:
-        tasks.add("pet")
-
-    if not all(progress.get(t) for t in tasks):
-        await query.answer("Не все задания выполнены!", show_alert=True)
+    # Получаем текущий квест
+    quest_id = progress.get("quest_id", "chapter1")
+    template = QUEST_TEMPLATES.get(quest_id)
+    if not template:
+        await query.answer("Квест не найден", show_alert=True)
         return
 
-    # Начисляем награду атомарно
+    # Проверяем выполнение всех этапов
+    all_done = True
+    for task in template.get("tasks", []):
+        key = task["key"]
+        if not progress.get(key, False):
+            all_done = False
+            break
+
+    if not all_done:
+        await query.answer("Выполни все этапы квеста!", show_alert=True)
+        return
+
+    # Атомарно начисляем награду
     async def _reward(p, conn):
         p.balance += 100
         p.daily_progress["reward_claimed"] = True
+        # Увеличиваем стрик (простейшая логика)
+        #p.daily_progress["streak"] = p.daily_progress.get("streak", 0) + 1
         return p.balance
 
     result = await ctx.repo.atomic_update(uid, _reward)
-    if result:
+    if result is not None:
         await context.bot.send_message(
+
             chat_id=query.message.chat.id,
-            text="🎉 <b>НАГРАДА ПОЛУЧЕНА!🏅</b>\n\n<b>+100 OAC 🍬</b>\n\nОтличная работа!",
+            text=(
+            f"🎉 <b>НАГРАДА ПОЛУЧЕНА!🏅</b>\n\n"
+            f"<b>📜 {template['title']} — пройдена! +100 OAC 🍬</b>\n\n"
+            f"Отличная работа!"
+            ),
             parse_mode='HTML'
         )
+    else:
+        await query.answer("Ошибка при начислении награды. Попробуйте позже.", show_alert=True)
 
     # Обновляем главное меню
     await menu_handler(update, context, ctx)
