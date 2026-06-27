@@ -6436,8 +6436,10 @@ async def daily_quest_hub(update, context, ctx):
     bar = "▓" * done + "░" * (total - done)
     percent = int(done / total * 100) if total > 0 else 0
 
-    # ===== ЗАГОЛОВОК С БАРОМ =====
+    # ===== НОВЫЙ заголовок =====
     text = f"<b>📋 ЗАДАНИЯ ДНЯ [{bar}] {done}/{total}</b>\n\n"
+    text += f"<b>📜 ГЛАВА 1: «Тень в лесу»</b>\n"
+    text += "🌙 Ты слышишь шёпот из чащи. Кто-то зовёт тебя на помощь.\n\n"
     
     # ===== СПИСОК ЗАДАНИЙ =====
     kb_rows = []
