@@ -4221,7 +4221,7 @@ async def my_blunts_callback(update, context, ctx, player, page=0):
     end = start + BLUNTS_PER_PAGE
     page_blunts = named[start:end]
 
-    text = f"<b>💎 ТВОИ ИМЕННЫЕ БЛАНТЫ ({total_named} всего, стр. {page+1}/{total_pages})</b>\n\n"
+    text = f"<b>💎 ТВОИ ИМЕННЫЕ БЛАНТЫ ({len(named)} всего, стр. {page+1}/{total_pages})</b>\n\n"
     for i, item in enumerate(page_blunts, 1):
         name = item["name"]
         rarity = item.get("rarity", "common")
@@ -6357,7 +6357,7 @@ async def progress_hub_handler(update, context, ctx):
                 break
 
         if next_threshold:
-            prev_threshold = RANKS[i][1] if i < len(RANKS)-1 else 0
+            prev_threshold = RANKS[i-1][1] if i > 0 else 0
             progress_percent = int((balance - prev_threshold) / (next_threshold - prev_threshold) * 100) if next_threshold > prev_threshold else 100
             progress_percent = min(100, max(0, progress_percent))
             bar = "▓" * (progress_percent // 10) + "░" * (10 - progress_percent // 10)
