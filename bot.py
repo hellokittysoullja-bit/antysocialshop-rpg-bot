@@ -2565,10 +2565,15 @@ async def _create_new_player(update, context, uid, username):
     ctx = context.bot_data.get("ctx")
     new_name = random.choice(["Крик Бездны", "Шёпот Склепа"])
 
-    # Атомарное создание игрока и первого бланта
     async with ctx.db_pool.acquire() as conn:
         async with conn.transaction():
             player = Player(user_id=uid, username=username, balance=800)
+            # Установка daily_progress ДО сохранения
+            player.daily_progress = {
+                "reset_date": date.today().isoformat(),
+                "quest_id": "chapter1",
+                "reward_claimed": False
+            }
             await ctx.repo.save(player, conn=conn)
             await create_named_blunt(uid, new_name, ctx=ctx, conn=conn)
 
@@ -6341,7 +6346,18 @@ async def progress_hub_handler(update, context, ctx):
         # ===== 2. ЕЖЕДНЕВНЫЕ ЗАДАНИЯ =====
         from datetime import date
         today = date.today().isoformat()
-        progress = getattr(player, 'daily_progress', {}) or {}
+        progress = player.daily_progress or {}
+        if progress.get("reset_date") != today:
+            # Новый день – сбрасываем, сохраняя текущий квест
+            current_quest = progress.get("quest_id", "chapter1")
+            player.daily_progress = {
+                "reset_date": today,
+                "quest_id": current_quest,
+                "reward_claimed": False
+            }
+            await ctx.repo.save(player)
+            progress = player.daily_progress
+
         
         # Сброс, если новый день
         if progress.get("reset_date") != today:
@@ -6692,9 +6708,22 @@ async def claim_reward_handler(update, context, ctx):
     # Атомарно начисляем награду
     async def _reward(p, conn):
         p.balance += 100
-        p.daily_progress["reward_claimed"] = True
+        # Получаем текущий квест
+        current_quest_id = p.daily_progress.get("quest_id", "chapter1")
+        template = QUEST_TEMPLATES.get(current_quest_id)
+        next_quest = template.get("next_quest") if template else None
+        
+        # Сохраняем дату сброса
+        reset_date = p.daily_progress.get("reset_date")
+        # Пересобираем словарь: сбрасываем флаги заданий, но ставим новую главу (если есть)
+        p.daily_progress = {
+            "reset_date": reset_date,
+            "quest_id": next_quest or current_quest_id,
+            "reward_claimed": True
+        }
+
         # Увеличиваем стрик (простейшая логика)
-        #p.daily_progress["streak"] = p.daily_progress.get("streak", 0) + 1
+        # p.daily_progress["streak"] = p.daily_progress.get("streak", 0) + 1
         return p.balance
 
     result = await ctx.repo.atomic_update(uid, _reward)
