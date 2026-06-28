@@ -1399,6 +1399,7 @@ QUEST_TEMPLATES = {
             {"label": "🌿 Крафт", "key": "craft", "target": 3},
             {"label": "💨 Дунуть", "key": "smoke", "target": 2},
             {"label": "🕯️ Ритуал", "key": "ritual", "target": 1, "condition": "guild_black"},
+            {"label": "⚜️ Исповедь", "key": "repent", "target": 1, "condition": "guild_white"},
             {"label": "🐾 Покормить питомца", "key": "pet", "target": 1, "condition": "is_veteran_and_has_pet"},
         ],
         "reward_oac": 150,
@@ -6126,15 +6127,40 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
     has_pet = bool(player.pet)
     is_veteran = balance >= 5000
 
+    # ---- Автоматический сброс daily_progress ----
+    today = date.today().isoformat()
     progress = getattr(player, 'daily_progress', {}) or {}
-    tasks = {"farm": "🍬", "craft": "🌿", "smoke": "💨"}
-    if guild:
-        tasks["guild_action"] = "🕯️" if guild == "BLACK" else "⚜️"
-    if is_veteran and has_pet:
-        tasks["pet"] = "🐾"
+    if progress.get("reset_date") != today:
+        current_quest = progress.get("quest_id", "chapter1")
+        player.daily_progress = {
+            "reset_date": today,
+            "quest_id": current_quest,
+            "reward_claimed": False
+        }
+        await ctx.repo.save(player)
+        progress = player.daily_progress
 
-    total = len(tasks)
-    done = sum(1 for k in tasks if progress.get(k))
+    # ---- Вычисление total и done из шаблона квеста ----
+    quest_id = progress.get("quest_id", "chapter1")
+    template = QUEST_TEMPLATES.get(quest_id)
+    if template:
+        conditions = {
+            "guild_black": guild == "BLACK",
+            "guild_white": guild == "WHITE",
+            "is_veteran_and_has_pet": is_veteran and has_pet,
+        }
+        filtered_tasks = []
+        for task in template["tasks"]:
+            cond = task.get("condition")
+            if cond and not conditions.get(cond, False):
+                continue
+            filtered_tasks.append(task)
+        total = len(filtered_tasks)
+        done = sum(1 for task in filtered_tasks if progress.get(task["key"], False))
+    else:
+        total = 0
+        done = 0
+
     reward_claimed = progress.get("reward_claimed", False)
 
     # ── ТЕКСТ ──
@@ -6625,6 +6651,10 @@ async def daily_quest_hub(update, context, ctx):
     
     if template.get("chapter_number") and template.get("total_chapters"):
         text += f"\n🏆 <b>Сага: Глава {template['chapter_number']} из {template['total_chapters']}</b>"
+        
+    # Если все задания выполнены и нет выбора (choices) – добавляем кнопку "Забрать награду"
+    if done == total and not template.get("choices"):
+        kb_rows.append([InlineKeyboardButton("🎁 Забрать награду", callback_data="claim_reward")])
 
     kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="menu")])
     kb = InlineKeyboardMarkup(kb_rows)
