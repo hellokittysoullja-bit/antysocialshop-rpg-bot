@@ -1658,6 +1658,15 @@ async def _run_migrations(conn):
             END IF;
         END $$;
     """)
+    await conn.execute("""
+        UPDATE players 
+        SET daily_progress = jsonb_build_object(
+            'reset_date', CURRENT_DATE::text,
+            'quest_id', 'chapter1',
+            'reward_claimed', false
+        )
+        WHERE daily_progress IS NULL;
+    """)
 
     # Исповедь медали миграция 
     await conn.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS repent_count INTEGER DEFAULT 0;")
