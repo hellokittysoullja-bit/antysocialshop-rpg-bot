@@ -1658,15 +1658,20 @@ async def _run_migrations(conn):
             END IF;
         END $$;
     """)
-    await conn.execute("""
-        UPDATE players 
-        SET daily_progress = jsonb_build_object(
-            'reset_date', CURRENT_DATE::text,
-            'quest_id', 'chapter1',
-            'reward_claimed', false
-        )
-        WHERE daily_progress IS NULL;
-    """)
+    UPDATE players 
+    SET daily_progress = jsonb_build_object(
+        'reset_date', CURRENT_DATE::text,
+        'quest_id', 
+            CASE 
+                WHEN daily_progress ? 'quest_id' AND daily_progress->>'quest_id' IN ('chapter1','chapter2','chapter3_warrior','chapter3_benefactor') 
+                THEN daily_progress->>'quest_id'
+                ELSE 'chapter1'
+            END,
+        'reward_claimed', false
+    )
+    WHERE NOT (daily_progress ? 'reset_date' AND daily_progress ? 'quest_id' AND daily_progress ? 'reward_claimed')
+       OR (daily_progress ? 'reset_date' AND (daily_progress->>'reset_date')::date < CURRENT_DATE)
+       OR (daily_progress ? 'quest_id' AND daily_progress->>'quest_id' = 'chapter1' AND (daily_progress->>'reward_claimed')::boolean = true);
 
     # Исповедь медали миграция 
     await conn.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS repent_count INTEGER DEFAULT 0;")
