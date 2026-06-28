@@ -6276,8 +6276,8 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
         if done == total:
             keyboard.append([InlineKeyboardButton("🎁 Забрать награду!", callback_data="claim_reward")])
         else:
-            bar_filled = int(done / total * 5)
-            bar_empty = 5 - bar_filled
+            bar_filled = done
+            bar_empty = total - done
             bar_text = "⚠️ Задания " + "▰" * bar_filled + "▱" * bar_empty + f" {done}/{total}"
             keyboard.append([InlineKeyboardButton(bar_text, callback_data="daily_quest_hub")])
     else:
@@ -6286,6 +6286,7 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
     # Вторая строка (row2)
     if (not reward_claimed and total > 0 and done == 0) or (reward_claimed or total == 0):
         row2 = [
+            InlineKeyboardButton("🍬 Фармить", callback_data="farm"),
             InlineKeyboardButton("🌿 Крафт ›", callback_data="craft"),
             InlineKeyboardButton("💨 Дунуть", callback_data="smoke"),
         ]
