@@ -6383,13 +6383,6 @@ async def progress_hub_handler(update, context, ctx):
             }
             await ctx.repo.save(player)
             progress = player.daily_progress
-
-        
-        # Сброс, если новый день
-        if progress.get("reset_date") != today:
-            progress = {"reset_date": today, "quest_id": "chapter1", "completed": False}
-            player.daily_progress = progress
-            await ctx.repo.save(player)
         
         # Получаем текущий квест
         quest_id = progress.get("quest_id", "chapter1")
@@ -6573,10 +6566,10 @@ async def daily_quest_hub(update, context, ctx):
     today = date.today().isoformat()
     progress = player.daily_progress or {}
     if progress.get("reset_date") != today:
-        current_quest = progress.get("quest_id", "chapter1")
-        progress = {"reset_date": today, "quest_id": current_quest}
-        player.daily_progress = progress
-        await ctx.repo.save(player)
+            current_quest = progress.get("quest_id", "chapter1")
+            progress = {"reset_date": today, "quest_id": current_quest, "reward_claimed": False}
+            player.daily_progress = progress
+            await ctx.repo.save(player)
 
     # === ВЫБОР ШАБЛОНА (ЭТО БЫЛО ПРОПУЩЕНО) ===
     quest_id = progress.get("quest_id", "chapter1")
