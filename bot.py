@@ -6623,10 +6623,10 @@ async def daily_quest_hub(update, context, ctx):
         return
 
     # ===== НОВЫЙ заголовок =====
-    text = f"<b>📋 ЗАДАНИЯ ДНЯ [{bar}] {done}/{total}</b>\n\n"
+    text = f"<b>📋 ЗАДАНИЯ ДНЯ</b>\n\n"
     text += f"<b>📜 {template['title']}</b>\n"
-    text += f"<b>[{bar}] ({done}/{total} этапов)</b>\n"
     text += f"{template['description']}\n\n"
+    text += f"<b>[{bar}] {done}/{total} этапов</b>\n"
     
     # ===== СПИСОК ЗАДАНИЙ =====
     kb_rows = []
