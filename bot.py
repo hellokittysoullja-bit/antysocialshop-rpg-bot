@@ -3992,6 +3992,7 @@ async def ritual_callback(update, context):
         player.balance += reward + extra + medal_bonus
         player.daily_progress = player.daily_progress or {}
         player.daily_progress["guild_action"] = True
+        player.daily_progress["ritual"] = True
         player.ritual_count = new_count
         player.last_ritual = now
 
@@ -4716,6 +4717,7 @@ async def repent_callback(update, context, ctx):
         if r < 0.70:
             reward = random.randint(100, 200)
             p.balance += reward + medal_bonus  # ← добавили medal_bonus
+            p.daily_progress["repent"] = True
             p.daily_progress["guild_action"] = True
             result_line = f"Исповедь принесла тебе <b>{reward} OAC</b> 🍬"
         elif r < 0.95:
