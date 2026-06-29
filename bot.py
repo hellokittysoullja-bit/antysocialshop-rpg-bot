@@ -5096,9 +5096,9 @@ async def _process_mines(update, context, uid, player, cfg, ctx):
 
     # --- 1. Проверяем доступность (баланс, кулдаун) ---
     min_bet = min(cfg["mines"]["bet_options"])
-        if player.balance < min_bet:
-            await _notify_user(update, context, f"💣 Недостаточно OAC. Минимальная ставка: {min_bet} OAC.")
-            return
+    if player.balance < min_bet:
+        await _notify_user(update, context, f"💣 Недостаточно OAC. Минимальная ставка: {min_bet} OAC.")
+        return
 
     # --- 2. Загружаем или создаём состояние игры в Redis ---
     redis_key = f"mines_game:{uid}"
