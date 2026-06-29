@@ -7016,48 +7016,73 @@ async def claim_reward_handler(update, context, ctx):
         return
 
     # Проверяем выполнение всех этапов
-    all_done = True
+# ---- Фильтруем задания по условиям (как в daily_quest_hub) ----
+    guild = player.guild
+    has_pet = bool(player.pet)
+    is_veteran = (player.balance or 0) >= 5000
+    conditions = {
+        "guild_black": guild == "BLACK",
+        "guild_white": guild == "WHITE",
+        "is_veteran_and_has_pet": is_veteran and has_pet,
+    }
+    filtered_tasks = []
     for task in template.get("tasks", []):
+        cond = task.get("condition")
+        if cond and not conditions.get(cond, False):
+            continue
+        filtered_tasks.append(task)
+
+    # ---- Проверяем выполнение только доступных заданий ----
+    all_done = True
+    for task in filtered_tasks:
         key = task["key"]
         if not progress.get(key, False):
             all_done = False
             break
 
     if not all_done:
-        await query.answer("Выполни все этапы квеста!", show_alert=True)
+        await query.answer("Выполни все доступные этапы квеста!", show_alert=True)
         return
 
-    # Атомарно начисляем награду
+    # ---- Начисляем награду из шаблона ----
     async def _reward(p, conn):
-        p.balance += 100
-        # Получаем текущий квест
-        current_quest_id = p.daily_progress.get("quest_id", "chapter1")
-        template = QUEST_TEMPLATES.get(current_quest_id)
-        next_quest = template.get("next_quest") if template else None
-        
-        # Сохраняем дату сброса
+        reward_oac = template.get("reward_oac", 150)
+        p.balance += reward_oac
+
+        reward_title = template.get("reward_title")
+        if reward_title:
+            titles = (p.titles or "").split()
+            if reward_title not in titles:
+                titles.append(reward_title)
+                p.titles = " ".join(titles).strip()
+
+        for item_key, qty in template.get("reward_items", {}).items():
+            if hasattr(p, item_key):
+                setattr(p, item_key, getattr(p, item_key, 0) + qty)
+
+        next_quest = template.get("next_quest")
         reset_date = p.daily_progress.get("reset_date")
-        # Пересобираем словарь: сбрасываем флаги заданий, но ставим новую главу (если есть)
         p.daily_progress = {
             "reset_date": reset_date,
-            "quest_id": next_quest or current_quest_id,
+            "quest_id": next_quest or quest_id,
             "reward_claimed": True
         }
-
         # Увеличиваем стрик (простейшая логика)
         # p.daily_progress["streak"] = p.daily_progress.get("streak", 0) + 1
         return p.balance
 
     result = await ctx.repo.atomic_update(uid, _reward)
-    if result is not None:
-        await context.bot.send_message(
 
+    if result is not None:
+        reward_oac = template.get("reward_oac", 150)
+        reward_text = f"+{reward_oac} OAC 🍬" if reward_oac > 0 else ""
+        await context.bot.send_message(
             chat_id=query.message.chat.id,
             text=(
-            f"🎉 <b>НАГРАДА ПОЛУЧЕНА!🏅</b>\n"
-            f"🌙 Тень отступила, лес благодарит тебя.\n\n"
-            f"<b>📜 {template['title']} — пройдена! +150 OAC 🍬</b>\n\n"
-            f"Отличная работа!"
+                f"🎉 <b>НАГРАДА ПОЛУЧЕНА!🏅</b>\n"
+                f"🌙 Тень отступила, лес благодарит тебя.\n\n"
+                f"<b>📜 {template['title']} — пройдена! {reward_text}</b>\n\n"
+                f"Отличная работа!"
             ),
             parse_mode='HTML'
         )
