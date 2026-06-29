@@ -5095,11 +5095,10 @@ async def _process_mines(update, context, uid, player, cfg, ctx):
         await query.answer()
 
     # --- 1. Проверяем доступность (баланс, кулдаун) ---
-    # Используем старую функцию _check_berserk_availability как проверку баланса и кулдауна
-    # Можно оставить или заменить на свою проверку.
-    if not _check_berserk_availability(player, datetime.now(), cfg["berserk"]["cost"], cfg["berserk"]["cooldown_hours"]):
-        await _notify_user(update, context, "💣 Мины пока недоступны! Проверь баланс или подожди.")
-        return
+    min_bet = min(cfg["mines"]["bet_options"])
+        if player.balance < min_bet:
+            await _notify_user(update, context, f"💣 Недостаточно OAC. Минимальная ставка: {min_bet} OAC.")
+            return
 
     # --- 2. Загружаем или создаём состояние игры в Redis ---
     redis_key = f"mines_game:{uid}"
@@ -7585,7 +7584,6 @@ EXACT_HANDLERS: Dict[str, Callable] = {
     "lab_focus_use": handle_lab_option,
     "lab_escape": handle_lab_option,
     "luck_wheel": luck_wheel_handler,
-    "mines_open_": _mines_open_cell_wrapper,
     "mines_cashout": _mines_cashout_wrapper,
     "alchemy_start": alchemy_start_handler,
     "alchemy_confirm": alchemy_confirm_handler,
@@ -7602,6 +7600,7 @@ PREFIX_HANDLERS: Dict[str, Callable] = {
     "lab_attack_": handle_lab_option,
     "achievements_": achievements_callback,
     "quest_": handle_quest_action,
+    "mines_open_": _mines_open_cell_wrapper,
 }
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
