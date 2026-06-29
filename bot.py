@@ -4874,7 +4874,7 @@ LUCK_CONFIG = {
         "cooldown_hours": 24,
     },
     "berserk": {
-        "cost": 300,
+        "cost": 300,          # ставка по умолчанию
         "win_amount": 200,
         "lose_amount": 300,
         "cooldown_hours": 24,
@@ -4890,10 +4890,17 @@ LUCK_CONFIG = {
             (1.0, "legendary", 1),
         ],
         "legendary_names": [
-            "Крик Бездны", "Пепел Короля", "Шёпот Склепа",
+            "Крик Бездны", "Шёпот Склепа",
             "Коготь Хаоса", "Вздох Пожирателя"
         ],
     },
+    "mines": {
+        "bet_options": [50, 100, 250, 500],   # доступные ставки
+        "default_bet": 50,
+        "mines_count": 3,
+        "cooldown_hours": 0,                  # можно поставить 0 – без кулдауна
+        "multiplier_max": 3.0,
+    }
 }
 
 
@@ -4982,10 +4989,10 @@ async def luck_callback(update, context, action=None):
     alchemy_ok = player.balance >= cfg["alchemy"]["required_balance"]
 
     if action == "luck_wheel":
-        await _process_wheel(update, context, uid, player, cfg, ctx)          # передаём ctx вместо war_service
+        await _process_wheel(update, context, uid, player, cfg, ctx)     
         return
     if action == "luck_berserk":
-        await _process_berserk(update, context, uid, player, cfg, ctx)
+        await _process_mines(update, context, uid, player, cfg, ctx)
         return
     if action == "alchemy_start":
         await _process_alchemy_start(update, context, player, cfg)
@@ -5056,41 +5063,314 @@ async def _process_wheel(update, context, uid, player, cfg, ctx):
 
 
 # ── Берсерк ─────────────────────────────────────────────────
-async def _process_berserk(update, context, uid, player, cfg, ctx):
+import json
+import time
+import random
+from typing import Optional, Tuple, Set, List
+
+# Вспомогательная функция для генерации поля (чистая)
+def _generate_mines_field() -> Tuple[List[List[int]], Set[Tuple[int, int]]]:
+    """Создаёт поле 5x5 и расставляет 3 мины. Возвращает (поле, координаты мин)."""
+    size = 5
+    field = [[0]*size for _ in range(size)]
+    # Все координаты
+    all_cells = [(r, c) for r in range(size) for c in range(size)]
+    mines = set(random.sample(all_cells, 3))  # 3 мины
+    return field, mines
+
+# Вспомогательная функция для расчёта множителя
+def _calc_multiplier(step: int) -> float:
+    """Множитель от 1.0 до 3.0, линейно растёт с каждым шагом."""
+    max_step = 22  # всего безопасных клеток (25-3)
+    return round(1.0 + (step / max_step) * 2.0, 2)
+
+# Основная функция – замена _process_berserk
+async def _process_mines(update, context, uid, player, cfg, ctx):
+    """
+    Запускает игру «Мины» (вместо Берсерка).
+    Обрабатывает все состояния: начало, открытие клетки, кэшаут, завершение.
+    """
+    query = update.callback_query
+    if query:
+        await query.answer()
+
+    # --- 1. Проверяем доступность (баланс, кулдаун) ---
+    # Используем старую функцию _check_berserk_availability как проверку баланса и кулдауна
+    # Можно оставить или заменить на свою проверку.
     if not _check_berserk_availability(player, datetime.now(), cfg["berserk"]["cost"], cfg["berserk"]["cooldown_hours"]):
-        await _notify_user(update, context, "🍀 Берсерк недоступен! Проверь баланс или время.")
+        await _notify_user(update, context, "💣 Мины пока недоступны! Проверь баланс или подожди.")
         return
 
-    async def _berserk(p, conn):
-        if p.balance < cfg["berserk"]["cost"]:
-            return ("no_money", p.balance)
-
-        if random.random() < 0.6:
-            p.balance += cfg["berserk"]["win_amount"]
-            res = f"<b><i>🎲 БЕЗДНА ОТВЕТИЛА</i></b>\n\nИскажение благосклонно! +<b>{cfg['berserk']['win_amount']} OAC</b> 🍬."
-            if ctx.war_service:
-                await war_service.add_score(uid, WarAction.BERSERK_WIN, conn)
-        else:
-            p.balance -= cfg["berserk"]["cost"]
-            res = f"<b><i>🕯️ БЕЗДНА МОЛЧИТ</i></b>\n\nИскажение промолчало. –<b>{cfg['berserk']['cost']} OAC</b>."
-            if ctx.war_service:
-                await war_service.add_score(uid, WarAction.BERSERK_LOSE, conn)
-        p.last_berserk = datetime.now()
-        return ("ok", res, p.balance)
-
-    result = await ctx.repo.atomic_update(uid, _berserk)
-    if result is None:
-        logger.error("berserk atomic_update failed", extra={"user_id": uid})
-        await _notify_user(update, context, "❌ Ошибка при обработке. Попробуй позже.")
+    # --- 2. Загружаем или создаём состояние игры в Redis ---
+    redis_key = f"mines_game:{uid}"
+    state_json = await ctx.redis.get(redis_key)
+    if state_json:
+        state = json.loads(state_json)
+    else:
+        # Если игра не начата – показываем меню выбора ставки
+        await _show_mines_bet_menu(update, context, player, cfg)
         return
-    status, *data = result
-    if status == "no_money":
-        await _notify_user(update, context, f"❌ Недостаточно OAC 🍬. Текущий баланс: {data[0]}")
-        return
-    res_text, _ = data
-    await edit_or_reply(update, context, res_text,
-                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]))
 
+    # --- 3. Обработка действий в зависимости от состояния ---
+    action = query.data if query else None
+
+    # Если действие – открыть клетку
+    if action and action.startswith("mines_open_"):
+        await _mines_open_cell(update, context, state, redis_key, uid, ctx)
+        return
+
+    # Если действие – забрать выигрыш
+    if action and action == "mines_cashout":
+        await _mines_cashout(update, context, state, redis_key, uid, ctx)
+        return
+
+    # Если действие – начать новую игру (выбрана ставка)
+    if action and action.startswith("mines_bet_"):
+        bet = int(action.split("_")[-1])
+        await _mines_start_game(update, context, uid, bet, ctx)
+        return
+
+    # Если действие – "назад" или "меню" – просто показываем меню удачи
+    if action and action in ("luck", "menu"):
+        await luck_callback(update, context)
+        return
+
+    # Если никакое действие не подошло – показываем текущее поле
+    await _mines_show_field(update, context, state, redis_key, uid, ctx)
+    
+async def _show_mines_bet_menu(update, context, player, cfg):
+    """Показывает меню выбора ставки."""
+    query = update.callback_query
+    if not query:
+        return
+    text = (
+        "💣 **МИНЫ**\n\n"
+        "Выбери ставку и начни игру.\n"
+        "Поле 5×5, спрятано 3 мины.\n"
+        "Открывай клетки, множитель растёт!\n"
+        "Можешь в любой момент забрать выигрыш.\n\n"
+        f"💰 Твой баланс: {player.balance} OAC"
+    )
+    keyboard = []
+    for bet in cfg["mines"]["bet_options"]:
+        keyboard.append([InlineKeyboardButton(f"{bet} OAC", callback_data=f"mines_bet_{bet}")])
+    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="luck")])
+    await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+async def _mines_start_game(update, context, uid, bet, ctx):
+    """Создаёт новую игру, списывает ставку и показывает поле."""
+    query = update.callback_query
+    if not query:
+        return
+    # Проверка баланса
+    player = await ctx.repo.get_by_id(uid)
+    if player.balance < bet:
+        await query.answer("Недостаточно OAC!", show_alert=True)
+        return
+
+    # Атомарно списываем ставку
+    async def _deduct(p, conn):
+        if p.balance < bet:
+            raise ValueError("Недостаточно средств")
+        p.balance -= bet
+        return p.balance
+
+    try:
+        await ctx.repo.atomic_update(uid, _deduct)
+    except Exception as e:
+        logger.error(f"Ошибка списания ставки {bet} у {uid}: {e}")
+        await query.answer("Ошибка при списании ставки", show_alert=True)
+        return
+
+    # Генерируем поле и мины
+    field, mines = _generate_mines_field()
+    state = {
+        "field": field,
+        "mines": list(mines),  # для сериализации
+        "bet": bet,
+        "step": 0,
+        "multiplier": 1.0,
+        "status": "playing",
+        "created_at": time.time()
+    }
+    redis_key = f"mines_game:{uid}"
+    await ctx.redis.setex(redis_key, 3600, json.dumps(state))
+    await _mines_show_field(update, context, state, redis_key, uid, ctx)
+
+async def _mines_show_field(update, context, state, redis_key, uid, ctx):
+    """Отображает текущее состояние поля."""
+    query = update.callback_query
+    if not query:
+        return
+    field = state["field"]
+    mines = set(state["mines"])
+    bet = state["bet"]
+    step = state["step"]
+    multiplier = state["multiplier"]
+    status = state["status"]
+
+    # Строим визуальное поле
+    size = 5
+    lines = []
+    for r in range(size):
+        row_cells = []
+        for c in range(size):
+            val = field[r][c]
+            if val == 0:
+                row_cells.append("?")
+            elif val == 1:
+                row_cells.append("💎")
+            elif val == 2:
+                row_cells.append("💀")
+        lines.append("│ " + " │ ".join(row_cells) + " │")
+    field_str = "┌───┬───┬───┬───┬───┐\n" + "\n├───┼───┼───┼───┼───┤\n".join(lines) + "\n└───┴───┴───┴───┴───┘"
+
+    win = int(bet * multiplier) if status == "playing" else 0
+
+    text = (
+        f"💣 **МИНЫ**\n\n"
+        f"💰 Ставка: {bet} OAC\n"
+        f"🏆 Множитель: x{multiplier:.2f}\n"
+        f"📊 Прогресс: {step}/22 клеток\n"
+    )
+
+    if status == "playing":
+        text += f"💰 Возможный выигрыш: {win} OAC\n\n"
+        text += f"```\n{field_str}\n```\n"
+        # Клавиатура с клетками
+        keyboard = []
+        for r in range(size):
+            row_btns = []
+            for c in range(size):
+                if field[r][c] == 0:
+                    row_btns.append(InlineKeyboardButton("▪️", callback_data=f"mines_open_{r}_{c}"))
+                else:
+                    row_btns.append(InlineKeyboardButton("  ", callback_data="noop"))
+            keyboard.append(row_btns)
+        keyboard.append([InlineKeyboardButton(f"🏆 Забрать {win} OAC", callback_data="mines_cashout")])
+        keyboard.append([InlineKeyboardButton("🔙 В меню", callback_data="luck")])
+    elif status == "won":
+        text += f"🎉 **ПОБЕДА!** Ты открыл все клетки!\n"
+        text += f"💰 Выигрыш: {win} OAC\n\n```\n{field_str}\n```"
+        keyboard = [[InlineKeyboardButton("💣 Новая игра", callback_data="mines_bet_50")],
+                    [InlineKeyboardButton("🔙 В меню", callback_data="luck")]]
+    elif status == "lost":
+        text += f"💥 **ВЗРЫВ!** Ты попал на мину!\n"
+        text += f"💰 Ты потерял ставку.\n\n```\n{field_str}\n```"
+        keyboard = [[InlineKeyboardButton("💣 Попробовать снова", callback_data="mines_bet_50")],
+                    [InlineKeyboardButton("🔙 В меню", callback_data="luck")]]
+    else:  # cashed_out
+        text += f"✅ **Ты забрал выигрыш!**\n"
+        text += f"💰 Выигрыш: {win} OAC\n\n```\n{field_str}\n```"
+        keyboard = [[InlineKeyboardButton("💣 Новая игра", callback_data="mines_bet_50")],
+                    [InlineKeyboardButton("🔙 В меню", callback_data="luck")]]
+
+    await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+async def _mines_open_cell(update, context, state, redis_key, uid, ctx):
+    """Открывает клетку, проверяет мину, обновляет состояние."""
+    query = update.callback_query
+    if not query:
+        return
+    # Парсим координаты
+    _, r_str, c_str = query.data.split("_")
+    row, col = int(r_str), int(c_str)
+
+    field = state["field"]
+    if field[row][col] != 0:
+        await query.answer("Эта клетка уже открыта", show_alert=True)
+        return
+
+    mines = set(state["mines"])
+
+    # Проверяем мину
+    if (row, col) in mines:
+        field[row][col] = 2
+        state["status"] = "lost"
+        # Ставка уже списана, ничего не возвращаем
+        await ctx.redis.setex(redis_key, 3600, json.dumps(state))
+        await _mines_show_field(update, context, state, redis_key, uid, ctx)
+        return
+
+    # Безопасная клетка
+    field[row][col] = 1
+    state["step"] += 1
+    state["multiplier"] = _calc_multiplier(state["step"])
+
+    # Проверяем победу (все 22 клетки открыты)
+    if state["step"] == 22:
+        state["status"] = "won"
+        win = int(state["bet"] * state["multiplier"])
+        # Начисляем выигрыш атомарно
+        async def _win(p, conn):
+            p.balance += win
+            return p.balance
+        try:
+            await ctx.repo.atomic_update(uid, _win)
+        except Exception as e:
+            logger.error(f"Ошибка начисления выигрыша {win} у {uid}: {e}")
+            await query.answer("Ошибка при начислении", show_alert=True)
+            return
+        await ctx.redis.setex(redis_key, 3600, json.dumps(state))
+        await _mines_show_field(update, context, state, redis_key, uid, ctx)
+        return
+
+    # Игра продолжается
+    await ctx.redis.setex(redis_key, 3600, json.dumps(state))
+    await _mines_show_field(update, context, state, redis_key, uid, ctx)
+
+async def _mines_cashout(update, context, state, redis_key, uid, ctx):
+    """Забирает текущий выигрыш."""
+    query = update.callback_query
+    if not query:
+        return
+    if state["status"] != "playing":
+        await query.answer("Игра уже завершена", show_alert=True)
+        return
+    if state["step"] == 0:
+        await query.answer("Нужно открыть хотя бы одну клетку", show_alert=True)
+        return
+
+    win = int(state["bet"] * state["multiplier"])
+    # Начисляем выигрыш
+    async def _cash(p, conn):
+        p.balance += win
+        return p.balance
+    try:
+        await ctx.repo.atomic_update(uid, _cash)
+    except Exception as e:
+        logger.error(f"Ошибка кэшаута {win} у {uid}: {e}")
+        await query.answer("Ошибка при выводе", show_alert=True)
+        return
+
+async def _mines_open_cell_wrapper(update, context):
+    # Извлекаем uid и данные из callback_data, затем вызываем основную функцию
+    query = update.callback_query
+    uid = query.from_user.id
+    ctx = context.bot_data.get("ctx")
+    redis_key = f"mines_game:{uid}"
+    state_json = await ctx.redis.get(redis_key)
+    if not state_json:
+        await query.answer("Игра не найдена. Начните новую.", show_alert=True)
+        return
+    state = json.loads(state_json)
+    await _mines_open_cell(update, context, state, redis_key, uid, ctx)
+
+async def _mines_cashout_wrapper(update, context):
+    query = update.callback_query
+    uid = query.from_user.id
+    ctx = context.bot_data.get("ctx")
+    redis_key = f"mines_game:{uid}"
+    state_json = await ctx.redis.get(redis_key)
+    if not state_json:
+        await query.answer("Игра не найдена.", show_alert=True)
+        return
+    state = json.loads(state_json)
+    await _mines_cashout(update, context, state, redis_key, uid, ctx)
+
+    state["status"] = "cashed_out"
+    await ctx.redis.setex(redis_key, 3600, json.dumps(state))
+    await _mines_show_field(update, context, state, redis_key, uid, ctx)
 
 # ── Алхимия (начало) ────────────────────────────────────────
 async def _process_alchemy_start(update, context, player, cfg):
@@ -7305,7 +7585,8 @@ EXACT_HANDLERS: Dict[str, Callable] = {
     "lab_focus_use": handle_lab_option,
     "lab_escape": handle_lab_option,
     "luck_wheel": luck_wheel_handler,
-    "luck_berserk": luck_berserk_handler,
+    "mines_open_": _mines_open_cell_wrapper,
+    "mines_cashout": _mines_cashout_wrapper,
     "alchemy_start": alchemy_start_handler,
     "alchemy_confirm": alchemy_confirm_handler,
 }
