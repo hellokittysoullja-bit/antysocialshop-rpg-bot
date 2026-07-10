@@ -4305,6 +4305,24 @@ async def _mines_cashout_wrapper(update, context):
     await ctx.redis.setex(redis_key, 3600, json.dumps(state))
     await _mines_show_field(update, context, state, redis_key, uid, ctx)
 
+
+async def _mines_bet_wrapper(update, context):
+    """Клик по кнопке ставки в минах: списывает ставку и стартует игру.
+
+    Раньше callback 'mines_bet_<n>' не был зарегистрирован ни в одном реестре,
+    поэтому выбор ставки выдавал «Неизвестная команда» и мины были непроходимы.
+    """
+    query = update.callback_query
+    await query.answer()
+    ctx = context.bot_data.get("ctx")
+    uid = query.from_user.id
+    try:
+        bet = int(query.data.split("_")[-1])
+    except (ValueError, AttributeError):
+        await query.answer("Некорректная ставка", show_alert=True)
+        return
+    await _mines_start_game(update, context, uid, bet, ctx)
+
 # ── Алхимия (начало) ────────────────────────────────────────
 async def _process_alchemy_start(update, context, player, cfg):
     if not has_rank(player.balance, "Ветеран"):
@@ -5668,7 +5686,7 @@ async def daily_quest_hub(update, context, ctx):
 
         kb_rows = []
         for i, choice in enumerate(template["choices"]):
-            kb_rows.append([InlineKeyboardButton(choice["label"], callback_data=f"choice_{i}")])
+            kb_rows.append([InlineKeyboardButton(choice["label"], callback_data=f"quest_choice_{i}")])
         kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="menu")])
         kb = InlineKeyboardMarkup(kb_rows)
         await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
@@ -5705,6 +5723,87 @@ async def daily_quest_hub(update, context, ctx):
     kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="menu")])
     kb = InlineKeyboardMarkup(kb_rows)
     await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
+
+async def handle_choice(update, context, ctx):
+    """Выбор ветки сюжета (глава 2 → путь воина/благодетеля).
+
+    Раньше эта функция вызывалась из handle_quest_action, но НЕ БЫЛА ОПРЕДЕЛЕНА
+    (NameError), а кнопка шла как 'choice_<i>' вместо 'quest_choice_<i>' и не
+    маршрутизировалась. Из-за этого игроки застревали на главе 2. Логика наград
+    и продвижения квеста зеркалит claim_reward_handler, но берёт данные из выбора.
+    """
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+
+    player = await ctx.repo.get_by_id(uid)
+    if not player or not player.exists:
+        return
+
+    progress = getattr(player, 'daily_progress', {}) or {}
+    quest_id = progress.get("quest_id", "chapter1")
+    template = QUEST_TEMPLATES.get(quest_id)
+    choices = template.get("choices") if template else None
+    if not choices:
+        await query.answer("Выбор сейчас недоступен", show_alert=True)
+        return
+
+    try:
+        idx = int(query.data.split("_")[-1])
+        choice = choices[idx]
+    except (ValueError, IndexError):
+        await query.answer("Некорректный выбор", show_alert=True)
+        return
+
+    async def _apply(p, conn):
+        p.balance += choice.get("reward_oac", 0)
+        reward_title = choice.get("reward_title")
+        if reward_title:
+            titles = (p.titles or "").split()
+            if reward_title not in titles:
+                titles.append(reward_title)
+                p.titles = " ".join(titles).strip()
+        for item_key, qty in choice.get("reward_items", {}).items():
+            if hasattr(p, item_key):
+                setattr(p, item_key, getattr(p, item_key, 0) + qty)
+        reset_date = (p.daily_progress or {}).get("reset_date")
+        p.daily_progress = {
+            "reset_date": reset_date,
+            "quest_id": choice.get("next_quest", quest_id),
+            "reward_claimed": True,
+        }
+        return True
+
+    await ctx.repo.atomic_update(uid, _apply)
+    await context.bot.send_message(
+        chat_id=query.message.chat.id,
+        text=choice.get("result_text", "✨ Выбор сделан."),
+        parse_mode='HTML',
+    )
+
+
+async def skip_onboarding_handler(update, context):
+    """Кнопка «Пропустить обучение»: завершает онбординг и показывает меню.
+
+    Раньше callback 'skip_onboarding' не имел обработчика → «Неизвестная команда».
+    """
+    ctx = context.bot_data.get("ctx")
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+
+    player = await ctx.repo.get_by_id(uid)
+    if not player or not player.exists:
+        return
+    player.onboarding_step = -1
+    await ctx.repo.save(player)
+
+    text, kb = await build_main_menu(player, ctx, context, full_mode=True)
+    try:
+        await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
+    except Exception:
+        await safe_send_message(context, uid, text, reply_markup=kb, parse_mode='HTML')
+
 
 # ─── Маршрутизатор заданий (вызывается при нажатии на кнопку задания) ───
 async def handle_quest_action(update, context):
@@ -6356,6 +6455,7 @@ CALLBACKS: Dict[str, Callable] = {
     "progress_hub": progress_hub_handler,
     "all_features": all_features_handler,
     "claim_reward": claim_reward_handler,
+    "skip_onboarding": skip_onboarding_handler,
 }
 
 EXACT_HANDLERS: Dict[str, Callable] = {
@@ -6381,6 +6481,7 @@ PREFIX_HANDLERS: Dict[str, Callable] = {
     "achievements_": achievements_callback,
     "quest_": handle_quest_action,
     "mines_open_": _mines_open_cell_wrapper,
+    "mines_bet_": _mines_bet_wrapper,
 }
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
