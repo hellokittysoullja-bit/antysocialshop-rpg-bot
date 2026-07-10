@@ -1555,6 +1555,9 @@ async def world_hub(update, context, ctx):
 
     kb_rows = []
 
+    # Путь к власти — north-star «кем ты становишься» (смысл/фантазия)
+    kb_rows.append([InlineKeyboardButton("🎯 Твой Путь к власти", callback_data="destiny_hub")])
+
     # Плантация — доступна ВСЕМ (idle-крючок против раннего оттока: «зайди собрать»)
     kb_rows.append([InlineKeyboardButton("🪴 Плантация", callback_data="collect")])
 
@@ -1577,8 +1580,60 @@ async def world_hub(update, context, ctx):
         reply_markup=kb, parse_mode='HTML'
     )
 
+@cb
+async def destiny_hub(update, context, ctx):
+    """Северная звезда: «кем ты становишься». Отвечает на «зачем эта игра» —
+    показывает фантазию (восхождение к власти) как видимый путь + твою легенду.
+    """
+    query = update.callback_query
+    await query.answer()
+    player = await ctx.repo.get_by_id(query.from_user.id)
+    if not player or not player.exists:
+        await query.answer("Профиль не найден", show_alert=True)
+        return
+
+    balance = player.balance or 0
+    _re, _rn, _ne, _nn, next_th, _pt = compute_rank_info(balance)
+
+    # Лестница восхождения: пройденное ✅, следующее ➡️, заблокированное 🔒
+    ladder = []
+    for emoji, threshold, _ in RANKS:
+        e = emoji.split(' ', 1)[0]
+        nm = emoji.split(' ', 1)[1] if ' ' in emoji else emoji
+        if balance >= threshold:
+            ladder.append(f"✅ {e} <b>{nm}</b>")
+        elif threshold == next_th:
+            ladder.append(f"➡️ {e} <b>{nm}</b> — осталось {threshold - balance} OAC")
+        else:
+            ladder.append(f"🔒 {e} {nm}")
+
+    inv = player.inventory or []
+    named = sum(1 for it in inv if it.get("type") == "named")
+    legendaries = sum(1 for it in inv if it.get("type") == "named" and it.get("rarity") == "legendary")
+    plant_lvl = player.passive_level or 0
+    guild = {"BLACK": "🕯️ Тёмная", "WHITE": "⚜️ Светлая"}.get(player.guild, "— не выбрана")
+
+    text = (
+        "🎯 <b>ТВОЙ ПУТЬ К ВЛАСТИ</b>\n\n"
+        "<i>Ты начал никем. Стань 🪬 Некромантом Искажения — тем, о ком шепчутся оба мира.</i>\n\n"
+        "<b>⚜️ Восхождение:</b>\n"
+        + "\n".join(ladder) +
+        "\n\n<b>👑 Твоя легенда:</b>\n"
+        f"💍 Именных блантов: <b>{named}</b>  (🟡 легендарных: <b>{legendaries}</b>)\n"
+        f"🪴 Плантация-империя: <b>уровень {plant_lvl}</b>\n"
+        f"🏰 Гильдия: <b>{guild}</b>\n\n"
+        "<i>Каждый фарм, каждый блант, каждая победа гильдии — шаг к власти.</i>"
+    )
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🪴 Растить империю", callback_data="collect"),
+         InlineKeyboardButton("💍 Крафт", callback_data="craft")],
+        [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
+    ])
+    await edit_or_reply(update, context, text, reply_markup=kb, parse_mode='HTML')
+
+
 # ========== ОБРАБОТЧИКИ КОМАНД (полный, надёжный, с лабиринтом) ==========
-logger = logging.getLogger(__name__)   # ← 
+logger = logging.getLogger(__name__)   # ←
 
 # --- Retry-обёртки для Telegram API (обработка 429) ---
 @retry(
@@ -1801,6 +1856,9 @@ async def _create_new_player(update, context, uid, username, invited_by=None):
     welcome_text = (
         "<b>🎉 Добро пожаловать в Гильдию Antysocialshop!</b>\n"
         "<i>Здесь курят бланты, поклоняются древним богам и воюют за OAC.</i>\n\n"
+        "🩸 <b>Твой путь:</b> <i>от нищего 🪓 Рекрута до 🪬 Некроманта Искажения — "
+        "скрути легендарные бланты, вырасти империю-плантацию и приведи гильдию к власти "
+        "над обоими мирами.</i>\n\n"
         f"{ref_bonus_line}"
         f"🎁 <b>Смотритель дарует тебе</b> <code>{start_balance}</code> 🍬 <b>и твой первый именной блант!</b>\n\n"
         "<b>🎓 ОБУЧЕНИЕ [▓░░░] 1/3</b>\n\n"
@@ -6867,6 +6925,7 @@ CALLBACKS: Dict[str, Callable] = {
     "onboarding_reward": onboarding_reward,
     "daily_quest_hub": daily_quest_hub,
     "world_hub": world_hub,
+    "destiny_hub": destiny_hub,
     "progress_hub": progress_hub_handler,
     "all_features": all_features_handler,
     "claim_reward": claim_reward_handler,
