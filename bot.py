@@ -1935,6 +1935,25 @@ def _calculate_reward(streak: int, config: StreakConfig) -> RewardResult:
 # Формирование сообщения с улучшенным прогресс-баром (пункт 7)
 # ---------------------------------------------------------------------------
 
+def _build_next_day_preview(streak: int, config: StreakConfig) -> str:
+    """Предпросмотр завтрашней награды — крючок предвкушения + loss-aversion.
+
+    Показывает, что игрок получит, если вернётся завтра и продлит серию.
+    Чистая функция (детерминированная часть награды, без случайных бонусов).
+    """
+    next_streak = streak + 1
+    base = config.base_rewards.get(next_streak, 100)
+    if next_streak >= config.hot_streak_threshold:
+        base = int(base * config.hot_streak_multiplier)
+    next_title = config.title_rewards.get(next_streak)
+
+    if next_title:
+        return (f"\n\n🎁 <b>Завтра (День {next_streak}):</b> +{base} OAC "
+                f"<b>и титул {next_title}!</b>\n<i>Вернись и не разорви серию 🔥</i>")
+    return (f"\n\n⏳ <b>Завтра (День {next_streak}):</b> +{base} OAC ждут тебя.\n"
+            f"<i>Вернись и продли серию 🔥</i>")
+
+
 def _build_daily_message(streak: int, reward: RewardResult, config: StreakConfig) -> str:
     # Стиль заголовка
     if streak >= 8:
@@ -1985,6 +2004,7 @@ def _build_daily_message(streak: int, reward: RewardResult, config: StreakConfig
         f"<b>День {streak}.</b> {desc}\n\n"
         f"{bar}\n\n"
         f"<b>+{reward.total_oac} OAC</b>{title_msg}{item_msg}"
+        f"{_build_next_day_preview(streak, config)}"
     )
 # ---------------------------------------------------------------------------
 # Вспомогательные функции

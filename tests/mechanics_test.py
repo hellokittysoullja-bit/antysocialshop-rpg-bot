@@ -28,6 +28,7 @@ from bot import (
     calculate_smoke_reward, _calculate_reward, daily_config,
     _calc_multiplier, _generate_mines_field, get_medal_target,
     get_rank_progress, _get_craft_stats, FARM_MEDALS,
+    _build_next_day_preview, _build_daily_message,
     create_tables, _run_migrations, PlayerRepository, Player,
     PetService, GuildWarService, WarConfig, WarSettings, PET_CONFIG,
 )
@@ -92,6 +93,15 @@ def test_pure(passed):
     stats = _get_craft_stats(balance=100, blunts=3, craft_count=5)
     assert "medal_name" in stats and "target" in stats and stats["target"] >= 5
     passed.append("_get_craft_stats: структура ответа")
+
+    # --- предпросмотр завтрашней награды (крючок предвкушения + titles) ---
+    assert "День 2" in _build_next_day_preview(1, daily_config)
+    p6 = _build_next_day_preview(6, daily_config)   # завтра день 7 → титул 🕊️
+    assert "титул" in p6 and "🕊️" in p6
+    assert "🔮" in _build_next_day_preview(13, daily_config)  # завтра день 14
+    full = _build_daily_message(1, _calculate_reward(1, daily_config), daily_config)
+    assert "OAC" in full and "Завтра" in full
+    passed.append("_build_next_day_preview: предпросмотр + титулы 7/14")
 
 
 async def test_services(passed):
