@@ -32,6 +32,7 @@ from bot import (
     _farm_on_cooldown, _quest_progress_counts, _plural_steps, QUEST_TEMPLATES,
     _resolve_referrer, _reward_referrer,
     _plant_rate, _plant_upgrade_cost, _plant_pending,
+    _days_left_in_week, _war_rally_line,
     create_tables, _run_migrations, PlayerRepository, Player,
     PetService, GuildWarService, WarConfig, WarSettings, PET_CONFIG,
 )
@@ -165,6 +166,15 @@ def test_pure(passed):
     assert e_cap == 200 and capped is True     # лимит 8ч × 25 OAC/ч
     assert _plant_pending(0, pn - timedelta(hours=4), pn) == (0, 0.0, False)  # не посажено
     passed.append("Плантация: rate/cost/pending + лимит накопления")
+
+    # --- Война гильдий: дней до итогов + мотивационная строка (долг/соревнование) ---
+    assert _days_left_in_week(datetime(2024, 1, 1)) == 7   # понедельник
+    assert _days_left_in_week(datetime(2024, 1, 7)) == 1   # воскресенье
+    assert "ОТСТАЁТ" in _war_rally_line("BLACK", 100, 300)   # моя гильдия позади
+    assert "ВЕДЁТ" in _war_rally_line("BLACK", 300, 100)     # моя гильдия впереди
+    assert "Ноздря" in _war_rally_line("WHITE", 200, 200)    # поровну
+    assert "Выбери гильдию" in _war_rally_line(None, 0, 0)   # без гильдии
+    passed.append("Война гильдий: дни недели + рэлли-строка")
 
 
 async def test_services(passed):

@@ -226,6 +226,16 @@ async def on_startup(app: Application):
         app.bot_data["ctx"] = ctx
         logger.info("✅ Контекст сохранён")
 
+        # Активируем войну гильдий, если не запущена: иначе очки гильдий не
+        # считаются (add_score_raw работает только при активной войне) и вся
+        # социальная система дремлет до первой недельной джобы.
+        try:
+            if not await ctx.war_service.is_war_active():
+                await ctx.war_service.start_war()
+                logger.info("⚔️ Война гильдий активирована на старте")
+        except Exception:
+            logger.exception("Не удалось активировать войну гильдий на старте")
+
         # ================== Прогрев кэша ==================
         if redis_client:
             await load_blunt_images(ctx)

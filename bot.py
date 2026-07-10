@@ -3849,24 +3849,40 @@ async def guild_info_callback(update, context):
 
     await edit_or_reply(update, context, text, reply_markup=kb, parse_mode='HTML')
 
+def _days_left_in_week(now) -> int:
+    """Дней до подведения итогов недели (понедельник — новая неделя). Чистая функция."""
+    return 7 - now.weekday()
+
+
+def _war_rally_line(my_guild, black, white) -> str:
+    """Мотивационная строка войны: долг + соревнование. Чистая функция.
+
+    Отстаём → «ты нужен»; ведём → «не дай догнать»; поровну → «твой вклад решит».
+    """
+    if my_guild not in ("BLACK", "WHITE"):
+        return "🏰 <b>Выбери гильдию</b>, чтобы сражаться за общую награду!"
+    mine = black if my_guild == "BLACK" else white
+    rival = white if my_guild == "BLACK" else black
+    if mine < rival:
+        return (f"🔥 <b>Твоя гильдия ОТСТАЁТ на {rival - mine}!</b>\n"
+                "Каждый твой фарм и сбор — очки гильдии. <b>Ты нужен.</b>")
+    if mine > rival:
+        return (f"🏆 <b>Твоя гильдия ВЕДЁТ (+{mine - rival})!</b>\n"
+                "Не дай сопернику догнать — продолжай приносить очки.")
+    return "⚖️ <b>Ноздря в ноздрю!</b> Твой вклад решит исход недели."
+
+
 async def guild_war_callback(update, context):
     ctx = context.application.bot_data["ctx"]
     query = update.callback_query
     await query.answer()
-    uid = query.from_user.id
+    player = await ctx.repo.get_by_id(query.from_user.id)
+    my_guild = player.guild if player else None
 
     async with ctx.db_pool.acquire() as conn:
-        # Загружаем очки гильдий и героев одним запросом
         scores = await conn.fetch("SELECT guild, total_score FROM guild_weekly")
         black_score = next((r["total_score"] for r in scores if r["guild"] == "BLACK"), 0)
         white_score = next((r["total_score"] for r in scores if r["guild"] == "WHITE"), 0)
-
-        # Если очков нет — война неактивна
-        if black_score == 0 and white_score == 0:
-            await edit_or_reply(update, context, "🕊️ Сейчас мирное время.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="guild_info")]]))
-            return
-
         top_black = await conn.fetch(
             "SELECT username, donated FROM players WHERE guild='BLACK' ORDER BY donated DESC LIMIT 3"
         )
@@ -3882,22 +3898,24 @@ async def guild_war_callback(update, context):
         filled = perc // 10
         return "▓" * filled + "░" * (10 - filled)
 
+    days_left = _days_left_in_week(datetime.now())
     text = (
-        f"<b>⚔️ БИТВА ГИЛЬДИЙ</b>\n\n"
-        f"🕯️ <b>Тёмная Гильдия:</b> {black_score} очков\n"
-        f"<b>{safe_bar(bp)} {bp}%</b>\n\n"
-        f"⚜️ <b>Светлая Гильдия:</b> {white_score} очков\n"
-        f"<b>{safe_bar(wp)} {wp}%</b>\n\n"
+        f"<b>⚔️ ВОЙНА ГИЛЬДИЙ</b>\n\n"
+        f"{_war_rally_line(my_guild, black_score, white_score)}\n\n"
+        f"🕯️ <b>Тёмные:</b> {black_score}\n<b>{safe_bar(bp)} {bp}%</b>\n\n"
+        f"⚜️ <b>Светлые:</b> {white_score}\n<b>{safe_bar(wp)} {wp}%</b>\n\n"
+        f"⏳ До итогов недели: <b>{days_left} дн.</b>\n"
+        f"🎁 <b>Победившая гильдия — награда КАЖДОМУ</b> (OAC + бланты + пыль)!\n\n"
     )
 
     if top_black:
         text += "🕯️ <b>Герои Тьмы:</b>\n"
         for i, row in enumerate(top_black, 1):
-            text += f"  {i}. {html.escape(row['username'])} — {row['donated']} очков\n"
+            text += f"  {i}. {html.escape(row['username'])} — {row['donated']}\n"
     if top_white:
         text += "⚜️ <b>Герои Света:</b>\n"
         for i, row in enumerate(top_white, 1):
-            text += f"  {i}. {html.escape(row['username'])} — {row['donated']} очков\n"
+            text += f"  {i}. {html.escape(row['username'])} — {row['donated']}\n"
 
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔙 Назад", callback_data="guild_info")]
