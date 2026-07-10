@@ -66,6 +66,22 @@ def main() -> int:
     assert not stale, f"KNOWN_UNTRACKED устарел, убери: {stale}"
     passed.append(f"известные пробелы актуальны: {sorted(still_used)}")
 
+    # 4. Достижения: у каждого (кроме lunar_lord) есть условие на реальном поле Player.
+    from bot import ACHIEVEMENTS, ACHIEVEMENT_CONDITIONS, Player
+    player_fields = set(Player.model_fields.keys())
+    bad_ach = []
+    for a in ACHIEVEMENTS:
+        aid = a["id"]
+        if aid == "lunar_lord":
+            continue
+        cond = ACHIEVEMENT_CONDITIONS.get(aid)
+        if not cond:
+            bad_ach.append(f"{aid}: нет условия (недостижимо)")
+        elif cond[0] not in player_fields:
+            bad_ach.append(f"{aid}: поле '{cond[0]}' не существует в Player")
+    assert not bad_ach, f"Достижения без рабочих условий: {bad_ach}"
+    passed.append(f"достижения: {len(ACHIEVEMENTS)} шт, все условия на реальных полях Player")
+
     for name in passed:
         print(f"  OK  {name}")
     print(f"\nТест контента пройден: {len(passed)}/{len(passed)}")
