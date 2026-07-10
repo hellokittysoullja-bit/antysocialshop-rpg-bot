@@ -6379,8 +6379,7 @@ async def share_blunt_handler(update, context, ctx, player):
     username = html.escape(player.username or str(uid))
 
     if not item:
-        fallback_text = f"Блант не найден.\n{ref_link}"
-        await query.answer(switch_inline_query=fallback_text)
+        await query.answer("Блант не найден.", show_alert=True)
         return
 
     name = item["name"]
@@ -6397,8 +6396,20 @@ async def share_blunt_handler(update, context, ctx, player):
         f"<b>💎 Нажми на ссылку чтобы забрать уникальный Блант:</b>\n{ref_link}"
     )
 
-    # Вот новое: вместо отправки в чат — открываем список чатов для пересылки
-    await query.answer(switch_inline_query=share_text)
+    # Рабочий шеринг: switch_inline_query требует inline-режима/обработчика (их нет)
+    # → кнопка была мёртвой. Используем нативный t.me/share/url (без HTML — он там
+    # не рендерится) и мотивируем двусторонним бонусом (реферер+приглашённый).
+    share_plain = re.sub(r"<[^>]+>", "", share_text)
+    share_kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📤 Отправить другу", url=build_share_url(share_plain))],
+        [InlineKeyboardButton("🔙 Назад", callback_data="my_blunts")],
+    ])
+    await query.answer()
+    await query.message.edit_text(
+        share_text + "\n\n<i>👆 Отправь другу — когда он войдёт по ссылке, "
+        "<b>вы оба получите бонус!</b></i>",
+        reply_markup=share_kb, parse_mode='HTML'
+    )
 
 @rate_limit(1)
 @game_handler
