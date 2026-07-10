@@ -31,6 +31,7 @@ from bot import (
     _build_next_day_preview, _build_daily_message, _reengagement_text, reengagement_push,
     _farm_on_cooldown, _quest_progress_counts, _plural_steps, QUEST_TEMPLATES,
     _resolve_referrer, _reward_referrer,
+    _plant_rate, _plant_upgrade_cost, _plant_pending,
     create_tables, _run_migrations, PlayerRepository, Player,
     PetService, GuildWarService, WarConfig, WarSettings, PET_CONFIG,
 )
@@ -155,6 +156,16 @@ def test_pure(passed):
     assert _resolve_referrer([], 999) is None
     passed.append("_resolve_referrer: парсинг создателя из ссылки")
 
+    # --- Плантация: ставка / стоимость апгрейда / накопление с лимитом ---
+    assert (_plant_rate(1), _plant_rate(5)) == (25, 125)
+    assert (_plant_upgrade_cost(1), _plant_upgrade_cost(2)) == (600, 1350)
+    pn = datetime(2026, 1, 1, 12, 0)
+    assert _plant_pending(1, pn - timedelta(hours=4), pn) == (100, 4.0, False)
+    e_cap, _h, capped = _plant_pending(1, pn - timedelta(hours=20), pn)
+    assert e_cap == 200 and capped is True     # лимит 8ч × 25 OAC/ч
+    assert _plant_pending(0, pn - timedelta(hours=4), pn) == (0, 0.0, False)  # не посажено
+    passed.append("Плантация: rate/cost/pending + лимит накопления")
+
 
 async def test_services(passed):
     pool = await asyncpg.create_pool(os.environ["DATABASE_URL_AIVEN"], min_size=1, max_size=3)
@@ -251,6 +262,22 @@ async def test_services(passed):
     async with pool.acquire() as conn:
         await conn.execute("DELETE FROM players WHERE user_id=$1", REF_UID)
     passed.append("_reward_referrer: +50 OAC + счётчик + метка 🩸")
+
+    # --- Плантация: passive_level/passive_collected round-trip через БД + расчёт ---
+    PLANT_UID = 999004
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM players WHERE user_id=$1", PLANT_UID)
+    plnt = Player(user_id=PLANT_UID, username="Planter", balance=1000, exists=True)
+    plnt.passive_level = 2
+    plnt.passive_collected = datetime.now() - timedelta(hours=4)
+    await repo.save(plnt)
+    reloaded_p = await repo.get_by_id(PLANT_UID)
+    assert reloaded_p.passive_level == 2
+    earned_p, _hh, _cc = _plant_pending(reloaded_p.passive_level, reloaded_p.passive_collected, datetime.now())
+    assert 190 <= earned_p <= 210, f"урожай ур.2 за 4ч ≈ 200, получено {earned_p}"
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM players WHERE user_id=$1", PLANT_UID)
+    passed.append("Плантация: round-trip полей + расчёт урожая на БД")
 
     async with pool.acquire() as conn:
         await conn.execute("DELETE FROM players WHERE user_id=$1", TEST_UID)

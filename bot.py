@@ -1555,9 +1555,8 @@ async def world_hub(update, context, ctx):
 
     kb_rows = []
 
-    # Куст – только ветеранам
-    if is_veteran:
-        kb_rows.append([InlineKeyboardButton("🪴 Куст", callback_data="collect")])
+    # Плантация — доступна ВСЕМ (idle-крючок против раннего оттока: «зайди собрать»)
+    kb_rows.append([InlineKeyboardButton("🪴 Плантация", callback_data="collect")])
 
     # Питомец – виден всем
     if is_veteran and has_pet:
@@ -3147,66 +3146,181 @@ async def ritual_callback(update, context):
 
     await check_achievements(uid, context)
 
-# КУСТИК (с защитой от None)
+# ============================================================
+# ПЛАНТАЦИЯ (idle-система: владение + апгрейды + лимит накопления)
+# Переиспользует поля passive_level (уровень) и passive_collected (последний сбор)
+# — без миграции БД. Доступна с самого старта (лечит ранний отток).
+# ============================================================
+PLANT_RATE_PER_LEVEL = 25     # OAC/час за каждый уровень плантации
+PLANT_CAP_HOURS = 8           # максимум накопления (создаёт крючок «зайди собрать»)
+PLANT_MAX_LEVEL = 10
+
+
+def _plant_rate(level: int) -> int:
+    """Пассивная скорость плантации, OAC/час."""
+    return PLANT_RATE_PER_LEVEL * max(0, level)
+
+
+def _plant_upgrade_cost(level: int) -> int:
+    """Стоимость апгрейда с текущего level на level+1 (растущая кривая = сток экономики)."""
+    return 150 * (level + 1) * (level + 1)
+
+
+def _plant_pending(level, last_collected, now):
+    """(earned, hours_used, capped) — сколько накоплено к сбору. Чистая функция.
+
+    Накопление ограничено PLANT_CAP_HOURS: производство «переполняется» и стоит,
+    пока не соберёшь → loss-aversion и ежедневный возврат (механика Clash/Township).
+    """
+    if (level or 0) < 1 or not last_collected:
+        return (0, 0.0, False)
+    hrs = (now - last_collected).total_seconds() / 3600
+    if hrs < 0:
+        hrs = 0.0
+    capped = hrs >= PLANT_CAP_HOURS
+    hrs_used = min(hrs, PLANT_CAP_HOURS)
+    earned = int(hrs_used * _plant_rate(level))
+    return (earned, hrs_used, capped)
+
+
 async def collect_callback(update, context):
+    """Вход в Плантацию (эволюция старого «кустика»/collect)."""
     ctx = context.bot_data.get("ctx")
     if not ctx:
         await update.effective_message.reply_text("⚠️ Бот инициализируется, попробуйте позже.")
         return
     user, msg = get_user_and_msg(update)
-    uid = user.id
-    uname = html.escape(user.username or user.first_name)
+    player = await ctx.repo.get_by_id(user.id)
+    if not player or not player.exists:
+        await _notify_user(update, context, "Сначала активируйся: /start")
+        return
+    await _show_plantation(update, context, ctx, player)
+
+
+async def _show_plantation(update, context, ctx, player):
+    now = datetime.now()
+    level = player.passive_level or 0
+
+    if level < 1:
+        text = (
+            "🪴 <b>ПЛАНТАЦИЯ</b>\n\n"
+            "<i>Пустая грядка ждёт первого ростка.</i>\n\n"
+            "🌱 Посади куст — и он будет приносить <b>OAC сам</b>, даже пока тебя нет.\n"
+            "Заглядывай собирать урожай и <b>прокачивай грядку</b>, чтобы она росла быстрее."
+        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🌱 Посадить (бесплатно)", callback_data="plant_start")],
+            [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+        ])
+    else:
+        earned, _hrs, capped = _plant_pending(level, _to_datetime(player.passive_collected), now)
+        rate = _plant_rate(level)
+        cap_total = rate * PLANT_CAP_HOURS
+        fill = min(100, int(earned / cap_total * 100)) if cap_total else 0
+        bar = "🟩" * (fill // 20) + "⬛️" * (5 - fill // 20)
+        cap_line = ("⚠️ <b>ПЕРЕПОЛНЕНО!</b> Собери, иначе урожай пропадает."
+                    if capped else f"📦 Хранилище: {bar} {fill}%")
+        if level < PLANT_MAX_LEVEL:
+            up_cost = _plant_upgrade_cost(level)
+            up_line = f"⬆️ <b>Апгрейд до ур.{level+1}:</b> {up_cost} OAC → {_plant_rate(level+1)}/ч"
+        else:
+            up_cost = None
+            up_line = "⭐️ <b>Максимальный уровень!</b>"
+        text = (
+            f"🪴 <b>ПЛАНТАЦИЯ · Уровень {level}</b>\n\n"
+            f"⚡ Скорость: <b>{rate} OAC/час</b>\n"
+            f"🌾 К сбору: <b>{earned} OAC</b>\n"
+            f"{cap_line}\n\n"
+            f"{up_line}"
+        )
+        rows = [[InlineKeyboardButton(f"🌾 Собрать ({earned} OAC)", callback_data="plant_harvest")]]
+        if up_cost is not None:
+            rows.append([InlineKeyboardButton(f"⬆️ Улучшить · {up_cost} OAC", callback_data="plant_upgrade")])
+        rows.append([InlineKeyboardButton("🏰 В меню", callback_data="menu")])
+        kb = InlineKeyboardMarkup(rows)
+
+    await edit_or_reply(update, context, text, reply_markup=kb, parse_mode='HTML')
+
+
+@cb
+async def plant_start_handler(update, context, ctx):
+    uid = update.callback_query.from_user.id
     now = datetime.now()
 
-    async def _collect(player, conn):
-        if not has_rank(player.balance, "Ветеран"):
-            return ("low_rank",)
-        lvl = 3 if player.balance >= 20000 else 2
-        if not player.passive_collected:
-            player.passive_collected = now
-            return ("activated",)
-        last_collect = _to_datetime(player.passive_collected)
-        hrs = (now - last_collect).total_seconds() / 3600 if last_collect else 0
-        earned = int(hrs * 30 * lvl)
-        if ctx.cache.get("happy_hour", False):
+    async def _plant(p, conn):
+        if (p.passive_level or 0) >= 1:
+            return False
+        p.passive_level = 1
+        p.passive_collected = now
+        return True
+    await ctx.repo.atomic_update(uid, _plant)
+    player = await ctx.repo.get_by_id(uid)
+    await _show_plantation(update, context, ctx, player)
+
+
+@cb
+async def plant_harvest_handler(update, context, ctx):
+    query = update.callback_query
+    uid = query.from_user.id
+    now = datetime.now()
+    happy = bool(ctx.cache.get("happy_hour", False))
+
+    async def _harvest(p, conn):
+        level = p.passive_level or 0
+        if level < 1:
+            return ("no_plant",)
+        earned, _hrs, _capped = _plant_pending(level, _to_datetime(p.passive_collected), now)
+        if happy:
             earned *= HAPPY_HOUR_MULTIPLIER
         if earned < 1:
             return ("not_ready",)
-        player.balance += earned
-        player.passive_collected = now
+        p.balance += earned
+        p.passive_collected = now
+        if ctx.war_service:
+            await ctx.war_service.add_score_raw(uid, earned, conn)
+        return ("ok", earned)
 
-        await ctx.war_service.add_score_raw(uid, earned, conn)
+    result = await ctx.repo.atomic_update(uid, _harvest)
+    if result and result[0] == "ok":
+        await query.answer(f"🌾 Урожай собран: +{result[1]} OAC!")
+    elif result and result[0] == "not_ready":
+        await query.answer("🌱 Ещё рано — куст копит урожай.")
+    player = await ctx.repo.get_by_id(uid)
+    await _show_plantation(update, context, ctx, player)
 
-        return ("ok", earned, player.balance)
 
-    result = await ctx.repo.atomic_update(uid, _collect)
-    if result is None:
-        await send_whisper_dm(update, context, "Профиль не найден.")
-        return
-    status, *data = result
-    if status == "low_rank":
-        await send_whisper_dm(update, context, "❌ Доступно с ранга ⚔️ Ветеран (5000 OAC 🍬)")
-        return
-    if status == "activated":
-        await safe_send_message(
-            context,
-            update.effective_chat.id,
-            "<b>🪴 Авто‑сборщик активирован 💎</b>\n\n<b>🌱 Загляни позже</b>",
-            parse_mode='HTML'
-        )
-        return
-    if status == "not_ready":
-        await safe_send_message(
-            context,
-            update.effective_chat.id,
-            "<b>🪴 Кустик ещё не созрел 💎</b>\n\n<b>🌱 Загляни позже</b>",
-            parse_mode='HTML'
-        )
-        return
+@cb
+async def plant_upgrade_handler(update, context, ctx):
+    query = update.callback_query
+    uid = query.from_user.id
+    now = datetime.now()
 
-    earned, new_bal = data
-    await send_whisper_dm(update, context,
-        f"<b><i>🪴 УРОЖАЙ СОБРАН</i></b>\n\nТвой куст принёс <b>{earned} OAC</b> 🍬.\n\n💎 <i>У тебя:</i> <b>{new_bal} OAC</b> 🍬")
+    async def _upgrade(p, conn):
+        level = p.passive_level or 0
+        if level < 1:
+            return ("no_plant",)
+        if level >= PLANT_MAX_LEVEL:
+            return ("max",)
+        cost = _plant_upgrade_cost(level)
+        if (p.balance or 0) < cost:
+            return ("no_money", cost)
+        # Сначала собираем накопленное по старой ставке (честно), потом апаем
+        pending, _h, _c = _plant_pending(level, _to_datetime(p.passive_collected), now)
+        p.balance += pending
+        p.balance -= cost
+        p.passive_level = level + 1
+        p.passive_collected = now
+        return ("ok", level + 1)
+
+    result = await ctx.repo.atomic_update(uid, _upgrade)
+    if result and result[0] == "ok":
+        await query.answer(f"⬆️ Плантация улучшена до ур.{result[1]}!")
+    elif result and result[0] == "no_money":
+        await query.answer(f"Недостаточно OAC. Нужно {result[1]}.", show_alert=True)
+    elif result and result[0] == "max":
+        await query.answer("Уже максимальный уровень!")
+    player = await ctx.repo.get_by_id(uid)
+    await _show_plantation(update, context, ctx, player)
 
 # Профиль – премиум-карточка, сеньорская версия (аватарка + текст + кнопки)
 @rate_limit(1)
@@ -6655,6 +6769,9 @@ CALLBACKS: Dict[str, Callable] = {
     "smoke": smoke_callback,
     "ritual": ritual_callback,
     "collect": collect_callback,
+    "plant_start": plant_start_handler,
+    "plant_harvest": plant_harvest_handler,
+    "plant_upgrade": plant_upgrade_handler,
     "profile": profile_callback,
     "top": top_callback,
     "guild_info": guild_info_callback,
