@@ -1,0 +1,162 @@
+"""Тесты игровых механик: чистая логика + доменные сервисы на реальной БД.
+
+Дополняет tests/smoke_test.py. Покрывает функции наград/прогрессии и сервисы
+(питомец, война гильдий), чтобы будущая разбивка хендлеров была под защитой.
+
+Запуск (нужны Postgres и Redis):
+    export DATABASE_URL_AIVEN="postgresql://botuser:botpass@127.0.0.1:5432/botdb"
+    export REDIS_URL="redis://127.0.0.1:6379/0"
+    python tests/mechanics_test.py
+"""
+import os
+import sys
+import asyncio
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+os.environ.setdefault("TOKEN", "123:DUMMY")
+os.environ.setdefault("DATABASE_URL_AIVEN", "postgresql://botuser:botpass@127.0.0.1:5432/botdb")
+os.environ.setdefault("REDIS_URL", "redis://127.0.0.1:6379/0")
+os.environ.setdefault("ADMIN_ID", "0")
+os.environ.setdefault("RENDER_URL", "")
+
+import asyncpg
+import redis.asyncio as aioredis
+from cachetools import TTLCache
+
+from bot import (
+    calculate_smoke_reward, _calculate_reward, daily_config,
+    _calc_multiplier, _generate_mines_field, get_medal_target,
+    get_rank_progress, _get_craft_stats, FARM_MEDALS,
+    create_tables, _run_migrations, PlayerRepository, Player,
+    PetService, GuildWarService, WarConfig, WarSettings, PET_CONFIG,
+)
+
+TEST_UID = 999002
+
+
+def test_pure(passed):
+    # --- дунуть: значение всегда в допустимом множестве (2000 прогонов) ---
+    class _P:  # p не используется функцией, но передаём объект
+        smoke_count = 0
+    for _ in range(2000):
+        val = calculate_smoke_reward(_P(), happy_hour=False)
+        assert val == 0 or val == -5 or 15 <= val <= 40, f"дунуть вернул {val}"
+    # с happy hour положительный доход удваивается (30..80)
+    for _ in range(2000):
+        val = calculate_smoke_reward(_P(), happy_hour=True)
+        assert val in (0, -5) or 30 <= val <= 80, f"дунуть HH вернул {val}"
+    passed.append("calculate_smoke_reward: значения в допустимых диапазонах")
+
+    # --- стрик-награда: титулы детерминированы, доход не ниже базы×hot ---
+    r5 = _calculate_reward(5, daily_config)
+    assert r5.title is None and r5.total_oac >= int(30 * 1.1)
+    r7 = _calculate_reward(7, daily_config)
+    assert r7.title == "🕊️" and r7.total_oac >= int(50 * 1.1)
+    r14 = _calculate_reward(14, daily_config)
+    assert r14.title == "🔮" and r14.total_oac >= int(100 * 1.1)
+    passed.append("_calculate_reward: титулы 7/14 и hot-streak множитель")
+
+    # --- множитель мин: 1.0 → 3.0, монотонно, границы точные ---
+    assert _calc_multiplier(0) == 1.0
+    assert _calc_multiplier(22) == 3.0
+    prev = -1.0
+    for step in range(0, 23):
+        m = _calc_multiplier(step)
+        assert 1.0 <= m <= 3.0 and m >= prev, f"множитель не монотонен на шаге {step}"
+        prev = m
+    passed.append("_calc_multiplier: 1.0→3.0, монотонно")
+
+    # --- поле мин: 5x5, ровно 3 мины, координаты валидны ---
+    for _ in range(500):
+        field, mines = _generate_mines_field()
+        assert len(field) == 5 and all(len(row) == 5 for row in field)
+        assert len(mines) == 3
+        assert all(0 <= r <= 4 and 0 <= c <= 4 for r, c in mines)
+    passed.append("_generate_mines_field: 5x5, ровно 3 мины")
+
+    # --- цель медали: следующий порог / максимум ---
+    assert get_medal_target(0, FARM_MEDALS) == 1
+    assert get_medal_target(5, FARM_MEDALS) == 10
+    assert get_medal_target(50, FARM_MEDALS) == 250
+    assert get_medal_target(10_000, FARM_MEDALS) == FARM_MEDALS[-1][0]
+    passed.append("get_medal_target: пороги и максимум")
+
+    # --- прогресс ранга: не падает и содержит метку на всех уровнях ---
+    for bal in (0, 4999, 5000, 25000, 999999):
+        s = get_rank_progress(bal)
+        assert "Ранг" in s and "%" in s
+    passed.append("get_rank_progress: рендер на всех рангах")
+
+    # --- статистика крафта: возвращает имя медали и цель ---
+    stats = _get_craft_stats(balance=100, blunts=3, craft_count=5)
+    assert "medal_name" in stats and "target" in stats and stats["target"] >= 5
+    passed.append("_get_craft_stats: структура ответа")
+
+
+async def test_services(passed):
+    pool = await asyncpg.create_pool(os.environ["DATABASE_URL_AIVEN"], min_size=1, max_size=3)
+    async with pool.acquire() as conn:
+        await create_tables(conn)
+        await _run_migrations(conn)
+    redis_client = await aioredis.from_url(os.environ["REDIS_URL"])
+    repo = PlayerRepository(pool, redis_client, TTLCache(maxsize=100, ttl=600))
+
+    # чистим тестового игрока
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM players WHERE user_id=$1", TEST_UID)
+
+    # --- PetService: нет денег → no_money ---
+    await repo.save(Player(user_id=TEST_UID, username="PetTester", balance=0, exists=True))
+    pet_service = PetService(repo, PET_CONFIG)
+    res = await pet_service.buy(TEST_UID, "dog")
+    assert res and res["status"] == "no_money", f"ждали no_money, получили {res}"
+
+    # --- достаточно денег → ok, баланс списан, питомец установлен ---
+    async def _set_balance(p, conn):
+        p.balance = 5000
+    await repo.atomic_update(TEST_UID, _set_balance)
+    res = await pet_service.buy(TEST_UID, "dog")
+    assert res and res["status"] == "ok", f"ждали ok, получили {res}"
+    after = await repo.get_by_id(TEST_UID)
+    assert after.balance == 5000 - PET_CONFIG["dog"]["price"] and after.pet
+    passed.append("PetService.buy: no_money / ok / списание баланса")
+
+    # --- повторная покупка → already_have ---
+    res = await pet_service.buy(TEST_UID, "dog")
+    assert res and res["status"] == "already_have"
+    # --- имя питомца обрезается до max_name_len ---
+    long_name = "x" * 999
+    await pet_service.set_name(TEST_UID, long_name)
+    reloaded = await repo.get_by_id(TEST_UID)
+    assert len(reloaded.pet_name) == PET_CONFIG["dog"]["max_name_len"]
+    passed.append("PetService: already_have + обрезка имени")
+
+    # --- GuildWarService: старт/стоп/статус ---
+    war = GuildWarService(pool, redis_client, WarConfig(), WarSettings())
+    await war.stop_war()
+    assert await war.is_war_active() is False
+    await war.start_war()
+    assert await war.is_war_active() is True
+    await war.stop_war()
+    assert await war.is_war_active() is False
+    passed.append("GuildWarService: start/stop/is_war_active")
+
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM players WHERE user_id=$1", TEST_UID)
+    await redis_client.aclose()
+    await pool.close()
+
+
+async def main() -> int:
+    passed = []
+    test_pure(passed)
+    await test_services(passed)
+    for name in passed:
+        print(f"  OK  {name}")
+    print(f"\nТесты механик пройдены: {len(passed)}/{len(passed)}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(asyncio.run(main()))
