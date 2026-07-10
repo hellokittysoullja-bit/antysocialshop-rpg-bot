@@ -1777,13 +1777,16 @@ async def _handle_referral(update, context, uid, player):
     #     logger.error(f"Ошибка отправки в канал: {e}")
 
 
-async def _create_new_player(update, context, uid, username):
+async def _create_new_player(update, context, uid, username, invited_by=None):
     ctx = context.bot_data.get("ctx")
     new_name = random.choice(["Крик Бездны", "Шёпот Склепа"])
+    # Двусторонний реферал: приглашённый получает бонус к старту
+    start_balance = 800 + (100 if invited_by else 0)
 
     async with ctx.db_pool.acquire() as conn:
         async with conn.transaction():
-            player = Player(user_id=uid, username=username, balance=800)
+            player = Player(user_id=uid, username=username, balance=start_balance)
+            player.invited_by = invited_by
             # Установка daily_progress ДО сохранения
             player.daily_progress = {
                 "reset_date": date.today().isoformat(),
@@ -1793,10 +1796,14 @@ async def _create_new_player(update, context, uid, username):
             await ctx.repo.save(player, conn=conn)
             await create_named_blunt(uid, new_name, ctx=ctx, conn=conn)
 
+    ref_bonus_line = (
+        "🤝 <b>+100 OAC за приход по ссылке друга!</b>\n\n" if invited_by else ""
+    )
     welcome_text = (
         "<b>🎉 Добро пожаловать в Гильдию Antysocialshop!</b>\n"
         "<i>Здесь курят бланты, поклоняются древним богам и воюют за OAC.</i>\n\n"
-        "🎁 <b>Смотритель дарует тебе</b> <code>800</code> 🍬 <b>и твой первый именной блант!</b>\n\n"
+        f"{ref_bonus_line}"
+        f"🎁 <b>Смотритель дарует тебе</b> <code>{start_balance}</code> 🍬 <b>и твой первый именной блант!</b>\n\n"
         "<b>🎓 ОБУЧЕНИЕ [▓░░░] 1/3</b>\n\n"
         "⚔️ <b>ВЫБЕРИ ФРАКЦИЮ — ПОЛУЧИ +50 OAC СРАЗУ!</b>\n\n"
         "🕯️ <b>Тёмная Гильдия</b>\n"
@@ -1857,6 +1864,53 @@ def get_next_action(player, exclude_callback: str = None) -> tuple[str, str, str
 
     return ("🏰 В меню", "menu", "Все дела пока недоступны. Загляни позже!")
 
+
+def _resolve_referrer(args, uid):
+    """Из реф-ссылки blunt_... достаёт creator_id. Чистая функция, без БД.
+
+    Создатель зашит в самом blunt_id (blunt_{creator}_{ts}_{rand}), поэтому
+    скан таблицы не нужен — это O(1) и масштабируется. start-параметр =
+    "blunt_" + blunt_id. Возвращает creator_id (int) или None.
+    """
+    if not args or not str(args[0]).startswith("blunt_"):
+        return None
+    blunt_id = str(args[0])[len("blunt_"):]     # снимаем ведущий префикс
+    parts = blunt_id.split("_")
+    if len(parts) < 2 or not parts[1].isdigit():
+        return None
+    creator_id = int(parts[1])
+    return creator_id if creator_id != uid else None
+
+
+async def _reward_referrer(ctx, context, creator_id):
+    """Награда рефереру: +50 OAC, счётчик, легендарный блант, метка 🩸 + уведомление."""
+    async def _reward(p, conn):
+        p.balance = (p.balance or 0) + 50
+        p.referral_count = (p.referral_count or 0) + 1
+        if "🩸" not in (p.titles or ""):
+            p.titles = f"{p.titles or ''} 🩸".strip()
+        return p.referral_count
+    count = await ctx.repo.atomic_update(creator_id, _reward)
+    if count is None:
+        return
+    try:
+        await create_named_blunt(
+            creator_id,
+            random.choice(["Крик Бездны", "Пепел Короля", "Шёпот Склепа"]),
+            rarity="legendary", ctx=ctx)
+    except Exception:
+        logger.exception("referral: не удалось создать легендарный блант")
+    try:
+        await safe_send_message(
+            context, creator_id,
+            "🩸 <b>По твоей ссылке пришёл новый Странник!</b>\n"
+            "🎁 +50 OAC · легендарный блант · метка 🩸\n"
+            f"👥 Всего приглашено: {count}",
+            parse_mode='HTML')
+    except Exception:
+        pass
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ctx = context.bot_data.get("ctx")
     if not ctx:
@@ -1867,9 +1921,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         uid = user.id
         username = user.username or user.first_name or "Странник"
         player = await ctx.repo.get_by_id(uid)
-        await _handle_referral(update, context, uid, player)
         if not player or not player.exists:
-            await _create_new_player(update, context, uid, username)
+            # Реферал применяется только к НОВЫМ игрокам (анти-фарм)
+            creator_id = _resolve_referrer(context.args, uid)
+            if creator_id:
+                ref = await ctx.repo.get_by_id(creator_id)
+                if not ref or not ref.exists:
+                    creator_id = None
+            await _create_new_player(update, context, uid, username, invited_by=creator_id)
+            if creator_id:
+                await _reward_referrer(ctx, context, creator_id)
         else:
             # Запускаем ежедневный бонус в фоне, чтобы меню появилось мгновенно:
             asyncio.create_task(process_daily_login(uid, context))

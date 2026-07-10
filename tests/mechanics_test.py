@@ -30,6 +30,7 @@ from bot import (
     get_rank_progress, _get_craft_stats, FARM_MEDALS,
     _build_next_day_preview, _build_daily_message, _reengagement_text, reengagement_push,
     _farm_on_cooldown, _quest_progress_counts, _plural_steps, QUEST_TEMPLATES,
+    _resolve_referrer, _reward_referrer,
     create_tables, _run_migrations, PlayerRepository, Player,
     PetService, GuildWarService, WarConfig, WarSettings, PET_CONFIG,
 )
@@ -146,6 +147,14 @@ def test_pure(passed):
             _plural_steps(11), _plural_steps(21)) == ("шаг", "шага", "шагов", "шагов", "шаг")
     passed.append("_plural_steps: склонение 1/2/5/11/21")
 
+    # --- резолвер реферала: создатель зашит в blunt-ссылке (O(1), без БД) ---
+    assert _resolve_referrer(["blunt_blunt_12345_1700000000_4321"], 999) == 12345
+    assert _resolve_referrer(["blunt_blunt_999_1_2"], 999) is None   # сам себя
+    assert _resolve_referrer(["b_abc"], 999) is None                 # чужой префикс
+    assert _resolve_referrer(["blunt_garbage"], 999) is None         # мусор
+    assert _resolve_referrer([], 999) is None
+    passed.append("_resolve_referrer: парсинг создателя из ссылки")
+
 
 async def test_services(passed):
     pool = await asyncpg.create_pool(os.environ["DATABASE_URL_AIVEN"], min_size=1, max_size=3)
@@ -211,6 +220,37 @@ async def test_services(passed):
         redis = None
     await reengagement_push(_NoRedisCtx())   # должно тихо вернуться
     passed.append("reengagement_push: fail-closed без Redis")
+
+    # --- _reward_referrer: реферер получает +50 OAC, счётчик, метку 🩸 ---
+    REF_UID = 999003
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM players WHERE user_id=$1", REF_UID)
+    await repo.save(Player(user_id=REF_UID, username="Referrer", balance=1000, exists=True))
+
+    class _NoNetBot:
+        async def send_message(self, *a, **k):
+            raise RuntimeError("no network in test")
+        async def send_photo(self, *a, **k):
+            raise RuntimeError("no network in test")
+
+    class _RefContext:
+        def __init__(self):
+            self.bot = _NoNetBot()
+            self.bot_data = {}
+            self.user_data = {}
+
+    class _RefCtx:
+        def __init__(self, repo):
+            self.repo = repo
+
+    before = await repo.get_by_id(REF_UID)
+    await _reward_referrer(_RefCtx(repo), _RefContext(), REF_UID)
+    after = await repo.get_by_id(REF_UID)
+    assert after.balance == before.balance + 50, f"баланс {before.balance}->{after.balance}"
+    assert after.referral_count == 1 and "🩸" in (after.titles or "")
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM players WHERE user_id=$1", REF_UID)
+    passed.append("_reward_referrer: +50 OAC + счётчик + метка 🩸")
 
     async with pool.acquire() as conn:
         await conn.execute("DELETE FROM players WHERE user_id=$1", TEST_UID)
