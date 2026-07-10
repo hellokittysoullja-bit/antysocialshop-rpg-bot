@@ -330,7 +330,7 @@ class AchievementService:
                                 f"<i>{ach['emoji']} «{ach['name']}» {ach['emoji']}</i>\n\n"
                                 f"<b>📜 Запись добавлена! 💎</b>"
                             )
-                            await safe_send_message(context, uid, text, parse_mode='HTML')
+                            await safe_send_message(context, user_id, text, parse_mode='HTML')
                         except Exception as e:
                             logger.error(f"Achievement notify error: {e}")
             # lunar_lord
@@ -357,7 +357,7 @@ class AchievementService:
                         f"<i>{lunar['emoji']} «{lunar['name']}» {lunar['emoji']}</i>\n\n"
                         f"<b>📜 Запись добавлена! 💎</b>"
                     )
-                    await safe_send_message(context, uid, text, parse_mode='HTML')
+                    await safe_send_message(context, user_id, text, parse_mode='HTML')
                 except Exception as e:
                     logger.error(f"Achievement notify error (lunar): {e}")
 
