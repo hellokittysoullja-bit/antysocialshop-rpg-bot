@@ -41,6 +41,7 @@ from bot import (
     echo_of_distortion,
     happy_hour_trigger,
     weekly_guild_rating,
+    reengagement_push,
     _safe_send_guild_message,
     BLUNT_IMAGES,
 )
@@ -144,8 +145,19 @@ async def background_jobs(ctx: AppContext):
             except Exception:
                 logger.exception("weekly_guild_rating error")
 
+    @resilient_task
+    async def job_reengagement():
+        # Первый прогон — через 5 минут после старта (не сразу на деплое)
+        await asyncio.sleep(300)
+        while True:
+            try:
+                await reengagement_push(ctx)
+            except Exception:
+                logger.exception("reengagement_push error")
+            await asyncio.sleep(1800)   # каждые 30 минут (guard в Redis ограничивает до ~1/сут)
+
     for coro in (job_keep_db_alive, job_update_pulse, job_echo_of_distortion,
-                 job_happy_hour, job_weekly_guild_rating):
+                 job_happy_hour, job_weekly_guild_rating, job_reengagement):
         t = asyncio.create_task(coro())
         background_tasks.add(t)
         t.add_done_callback(background_tasks.discard)

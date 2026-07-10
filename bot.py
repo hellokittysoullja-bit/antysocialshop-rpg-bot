@@ -6805,6 +6805,88 @@ async def keep_db_alive(ctx: AppContext):
     except Exception as e:
         logger.error(f"keep_db_alive failed: {e}")
 
+
+def _reengagement_text(last_farm, login_streak, last_login_date, now, farm_cooldown):
+    """Выбирает текст пуш-возврата (или None, если повода нет). Чистая функция.
+
+    Приоритет: серия под угрозой (вечером) > созревший фарм.
+    """
+    streak = login_streak or 0
+    logged_today = (last_login_date is not None
+                    and str(last_login_date) == now.date().isoformat())
+    # Серия под угрозой: есть серия, сегодня не заходил, уже вечер
+    if streak >= 2 and not logged_today and now.hour >= 18:
+        return (f"🔥 <b>Твоя серия входов ({streak} дн.) сгорит в полночь!</b>\n"
+                f"Загляни в игру, чтобы сохранить её и забрать награду дня.")
+    # Фарм созрел
+    if last_farm and (now - last_farm) >= farm_cooldown:
+        return ("🍬 <b>Грядка созрела!</b>\n"
+                "Твои OAC ждут сбора — вернись и продолжи путь. 🌿")
+    return None
+
+
+async def reengagement_push(ctx: AppContext) -> None:
+    """Личные пуш-возвраты дрейфующим игрокам (анти-churn).
+
+    Отбирает тех, кто недавно играл, но сейчас неактивен несколько часов, и у
+    кого есть повод вернуться. АНТИ-СПАМ:
+      • без Redis — не шлём вообще (fail-closed, иначе риск спама);
+      • не чаще ~1 раза в 20 ч на игрока (guard в Redis);
+      • окно активности 2 ч … 3 дня (не трогаем активных и давно ушедших);
+      • 403 (заблокировал бота) — молча пропускаем.
+    """
+    if not ctx or not ctx.db_pool or not ctx.redis:
+        return
+
+    now = datetime.now()
+    farm_cd = timedelta(hours=settings.farm_cooldown_hours)
+    drift_min = now - timedelta(hours=2)      # неактивен хотя бы 2 часа
+    active_window = now - timedelta(days=3)   # но не ушёл насовсем
+
+    try:
+        async with ctx.db_pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT user_id, last_farm, login_streak, last_login_date "
+                "FROM players "
+                "WHERE last_farm IS NOT NULL AND last_farm BETWEEN $1 AND $2",
+                active_window, drift_min,
+            )
+    except Exception as e:
+        logger.error(f"reengagement query error: {e}")
+        return
+
+    token = ctx.settings.bot_token
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    sent = 0
+    async with httpx.AsyncClient(timeout=10) as client:
+        for row in rows:
+            uid = row["user_id"]
+            guard_key = f"reengage:{uid}"
+            try:
+                if await ctx.redis.get(guard_key):
+                    continue
+            except Exception:
+                continue  # Redis-сбой → пропускаем (не рискуем спамом)
+
+            text = _reengagement_text(
+                row["last_farm"], row["login_streak"],
+                row["last_login_date"], now, farm_cd,
+            )
+            if not text:
+                continue
+
+            try:
+                r = await client.post(url, json={"chat_id": uid, "text": text, "parse_mode": "HTML"})
+                if r.status_code == 200:
+                    sent += 1
+                    await ctx.redis.setex(guard_key, 20 * 3600, "1")
+                # 403/прочее — молча пропускаем
+            except Exception:
+                pass
+            await asyncio.sleep(0.05)  # мягкий rate-limit к Telegram API
+
+    logger.info("reengagement: sent %d pushes to %d candidates", sent, len(rows))
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg or not msg.text:

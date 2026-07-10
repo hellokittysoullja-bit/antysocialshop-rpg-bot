@@ -28,10 +28,11 @@ from bot import (
     calculate_smoke_reward, _calculate_reward, daily_config,
     _calc_multiplier, _generate_mines_field, get_medal_target,
     get_rank_progress, _get_craft_stats, FARM_MEDALS,
-    _build_next_day_preview, _build_daily_message,
+    _build_next_day_preview, _build_daily_message, _reengagement_text, reengagement_push,
     create_tables, _run_migrations, PlayerRepository, Player,
     PetService, GuildWarService, WarConfig, WarSettings, PET_CONFIG,
 )
+from datetime import datetime, timedelta
 
 TEST_UID = 999002
 
@@ -103,6 +104,22 @@ def test_pure(passed):
     assert "OAC" in full and "Завтра" in full
     passed.append("_build_next_day_preview: предпросмотр + титулы 7/14")
 
+    # --- текст пуш-возврата (приоритеты: серия вечером > фарм > ничего) ---
+    cd = timedelta(minutes=30)
+    evening = datetime(2026, 1, 1, 20, 0)
+    morning = datetime(2026, 1, 1, 10, 0)
+    old_farm = evening - timedelta(hours=1)      # фарм созрел
+    fresh_farm = evening - timedelta(minutes=5)  # фарм не готов
+    assert "серия" in _reengagement_text(old_farm, 3, None, evening, cd).lower()
+    # зашёл сегодня → не про серию, но фарм готов → про грядку
+    assert "Грядка" in _reengagement_text(old_farm, 3, evening.date().isoformat(), evening, cd)
+    # утро (не вечер) → серия не триггерится, но фарм готов
+    old_farm_morning = morning - timedelta(hours=1)
+    assert "Грядка" in _reengagement_text(old_farm_morning, 3, None, morning, cd)
+    # нет повода: фарм не готов, серии нет
+    assert _reengagement_text(fresh_farm, 0, None, morning, cd) is None
+    passed.append("_reengagement_text: серия/фарм/пусто по приоритету")
+
 
 async def test_services(passed):
     pool = await asyncpg.create_pool(os.environ["DATABASE_URL_AIVEN"], min_size=1, max_size=3)
@@ -161,6 +178,13 @@ async def test_services(passed):
     await war.stop_war()
     assert await war.is_war_active() is False
     passed.append("GuildWarService: start/stop/is_war_active")
+
+    # --- reengagement_push: fail-closed без Redis (не шлёт, не падает) ---
+    class _NoRedisCtx:
+        db_pool = object()   # truthy
+        redis = None
+    await reengagement_push(_NoRedisCtx())   # должно тихо вернуться
+    passed.append("reengagement_push: fail-closed без Redis")
 
     async with pool.acquire() as conn:
         await conn.execute("DELETE FROM players WHERE user_id=$1", TEST_UID)
