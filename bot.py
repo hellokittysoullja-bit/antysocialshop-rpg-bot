@@ -2644,7 +2644,14 @@ async def handle_named_name(update, context):
             label = "ОБЫЧНЫЙ"
             discovery = "3.5%"
 
-        caption = (
+        # Фанфары по редкости — эмоциональный пик («ахнуть»), твой текст ниже не тронут
+        fanfare = {
+            "legendary": "🎊✨🎊 <b>ЛЕГЕНДАРНЫЙ!!!</b> 🎊✨🎊\n<i>Такое рождается раз на тысячу. Ты уловил невозможное.</i>\n\n",
+            "epic": "🟣✨ <b>ЭПИЧЕСКИЙ!</b> Искажение благосклонно к тебе.\n\n",
+            "rare": "🔵 <b>РЕДКИЙ!</b> Достойный улов.\n\n",
+        }.get(rarity, "")
+
+        caption = fanfare + (
             f"<b>💍 ТЫ СОЗДАЛ ИМЕННОЙ БЛАНТ!</b>\n"
             f"🎉 Он навсегда останется в <b>твоей коллекции</b>.\n\n"
             f"{color}<b><i>«{html.escape(meme_name)}»</i></b>\n"
@@ -2657,9 +2664,9 @@ async def handle_named_name(update, context):
 
         # --- Текст для кнопки «Поделиться» ---
         bot_username = (await context.bot.get_me()).username
-        short_code = generate_short_code()
-        # сохрани в базу пару: short_code -> blunt_id
-        ref_link = f"https://t.me/{bot_username}?start=b_{short_code}"
+        # Рабочий реф-формат (согласован с _resolve_referrer): создатель зашит в blunt_id.
+        # Прежний ?start=b_<short_code> не работал — short_code нигде не сохранялся.
+        ref_link = f"https://t.me/{bot_username}?start=blunt_{blunt_id}"
         
         share_text = (
             f"{color} ИМЯ NFT Бланта: «{html.escape(meme_name)}»\n"
@@ -2680,11 +2687,42 @@ async def handle_named_name(update, context):
             [InlineKeyboardButton("🔙 В меню", callback_data="menu")]
         ])
 
+        # Суспенс-ревил: предвкушение перед результатом (дофаминовый пик гачи)
+        try:
+            suspense = await update.message.reply_text("🌀 <b>Искажение сгущается...</b>", parse_mode='HTML')
+            for frame in ("🌫️ <b>Скручиваем твой блант...</b>",
+                          "✨ <b>Проступает редкость...</b>",
+                          "💫 <b>Почти...</b>"):
+                await asyncio.sleep(0.7)
+                try:
+                    await suspense.edit_text(frame, parse_mode='HTML')
+                except Exception:
+                    pass
+            await asyncio.sleep(0.4)
+            try:
+                await suspense.delete()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
         sent_img = await safe_send_blunt_image(
             context, update.effective_chat.id, item["rarity"], caption=caption, reply_markup=kb
         )
         if not sent_img:
             await update.message.reply_text(caption, reply_markup=kb, parse_mode='HTML')
+
+        # Публичное признание редких блантов в чате гильдии — гордость + зависть + вирусность
+        if rarity in ("legendary", "epic"):
+            try:
+                await _safe_send_guild_message(
+                    ctx,
+                    f"{color} <b>@{html.escape(player.username or 'Странник')}</b> создал "
+                    f"<b>{'ЛЕГЕНДАРНЫЙ' if rarity == 'legendary' else 'ЭПИЧЕСКИЙ'}</b> блант "
+                    f"<b>«{html.escape(meme_name)}»</b>! 🩸"
+                )
+            except Exception:
+                pass
 
         # FOMO-бонус (без изменений)
         async def fomo_reminder():
