@@ -47,7 +47,7 @@ from game_content import (
 from game_models import Player
 # Слой конфигурации
 from config import (
-    settings, FARM_MIN, FARM_MAX, FARM_COOLDOWN_HOURS,
+    settings, FARM_MIN, FARM_MAX, FARM_COOLDOWN_HOURS, FARM_GRACE_COUNT,
     HAPPY_HOUR_MULTIPLIER, GAME_CONFIG, PET_CONFIG,
 )
 # Слой доступа к данным
@@ -2025,6 +2025,18 @@ def _parse_last_login_date(last) -> Optional[date]:
 # FARM – атомарный сбор OAC
 # ============================================================
 
+def _farm_on_cooldown(farm_count, last_farm, now) -> bool:
+    """True, если фарм сейчас на кулдауне.
+
+    Единый источник логики кулдауна (используется и хендлером фарма, и таймером
+    в главном меню). Первые FARM_GRACE_COUNT фармов — без кулдауна, чтобы новичок
+    сформировал привычку в первую сессию до включения 30-минутного ожидания.
+    """
+    if (farm_count or 0) < FARM_GRACE_COUNT:
+        return False
+    return bool(last_farm and (now - last_farm) < timedelta(hours=FARM_COOLDOWN_HOURS))
+
+
 def _calculate_farm_reward(player, context) -> tuple[int, bool, bool]:
     """
     Чистая логика расчёта награды за фарм.
@@ -2125,7 +2137,7 @@ async def farm_callback_v2(update, context, ctx, player):
             pass
 
     async def _farm(p, conn):
-        if p.last_farm and (now - p.last_farm) < timedelta(hours=FARM_COOLDOWN_HOURS):
+        if _farm_on_cooldown(p.farm_count, p.last_farm, now):
             remain = math.ceil((timedelta(hours=FARM_COOLDOWN_HOURS) - (now - p.last_farm)).seconds / 60)
             return ("cooldown", remain)
 
@@ -5401,7 +5413,7 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
     keyboard = []
 
     # Кнопка фарма с живым таймером кулдауна — конец «слепым кликам»
-    farm_ready = (not player.last_farm) or (now - player.last_farm) >= timedelta(hours=FARM_COOLDOWN_HOURS)
+    farm_ready = not _farm_on_cooldown(player.farm_count, player.last_farm, now)
     if farm_ready:
         farm_label = "🍬 Фармить"
     else:

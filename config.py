@@ -44,6 +44,9 @@ FARM_MIN = settings.farm_min
 FARM_MAX = settings.farm_max
 FARM_COOLDOWN_HOURS = settings.farm_cooldown_hours
 HAPPY_HOUR_MULTIPLIER = settings.happy_hour_multiplier
+# Первые N фармов — без кулдауна: даём новичку сформировать привычку «ещё разок»
+# в первую сессию, до того как включится 30-минутное ожидание.
+FARM_GRACE_COUNT = 5
 
 # ── Глобальные конфиги игры ──
 GAME_CONFIG = {

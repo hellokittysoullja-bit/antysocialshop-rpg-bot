@@ -29,6 +29,7 @@ from bot import (
     _calc_multiplier, _generate_mines_field, get_medal_target,
     get_rank_progress, _get_craft_stats, FARM_MEDALS,
     _build_next_day_preview, _build_daily_message, _reengagement_text, reengagement_push,
+    _farm_on_cooldown,
     create_tables, _run_migrations, PlayerRepository, Player,
     PetService, GuildWarService, WarConfig, WarSettings, PET_CONFIG,
 )
@@ -119,6 +120,17 @@ def test_pure(passed):
     # нет повода: фарм не готов, серии нет
     assert _reengagement_text(fresh_farm, 0, None, morning, cd) is None
     passed.append("_reengagement_text: серия/фарм/пусто по приоритету")
+
+    # --- грейс-фарм: первые фармы без кулдауна, потом кулдаун действует ---
+    now2 = datetime(2026, 1, 1, 12, 0)
+    recent = now2 - timedelta(minutes=5)    # недавно (в пределах 30 мин)
+    long_ago = now2 - timedelta(minutes=40)  # давно (за пределами 30 мин)
+    assert _farm_on_cooldown(0, recent, now2) is False   # грейс
+    assert _farm_on_cooldown(4, recent, now2) is False   # грейс (последний бесплатный)
+    assert _farm_on_cooldown(5, recent, now2) is True    # грейс кончился → кулдаун
+    assert _farm_on_cooldown(10, long_ago, now2) is False  # кулдаун прошёл
+    assert _farm_on_cooldown(10, None, now2) is False      # ни разу не фармил
+    passed.append("_farm_on_cooldown: грейс + кулдаун")
 
 
 async def test_services(passed):
