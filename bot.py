@@ -2883,16 +2883,29 @@ def _format_farm_message(earned: int, crit: bool, happy: bool,
                          new_balance: int) -> str:
     """Сообщение после фарма – чистая структура, как в крафте."""
     # Крит-эмодзи
+    is_mega = crit and earned >= FARM_MAX * 10
     if not crit:
         crit_emoji = "🍬"
-    elif earned >= FARM_MAX * 10:
-        crit_emoji = "💥 (x10!)"
+    elif is_mega:
+        crit_emoji = "💥 (×10!)"
     else:
-        crit_emoji = "🍬(x2)"
+        crit_emoji = "🔥 (×2)"
 
-    # Happy hour (закомментирован)
-    # happy_str = " 🌟x2" if happy else ""
-    happy_str = ""
+    # Happy Hour — теперь ВИДНО игроку (peak-момент нельзя прятать)
+    happy_str = " 🌟×2 HAPPY HOUR" if happy else ""
+
+    # Праздничный баннер пикового момента (peak-end / «liking»)
+    if is_mega:
+        banner = (
+            "💥💥💥 <b>МЕГА-КРИТ ×10!</b> 💥💥💥\n"
+            "<i>Искажение прорвалось — тебе выпал невероятный куш!</i>\n\n"
+        )
+    elif crit:
+        banner = "🔥 <b>КРИТ ×2!</b> Удача на твоей стороне.\n\n"
+    elif happy:
+        banner = "🌟 <b>HAPPY HOUR!</b> Добыча удвоена — лови момент.\n\n"
+    else:
+        banner = ""
 
     # Прогресс-бары
     progress_bar_str = get_medal_progress(new_count, FARM_MEDALS)
@@ -2900,6 +2913,7 @@ def _format_farm_message(earned: int, crit: bool, happy: bool,
 
     # Сборка сообщения
     msg = (
+        f"{banner}"
         f"💎 <b>Ты нафармил: +{earned} OAC</b> {crit_emoji}{happy_str}\n"
         f"🎉 <b>У тебя: {new_balance} OAC</b>\n\n"
         f"{medal_text}"
@@ -5255,7 +5269,12 @@ async def _mines_show_field(update, context, state, redis_key, uid, ctx):
                     [InlineKeyboardButton("🔙 В меню", callback_data="luck")]]
     elif status == "lost":
         text += f"💥 **ВЗРЫВ!** Ты попал на мину!\n"
-        text += f"💰 Ты потерял ставку.\n\n```\n{field_str}\n```"
+        if step >= 1:
+            almost = int(bet * multiplier)
+            text += f"😱 Так близко! Открыто {step}/22 — ты мог забрать {almost} OAC (x{multiplier:.2f}).\n"
+            text += f"💰 Ставка сгорела. Ещё один шаг — и куш был бы твой.\n\n```\n{field_str}\n```"
+        else:
+            text += f"💰 Ты потерял ставку.\n\n```\n{field_str}\n```"
         keyboard = [[InlineKeyboardButton("💣 Попробовать снова", callback_data="mines_bet_50")],
                     [InlineKeyboardButton("🔙 В меню", callback_data="luck")]]
     else:  # cashed_out
@@ -6545,10 +6564,27 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
     if not guild and (player.login_streak or 0) == 3:
         lines.append("🏰 Гильдии помогают расти быстрее — загляните")
 
+    # Loss-aversion по серии входов: показываем, что можно потерять
+    _streak = player.login_streak or 0
+    if _streak >= 3:
+        lines.append(f"🔥 <b>Серия входов: {_streak} дн.</b> — не разорви её, вернись завтра за наградой!")
+
     text = "\n".join(lines)
 
 # ── КЛАВИАТУРА ──
     keyboard = []
+
+    # Кнопка фарма с живым таймером кулдауна — конец «слепым кликам»
+    farm_ready = (not player.last_farm) or (now - player.last_farm) >= timedelta(hours=FARM_COOLDOWN_HOURS)
+    if farm_ready:
+        farm_label = "🍬 Фармить"
+    else:
+        _remain = timedelta(hours=FARM_COOLDOWN_HOURS) - (now - player.last_farm)
+        _mins = max(1, math.ceil(_remain.total_seconds() / 60))
+        farm_label = f"🍬 Грядка зреет · {_mins}м"
+
+    def _farm_btn():
+        return InlineKeyboardButton(farm_label, callback_data="farm")
 
     if player.onboarding_step != -1:
         keyboard.append([InlineKeyboardButton("✨ Все возможности ›", callback_data="all_features")])
@@ -6562,21 +6598,14 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
             bar_text = "⚠️ Задания " + "▰" * bar_filled + "▱" * bar_empty + f" {done}/{total}"
             keyboard.append([InlineKeyboardButton(bar_text, callback_data="daily_quest_hub")])
     else:
-        keyboard.append([InlineKeyboardButton("🍬 Фармить", callback_data="farm")])
+        keyboard.append([_farm_btn()])
 
-    # Вторая строка (row2)
-    if (not reward_claimed and total > 0 and done == 0) or (reward_claimed or total == 0):
-        row2 = [
-            InlineKeyboardButton("🍬 Фармить", callback_data="farm"),
-            InlineKeyboardButton("🌿 Крафт ›", callback_data="craft"),
-            InlineKeyboardButton("💨 Дунуть", callback_data="smoke"),
-        ]
-    else:
-        row2 = [
-            InlineKeyboardButton("🍬 Фармить", callback_data="farm"),
-            InlineKeyboardButton("🌿 Крафт ›", callback_data="craft"),
-            InlineKeyboardButton("💨 Дунуть", callback_data="smoke"),
-        ]
+    # Вторая строка (row2) — раскладка едина (убран «мёртвый» дубль-ветка)
+    row2 = [
+        _farm_btn(),
+        InlineKeyboardButton("🌿 Крафт ›", callback_data="craft"),
+        InlineKeyboardButton("💨 Дунуть", callback_data="smoke"),
+    ]
     keyboard.append(row2)
 
     # ===== АДАПТИВНАЯ КНОПКА ГИЛЬДИИ =====
