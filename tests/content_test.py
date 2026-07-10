@@ -19,11 +19,14 @@ os.environ.setdefault("RENDER_URL", "")
 from bot import QUEST_TEMPLATES
 
 # Ключи заданий, которые хендлеры реально выставляют в daily_progress.
-TRACKED_KEYS = {"farm", "craft", "smoke", "guild_action", "ritual", "repent", "donate", "lab"}
+TRACKED_KEYS = {
+    "farm", "craft", "smoke", "guild_action", "ritual", "repent",
+    "donate", "lab", "pet", "train",
+}
 
-# Известные пробелы: механики пока нет (нужно дизайн-решение). Документированы,
-# чтобы тест проходил, но новые нетрекаемые ключи он поймает.
-KNOWN_UNTRACKED = {"pet", "train"}
+# Известные пробелы: механики пока нет. Пусто — у всех ключей заданий теперь
+# есть рабочая механика (pet — кормление, train — тренировка).
+KNOWN_UNTRACKED = set()
 
 
 def main() -> int:

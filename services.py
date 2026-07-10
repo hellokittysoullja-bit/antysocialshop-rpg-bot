@@ -223,6 +223,17 @@ class PetService:
         result = await self.repo.atomic_update(user_id, _set)
         return result is not None
 
+    async def feed(self, user_id: int) -> dict | None:
+        """Кормит питомца: восстанавливает сытость и отмечает задание квеста «pet»."""
+        async def _feed(p, conn):
+            if not p.pet:
+                return {"status": "no_pet"}
+            p.pet_hunger = 100
+            p.daily_progress = p.daily_progress or {}
+            p.daily_progress["pet"] = True
+            return {"status": "ok"}
+        return await self.repo.atomic_update(user_id, _feed)
+
     async def has_pet(self, user_id: int) -> bool:
         player = await self.repo.get_by_id(user_id)
         return player is not None and bool(player.pet)

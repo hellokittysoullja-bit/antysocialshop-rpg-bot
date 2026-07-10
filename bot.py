@@ -5024,7 +5024,17 @@ async def pet_preview(update, context, ctx):
 
     if player and player.pet:
         name_str = f" по кличке «{player.pet_name}»" if player.pet_name else ""
-        await query.message.edit_text(f"Твой питомец: {player.pet}{name_str}")
+        hunger = player.pet_hunger if player.pet_hunger is not None else 100
+        hbar = "🟩" * (hunger // 20) + "⬛️" * (5 - hunger // 20)
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🍖 Покормить", callback_data="pet_feed")],
+            [InlineKeyboardButton("🔙 Назад", callback_data="menu")],
+        ])
+        await query.message.edit_text(
+            f"🐾 <b>Твой питомец: {player.pet}{name_str}</b>\n\n"
+            f"🍖 <b>Сытость:</b> {hbar} {hunger}/100",
+            reply_markup=kb, parse_mode='HTML'
+        )
     else:
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton(f"🐕 Купить Песика ({PET_CONFIG['dog']['price']} 🍬)", callback_data="pet_buy_dog")],
@@ -5034,6 +5044,18 @@ async def pet_preview(update, context, ctx):
             "🐾 <b>ПИТОМЦЫ</b>\n\nПока доступен только Песик.",
             reply_markup=kb, parse_mode='HTML'
         )
+
+@cb
+async def pet_feed_handler(update, context, ctx):
+    query = update.callback_query
+    uid = query.from_user.id
+    result = await ctx.pet_service.feed(uid)
+    if not result or result.get("status") == "no_pet":
+        await query.answer("Сначала заведи питомца!", show_alert=True)
+        return
+    await query.answer("🐾 Питомец сыт и доволен!")
+    await pet_preview(update, context)
+
 
 @cb
 async def pet_buy_dog_handler(update, context, ctx):
@@ -5832,6 +5854,49 @@ async def skip_onboarding_handler(update, context):
         await safe_send_message(context, uid, text, reply_markup=kb, parse_mode='HTML')
 
 
+@rate_limit(2)
+@game_handler
+async def train_callback(update, context, ctx, player):
+    """Тренировка (ветка воина): раз в день, закаляет дух и даёт OAC.
+
+    Отмечает задание квеста «train». Кулдаун — раз в день через daily_progress
+    (сбрасывается вместе с дневным прогрессом), поэтому не требует новой колонки БД.
+    """
+    uid = update.effective_user.id
+    if update.callback_query:
+        try:
+            await update.callback_query.answer()
+        except Exception:
+            pass
+
+    async def _train(p, conn):
+        p.daily_progress = p.daily_progress or {}
+        if p.daily_progress.get("train"):
+            return ("already",)
+        reward = random.randint(20, 45)
+        p.balance += reward
+        p.daily_progress["train"] = True
+        return ("ok", reward, p.balance)
+
+    result = await ctx.repo.atomic_update(uid, _train)
+    if not result:
+        return
+    if result[0] == "already":
+        await safe_send_message(
+            context, uid,
+            "⚔️ <b>Ты уже тренировался сегодня.</b>\n"
+            "<i>Дух воина крепнет постепенно — возвращайся завтра.</i>",
+            parse_mode='HTML')
+        return
+    _, reward, new_balance = result
+    await safe_send_message(
+        context, uid,
+        f"⚔️ <b>ТРЕНИРОВКА ЗАВЕРШЕНА!</b>\n\n"
+        f"🛡️ Ты закалил дух воина. <b>+{reward} OAC</b>\n"
+        f"💎 <b>Баланс:</b> {new_balance} OAC",
+        parse_mode='HTML')
+
+
 # ─── Маршрутизатор заданий (вызывается при нажатии на кнопку задания) ───
 async def handle_quest_action(update, context):
     ctx = context.bot_data.get("ctx")
@@ -5843,7 +5908,7 @@ async def handle_quest_action(update, context):
         await handle_choice(update, context, ctx)
         return
 
-    player = await ctx.repo.get_by_id(uid)  
+    player = await ctx.repo.get_by_id(uid)
     if not player and action not in ["farm", "craft", "smoke", "pet"]:
         await query.answer("Игрок не найден", show_alert=True)
         return
@@ -5864,8 +5929,14 @@ async def handle_quest_action(update, context):
             await repent_callback(update, context)
         else:
             await query.answer("Ты не в Светлой Гильдии", show_alert=True)
+    elif action == "train":
+        await train_callback(update, context)
     elif action == "pet":
-        await pet_preview(update, context)
+        result = await ctx.pet_service.feed(uid)
+        if not result or result.get("status") == "no_pet":
+            await query.answer("Сначала заведи питомца! (в разделе «Мир»)", show_alert=True)
+        else:
+            await query.answer("🐾 Питомец накормлен!")
     else:
         await query.answer("Неизвестное задание", show_alert=True)
         
@@ -6477,6 +6548,7 @@ CALLBACKS: Dict[str, Callable] = {
     "guild_join_WHITE": guild_join_handler,
     "cancel_gift": cancel_gift_handler,
     "pet_preview": pet_preview,
+    "pet_feed": pet_feed_handler,
     "pet_buy_dog": pet_buy_dog_handler,
     "pet_name_skip": pet_name_skip_handler,
     "pet_locked": pet_locked_handler,

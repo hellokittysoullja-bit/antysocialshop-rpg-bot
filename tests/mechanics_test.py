@@ -142,6 +142,16 @@ async def test_services(passed):
     assert len(reloaded.pet_name) == PET_CONFIG["dog"]["max_name_len"]
     passed.append("PetService: already_have + обрезка имени")
 
+    # --- PetService.feed: восстанавливает сытость и отмечает задание квеста pet ---
+    async def _starve(p, conn):
+        p.pet_hunger = 10
+    await repo.atomic_update(TEST_UID, _starve)
+    fed = await pet_service.feed(TEST_UID)
+    assert fed and fed["status"] == "ok", f"ждали ok, получили {fed}"
+    after_feed = await repo.get_by_id(TEST_UID)
+    assert after_feed.pet_hunger == 100 and after_feed.daily_progress.get("pet") is True
+    passed.append("PetService.feed: сытость=100 + задание pet отмечено")
+
     # --- GuildWarService: старт/стоп/статус ---
     war = GuildWarService(pool, redis_client, WarConfig(), WarSettings())
     await war.stop_war()
