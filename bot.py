@@ -1277,6 +1277,22 @@ def compute_rank_info(balance: int):
     return rank_emoji, rank_name, next_rank_emoji, next_rank_name, next_threshold, prev_threshold
 
 
+async def ensure_daily_progress(player, ctx) -> dict:
+    """Сбрасывает daily_progress при наступлении нового дня (сохраняя текущий квест).
+
+    Единый источник (раньше этот блок был скопирован в build_main_menu,
+    progress_hub_handler и daily_quest_hub). Возвращает актуальный dict progress.
+    """
+    today = date.today().isoformat()
+    progress = getattr(player, 'daily_progress', {}) or {}
+    if progress.get("reset_date") != today:
+        current_quest = progress.get("quest_id", "chapter1")
+        progress = {"reset_date": today, "quest_id": current_quest, "reward_claimed": False}
+        player.daily_progress = progress
+        await ctx.repo.save(player)
+    return progress
+
+
 ACHIEVEMENTS = [
     {"id": "farm_1", "name": "Первый Шаг", "emoji": "🕯️", "desc": "Совершить 1 фарм очков (АнтиСошл)", "reward": "Титул 🕯️"},
     {"id": "craft_1", "name": "О! Росточек!", "emoji": "🌱", "desc": "Скрутить свой первый блант — главное средство успокоения от бед в этом мире", "reward": "Титул 🌱"},
@@ -6011,17 +6027,7 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
     is_veteran = balance >= 5000
 
     # ---- Автоматический сброс daily_progress ----
-    today = date.today().isoformat()
-    progress = getattr(player, 'daily_progress', {}) or {}
-    if progress.get("reset_date") != today:
-        current_quest = progress.get("quest_id", "chapter1")
-        player.daily_progress = {
-            "reset_date": today,
-            "quest_id": current_quest,
-            "reward_claimed": False
-        }
-        await ctx.repo.save(player)
-        progress = player.daily_progress
+    progress = await ensure_daily_progress(player, ctx)
 
     # ---- Вычисление total и done из шаблона квеста ----
     quest_id = progress.get("quest_id", "chapter1")
@@ -6234,20 +6240,8 @@ async def progress_hub_handler(update, context, ctx):
             rank_line = f"<b>⚜️ Ранг: {rank_emoji} {rank_name}</b> (Максимум!)"
 
         # ===== 2. ЕЖЕДНЕВНЫЕ ЗАДАНИЯ =====
-        from datetime import date
-        today = date.today().isoformat()
-        progress = player.daily_progress or {}
-        if progress.get("reset_date") != today:
-            # Новый день – сбрасываем, сохраняя текущий квест
-            current_quest = progress.get("quest_id", "chapter1")
-            player.daily_progress = {
-                "reset_date": today,
-                "quest_id": current_quest,
-                "reward_claimed": False
-            }
-            await ctx.repo.save(player)
-            progress = player.daily_progress
-        
+        progress = await ensure_daily_progress(player, ctx)
+
         # Получаем текущий квест
         quest_id = progress.get("quest_id", "chapter1")
         template = QUEST_TEMPLATES.get(quest_id)
@@ -6425,17 +6419,10 @@ async def daily_quest_hub(update, context, ctx):
     if not player:
         return
 
-# ===== ЕЖЕДНЕВНЫЙ СБРОС =====
-    from datetime import date
-    today = date.today().isoformat()
-    progress = player.daily_progress or {}
-    if progress.get("reset_date") != today:
-            current_quest = progress.get("quest_id", "chapter1")
-            progress = {"reset_date": today, "quest_id": current_quest, "reward_claimed": False}
-            player.daily_progress = progress
-            await ctx.repo.save(player)
+    # ===== ЕЖЕДНЕВНЫЙ СБРОС =====
+    progress = await ensure_daily_progress(player, ctx)
 
-    # === ВЫБОР ШАБЛОНА (ЭТО БЫЛО ПРОПУЩЕНО) ===
+    # === ВЫБОР ШАБЛОНА ===
     quest_id = progress.get("quest_id", "chapter1")
     template = QUEST_TEMPLATES.get(quest_id)
     if not template:
