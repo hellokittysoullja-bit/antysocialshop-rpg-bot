@@ -5476,6 +5476,7 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
     if player.onboarding_step != -1:
         keyboard.append([InlineKeyboardButton("✨ Все возможности ›", callback_data="all_features")])
 
+    farm_in_cta = False
     if not reward_claimed and total > 0:
         if done == total:
             keyboard.append([InlineKeyboardButton("🎁 Забрать награду!", callback_data="claim_reward")])
@@ -5486,10 +5487,11 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
             keyboard.append([InlineKeyboardButton(bar_text, callback_data="daily_quest_hub")])
     else:
         keyboard.append([_farm_btn()])
+        farm_in_cta = True
 
-    # Вторая строка (row2) — раскладка едина (убран «мёртвый» дубль-ветка)
-    row2 = [
-        _farm_btn(),
+    # Вторая строка: фарм включаем только если его НЕТ в первой строке —
+    # иначе «🍬 Фармить» дублировалась бы двумя одинаковыми кнопками подряд.
+    row2 = ([] if farm_in_cta else [_farm_btn()]) + [
         InlineKeyboardButton("🌿 Крафт ›", callback_data="craft"),
         InlineKeyboardButton("💨 Дунуть", callback_data="smoke"),
     ]
