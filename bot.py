@@ -4519,8 +4519,15 @@ async def lab_enter_confirm(update, context):
     depth = player.lab_depth or 1 if player else 1
     total_rooms = 4 + depth
     now = datetime.now()
-    async with ctx.db_pool.acquire() as conn:
-        await conn.execute("UPDATE players SET last_lab_attempt=$1 WHERE user_id=$2", now, uid)
+
+    async def _mark_lab(p, conn):
+        p.last_lab_attempt = now
+        # Отмечаем задание квеста «Лабиринт» (раньше не трекалось → глава 2
+        # была непроходима)
+        p.daily_progress = p.daily_progress or {}
+        p.daily_progress["lab"] = True
+        return True
+    await ctx.repo.atomic_update(uid, _mark_lab)
 
     context.user_data["lab_room"] = 1
     context.user_data["lab_hp"] = 100
@@ -6206,6 +6213,10 @@ async def shrine_donate_handler(update, context, ctx, player):
             return ("no_money",)
         p.balance -= amount
         p.donated = (p.donated or 0) + amount
+        # Отмечаем задание квеста «Пожертвовать» (раньше не трекалось → глава 2
+        # была непроходима)
+        p.daily_progress = p.daily_progress or {}
+        p.daily_progress["donate"] = True
         return ("ok",)
 
     result = await ctx.repo.atomic_update(uid, _donate)
