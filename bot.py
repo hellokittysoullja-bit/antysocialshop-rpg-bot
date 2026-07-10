@@ -18,8 +18,7 @@ from tenacity import (
     retry, stop_after_attempt, wait_exponential,
     retry_if_exception_type, before_sleep_log
 )
-from pydantic import BaseModel, ConfigDict, Field   # <-- добавлен Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
@@ -55,6 +54,11 @@ from game_content import (
 )
 # Слой моделей
 from game_models import Player
+# Слой конфигурации
+from config import (
+    settings, Settings, FARM_MIN, FARM_MAX, FARM_COOLDOWN_HOURS,
+    HAPPY_HOUR_MULTIPLIER, GAME_CONFIG, PET_CONFIG,
+)
 
 # ============================================================
 # ДЕКОРАТОРЫ
@@ -414,43 +418,6 @@ class PlayerRepository:
             logger.warning("Не удалось обновить кэш для игрока %d: %s", user_id, e)
             self.cache.pop(user_id, None)
         
-class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_prefix="")
-
-    bot_token: str = Field(..., alias="TOKEN")
-    database_url: str = Field(..., alias="DATABASE_URL_AIVEN")
-    render_url: str = Field("", alias="RENDER_URL")
-    redis_url: str = Field("", alias="REDIS_URL")
-    port: int = Field(default=10000, alias="PORT")
-    webhook_path: str = "/webhook"
-    webhook_secret: str = "SuperSecret"
-    sentry_dsn: str = ""
-    environment: str = "production"
-    admin_id: int = 0
-
-    # Игровые конфиги
-    farm_cooldown_hours: float = 0.5
-    farm_min: int = 45
-    farm_max: int = 100
-    happy_hour_multiplier: int = 2
-    happy_hour_duration_min: int = 30
-    veteran_threshold: int = 5000
-    phantom_threshold: int = 20000
-    necromant_threshold: int = 50000
-    lab_cooldown_hours: int = 12
-    ritual_cooldown_hours: int = 12
-    repent_cooldown_hours: int = 12
-
-    @property
-    def webhook_url(self) -> str:
-        return f"{self.render_url}{self.webhook_path}"
-
-settings = Settings()
-FARM_MIN = settings.farm_min
-FARM_MAX = settings.farm_max
-FARM_COOLDOWN_HOURS = settings.farm_cooldown_hours
-HAPPY_HOUR_MULTIPLIER = settings.happy_hour_multiplier
-
 # ── JSON-логгер ──
 class JsonFormatter(logging.Formatter):
     def format(self, record):
@@ -468,22 +435,6 @@ handler = logging.StreamHandler(sys.stdout)
 handler.setFormatter(JsonFormatter())
 logging.basicConfig(level=logging.INFO, handlers=[handler])
 logger = logging.getLogger(__name__)
-
-# ── Глобальные конфиги игры ──
-GAME_CONFIG = {
-    "craft_cost": 15,
-    "named_blunt_cost": 50,
-    "farm_cooldown_hours": settings.farm_cooldown_hours,
-    "ritual_cooldown_hours": settings.ritual_cooldown_hours,
-    "repent_cooldown_hours": settings.repent_cooldown_hours,
-    "lab_cooldown_hours": settings.lab_cooldown_hours,
-    "veteran_threshold": settings.veteran_threshold,
-    "phantom_threshold": settings.phantom_threshold,
-    "necromant_threshold": settings.necromant_threshold,
-}
-PET_CONFIG = {
-    "dog": {"name": "🐕 Песик", "price": 3000, "max_name_len": 15},
-}
 
 # ── Хелперы ──
 def has_rank(balance: int, rank_name: str = "Ветеран") -> bool:
