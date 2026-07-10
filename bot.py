@@ -48,14 +48,8 @@ except Exception as e:
     tg_breaker = DummyBreaker()
 
 from cachetools import TTLCache
-from prometheus_client import Counter, Histogram
-callback_requests = Counter('bot_callback_requests', 'Total callbacks')
-callback_duration = Histogram('bot_callback_duration_seconds', 'Callback duration')
-rate_limited_requests = Counter('bot_rate_limited_requests', 'Rate limited requests')
 
 import httpx
-import re
-import copy
 
 # ============================================================
 # ДЕКОРАТОРЫ
@@ -1329,6 +1323,39 @@ FUNNY_REACTIONS = [
     'Если оставишь это себе, OAC начнут плакать. Подари — и они засмеются.'
 ]
 RANKS = [("🪓 Рекрут", 0, 0), ("⚔️ Ветеран", 5000, 1500), ("🪦 Призрак", 20000, 6000), ("🪬 Некромант", 50000, 15000)]
+
+
+def compute_rank_info(balance: int):
+    """Чистая функция: разбирает RANKS и возвращает данные о ранге.
+
+    Единый источник вычисления ранга (раньше этот блок был скопирован
+    в build_main_menu и progress_hub_handler).
+
+    Возвращает кортеж:
+        (rank_emoji, rank_name, next_emoji, next_name, next_threshold, prev_threshold)
+    next_threshold == 0 означает максимальный ранг.
+    """
+    rank_emoji, rank_name = "🪓", "Рекрут"
+    next_rank_emoji, next_rank_name, next_threshold = "", "", 0
+    final_i = 0
+    for i, (emoji, threshold, _) in enumerate(RANKS):
+        final_i = i
+        if balance >= threshold:
+            rank_emoji = emoji.split(' ', 1)[0]
+            rank_name = emoji.split(' ', 1)[1] if ' ' in emoji else emoji
+            if i + 1 < len(RANKS):
+                next_rank_emoji = RANKS[i+1][0].split(' ', 1)[0]
+                next_rank_name = RANKS[i+1][0].split(' ', 1)[1] if ' ' in RANKS[i+1][0] else RANKS[i+1][0]
+                next_threshold = RANKS[i+1][1]
+        else:
+            next_rank_emoji = emoji.split(' ', 1)[0]
+            next_rank_name = emoji.split(' ', 1)[1] if ' ' in emoji else emoji
+            next_threshold = threshold
+            break
+    prev_threshold = RANKS[final_i-1][1] if final_i > 0 else 0
+    return rank_emoji, rank_name, next_rank_emoji, next_rank_name, next_threshold, prev_threshold
+
+
 ACHIEVEMENTS = [
     {"id": "farm_1", "name": "Первый Шаг", "emoji": "🕯️", "desc": "Совершить 1 фарм очков (АнтиСошл)", "reward": "Титул 🕯️"},
     {"id": "craft_1", "name": "О! Росточек!", "emoji": "🌱", "desc": "Скрутить свой первый блант — главное средство успокоения от бед в этом мире", "reward": "Титул 🌱"},
@@ -2859,8 +2886,10 @@ def _calculate_farm_reward(player, context) -> tuple[int, bool, bool]:
     if last_smoke and (now - last_smoke).total_seconds() < 300:
         earned += random.randint(3, 5)
 
-    # Happy hour – удвоение
-    happy = context.bot_data.get("happy_hour", False)
+    # Happy hour – удвоение. Флаг живёт в ctx.cache (как и во всех остальных
+    # механиках); раньше фарм ошибочно читал его из bot_data → ×2 не срабатывал.
+    _ctx = context.bot_data.get("ctx")
+    happy = bool(_ctx and _ctx.cache and _ctx.cache.get("happy_hour", False))
     if happy:
         earned *= HAPPY_HOUR_MULTIPLIER
 
@@ -6366,46 +6395,6 @@ async def broadcast(update, context, ctx):
             pass
     
     await update.message.reply_text(f"✅ Разослано {success} из {len(users)} игроков")
-# ============================================================
-# ОБРАБОТЧИК КОМАНД
-# ============================================================
-
-    if not await check_rate_limit_redis(ctx, user_id, "command", limit=10, period=10):
-        await update.message.reply_text("⚠️ Слишком часто. Подожди секунду.")
-        return
-
-    raw_text = msg.text.strip()
-    request_id = uuid.uuid4().hex[:8]
-    logger.info("[%s] Команда '%s' от user=%d", request_id, raw_text, user_id)
-
-    command = raw_text.split()[0].split('@')[0][1:].lower()
-    if not command:
-        return
-    args = raw_text.split()[1:]
-
-    # ===== ВОТ ЭТУ СТРОКУ ЗАМЕНИЛ =====
-    handler = TEXT_COMMAND_HANDLERS.get(command)
-    if not handler:
-        return
-
-    try:
-        old_args = context.args
-        context.args = args
-        try:
-            await handler(update, context)
-        finally:
-            context.args = old_args
-    except Exception as e:
-        logger.error(f"Ошибка в команде /{command}: {e}", exc_info=True)
-        async def _alert():
-            for attempt in range(3):
-                try:
-                    await context.bot.send_message(chat_id=ctx.settings.admin_id, text=f"🚨 [{request_id}] Ошибка /{command} от {user_id}: {html.escape(str(e)[:500])}")
-                    break
-                except Exception:
-                    await asyncio.sleep(2 ** attempt)
-        asyncio.create_task(_alert())
-        await update.message.reply_text("⚠️ Внутренняя ошибка. Админ уже уведомлён.")
 
 # ============================================================
 # ГЛОБАЛЬНЫЙ ОБРАБОТЧИК ОШИБОК
@@ -6494,22 +6483,8 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
         lines.append(f"<i>{whisper}</i>")
         lines.append("")
 
-        # Определение текущего и следующего ранга (логика без изменений)
-        rank_emoji, rank_name = "🪓", "Рекрут"
-        next_rank_emoji, next_rank_name, next_threshold = "", "", 0
-        for i, (emoji, threshold, _) in enumerate(RANKS):
-            if balance >= threshold:
-                rank_emoji = emoji.split(' ', 1)[0]
-                rank_name = emoji.split(' ', 1)[1] if ' ' in emoji else emoji
-                if i + 1 < len(RANKS):
-                    next_rank_emoji = RANKS[i+1][0].split(' ', 1)[0]
-                    next_rank_name = RANKS[i+1][0].split(' ', 1)[1] if ' ' in RANKS[i+1][0] else RANKS[i+1][0]
-                    next_threshold = RANKS[i+1][1]
-            else:
-                next_rank_emoji = emoji.split(' ', 1)[0]
-                next_rank_name = emoji.split(' ', 1)[1] if ' ' in emoji else emoji
-                next_threshold = threshold
-                break
+        # Определение текущего и следующего ранга
+        rank_emoji, rank_name, next_rank_emoji, next_rank_name, next_threshold, _ = compute_rank_info(balance)
 
         rank_display = f"{rank_emoji} {rank_name}" if rank_name else rank_emoji
 
@@ -6667,24 +6642,9 @@ async def progress_hub_handler(update, context, ctx):
         username = html_escape(player.username or str(uid))
 
         # ===== 1. РАНГ И ПРОГРЕСС =====
-        rank_emoji, rank_name = "🪓", "Рекрут"
-        next_rank_emoji, next_rank_name, next_threshold = "", "", 0
-        for i, (emoji, threshold, _) in enumerate(RANKS):
-            if balance >= threshold:
-                rank_emoji = emoji.split(' ', 1)[0]
-                rank_name = emoji.split(' ', 1)[1] if ' ' in emoji else emoji
-                if i + 1 < len(RANKS):
-                    next_rank_emoji = RANKS[i+1][0].split(' ', 1)[0]
-                    next_rank_name = RANKS[i+1][0].split(' ', 1)[1] if ' ' in RANKS[i+1][0] else RANKS[i+1][0]
-                    next_threshold = RANKS[i+1][1]
-            else:
-                next_rank_emoji = emoji.split(' ', 1)[0]
-                next_rank_name = emoji.split(' ', 1)[1] if ' ' in emoji else emoji
-                next_threshold = threshold
-                break
+        rank_emoji, rank_name, next_rank_emoji, next_rank_name, next_threshold, prev_threshold = compute_rank_info(balance)
 
         if next_threshold:
-            prev_threshold = RANKS[i-1][1] if i > 0 else 0
             progress_percent = int((balance - prev_threshold) / (next_threshold - prev_threshold) * 100) if next_threshold > prev_threshold else 100
             progress_percent = min(100, max(0, progress_percent))
             bar = "▓" * (progress_percent // 10) + "░" * (10 - progress_percent // 10)
@@ -7661,6 +7621,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     data = q.data
     try:
+        if data == "noop":
+            await q.answer()
+            return
         if data in EXACT_HANDLERS:
             await EXACT_HANDLERS[data](update, context)
             return
