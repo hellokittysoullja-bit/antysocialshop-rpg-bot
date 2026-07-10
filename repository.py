@@ -19,6 +19,20 @@ except Exception:  # pragma: no cover
 
 logger = logging.getLogger(__name__)
 
+# Единый источник правды: полный порядок колонок таблицы players.
+# Используется во всех операциях чтения/записи (get_by_id, save, atomic_update),
+# чтобы схема была описана ровно в одном месте.
+PLAYER_COLUMNS = (
+    "user_id", "username", "balance", "blunts", "guild", "last_farm",
+    "last_ritual", "last_repent", "last_daily", "titles", "last_farm_date", "passive_level",
+    "passive_collected", "karma", "inhaled", "smoke_count", "farm_count",
+    "craft_count", "ritual_count", "referral_count", "last_berserk",
+    "inventory", "invited_by", "profile_skins", "login_streak",
+    "last_login_date", "oath", "keys", "check_count", "m_essence",
+    "lab_chests", "lab_deaths", "alchemy_count", "last_lab_attempt",
+    "donated", "daily_progress", "pending_transfer", "lab_depth", "pet", "pet_name", "exists",
+)
+
 
 class PlayerRepository:
     """Репозиторий игроков с Circuit Breaker, кэшем и автоматическими ретраями."""
@@ -60,16 +74,7 @@ class PlayerRepository:
             except Exception:
                 pass  # таймаут не критичен
 
-            columns = [
-                "user_id", "username", "balance", "blunts", "guild", "last_farm",
-                "last_ritual", "last_repent", "last_daily", "titles", "last_farm_date", "passive_level",
-                "passive_collected", "karma", "inhaled", "smoke_count", "farm_count",
-                "craft_count", "ritual_count", "referral_count", "last_berserk",
-                "inventory", "invited_by", "profile_skins", "login_streak",
-                "last_login_date", "oath", "keys", "check_count", "m_essence",
-                "lab_chests", "lab_deaths", "alchemy_count", "last_lab_attempt",
-                "donated", "daily_progress", "pending_transfer", "lab_depth", "pet", "pet_name", "exists",
-            ]
+            columns = PLAYER_COLUMNS
             cols_sql = ", ".join(f'"{c}"' for c in columns)
             row = await db_breaker.call(
                 conn.fetchrow,
@@ -105,16 +110,7 @@ class PlayerRepository:
         if conn and conn.is_closed():
             conn = None
 
-        columns = [
-            "user_id", "username", "balance", "blunts", "guild", "last_farm",
-            "last_ritual", "last_repent", "last_daily", "titles", "last_farm_date", "passive_level",
-            "passive_collected", "karma", "inhaled", "smoke_count", "farm_count",
-            "craft_count", "ritual_count", "referral_count", "last_berserk",
-            "inventory", "invited_by", "profile_skins", "login_streak",
-            "last_login_date", "oath", "keys", "check_count", "m_essence",
-            "lab_chests", "lab_deaths", "alchemy_count", "last_lab_attempt",
-            "donated", "daily_progress", "pending_transfer", "lab_depth", "pet", "pet_name", "exists",
-        ]
+        columns = PLAYER_COLUMNS
         json_cols = {"inventory", "profile_skins", "pending_transfer", "daily_progress"}
         cols_sql = ", ".join(f'"{c}"' for c in columns)
         placeholders = ", ".join(f"${i+1}" for i in range(len(columns)))
@@ -160,16 +156,7 @@ class PlayerRepository:
 
         async with self.db_pool.acquire() as conn:
             async with conn.transaction():
-                columns = [
-                    "user_id", "username", "balance", "blunts", "guild", "last_farm",
-                    "last_ritual", "last_repent", "last_daily", "titles", "last_farm_date", "passive_level",
-                    "passive_collected", "karma", "inhaled", "smoke_count", "farm_count",
-                    "craft_count", "ritual_count", "referral_count", "last_berserk",
-                    "inventory", "invited_by", "profile_skins", "login_streak",
-                    "last_login_date", "oath", "keys", "check_count", "m_essence",
-                    "lab_chests", "lab_deaths", "alchemy_count", "last_lab_attempt",
-                    "donated", "pending_transfer", "daily_progress", "lab_depth", "pet", "pet_name", "exists",
-                ]
+                columns = PLAYER_COLUMNS
                 cols_sql = ", ".join(f'"{c}"' for c in columns)
                 row = await conn.fetchrow(
                     f"SELECT {cols_sql} FROM players WHERE user_id = $1 FOR UPDATE",

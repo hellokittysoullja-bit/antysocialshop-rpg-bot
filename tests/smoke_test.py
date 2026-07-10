@@ -74,6 +74,15 @@ async def main() -> int:
     assert loaded.exists and loaded.username == "SmokeTester"
     passed.append("Player save -> get_by_id round-trip")
 
+    # 1b. atomic_update (FOR UPDATE → изменение → save) — использует PLAYER_COLUMNS
+    async def _bump(p, conn):
+        p.balance += 123
+        return p.balance
+    new_balance = await repo.atomic_update(TEST_UID, _bump)
+    assert new_balance is not None, "atomic_update вернул None (игрок не найден)"
+    assert (await repo.get_by_id(TEST_UID)).balance >= 123, "atomic_update не сохранил"
+    passed.append("atomic_update round-trip")
+
     # 2. ранги на всех порогах + prev/next
     for bal, name in {0: "Рекрут", 5000: "Ветеран", 20000: "Призрак",
                       50000: "Некромант", 25000: "Призрак"}.items():
@@ -114,7 +123,7 @@ async def main() -> int:
 
     for name in passed:
         print(f"  OK  {name}")
-    print(f"\nСмоук-тест пройден: {len(passed)}/6")
+    print(f"\nСмоук-тест пройден: {len(passed)}/{len(passed)}")
     return 0
 
 
