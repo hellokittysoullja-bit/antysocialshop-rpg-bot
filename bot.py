@@ -5515,10 +5515,14 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
         if not last_time or (now - last_time) >= timedelta(hours=cooldown):
             keyboard.append([InlineKeyboardButton(label, callback_data=callback)])
 
+    # Навигация: 2 кнопки в ряд, чтобы длинные подписи не обрезались
+    # (3-в-ряд не помещались: «Прогресс…», «Гильди…»).
+    keyboard.append([
+        InlineKeyboardButton("🏰 Гильдия ›", callback_data="guild_info"),
+        InlineKeyboardButton("📊 Прогресс ›", callback_data="progress_hub"),
+    ])
     keyboard.append([
         InlineKeyboardButton("🌍 Мир ›", callback_data="world_hub"),
-        InlineKeyboardButton("📊 Прогресс ›", callback_data="progress_hub"),
-        InlineKeyboardButton("🏰 Гильдия ›", callback_data="guild_info"),
     ])
 
     return text, InlineKeyboardMarkup(keyboard)
