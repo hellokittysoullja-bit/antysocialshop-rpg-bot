@@ -8,9 +8,8 @@ def log_uncaught(exc_type, exc_value, exc_tb):
     time.sleep(2)   # даём время Render прочитать
     sys.__excepthook__(exc_type, exc_value, exc_tb)
 sys.excepthook = log_uncaught
-import asyncio, json, logging, os, sys, time, random, re, hashlib, html, enum, uuid, copy, math
-from datetime import datetime, timedelta, date, time as time_module, timezone
-from threading import Thread
+import asyncio, json, logging, os, sys, time, random, re, hashlib, html, enum, copy, math
+from datetime import datetime, timedelta, date, timezone
 from typing import Optional, List, Any, Dict, Tuple, NamedTuple, Callable
 from dataclasses import dataclass, field  
 
@@ -23,12 +22,8 @@ from pydantic import BaseModel, ConfigDict, Field   # <-- добавлен Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Application, ApplicationBuilder, CallbackQueryHandler,
-    ContextTypes, MessageHandler, filters, AIORateLimiter
-)
+from telegram.ext import ContextTypes
 from telegram.error import BadRequest, Forbidden, RetryAfter
-from telegram.request import HTTPXRequest
 
 import redis.asyncio as aioredis
 from functools import wraps
@@ -48,14 +43,8 @@ except Exception as e:
     tg_breaker = DummyBreaker()
 
 from cachetools import TTLCache
-from prometheus_client import Counter, Histogram
-callback_requests = Counter('bot_callback_requests', 'Total callbacks')
-callback_duration = Histogram('bot_callback_duration_seconds', 'Callback duration')
-rate_limited_requests = Counter('bot_rate_limited_requests', 'Rate limited requests')
 
 import httpx
-import re
-import copy
 
 # ============================================================
 # ДЕКОРАТОРЫ
@@ -82,51 +71,6 @@ def rate_limit(seconds: int = 2):
         return wrapper
     return decorator
     
-def divine_command(command_name: str):
-    """Делает обработчик 'Божественным': request ID, логи, асинхронный алерт админу."""
-    def decorator(func):
-        @wraps(func)
-        async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
-            request_id = uuid.uuid4().hex[:8]
-            user_id = update.effective_user.id
-            try:
-                logger.info("[%s] /%s от user=%d", request_id, command_name, user_id)
-            except Exception:
-                print(f"[{request_id}] CMD /{command_name} from {user_id}", file=sys.stderr)
-
-            try:
-                return await func(update, context)
-            except Exception as e:
-                import traceback
-                err_msg = traceback.format_exc()
-                try:
-                    logger.error("[%s] Ошибка /%s: %s", request_id, command_name, e, exc_info=True)
-                except Exception:
-                    print(f"[{request_id}] ERROR /{command_name}: {err_msg}", file=sys.stderr)
-
-                async def _alert():
-                    for attempt in range(3):
-                        try:
-                            await context.bot.send_message(
-                                chat_id=settings.admin_id,
-                                text=f"🚨 [{request_id}] Ошибка /{command_name} от {user_id}: {html.escape(str(e)[:500])}"
-                            )
-                            break
-                        except Exception:
-                            await asyncio.sleep(2 ** attempt)
-                asyncio.create_task(_alert())
-
-                try:
-                    await update.message.reply_text("⚠️ Внутренняя ошибка. Админ уже уведомлён.")
-                except Exception:
-                    pass
-            finally:
-                try:
-                    logger.debug("[%s] /%s обработана", request_id, command_name)
-                except Exception:
-                    pass
-        return wrapper
-    return decorator
     
 def game_handler(func):
     """Абсолютный декоратор: гарантированная идемпотентность, атомарный контекст, умная загрузка игрока."""
@@ -205,7 +149,6 @@ def game_handler(func):
             elif update.effective_message:
                 await update.effective_message.reply_text("⚠️ Что-то пошло не так. Попробуйте позже.")
             if settings.admin_id:
-                import traceback as tb_module
                 try:
                     err_msg = f"🚨 <b>Ошибка в {func.__name__}</b>\n<code>{html.escape(str(e))}</code>"
                     await context.bot.send_message(chat_id=settings.admin_id, text=err_msg, parse_mode='HTML')
@@ -588,8 +531,6 @@ def has_rank(balance: int, rank_name: str = "Ветеран") -> bool:
     }
     return balance >= thresholds.get(rank_name, 0)
 
-def ensure_player_exists(player) -> bool:
-    return player is not None and getattr(player, 'exists', False)
     
 from urllib.parse import quote
 
@@ -1060,33 +1001,7 @@ def emoji_to_name(emoji: str) -> str:
 # Устаревшие глобальные переменные (заменены на AppContext, но оставлены для совместимости)
 redis = None
 
-async def init_redis():
-    global redis
-    redis_url = os.getenv("REDIS_URL")
-    if redis_url:
-        redis = await aioredis.from_url(redis_url)
-        logger.info("Redis подключён – кэш активирован")
-    else:
-        logger.info("REDIS_URL не задан – используется in-memory кэш")
 
-async def claim_daily(user_id: int, today: date, streak: int, reward_oac: int,
-                      title: Optional[str], inventory_items: dict, ctx: AppContext) -> bool:
-    """Атомарно начисляет ежедневную награду (использует AppContext)."""
-    async def _apply(p, conn):
-        if p.last_login_date == today:
-            return False
-        p.balance = (p.balance or 0) + reward_oac
-        p.login_streak = streak
-        p.last_login_date = today
-        if title:
-            cur = (p.titles or "").strip()
-            if title not in cur:
-                p.titles = f"{cur} {title}".strip()
-        for field, amount in inventory_items.items():
-            if hasattr(p, field):
-                setattr(p, field, (getattr(p, field) or 0) + amount)
-        return True
-    return await ctx.repo.atomic_update(user_id, _apply)
 
 async def create_named_blunt(user_id: int, name: str, rarity: str = None, conn=None, ctx: AppContext = None, player: Player = None) -> dict:
     """Создаёт именной блант (использует репозиторий из ctx)."""
@@ -1329,6 +1244,39 @@ FUNNY_REACTIONS = [
     'Если оставишь это себе, OAC начнут плакать. Подари — и они засмеются.'
 ]
 RANKS = [("🪓 Рекрут", 0, 0), ("⚔️ Ветеран", 5000, 1500), ("🪦 Призрак", 20000, 6000), ("🪬 Некромант", 50000, 15000)]
+
+
+def compute_rank_info(balance: int):
+    """Чистая функция: разбирает RANKS и возвращает данные о ранге.
+
+    Единый источник вычисления ранга (раньше этот блок был скопирован
+    в build_main_menu и progress_hub_handler).
+
+    Возвращает кортеж:
+        (rank_emoji, rank_name, next_emoji, next_name, next_threshold, prev_threshold)
+    next_threshold == 0 означает максимальный ранг.
+    """
+    rank_emoji, rank_name = "🪓", "Рекрут"
+    next_rank_emoji, next_rank_name, next_threshold = "", "", 0
+    final_i = 0
+    for i, (emoji, threshold, _) in enumerate(RANKS):
+        final_i = i
+        if balance >= threshold:
+            rank_emoji = emoji.split(' ', 1)[0]
+            rank_name = emoji.split(' ', 1)[1] if ' ' in emoji else emoji
+            if i + 1 < len(RANKS):
+                next_rank_emoji = RANKS[i+1][0].split(' ', 1)[0]
+                next_rank_name = RANKS[i+1][0].split(' ', 1)[1] if ' ' in RANKS[i+1][0] else RANKS[i+1][0]
+                next_threshold = RANKS[i+1][1]
+        else:
+            next_rank_emoji = emoji.split(' ', 1)[0]
+            next_rank_name = emoji.split(' ', 1)[1] if ' ' in emoji else emoji
+            next_threshold = threshold
+            break
+    prev_threshold = RANKS[final_i-1][1] if final_i > 0 else 0
+    return rank_emoji, rank_name, next_rank_emoji, next_rank_name, next_threshold, prev_threshold
+
+
 ACHIEVEMENTS = [
     {"id": "farm_1", "name": "Первый Шаг", "emoji": "🕯️", "desc": "Совершить 1 фарм очков (АнтиСошл)", "reward": "Титул 🕯️"},
     {"id": "craft_1", "name": "О! Росточек!", "emoji": "🌱", "desc": "Скрутить свой первый блант — главное средство успокоения от бед в этом мире", "reward": "Титул 🌱"},
@@ -1707,10 +1655,6 @@ async def _run_migrations(conn):
     await conn.execute("ALTER TABLE players SET (autovacuum_vacuum_threshold = 50)")
     await conn.execute("ALTER TABLE players SET (autovacuum_vacuum_cost_limit = 200)")
     
-async def close_db_pool():
-    global db_pool
-    if db_pool:
-        await db_pool.close()
 
 async def create_tables(conn):
     await conn.execute("""
@@ -1919,24 +1863,7 @@ async def count_guilds(ctx: AppContext) -> dict:
         fallback={"BLACK": 0, "WHITE": 0}
     )
 
-async def get_top(ctx: AppContext, limit: int = 10) -> list[dict]:
-    """Топ игроков (идеальное кэширование)."""
-    return await perfected_cache.fetch(
-        redis_client=ctx.redis,
-        db_pool=ctx.db_pool,
-        cache_key=f"top_players_{limit}",
-        query="SELECT user_id, username, balance, guild FROM players ORDER BY balance DESC LIMIT $1",
-        params=(limit,),
-        ttl=300,
-        fallback=[]
-    )
 
-async def get_setting(key: str, default: str = "", ctx: AppContext = None) -> str:
-    if ctx is None:
-        return default
-    async with ctx.db_pool.acquire() as conn:
-        row = await db_breaker.call(conn.fetchrow, "SELECT value FROM bot_settings WHERE key=$1", key)
-        return row["value"] if row else default
 
 async def set_setting(key: str, value: str, ctx: AppContext = None) -> None:
     if ctx is None:
@@ -1948,56 +1875,7 @@ async def set_setting(key: str, value: str, ctx: AppContext = None) -> None:
             key, value
         )
 
-async def send_whisper(context, chat_id, text):
-    try:
-        await context.bot.send_message(chat_id=chat_id, text=text, parse_mode='HTML')
-    except Exception as e:
-        logger.error(f"Whisper error: {e}")
         
-def _extract_provider_info(error: Exception) -> tuple[str, str]:
-    """
-    Извлекает название провайдера и хост из любого исключения.
-    Возвращает кортеж (provider, host).
-    """
-    provider = "Неизвестный"
-    host = "неизвестен"
-    error_text = str(error).lower()
-
-    # Список известных доменов
-    domains = {
-        "neon.tech": "Neon",
-        "aivencloud.com": "Aiven",
-        "cockroachlabs.cloud": "CockroachDB",
-        "render.com": "Render PostgreSQL",
-        "oregon-postgres.render.com": "Render PostgreSQL",
-        "supabase.co": "Supabase"
-    }
-
-    # Ищем в самом сообщении об ошибке
-    for domain, name in domains.items():
-        if domain in error_text:
-            provider = name
-            # Пытаемся вытащить полный хост (достаточно грубо, но работает)
-            import re
-            match = re.search(rf"([\w-]+\.{re.escape(domain)})", error_text)
-            if match:
-                host = match.group(1)
-            else:
-                host = domain
-            break
-
-    # Если не нашли, проверяем причину (__cause__)
-    if provider == "Неизвестный" and error.__cause__:
-        cause_text = str(error.__cause__).lower()
-        for domain, name in domains.items():
-            if domain in cause_text:
-                provider = name
-                import re
-                match = re.search(rf"([\w-]+\.{re.escape(domain)})", cause_text)
-                host = match.group(1) if match else domain
-                break
-
-    return provider, host
 
 # КОМАНДА УСТАНОВКИ ФОТО БЛАНТА
 
@@ -2159,7 +2037,7 @@ def format_date(iso_string):
     try:
         dt = datetime.fromisoformat(iso_string)
         return dt.strftime("%d.%m.%Y в %H:%M")
-    except:
+    except Exception:
         return iso_string
 
 def next_sunday_str() -> str:
@@ -2170,13 +2048,6 @@ def next_sunday_str() -> str:
     next_sunday = now + timedelta(days=days_until_sunday)
     return next_sunday.strftime("%d.%m")
 
-async def add_title(user_id, emoji, ctx, conn=None):
-    player = await ctx.repo.get_by_id(user_id)
-    titles = (player.titles or "").split()
-    if emoji not in titles:
-        titles.append(emoji)
-        player.titles = " ".join(titles).strip()
-        await ctx.repo.save(player, conn=conn)
 
 def get_user_and_msg(update: Update):
     if update.callback_query:
@@ -2197,16 +2068,6 @@ def progress_bar(percent):
     empty = 10 - filled
     return "▓" * filled + "░" * empty
 
-def get_rank_info(balance: int):
-    """Возвращает эмодзи и название ранга по балансу."""
-    if balance >= 50000:
-        return "🪬", "Некромант"
-    elif balance >= 20000:
-        return "🪦", "Призрак"
-    elif balance >= 5000:
-        return "⚔️", "Ветеран"
-    else:
-        return "🪓", "Рекрут"
 
 async def process_daily_login(user_id: int, context) -> None:
     ctx = context.bot_data.get("ctx")
@@ -2305,40 +2166,6 @@ MAIN_MENU_COOLDOWNS = {
     },
 }
 
-def _format_cooldown(player, now, key: str) -> str:
-    """Возвращает текст кнопки с кулдауном или без."""
-    config = MAIN_MENU_COOLDOWNS.get(key)
-    if not config:
-        return ""
-
-    if config.get("guild_only") and (not player or player.guild != config["guild_only"]):
-        return ""
-
-    text = config["text"]
-    last_attr = config.get("last_attr")
-    if not last_attr or not player:
-        return text
-
-    last_time = getattr(player, last_attr, None)
-    if not last_time:
-        return text
-
-    cooldown_hours = config["cooldown_hours"]
-    remain = timedelta(hours=cooldown_hours) - (now - last_time)
-    if remain.total_seconds() <= 0:
-        return text
-
-    fmt = config.get("format", "min")
-    if fmt == "min":
-        mins = int(remain.total_seconds() // 60)
-        return f"{text} ⏳ {mins} мин"
-    elif fmt == "hrs":
-        hrs = int(remain.total_seconds() // 3600)
-        return f"{text} ⏳ {hrs} ч"
-    else:  # full
-        hrs = int(remain.total_seconds() // 3600)
-        mins = int((remain.total_seconds() % 3600) // 60)
-        return f"{text} ⏳ {hrs} ч {mins} мин"
 
 def get_back_to_menu_keyboard():
     return InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
@@ -2541,7 +2368,7 @@ async def _handle_referral(update, context, uid, player):
                 if item.get("id") == ref_blunt_id:
                     creator_id = row["user_id"]
                     break
-        except:
+        except Exception:
             continue
         if creator_id:
             break
@@ -2828,12 +2655,7 @@ def _parse_last_login_date(last) -> Optional[date]:
     return last
 
 
-async def _check_achievements(user_id: int, context) -> None:
-    # await AchievementService.check_and_award(user_id, context)
-    pass
 
-async def grant_title(user_id, emoji, name, context):
-    await add_title(user_id, emoji)
 
 #===•===****=====ФАРМ ОАС=====*****=====
 # ============================================================
@@ -2859,8 +2681,10 @@ def _calculate_farm_reward(player, context) -> tuple[int, bool, bool]:
     if last_smoke and (now - last_smoke).total_seconds() < 300:
         earned += random.randint(3, 5)
 
-    # Happy hour – удвоение
-    happy = context.bot_data.get("happy_hour", False)
+    # Happy hour – удвоение. Флаг живёт в ctx.cache (как и во всех остальных
+    # механиках); раньше фарм ошибочно читал его из bot_data → ×2 не срабатывал.
+    _ctx = context.bot_data.get("ctx")
+    happy = bool(_ctx and _ctx.cache and _ctx.cache.get("happy_hour", False))
     if happy:
         earned *= HAPPY_HOUR_MULTIPLIER
 
@@ -2883,16 +2707,29 @@ def _format_farm_message(earned: int, crit: bool, happy: bool,
                          new_balance: int) -> str:
     """Сообщение после фарма – чистая структура, как в крафте."""
     # Крит-эмодзи
+    is_mega = crit and earned >= FARM_MAX * 10
     if not crit:
         crit_emoji = "🍬"
-    elif earned >= FARM_MAX * 10:
-        crit_emoji = "💥 (x10!)"
+    elif is_mega:
+        crit_emoji = "💥 (×10!)"
     else:
-        crit_emoji = "🍬(x2)"
+        crit_emoji = "🔥 (×2)"
 
-    # Happy hour (закомментирован)
-    # happy_str = " 🌟x2" if happy else ""
-    happy_str = ""
+    # Happy Hour — теперь ВИДНО игроку (peak-момент нельзя прятать)
+    happy_str = " 🌟×2 HAPPY HOUR" if happy else ""
+
+    # Праздничный баннер пикового момента (peak-end / «liking»)
+    if is_mega:
+        banner = (
+            "💥💥💥 <b>МЕГА-КРИТ ×10!</b> 💥💥💥\n"
+            "<i>Искажение прорвалось — тебе выпал невероятный куш!</i>\n\n"
+        )
+    elif crit:
+        banner = "🔥 <b>КРИТ ×2!</b> Удача на твоей стороне.\n\n"
+    elif happy:
+        banner = "🌟 <b>HAPPY HOUR!</b> Добыча удвоена — лови момент.\n\n"
+    else:
+        banner = ""
 
     # Прогресс-бары
     progress_bar_str = get_medal_progress(new_count, FARM_MEDALS)
@@ -2900,6 +2737,7 @@ def _format_farm_message(earned: int, crit: bool, happy: bool,
 
     # Сборка сообщения
     msg = (
+        f"{banner}"
         f"💎 <b>Ты нафармил: +{earned} OAC</b> {crit_emoji}{happy_str}\n"
         f"🎉 <b>У тебя: {new_balance} OAC</b>\n\n"
         f"{medal_text}"
@@ -3394,7 +3232,7 @@ async def handle_named_name(update, context):
                 if any(it.get("id") == blunt_id for it in inv_now):
                     try:
                         await context.bot.send_message(uid, "⌛ Твой именной блантик всё ещё скучает. Подари или поделись им, пока не поздно!")
-                    except:
+                    except Exception:
                         pass
         asyncio.create_task(fomo_reminder())
 
@@ -3509,7 +3347,7 @@ async def cancel_named(update, context):
     if msg_id:
         try:
             await context.bot.delete_message(chat_id=query.message.chat.id, message_id=msg_id)
-        except:
+        except Exception:
             pass
     await craft_callback(update, context)
     
@@ -3542,69 +3380,6 @@ class BluntNotFound(TransferError):
 class SameUserError(TransferError):
     pass
 
-async def transfer_blunt(sender_id: int, receiver_id: int, blunt_id: str, ctx: AppContext) -> None:
-    """Атомарная передача именного бланта с блокировкой строк (использует ctx)."""
-    if sender_id == receiver_id:
-        raise SameUserError("Нельзя передать блант самому себе")
-
-    try:
-        async with ctx.db_pool.acquire() as conn:
-            async with conn.transaction():
-                sender_row = await conn.fetchrow("SELECT * FROM players WHERE user_id = $1 FOR UPDATE", sender_id)
-                receiver_row = await conn.fetchrow("SELECT * FROM players WHERE user_id = $1 FOR UPDATE", receiver_id)
-                if not sender_row or not receiver_row:
-                    raise TransferError("Игрок не найден")
-
-                sender = Player(**dict(sender_row))
-                receiver = Player(**dict(receiver_row))
-                sender.inventory = _json_safe_load(sender.inventory, [])
-                receiver.inventory = _json_safe_load(receiver.inventory, [])
-                receiver.profile_skins = _json_safe_load(receiver.profile_skins, {})
-
-                if not isinstance(sender.inventory, list):
-                    raise TransferError("Инвентарь отправителя повреждён")
-                if not isinstance(receiver.inventory, list):
-                    receiver.inventory = []
-
-                item = None
-                for it in sender.inventory:
-                    if it.get("id") == blunt_id and it.get("type") == "named":
-                        item = it
-                        break
-                if not item:
-                    raise BluntNotFound("Блант не найден или не является именным")
-                    # Запрет дарить уже подаренный блант (даже в гонке)
-                if 'gifted_by' in item:
-                    raise TransferError("Этот блант уже был подарен и не может быть передан повторно")
-
-                initial_len = len(sender.inventory)
-                sender.inventory.remove(item)
-                if len(sender.inventory) == initial_len:
-                    raise TransferError("Не удалось удалить предмет")
-                if any(it.get("id") == blunt_id for it in sender.inventory):
-                    raise TransferError("Обнаружен дубликат бланта")
-
-                if "owner_history" not in item:
-                    item["owner_history"] = []
-                item["owner_history"].append({
-                    "user_id": str(receiver_id),
-                    "since": datetime.now(timezone.utc).isoformat()
-                })
-                # Держим историю не длиннее 10 записей (экономия места в БД)
-                if len(item["owner_history"]) > 10:
-                    item["owner_history"] = item["owner_history"][-10:]
-                # Пометка, что блант подарен – запрещает последующие передачи
-                item['gifted_by'] = str(receiver_id)
-                receiver.inventory.append(item)
-                await ctx.repo.save(sender, conn=conn)
-                await ctx.repo.save(receiver, conn=conn)
-                logger.info(f"Blunt {blunt_id} передан от {sender_id} к {receiver_id}")
-
-    except TransferError:
-        raise
-    except Exception as e:
-        logger.exception("Неожиданная ошибка при передаче бланта")
-        raise TransferError("Внутренняя ошибка передачи") from e
 
 # ===== НОВЫЕ ФУНКЦИИ ДЛЯ ОБМЕНА БЛАНТАМИ =====
 import asyncio
@@ -3627,134 +3402,6 @@ async def _cleanup_gift_request(context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop('gifting_blunt_id', None)
     context.user_data.pop('gifting_blunt_name', None)
 
-@rate_limit(2)
-async def handle_gift_recipient(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    ctx = context.bot_data.get("ctx")
-    if not ctx:
-        return
-
-    uid = update.effective_user.id
-    if not context.user_data.get('gifting_blunt_id'):
-        return
-
-    blunt_id = context.user_data['gifting_blunt_id']
-    blunt_name = context.user_data.get('gifting_blunt_name', '???')
-    text = update.message.text.strip()
-
-    # ---------- Поиск получателя с защитой от долгого ответа БД ----------
-    recipient_id = None
-    text = update.message.text.strip() if update.message.text else ""
-
-    # Сначала пытаемся вытащить user_id из entities (если тегнули человека)
-    if update.message.entities:
-        for entity in update.message.entities:
-            if entity.type == "text_mention":
-                recipient_id = entity.user.id
-                break
-            elif entity.type == "mention":
-                # обычный @username – обработаем ниже
-                pass
-
-    # Если по entities не найден, пробуем распарсить текст
-    if not recipient_id:
-        if text.startswith("@"):
-            username = text[1:].lower()
-            try:
-                async with asyncio.timeout(3.0):
-                    async with ctx.db_pool.acquire() as conn:
-                        row = await conn.fetchrow(
-                            "SELECT user_id FROM players WHERE LOWER(username) = $1", username
-                        )
-                        if row:
-                            recipient_id = row['user_id']
-            except asyncio.TimeoutError:
-                logger.error("Таймаут поиска получателя")
-                await update.message.reply_text("⚠️ Сервер занят, попробуй через пару секунд.")
-                await _cleanup_gift_request(context)
-                return
-            except Exception as e:
-                logger.exception("Ошибка поиска получателя")
-                await update.message.reply_text("⚠️ Не удалось проверить игрока.")
-                await _cleanup_gift_request(context)
-                return
-        elif text.isdigit():
-            recipient_id = int(text)
-        else:
-            # Не @, не число – возможно, тег без username, entities не отработали? На всякий случай подскажем
-            await update.message.reply_text(
-                "❌ Используй <b>@username</b> или <b>числовой ID</b> игрока.\n"
-                "Если у игрока нет @username, попроси его отправить команду /id и введи полученный ID.",
-                parse_mode='HTML'
-            )
-            return
-
-    if not recipient_id:
-        await update.message.reply_text(
-            "❌ Игрок не найден. Проверь @username или ID.\nПопробуй ещё раз или нажми «Отмена»."
-        )
-        return
-
-    # ---------- Атомарная передача с ретраями ----------
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            await transfer_blunt(uid, recipient_id, blunt_id, ctx)
-            break
-        except SameUserError:
-            await update.message.reply_text("❌ Нельзя подарить блант самому себе. Введи другого получателя или нажми «Отмена».")
-            return
-        except BluntNotFound:
-            await update.message.reply_text("❌ Блант не найден в твоём инвентаре.")
-            await _cleanup_gift_request(context)
-            return
-        except TransferError as e:
-            cause = e.__cause__
-            if cause is not None and isinstance(cause, asyncpg.exceptions.SerializationError) and attempt < max_retries - 1:
-                await asyncio.sleep(0.1 * (2 ** attempt))
-                continue
-            logger.exception("Ошибка передачи бланта")
-            await update.message.reply_text(f"❌ Ошибка: {e}")
-            await _cleanup_gift_request(context)
-            return
-        except Exception as e:
-            logger.exception("Неожиданная ошибка при передаче бланта")
-            await update.message.reply_text("⚠️ Внутренняя ошибка. Попробуй позже.")
-            await _cleanup_gift_request(context)
-            return
-
-    # ---------- Успех ----------
-    msg_id = context.user_data.get('gift_msg_id')
-    chat_id = context.user_data.get('gift_chat_id')
-    if msg_id and chat_id:
-        try:
-            await context.bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=msg_id,
-                text=f"✅ Блант «{html.escape(blunt_name)}» успешно подарен игроку {text}!",
-                parse_mode='HTML'
-            )
-            context.user_data.pop('gift_msg_id', None)
-            context.user_data.pop('gift_chat_id', None)
-        except Exception:
-            try:
-                await context.bot.delete_message(chat_id, msg_id)
-            except Exception:
-                pass
-            finally:
-                context.user_data.pop('gift_msg_id', None)
-                context.user_data.pop('gift_chat_id', None)
-            await update.message.reply_text(
-                f"✅ Блант «{html.escape(blunt_name)}» успешно подарен игроку {text}!",
-                parse_mode='HTML'
-            )
-    else:
-        await update.message.reply_text(
-            f"✅ Блант «{html.escape(blunt_name)}» успешно подарен игроку {text}!",
-            parse_mode='HTML'
-        )
-
-    context.user_data.pop('gifting_blunt_id', None)
-    context.user_data.pop('gifting_blunt_name', None)
 
 @rate_limit(2)
 @game_handler
@@ -3836,26 +3483,6 @@ async def gift_blunt_start(update, context, ctx, player):
         _delayed_cleanup(),
         name=f"gift_clear_{uid}_{blunt_id}"
     )
-
-@rate_limit(1)
-async def cancel_gift(update, context):
-    query = update.callback_query
-    await query.answer()
-    uid = query.from_user.id
-
-    msg_id = context.user_data.pop('gift_msg_id', None)
-    chat_id = context.user_data.pop('gift_chat_id', None)
-    if msg_id and chat_id:
-        try:
-            await context.bot.delete_message(chat_id, msg_id)
-        except:
-            pass
-
-    context.user_data.pop('gifting_blunt_id', None)
-
-    # В группе дополнительно ничего не пишем, в личке — покажем меню (опционально)
-    if query.message.chat.type == "private":
-        await query.message.edit_text("❌ Подарок отменён.")
 
 @rate_limit(1)
 @game_handler
@@ -4198,7 +3825,7 @@ async def profile_callback(update, context, ctx, player):
         photos = await context.bot.get_user_profile_photos(uid, limit=1)
         if photos.photos:
             photo_id = photos.photos[0][0].file_id
-    except:
+    except Exception:
         pass
 
     if photo_id:
@@ -5255,7 +4882,12 @@ async def _mines_show_field(update, context, state, redis_key, uid, ctx):
                     [InlineKeyboardButton("🔙 В меню", callback_data="luck")]]
     elif status == "lost":
         text += f"💥 **ВЗРЫВ!** Ты попал на мину!\n"
-        text += f"💰 Ты потерял ставку.\n\n```\n{field_str}\n```"
+        if step >= 1:
+            almost = int(bet * multiplier)
+            text += f"😱 Так близко! Открыто {step}/22 — ты мог забрать {almost} OAC (x{multiplier:.2f}).\n"
+            text += f"💰 Ставка сгорела. Ещё один шаг — и куш был бы твой.\n\n```\n{field_str}\n```"
+        else:
+            text += f"💰 Ты потерял ставку.\n\n```\n{field_str}\n```"
         keyboard = [[InlineKeyboardButton("💣 Попробовать снова", callback_data="mines_bet_50")],
                     [InlineKeyboardButton("🔙 В меню", callback_data="luck")]]
     else:  # cashed_out
@@ -5467,7 +5099,7 @@ async def check_blunt(update, context):
                 for it in inv:
                     if it.get("id") == blunt_id:
                         owner_id = user_row["user_id"]; item = it; break
-            except: continue
+            except Exception: continue
             if owner_id: break
     if not item:
         await update.message.reply_text("Блант найден в реестре, но его владелец не обнаружен.")
@@ -6025,7 +5657,7 @@ async def welcome_new_member(update, context):
                 player = await ctx.repo.get_by_id(member.id)
                 if player:
                     player_guild = player.guild
-            except: pass
+            except Exception: pass
 
         welcome_text = (
             f"<b><i>🕯️⚜️ ДОБРО ПОЖАЛОВАТЬ В ЧАТ, СТРАННИК! ⚜️🕯️</i></b>\n\n"
@@ -6313,13 +5945,6 @@ async def check_blunt_pics(update, context, ctx):
             status.append(f"✅ {rarity} (file_id задан)")
     await update.message.reply_text("\n".join(status))
 
-async def get_file_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    ctx = context.bot_data.get("ctx")
-    if not ctx or update.effective_user.id != ctx.settings.admin_id:
-        return
-    if update.message.photo:
-        fid = update.message.photo[-1].file_id
-        await update.message.reply_text(fid)
 
 @cb
 async def broadcast(update, context, ctx):
@@ -6347,46 +5972,6 @@ async def broadcast(update, context, ctx):
             pass
     
     await update.message.reply_text(f"✅ Разослано {success} из {len(users)} игроков")
-# ============================================================
-# ОБРАБОТЧИК КОМАНД
-# ============================================================
-
-    if not await check_rate_limit_redis(ctx, user_id, "command", limit=10, period=10):
-        await update.message.reply_text("⚠️ Слишком часто. Подожди секунду.")
-        return
-
-    raw_text = msg.text.strip()
-    request_id = uuid.uuid4().hex[:8]
-    logger.info("[%s] Команда '%s' от user=%d", request_id, raw_text, user_id)
-
-    command = raw_text.split()[0].split('@')[0][1:].lower()
-    if not command:
-        return
-    args = raw_text.split()[1:]
-
-    # ===== ВОТ ЭТУ СТРОКУ ЗАМЕНИЛ =====
-    handler = TEXT_COMMAND_HANDLERS.get(command)
-    if not handler:
-        return
-
-    try:
-        old_args = context.args
-        context.args = args
-        try:
-            await handler(update, context)
-        finally:
-            context.args = old_args
-    except Exception as e:
-        logger.error(f"Ошибка в команде /{command}: {e}", exc_info=True)
-        async def _alert():
-            for attempt in range(3):
-                try:
-                    await context.bot.send_message(chat_id=ctx.settings.admin_id, text=f"🚨 [{request_id}] Ошибка /{command} от {user_id}: {html.escape(str(e)[:500])}")
-                    break
-                except Exception:
-                    await asyncio.sleep(2 ** attempt)
-        asyncio.create_task(_alert())
-        await update.message.reply_text("⚠️ Внутренняя ошибка. Админ уже уведомлён.")
 
 # ============================================================
 # ГЛОБАЛЬНЫЙ ОБРАБОТЧИК ОШИБОК
@@ -6475,22 +6060,8 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
         lines.append(f"<i>{whisper}</i>")
         lines.append("")
 
-        # Определение текущего и следующего ранга (логика без изменений)
-        rank_emoji, rank_name = "🪓", "Рекрут"
-        next_rank_emoji, next_rank_name, next_threshold = "", "", 0
-        for i, (emoji, threshold, _) in enumerate(RANKS):
-            if balance >= threshold:
-                rank_emoji = emoji.split(' ', 1)[0]
-                rank_name = emoji.split(' ', 1)[1] if ' ' in emoji else emoji
-                if i + 1 < len(RANKS):
-                    next_rank_emoji = RANKS[i+1][0].split(' ', 1)[0]
-                    next_rank_name = RANKS[i+1][0].split(' ', 1)[1] if ' ' in RANKS[i+1][0] else RANKS[i+1][0]
-                    next_threshold = RANKS[i+1][1]
-            else:
-                next_rank_emoji = emoji.split(' ', 1)[0]
-                next_rank_name = emoji.split(' ', 1)[1] if ' ' in emoji else emoji
-                next_threshold = threshold
-                break
+        # Определение текущего и следующего ранга
+        rank_emoji, rank_name, next_rank_emoji, next_rank_name, next_threshold, _ = compute_rank_info(balance)
 
         rank_display = f"{rank_emoji} {rank_name}" if rank_name else rank_emoji
 
@@ -6545,10 +6116,27 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
     if not guild and (player.login_streak or 0) == 3:
         lines.append("🏰 Гильдии помогают расти быстрее — загляните")
 
+    # Loss-aversion по серии входов: показываем, что можно потерять
+    _streak = player.login_streak or 0
+    if _streak >= 3:
+        lines.append(f"🔥 <b>Серия входов: {_streak} дн.</b> — не разорви её, вернись завтра за наградой!")
+
     text = "\n".join(lines)
 
 # ── КЛАВИАТУРА ──
     keyboard = []
+
+    # Кнопка фарма с живым таймером кулдауна — конец «слепым кликам»
+    farm_ready = (not player.last_farm) or (now - player.last_farm) >= timedelta(hours=FARM_COOLDOWN_HOURS)
+    if farm_ready:
+        farm_label = "🍬 Фармить"
+    else:
+        _remain = timedelta(hours=FARM_COOLDOWN_HOURS) - (now - player.last_farm)
+        _mins = max(1, math.ceil(_remain.total_seconds() / 60))
+        farm_label = f"🍬 Грядка зреет · {_mins}м"
+
+    def _farm_btn():
+        return InlineKeyboardButton(farm_label, callback_data="farm")
 
     if player.onboarding_step != -1:
         keyboard.append([InlineKeyboardButton("✨ Все возможности ›", callback_data="all_features")])
@@ -6562,21 +6150,14 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
             bar_text = "⚠️ Задания " + "▰" * bar_filled + "▱" * bar_empty + f" {done}/{total}"
             keyboard.append([InlineKeyboardButton(bar_text, callback_data="daily_quest_hub")])
     else:
-        keyboard.append([InlineKeyboardButton("🍬 Фармить", callback_data="farm")])
+        keyboard.append([_farm_btn()])
 
-    # Вторая строка (row2)
-    if (not reward_claimed and total > 0 and done == 0) or (reward_claimed or total == 0):
-        row2 = [
-            InlineKeyboardButton("🍬 Фармить", callback_data="farm"),
-            InlineKeyboardButton("🌿 Крафт ›", callback_data="craft"),
-            InlineKeyboardButton("💨 Дунуть", callback_data="smoke"),
-        ]
-    else:
-        row2 = [
-            InlineKeyboardButton("🍬 Фармить", callback_data="farm"),
-            InlineKeyboardButton("🌿 Крафт ›", callback_data="craft"),
-            InlineKeyboardButton("💨 Дунуть", callback_data="smoke"),
-        ]
+    # Вторая строка (row2) — раскладка едина (убран «мёртвый» дубль-ветка)
+    row2 = [
+        _farm_btn(),
+        InlineKeyboardButton("🌿 Крафт ›", callback_data="craft"),
+        InlineKeyboardButton("💨 Дунуть", callback_data="smoke"),
+    ]
     keyboard.append(row2)
 
     # ===== АДАПТИВНАЯ КНОПКА ГИЛЬДИИ =====
@@ -6638,24 +6219,9 @@ async def progress_hub_handler(update, context, ctx):
         username = html_escape(player.username or str(uid))
 
         # ===== 1. РАНГ И ПРОГРЕСС =====
-        rank_emoji, rank_name = "🪓", "Рекрут"
-        next_rank_emoji, next_rank_name, next_threshold = "", "", 0
-        for i, (emoji, threshold, _) in enumerate(RANKS):
-            if balance >= threshold:
-                rank_emoji = emoji.split(' ', 1)[0]
-                rank_name = emoji.split(' ', 1)[1] if ' ' in emoji else emoji
-                if i + 1 < len(RANKS):
-                    next_rank_emoji = RANKS[i+1][0].split(' ', 1)[0]
-                    next_rank_name = RANKS[i+1][0].split(' ', 1)[1] if ' ' in RANKS[i+1][0] else RANKS[i+1][0]
-                    next_threshold = RANKS[i+1][1]
-            else:
-                next_rank_emoji = emoji.split(' ', 1)[0]
-                next_rank_name = emoji.split(' ', 1)[1] if ' ' in emoji else emoji
-                next_threshold = threshold
-                break
+        rank_emoji, rank_name, next_rank_emoji, next_rank_name, next_threshold, prev_threshold = compute_rank_info(balance)
 
         if next_threshold:
-            prev_threshold = RANKS[i-1][1] if i > 0 else 0
             progress_percent = int((balance - prev_threshold) / (next_threshold - prev_threshold) * 100) if next_threshold > prev_threshold else 100
             progress_percent = min(100, max(0, progress_percent))
             bar = "▓" * (progress_percent // 10) + "░" * (10 - progress_percent // 10)
@@ -6847,7 +6413,7 @@ async def progress_hub_handler(update, context, ctx):
                     chat_id=ctx.settings.admin_id,
                     text=f"🚨 Ошибка в progress_hub_handler для {uid}:\n{html_escape(str(e))}"
                 )
-            except:
+            except Exception:
                 pass
 
 @cb
@@ -7609,6 +7175,7 @@ EXACT_HANDLERS: Dict[str, Callable] = {
     "lab_focus_use": handle_lab_option,
     "lab_escape": handle_lab_option,
     "luck_wheel": luck_wheel_handler,
+    "luck_berserk": luck_berserk_handler,
     "mines_cashout": _mines_cashout_wrapper,
     "alchemy_start": alchemy_start_handler,
     "alchemy_confirm": alchemy_confirm_handler,
@@ -7632,6 +7199,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     data = q.data
     try:
+        if data == "noop":
+            await q.answer()
+            return
         if data in EXACT_HANDLERS:
             await EXACT_HANDLERS[data](update, context)
             return
