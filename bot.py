@@ -772,6 +772,34 @@ async def ensure_daily_progress(player, ctx) -> dict:
     return progress
 
 
+def _quest_progress_counts(template, progress, guild, is_veteran, has_pet):
+    """(done, total) по заданиям квеста с учётом условий видимости. Чистая функция."""
+    if not template:
+        return (0, 0)
+    conditions = {
+        "guild_black": guild == "BLACK",
+        "guild_white": guild == "WHITE",
+        "is_veteran_and_has_pet": is_veteran and has_pet,
+    }
+    tasks = [t for t in template.get("tasks", [])
+             if not t.get("condition") or conditions.get(t["condition"], False)]
+    done = sum(1 for t in tasks if progress.get(t["key"], False))
+    return (done, len(tasks))
+
+
+def _plural_steps(n: int) -> str:
+    """Русское склонение слова «шаг» для числа n."""
+    n = abs(n) % 100
+    if 11 <= n <= 14:
+        return "шагов"
+    d = n % 10
+    if d == 1:
+        return "шаг"
+    if 2 <= d <= 4:
+        return "шага"
+    return "шагов"
+
+
 
 
 
@@ -2738,13 +2766,34 @@ async def onboarding_reward(update, context, ctx, player):
     result = await ctx.repo.atomic_update(query.from_user.id, _reward)
     if result:
         _, new_bal, new_blunts = result
+        # Убираем «обрыв обучения»: вместо «исследуй меню сам» — одна конкретная
+        # цель (goal-gradient + Zeigarnik) и путь к первому завершению квеста.
+        progress = getattr(player, 'daily_progress', {}) or {}
+        done, total = _quest_progress_counts(
+            QUEST_TEMPLATES.get("chapter1"), progress, player.guild, False, False)
+        left = max(0, total - done)
+
+        if left <= 0:
+            body = ("<b>Ты почти прошёл Главу 1 — первая награда Саги уже ждёт!</b>\n"
+                    "Забери её в «Заданиях дня» 👇")
+            cta = "🎁 Забрать награду Главы 1"
+        else:
+            body = (
+                "<b>Основы освоены. Но история только начинается…</b>\n\n"
+                f"📜 <b>Глава 1 почти пройдена — остал{'ся' if left == 1 else 'ось'} "
+                f"{left} {_plural_steps(left)} до первой награды Саги.</b>\n"
+                "<i>Заверши — и Смотритель наградит тебя. Один шаг за раз 👇</i>"
+            )
+            cta = f"📋 Продолжить · осталось {left}"
+
         await query.message.edit_text(
-            f"🎁 Ты получил бонус: +30 OAC, +1 блант!\n\n"
-            f"Твой баланс: {new_bal} OAC, блантов: {new_blunts}\n\n"
-            f"🎉 Поздравляю! Теперь ты можешь исследовать другие разделы меню.",
+            f"🎁 <b>Бонус за обучение: +30 OAC, +1 блант!</b>\n"
+            f"💎 Баланс: {new_bal} OAC · 🗞️ Блантов: {new_blunts}\n\n"
+            f"{body}",
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🏰 В меню", callback_data="menu")
-            ]])
+                InlineKeyboardButton(cta, callback_data="daily_quest_hub")
+            ]]),
+            parse_mode='HTML'
         )
     
 # ====== ФУНКЦИЯ ПЕРЕДАЧИ БЛАНТА (АТОМАРНАЯ, БЕЗОПАСНАЯ) =====

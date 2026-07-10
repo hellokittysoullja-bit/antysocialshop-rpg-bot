@@ -29,7 +29,7 @@ from bot import (
     _calc_multiplier, _generate_mines_field, get_medal_target,
     get_rank_progress, _get_craft_stats, FARM_MEDALS,
     _build_next_day_preview, _build_daily_message, _reengagement_text, reengagement_push,
-    _farm_on_cooldown,
+    _farm_on_cooldown, _quest_progress_counts, _plural_steps, QUEST_TEMPLATES,
     create_tables, _run_migrations, PlayerRepository, Player,
     PetService, GuildWarService, WarConfig, WarSettings, PET_CONFIG,
 )
@@ -131,6 +131,20 @@ def test_pure(passed):
     assert _farm_on_cooldown(10, long_ago, now2) is False  # кулдаун прошёл
     assert _farm_on_cooldown(10, None, now2) is False      # ни разу не фармил
     passed.append("_farm_on_cooldown: грейс + кулдаун")
+
+    # --- подсчёт прогресса квеста (условия видимости заданий) ---
+    ch1 = QUEST_TEMPLATES["chapter1"]
+    prog = {"farm": True, "craft": True}
+    # BLACK: farm,craft,smoke,ritual видимы (repent/pet отфильтрованы) → 2/4
+    assert _quest_progress_counts(ch1, prog, "BLACK", False, False) == (2, 4)
+    assert _quest_progress_counts(ch1, prog, "WHITE", False, False) == (2, 4)
+    assert _quest_progress_counts(None, {}, "BLACK", False, False) == (0, 0)
+    passed.append("_quest_progress_counts: фильтрация по условиям")
+
+    # --- русское склонение «шаг» ---
+    assert (_plural_steps(1), _plural_steps(2), _plural_steps(5),
+            _plural_steps(11), _plural_steps(21)) == ("шаг", "шага", "шагов", "шагов", "шаг")
+    passed.append("_plural_steps: склонение 1/2/5/11/21")
 
 
 async def test_services(passed):
