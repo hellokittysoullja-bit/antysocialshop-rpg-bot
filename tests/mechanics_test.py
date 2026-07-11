@@ -263,6 +263,18 @@ def test_pure(passed):
     assert "Владыка" in _codex_prestige_title([{"rarity": "legendary"}] * 16)
     passed.append("Кодекс блантов: визитка/метр/аспирация/титул честны")
 
+    # --- Виральность: блант из реф-ссылки для тёплого приветствия ---
+    from bot import _shared_blunt_info
+    ref = Player(user_id=100, username="korol", exists=True, inventory=[
+        {"id": "blunt_100_1700_42", "type": "named", "name": "Пепел Короля", "rarity": "legendary"},
+    ])
+    info = _shared_blunt_info(ref, ["blunt_blunt_100_1700_42"])
+    assert info == {"name": "Пепел Короля", "rarity": "legendary"}
+    assert _shared_blunt_info(ref, ["blunt_blunt_100_9999_00"]) is None   # не тот блант
+    assert _shared_blunt_info(ref, []) is None                            # нет аргумента
+    assert _shared_blunt_info(None, ["blunt_x"]) is None                  # нет реферера
+    passed.append("Виральность: блант из реф-ссылки для приветствия приглашённого")
+
     # --- Война гильдий: дней до итогов + мотивационная строка (долг/соревнование) ---
     assert _days_left_in_week(datetime(2024, 1, 1)) == 7   # понедельник
     assert _days_left_in_week(datetime(2024, 1, 7)) == 1   # воскресенье

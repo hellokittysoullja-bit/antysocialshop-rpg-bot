@@ -1899,7 +1899,8 @@ async def _handle_referral(update, context, uid, player):
     #     logger.error(f"Ошибка отправки в канал: {e}")
 
 
-async def _create_new_player(update, context, uid, username, invited_by=None):
+async def _create_new_player(update, context, uid, username, invited_by=None,
+                             inviter_name=None, shared_blunt=None):
     ctx = context.bot_data.get("ctx")
     new_name = random.choice(["Крик Бездны", "Шёпот Склепа"])
     # Двусторонний реферал: приглашённый получает бонус к старту
@@ -1918,9 +1919,23 @@ async def _create_new_player(update, context, uid, username, invited_by=None):
             await ctx.repo.save(player, conn=conn)
             await create_named_blunt(uid, new_name, ctx=ctx, conn=conn)
 
-    ref_bonus_line = (
-        "🤝 <b>+100 OAC за приход по ссылке друга!</b>\n\n" if invited_by else ""
-    )
+    # Тёплое, социально-связанное прибытие: закрывает обещание шеринга
+    # («забери уникальный Блант»), называет друга (соц-доказательство +
+    # принадлежность) и показывает блант, что привёл. Пустое — если пришёл сам.
+    if invited_by:
+        friend = f"@{html.escape(inviter_name)}" if inviter_name else "Твой друг"
+        blunt_line = ""
+        if shared_blunt:
+            c = {"legendary": "🟡", "epic": "🟣", "rare": "🔵"}.get(shared_blunt["rarity"], "🟢")
+            blunt_line = (f"💍 Блант, что привёл тебя сюда: {c} "
+                          f"<b>«{html.escape(shared_blunt['name'])}»</b>\n")
+        ref_bonus_line = (
+            f"🤝 <b>{friend} позвал тебя в Гильдию</b> — он уже здесь.\n"
+            f"{blunt_line}"
+            f"🎁 <b>Дар за приход: +100 OAC 🍬</b> и твой первый именной блант — уже в свёртке!\n\n"
+        )
+    else:
+        ref_bonus_line = ""
     welcome_text = (
         "<b>🎉 Добро пожаловать в Гильдию Antysocialshop!</b>\n"
         "<i>Здесь курят бланты, поклоняются древним богам и воюют за OAC.</i>\n\n"
@@ -2043,6 +2058,18 @@ def _resolve_referrer(args, uid):
     return creator_id if creator_id != uid else None
 
 
+def _shared_blunt_info(ref_player, args):
+    """Достаёт блант, которым поделились (по blunt_id из ссылки), для тёплого
+    приветствия приглашённого. Возвращает {name, rarity} или None."""
+    if not ref_player or not args or not str(args[0]).startswith("blunt_"):
+        return None
+    blunt_id = str(args[0])[len("blunt_"):]
+    for it in (ref_player.inventory or []):
+        if it.get("id") == blunt_id and it.get("type") == "named":
+            return {"name": it.get("name", "?"), "rarity": it.get("rarity", "common")}
+    return None
+
+
 async def _reward_referrer(ctx, context, creator_id):
     """Награда рефереру: +50 OAC, счётчик, легендарный блант, метка 🩸 + уведомление."""
     async def _reward(p, conn):
@@ -2085,11 +2112,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not player or not player.exists:
             # Реферал применяется только к НОВЫМ игрокам (анти-фарм)
             creator_id = _resolve_referrer(context.args, uid)
+            inviter_name = None
+            shared_blunt = None
             if creator_id:
                 ref = await ctx.repo.get_by_id(creator_id)
                 if not ref or not ref.exists:
                     creator_id = None
-            await _create_new_player(update, context, uid, username, invited_by=creator_id)
+                else:
+                    inviter_name = ref.username or None
+                    shared_blunt = _shared_blunt_info(ref, context.args)
+            await _create_new_player(update, context, uid, username, invited_by=creator_id,
+                                     inviter_name=inviter_name, shared_blunt=shared_blunt)
             if creator_id:
                 await _reward_referrer(ctx, context, creator_id)
         else:
