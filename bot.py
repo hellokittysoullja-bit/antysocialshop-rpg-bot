@@ -1056,6 +1056,11 @@ async def _run_migrations(conn):
     await conn.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS pet TEXT DEFAULT '';")
     await conn.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS pet_name TEXT DEFAULT '';")
     await conn.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS \"exists\" BOOLEAN DEFAULT TRUE;")
+    # Долговечность онбординга и сытости питомца: раньше эти поля жили только
+    # в кэше (Redis TTL 10с) → прогресс онбординга сбрасывался при паузе, а
+    # кормление питомца не сохранялось. Теперь — настоящие колонки.
+    await conn.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS onboarding_step INTEGER DEFAULT 0;")
+    await conn.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS pet_hunger INTEGER DEFAULT 100;")
 
 # ===== ОПТИМИЗАЦИЯ ХРАНЕНИЯ (Render Free Tier) =====
     # JSONB поля — сжатие + хранение вне таблицы при размере > 2KB
@@ -1928,7 +1933,10 @@ async def _create_new_player(update, context, uid, username, invited_by=None):
     
     guild_kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🕯️ Тёмная Гильдия (+50 🍬)", callback_data="guild_join_BLACK"),
-         InlineKeyboardButton("⚜️ Светлая Гильдия (+50 🍬)", callback_data="guild_join_WHITE")]
+         InlineKeyboardButton("⚜️ Светлая Гильдия (+50 🍬)", callback_data="guild_join_WHITE")],
+        # Крючок перед коммитом: дать сначала попробовать петлю (дофамин от
+        # фарма), выбор стороны — позже, когда он осмыслен. +50 не теряется.
+        [InlineKeyboardButton("🍬 Позже — сначала играть →", callback_data="defer_faction")],
     ])
 
     await update.effective_message.reply_text(
@@ -1936,6 +1944,39 @@ async def _create_new_player(update, context, uid, username, invited_by=None):
         reply_markup=guild_kb,
         parse_mode='HTML'
     )
+
+
+async def defer_faction_handler(update, context):
+    """Новичок отложил выбор фракции — сразу в фарм (дофамин до коммита).
+    Ставит onboarding_step=1, дальше работает штатный funnel фарм→крафт→готово.
+    Сторону выберет позже из меню и получит те же +50 (см. guild_join)."""
+    ctx = context.bot_data.get("ctx")
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+    player = await ctx.repo.get_by_id(uid, with_inventory=False)
+    if not player or not player.exists:
+        await query.answer("Профиль не найден, начните с /start", show_alert=True)
+        return
+    if player.onboarding_step == 0:
+        player.onboarding_step = 1
+        await ctx.repo.save(player)
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🍬 Фармить", callback_data="farm")],
+        [InlineKeyboardButton("⏭️ Пропустить обучение", callback_data="skip_onboarding")],
+    ])
+    try:
+        await query.message.edit_text(
+            "<b>🎓 ОБУЧЕНИЕ [▓░░░] 1/3</b>\n\n"
+            "<b>🍬 Твой первый шаг — фарм!</b>\n"
+            "Нажми кнопку ниже и получи первые <b>OAC</b> — прямо сейчас.\n\n"
+            "<i>💡 OAC — главная валюта. Сторону Гильдии выберешь позже, "
+            "когда почувствуешь игру (за вступление всё так же +50 🍬).</i>",
+            reply_markup=kb, parse_mode='HTML')
+    except Exception:
+        await safe_send_message(context, uid,
+            "<b>🍬 Твой первый шаг — фарм!</b> Жми «Фармить».",
+            reply_markup=kb, parse_mode='HTML')
     
 def get_next_action(player, exclude_callback: str = None) -> tuple[str, str, str]:
     progress = getattr(player, 'daily_progress', {}) or {}
@@ -6942,9 +6983,12 @@ async def guild_join_handler(update, context, ctx):
             await query.answer("Профиль не найден, начните с /start", show_alert=True)
             return
 
+        was_guildless = player.guild is None   # первый в жизни выбор стороны
         player.guild = guild
-        # Награда за вступление (только для новичков)
-        if player.onboarding_step == 0:
+        # Награда за вступление — за ПЕРВЫЙ выбор стороны (в т.ч. если игрок
+        # отложил его и играл без гильдии). Раньше было gated на step==0, и
+        # отложившие фракцию теряли +50 — теперь честно один раз.
+        if player.onboarding_step == 0 or was_guildless:
             player.balance += 50
         g_emoji = "🕯️" if guild == "BLACK" else "⚜️"
         g_name = "Тёмная" if guild == "BLACK" else "Светлая"
@@ -6992,10 +7036,12 @@ async def guild_join_handler(update, context, ctx):
             [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
         ])
 
+        bonus_line = "🎁 <b>+50 OAC 🍬 за выбор стороны!</b>\n\n" if was_guildless else ""
         await query.message.edit_text(
             f"<b><i>🏰 ГИЛЬДИЯ ПРИНЯЛА ТЕБЯ 🪽</i></b>\n\n"
             f"✨ Отныне ты — часть <b>{guild_name_genitive}</b>.\n"
             f"🩸 Искажение стало плотнее...\n\n"
+            f"{bonus_line}"
             f"<b>💡 Твой первый шаг:</b>",
             reply_markup=kb,
             parse_mode='HTML'
@@ -7126,6 +7172,7 @@ CALLBACKS: Dict[str, Callable] = {
     "all_features": all_features_handler,
     "claim_reward": claim_reward_handler,
     "skip_onboarding": skip_onboarding_handler,
+    "defer_faction": defer_faction_handler,
 }
 
 EXACT_HANDLERS: Dict[str, Callable] = {

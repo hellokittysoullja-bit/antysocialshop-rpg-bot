@@ -30,7 +30,8 @@ PLAYER_COLUMNS = (
     "inventory", "invited_by", "profile_skins", "login_streak",
     "last_login_date", "oath", "keys", "check_count", "m_essence",
     "lab_chests", "lab_deaths", "alchemy_count", "last_lab_attempt",
-    "donated", "daily_progress", "pending_transfer", "lab_depth", "pet", "pet_name", "exists",
+    "donated", "daily_progress", "pending_transfer", "lab_depth", "pet", "pet_name",
+    "repent_count", "onboarding_step", "pet_hunger", "exists",
 )
 
 

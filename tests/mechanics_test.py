@@ -231,6 +231,15 @@ def test_pure(passed):
     assert "ЧАС УДАЧИ" in _happy_hour_banner(_Ctx({"happy_hour": True}), n)  # без end не падает
     passed.append("Час Удачи: баннер FOMO с отсчётом, fail-closed")
 
+    # --- Персистентность: каждое поле Player пишется в БД (ловит «поле живёт
+    #     только в кэше» — так терялись onboarding_step/pet_hunger/repent_count) ---
+    from repository import PLAYER_COLUMNS
+    # Поля, которые намеренно НЕ хранятся отдельной колонкой (вычисляемые/служебные).
+    NON_PERSISTED = set()
+    unpersisted = set(Player.model_fields) - set(PLAYER_COLUMNS) - NON_PERSISTED
+    assert not unpersisted, f"поля Player не сохраняются в БД (потеряются при сбросе кэша): {unpersisted}"
+    passed.append(f"Персистентность: все {len(Player.model_fields)} полей Player пишутся в БД")
+
     # --- Война гильдий: дней до итогов + мотивационная строка (долг/соревнование) ---
     assert _days_left_in_week(datetime(2024, 1, 1)) == 7   # понедельник
     assert _days_left_in_week(datetime(2024, 1, 7)) == 1   # воскресенье
