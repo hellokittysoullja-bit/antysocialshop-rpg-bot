@@ -1617,8 +1617,17 @@ async def world_hub(update, context, ctx):
     # Путь к власти — north-star «кем ты становишься» (смысл/фантазия)
     kb_rows.append([InlineKeyboardButton("🎯 Твой Путь к власти", callback_data="destiny_hub")])
 
-    # Плантация — доступна ВСЕМ (idle-крючок против раннего оттока: «зайди собрать»)
-    kb_rows.append([InlineKeyboardButton("🪴 Плантация", callback_data="collect")])
+    # Плантация — idle-крючок «зайди собрать». Кнопка живая: показывает
+    # созревший урожай (goal-gradient тянет вернуться) или зовёт посадить.
+    plant_lvl = player.passive_level or 0
+    _pending, _h, _c = _plant_pending(plant_lvl, player.passive_collected, datetime.now())
+    if plant_lvl <= 0:
+        plant_label = "🪴 Плантация · посадить 🌱"
+    elif _pending > 0:
+        plant_label = f"🪴 Плантация · собрать {_pending} 🌾"
+    else:
+        plant_label = "🪴 Плантация"
+    kb_rows.append([InlineKeyboardButton(plant_label, callback_data="collect")])
 
     # Питомец – виден всем
     if is_veteran and has_pet:
@@ -3575,6 +3584,12 @@ async def profile_callback(update, context, ctx, player):
             pet_line += f" «{player.pet_name}»"
         pet_line += "\n"
 
+    # Плантация: показываем РЕАЛЬНОЕ состояние (уровень × ставку), а не прежнюю
+    # фантомную формулу от баланса, которая нигде не начислялась и врала игроку.
+    plant_lvl = player.passive_level or 0
+    bush_line = (f"🪴 <b>Плантация:</b> ур.{plant_lvl} · +{_plant_rate(plant_lvl)} OAC/ч"
+                 if plant_lvl > 0 else "🪴 <b>Плантация:</b> <i>не посажена — открой в 🌍 Мир</i>")
+
     text = (
         f"<b>⚜️ ПРОФИЛЬ</b>\n"
         f"👤 <b>{uname}</b>{guild_line}\n"
@@ -3582,7 +3597,7 @@ async def profile_callback(update, context, ctx, player):
         f"{rank_progress}\n\n"
         f"💎 <b>ОАС:</b> <b>{bal} OAC</b> 🍬\n"
         f"🌿 <b>Блантов в свёртке:</b> <b>{bl}</b>\n"
-        f"🪴 <b>Куст:</b> <b>+{30 * (3 if bal >= 20000 else 2 if bal >= 5000 else 0)} OAC/ч</b>\n"
+        f"{bush_line}\n"
         f"🧬 <b>Титул:</b> {active_title}\n"
         f"🧠 <b>Нейро-статус:</b> <i>{neuro}</i>\n"
         f"{pet_line}"
@@ -3612,7 +3627,7 @@ async def profile_callback(update, context, ctx, player):
         kb_rows.append([InlineKeyboardButton("🕋 Вступить в Гильдию", callback_data="guild_info")])
     if len(named) > 2:
         kb_rows.append([InlineKeyboardButton(f"💍 Все именные бланты ({len(named)})", callback_data="my_blunts")])
-    kb_rows.append([InlineKeyboardButton("📜 Кодекс", callback_data="rules")])
+    kb_rows.append([InlineKeyboardButton("📖 Правила мира", callback_data="rules")])
     kb_rows.append([InlineKeyboardButton("🎨 Кастомизация", callback_data="skins_menu")])
     kb_rows.append([InlineKeyboardButton("🏰 В меню", callback_data="menu")])
     kb = InlineKeyboardMarkup(kb_rows)
@@ -6118,7 +6133,10 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
         InlineKeyboardButton("🏰 Гильдия ›", callback_data="guild_info"),
         InlineKeyboardButton("📊 Прогресс ›", callback_data="progress_hub"),
     ])
+    # Лидерборд — из подвала на главный экран: сильнейший соц-крючок (топ-10 +
+    # твоя позиция + приз, который надо удержать). 2-в-ряд, без обрезки подписей.
     keyboard.append([
+        InlineKeyboardButton("🏅 Лидеры ›", callback_data="top"),
         InlineKeyboardButton("🌍 Мир ›", callback_data="world_hub"),
     ])
 
