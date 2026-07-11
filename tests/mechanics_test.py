@@ -45,14 +45,32 @@ def test_pure(passed):
     # --- дунуть: значение всегда в допустимом множестве (2000 прогонов) ---
     class _P:  # p не используется функцией, но передаём объект
         smoke_count = 0
+    from bot import build_smoke_effect, SMOKE_FLAVORS
+    outcomes_seen = set()
+    for _ in range(4000):
+        val, outcome = calculate_smoke_reward(_P(), happy_hour=False)
+        outcomes_seen.add(outcome)
+        assert outcome in SMOKE_FLAVORS, f"неизвестный исход {outcome}"
+        # число обязано соответствовать исходу — витрина честна
+        if outcome == "jackpot":
+            assert 80 <= val <= 160, f"джекпот вернул {val}"
+        elif outcome == "win":
+            assert 15 <= val <= 40, f"выигрыш вернул {val}"
+        elif outcome == "loss":
+            assert val == -5, f"проигрыш вернул {val}"
+        else:
+            assert val == 0, f"пусто вернул {val}"
+        # флейвор не падает и рендерит знак корректно
+        assert build_smoke_effect(outcome, val)
+    assert {"jackpot", "win", "loss", "neutral"} <= outcomes_seen, f"не все исходы: {outcomes_seen}"
+    # с happy hour положительный доход удваивается
     for _ in range(2000):
-        val = calculate_smoke_reward(_P(), happy_hour=False)
-        assert val == 0 or val == -5 or 15 <= val <= 40, f"дунуть вернул {val}"
-    # с happy hour положительный доход удваивается (30..80)
-    for _ in range(2000):
-        val = calculate_smoke_reward(_P(), happy_hour=True)
-        assert val in (0, -5) or 30 <= val <= 80, f"дунуть HH вернул {val}"
-    passed.append("calculate_smoke_reward: значения в допустимых диапазонах")
+        val, outcome = calculate_smoke_reward(_P(), happy_hour=True)
+        if outcome == "win":
+            assert 30 <= val <= 80, f"дунуть HH win вернул {val}"
+        elif outcome == "jackpot":
+            assert 160 <= val <= 320, f"дунуть HH jackpot вернул {val}"
+    passed.append("calculate_smoke_reward: число всегда соответствует исходу (флейвор честен)")
 
     # --- стрик-награда: титулы детерминированы, доход не ниже базы×hot ---
     r5 = _calculate_reward(5, daily_config)

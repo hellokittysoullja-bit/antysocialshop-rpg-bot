@@ -40,7 +40,7 @@ import httpx
 from game_content import (
     FARM_MEDALS, CRAFT_MEDALS, SMOKE_MEDALS, RITUAL_MEDALS, REPENT_MEDALS,
     WHISPERS, NEURO_STATUSES, FUNNY_REACTIONS, RANKS,
-    ACHIEVEMENTS, ACHIEVEMENTS_DICT, ACHIEVEMENT_CONDITIONS, SMOKE_EFFECTS,
+    ACHIEVEMENTS, ACHIEVEMENTS_DICT, ACHIEVEMENT_CONDITIONS, SMOKE_FLAVORS,
     QUEST_TEMPLATES, BLUNTS_PER_PAGE, BLUNT_IMAGES, LUCK_CONFIG, LABYRINTH_ROOMS,
 )
 # Слой моделей
@@ -804,28 +804,46 @@ def _plural_steps(n: int) -> str:
 
 
 
-def build_smoke_effect(roll, earned):
-    for threshold, name, flavor, has_earned in SMOKE_EFFECTS:
-        if roll < threshold:
-            earned_str = f"🍬 <b>+{earned} OAC</b>" if has_earned and earned else ""
-            return (
-                f"<b>💨 ДЫМ РАССЕЯЛСЯ</b>\n"
-                f"– {name}\n"
-                f"– <i>{flavor}</i>\n\n"
-                f"{earned_str}"
-            )
-    return ""
+def build_smoke_effect(outcome, earned):
+    """Собирает карточку исхода. Текст берётся из корзины, соответствующей
+    исходу (jackpot/win/loss/neutral), поэтому подпись OAC всегда честна."""
+    name, flavor = random.choice(SMOKE_FLAVORS.get(outcome, SMOKE_FLAVORS["neutral"]))
+    if outcome == "jackpot":
+        header = "<b>🎰 ДЖЕКПОТ! ДЫМ ХЛЫНУЛ ЗОЛОТОМ</b>"
+        earned_str = f"🎰 <b>+{earned} OAC</b>"
+    elif earned > 0:
+        header = "<b>💨 ДЫМ РАССЕЯЛСЯ</b>"
+        earned_str = f"🍬 <b>+{earned} OAC</b>"
+    elif earned < 0:
+        header = "<b>💨 ДЫМ РАССЕЯЛСЯ</b>"
+        earned_str = f"🕳️ <b>{earned} OAC</b>"
+    else:
+        header = "<b>💨 ДЫМ РАССЕЯЛСЯ</b>"
+        earned_str = "<i>Ни капли OAC осело на дне…</i>"
+    return (
+        f"{header}\n"
+        f"– {name}\n"
+        f"– <i>{flavor}</i>\n\n"
+        f"{earned_str}"
+    )
 
 def calculate_smoke_reward(p, happy_hour):
+    """Возвращает (earned, outcome). Одна руч­ка — и число, и флейвор.
+    Раньше число и текст брались из двух разных бросков и противоречили друг
+    другу. Джекпот (2%) вырезан из доли выигрыша — суммарный шанс плюса тот же
+    (18%), но у него есть дофаминовый пик."""
     r = random.random()
-    earned = 0
-    if r < 0.18:
-        earned = random.randint(15, 40)
-        if happy_hour:
-            earned *= HAPPY_HOUR_MULTIPLIER
+    if r < 0.02:
+        earned, outcome = random.randint(80, 160), "jackpot"
+    elif r < 0.18:
+        earned, outcome = random.randint(15, 40), "win"
     elif r < 0.70:
-        earned = -5
-    return earned
+        earned, outcome = -5, "loss"
+    else:
+        earned, outcome = 0, "neutral"
+    if happy_hour and earned > 0:
+        earned *= HAPPY_HOUR_MULTIPLIER
+    return earned, outcome
 
 class SmokeStatus(Enum):
     NO_BLUNTS = "no_blunts"
@@ -3108,7 +3126,7 @@ async def do_smoke(update, context, ctx, player):
             return SmokeStatus.NO_BLUNTS, None
 
         save = (p.guild == "WHITE" and random.randint(1, 100) <= 20)
-        earned = calculate_smoke_reward(p, ctx.cache.get("happy_hour", False))
+        earned, outcome = calculate_smoke_reward(p, ctx.cache.get("happy_hour", False))
 
         old_count = p.smoke_count or 0
         new_count = old_count + 1
@@ -3128,7 +3146,7 @@ async def do_smoke(update, context, ctx, player):
             except Exception:
                 logger.exception("War service error, proceeding without points")
 
-        return SmokeStatus.OK, (earned, save, medal_text, new_count, p.blunts, p.balance)
+        return SmokeStatus.OK, (earned, outcome, save, medal_text, new_count, p.blunts, p.balance)
 
     result = await ctx.repo.atomic_update(uid, _smoke)
     if result is None:
@@ -3147,8 +3165,8 @@ async def do_smoke(update, context, ctx, player):
         )
         return
 
-    earned, save, medal_text, new_count, bl_left, new_balance = data
-    effect = build_smoke_effect(random.random(), earned)
+    earned, outcome, save, medal_text, new_count, bl_left, new_balance = data
+    effect = build_smoke_effect(outcome, earned)
 
     text = (
         f"{effect}\n\n"
@@ -3168,6 +3186,13 @@ async def do_smoke(update, context, ctx, player):
     await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
 
     asyncio.create_task(check_achievements(uid, context))
+    if outcome == "jackpot":
+        who = f"@{player.username}" if player.username else "Кто-то из наших"
+        asyncio.create_task(_safe_send_guild_message(
+            ctx,
+            f"🎰 <b>ДЖЕКПОТ!</b>\n{who} сорвал <b>+{earned} OAC</b> одной тягой 🌌\n"
+            f"<i>Фабрика №9 сегодня щедра. Кто следующий?</i>"
+        ))
 
 @rate_limit(3)
 async def ritual_callback(update, context):
