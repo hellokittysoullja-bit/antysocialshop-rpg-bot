@@ -3331,8 +3331,9 @@ async def ritual_callback(update, context):
         if player.guild != "BLACK":
             return ("wrong_guild",)
         if player.last_ritual and (now - player.last_ritual) < timedelta(hours=GAME_CONFIG["ritual_cooldown_hours"]):
-            remain = int((timedelta(hours=GAME_CONFIG["ritual_cooldown_hours"]) - (now - player.last_ritual)).seconds / 3600)
-            return ("cooldown", remain)
+            remain = timedelta(hours=GAME_CONFIG["ritual_cooldown_hours"]) - (now - player.last_ritual)
+            hrs, rem = divmod(int(remain.total_seconds()), 3600)
+            return ("cooldown", hrs, rem // 60)
 
         reward = 150
         if ctx.cache.get("happy_hour", False):
@@ -3363,9 +3364,10 @@ async def ritual_callback(update, context):
         await send_whisper_dm(update, context, "❌ Только Тёмная Гильдия.")
         return
     if status == "cooldown":
-        remain = data[0]
+        hrs, mins = data[0], data[1]
+        wait = f"{hrs} ч {mins} мин" if hrs else f"{mins} мин"
         await safe_send_message(context, update.effective_chat.id,
-            f"<b>🕯️ Тёмный алтарь истощён 🌙</b>\n\n<b>🗝️ Жди {remain} ч</b>",
+            f"<b>🕯️ Тёмный алтарь истощён 🌙</b>\n\n<b>🗝️ Жди {wait}</b>",
             parse_mode='HTML')
         return
 
@@ -4142,20 +4144,25 @@ async def guild_info_callback(update, context):
     if guild:
         g_emoji = "🕯️" if guild == "BLACK" else "⚜️"
         g_name = "Тёмная" if guild == "BLACK" else "Светлая"
+        # Кулдаун на кнопке должен совпадать с реальным (GAME_CONFIG), а не с
+        # захардкоженными 24ч — иначе таймер врёт (реально ритуал/исповедь через
+        # 12ч). Исповедь раньше вообще не показывала таймер — теперь симметрично.
+        def _action_label(base_label, last_time, cooldown_hours, cb):
+            if last_time:
+                lt = _to_datetime(last_time)
+                if lt and datetime.now() - lt < timedelta(hours=cooldown_hours):
+                    diff = timedelta(hours=cooldown_hours) - (datetime.now() - lt)
+                    hrs, rem = divmod(int(diff.total_seconds()), 3600)
+                    wait = f"{hrs} ч {rem // 60} мин" if hrs else f"{rem // 60} мин"
+                    return InlineKeyboardButton(f"{base_label} ({wait})", callback_data=cb)
+            return InlineKeyboardButton(base_label, callback_data=cb)
+
         if guild == "BLACK":
-            if player.last_ritual:
-                last_ritual = _to_datetime(player.last_ritual)
-                if last_ritual and datetime.now() - last_ritual < timedelta(hours=24):
-                    diff = timedelta(hours=24) - (datetime.now() - last_ritual)
-                    hrs = int(diff.seconds // 3600)
-                    mins = int((diff.seconds % 3600) // 60)
-                    kb_rows.append([InlineKeyboardButton(f"🕯️ Ритуал ({hrs} ч {mins} мин)", callback_data="ritual")])
-                else:
-                    kb_rows.append([InlineKeyboardButton("🕯️ Ритуал", callback_data="ritual")])
-            else:
-                kb_rows.append([InlineKeyboardButton("🕯️ Ритуал", callback_data="ritual")])
+            kb_rows.append([_action_label("🕯️ Ритуал", player.last_ritual,
+                            GAME_CONFIG["ritual_cooldown_hours"], "ritual")])
         elif guild == "WHITE":
-            kb_rows.append([InlineKeyboardButton("⚜️ Исповедь", callback_data="repent")])
+            kb_rows.append([_action_label("⚜️ Исповедь", player.last_repent,
+                            GAME_CONFIG["repent_cooldown_hours"], "repent")])
         kb_rows.append([
             InlineKeyboardButton("🏛️ Храм", callback_data="guild_shrine"),
             InlineKeyboardButton("⚔️ Война", callback_data="guild_war")
@@ -4267,6 +4274,12 @@ async def repent_callback(update, context, ctx):
         p.last_repent = now
         p.daily_progress = p.daily_progress or {}
         p.repent_count = (p.repent_count or 0) + 1
+        # Исповедь СОСТОЯЛАСЬ (блант потрачен, кулдаун 12ч запущен) — квест
+        # обязан засчитаться при ЛЮБОМ исходе. Раньше отметка стояла только в
+        # ветке награды (70%): при удаче на эссенцию/легендарку задание не
+        # тикало, а повторить нельзя 12ч → Светлая гильдия застревала в главе.
+        p.daily_progress["repent"] = True
+        p.daily_progress["guild_action"] = True
 
         # === ДОБАВЛЕНО: Медали и прогресс (пункты 3 и 4) ===
         old_count = p.repent_count - 1
@@ -4281,8 +4294,6 @@ async def repent_callback(update, context, ctx):
         if r < 0.70:
             reward = random.randint(100, 200)
             p.balance += reward + medal_bonus  # ← добавили medal_bonus
-            p.daily_progress["repent"] = True
-            p.daily_progress["guild_action"] = True
             result_line = f"Исповедь принесла тебе <b>{reward} OAC</b> 🍬"
         elif r < 0.95:
             p.m_essence = (p.m_essence or 0) + 1
