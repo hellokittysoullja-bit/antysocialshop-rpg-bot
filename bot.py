@@ -42,6 +42,7 @@ from game_content import (
     WHISPERS, NEURO_STATUSES, FUNNY_REACTIONS, RANKS,
     ACHIEVEMENTS, ACHIEVEMENTS_DICT, ACHIEVEMENT_CONDITIONS, SMOKE_FLAVORS,
     QUEST_TEMPLATES, BLUNTS_PER_PAGE, BLUNT_IMAGES, LUCK_CONFIG, LABYRINTH_ROOMS,
+    SHOP_ITEMS,
 )
 # Слой моделей
 from game_models import Player
@@ -261,13 +262,6 @@ from urllib.parse import quote
 
 def build_share_url(share_text: str) -> str:
     return f"https://t.me/share/url?text={quote(share_text, safe='')}"
-    
-import secrets
-import string
-
-def generate_short_code(length=6):
-    alphabet = string.ascii_letters + string.digits
-    return ''.join(secrets.choice(alphabet) for _ in range(length))
 
 # ── Исключения ──────────────────────────────────────────────
         
@@ -5487,15 +5481,128 @@ async def pet_locked_handler(update, context):
 # ============================================================
 # МАГАЗИН, АДМИН-КОМАНДЫ
 # ============================================================
+# ── Прилавок: чистая логика (тестируется без БД) ────────────
+def _shop_discount_pct(balance):
+    """Скидка прилавка по достатку — ранг даёт ощутимую выгоду в лавке.
+    Потолок 15%, чтобы не разгонять инфляцию."""
+    b = balance or 0
+    if b >= 50000:
+        return 15
+    if b >= 20000:
+        return 10
+    if b >= 5000:
+        return 5
+    return 0
+
+
+def _shop_price(base, discount_pct):
+    """Цена со скидкой, минимум 1 OAC."""
+    return max(1, round(base * (100 - discount_pct) / 100))
+
+
+def _shop_today(ordinal):
+    """3 товара дня — детерминированное окно по дате (без состояния в БД).
+    Витрина сдвигается на 1 позицию каждый день → ощущение живой лавки."""
+    pool = list(SHOP_ITEMS.keys())
+    start = ordinal % len(pool)
+    return [pool[(start + i) % len(pool)] for i in range(min(3, len(pool)))]
+
+
+def _shop_time_left(now):
+    """(часы, минуты) до смены витрины — до ближайшей полуночи. FOMO-таймер."""
+    tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    delta = tomorrow - now
+    return delta.seconds // 3600, (delta.seconds % 3600) // 60
+
+
+def _build_shop_view(balance, now):
+    """Собирает текст+клавиатуру прилавка. Чистая функция для тестов."""
+    disc = _shop_discount_pct(balance)
+    today = _shop_today(now.toordinal())
+    h, m = _shop_time_left(now)
+    lines = ["<b>🏪 ЛАВКА ФАБРИКИ №9</b>", ""]
+    if disc:
+        lines.append(f"🪪 <b>Скидка ранга: −{disc}%</b> на всё сегодня")
+    else:
+        lines.append("🪪 <i>Достигни Ветерана — откроется скидка ранга</i>")
+    lines.append(f"🔥 <i>Прилавок сменится через {h}ч {m:02d}м</i>")
+    lines.append(f"💰 <b>У тебя:</b> {balance} OAC 🍬")
+    lines.append("")
+    rows = []
+    for key in today:
+        it = SHOP_ITEMS[key]
+        price = _shop_price(it["price"], disc)
+        old = f" <s>{it['price']}</s>" if disc else ""
+        lines.append(f"{it['emoji']} <b>{it['name']}</b> — {price} OAC{old}")
+        lines.append(f"   <i>{it['blurb']}</i>")
+        afford = "" if balance >= price else "🔒 "
+        rows.append([InlineKeyboardButton(
+            f"{afford}{it['emoji']} {it['name']} · {price}",
+            callback_data=f"shop_buy_{key}")])
+    lines.append("")
+    lines.append("🕯️ <i>А за настоящими артефактами — в Каталог Фабрики.</i>")
+    # Мост в реальный магазин сохранён: Скидка (привилегия ранга) и Каталог.
+    rows.append([
+        InlineKeyboardButton("🪪 Скидка", callback_data="privilege"),
+        InlineKeyboardButton("📦 Каталог", callback_data="catalog"),
+    ])
+    rows.append([InlineKeyboardButton("🏰 В меню", callback_data="menu")])
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
 @cb
 async def shop_callback(update, context, ctx):
     query = update.callback_query
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🪪 Скидка", callback_data="privilege")],
-        [InlineKeyboardButton("📦 Каталог", callback_data="catalog")],
-        [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
-    ])
-    await query.message.edit_text("<b>🏰 Главное Меню › 🛒 Магазин</b>", reply_markup=kb, parse_mode='HTML')
+    player = await ctx.repo.get_by_id(query.from_user.id)
+    balance = (player.balance if player else 0) or 0
+    text, kb = _build_shop_view(balance, datetime.now())
+    await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
+
+
+async def shop_buy_callback(update, context):
+    """Покупка товара дня. Атомарно, с валидацией витрины и скидки."""
+    ctx = context.bot_data.get("ctx")
+    query = update.callback_query
+    if not ctx:
+        await query.answer("⚠️ Бот инициализируется.", show_alert=True)
+        return
+    uid = query.from_user.id
+    key = query.data[len("shop_buy_"):]
+    now = datetime.now()
+    item = SHOP_ITEMS.get(key)
+    # товар должен быть в сегодняшней витрине — защита от устаревших кнопок
+    if not item or key not in _shop_today(now.toordinal()):
+        await query.answer("🔥 Этого товара уже нет на прилавке — витрина сменилась.", show_alert=True)
+        await shop_callback(update, context)
+        return
+
+    async def _buy(p, conn):
+        # Возвращаем статус, а НЕ бросаем исключение: atomic_update обёрнут в
+        # tenacity-retry, который завернул бы кастомный exception в RetryError
+        # и вхолостую ретраил бы «нет денег». Статус-кортеж — принятый здесь
+        # паттерн (см. do_smoke/craft).
+        price = _shop_price(item["price"], _shop_discount_pct(p.balance or 0))
+        if (p.balance or 0) < price:
+            return ("no_funds", price, None)
+        p.balance = (p.balance or 0) - price
+        setattr(p, item["field"], (getattr(p, item["field"], 0) or 0) + item["qty"])
+        return ("ok", price, getattr(p, item["field"]))
+
+    result = await ctx.repo.atomic_update(uid, _buy)
+    if result is None:
+        await query.answer("Профиль не найден.", show_alert=True)
+        return
+    status, price, new_total = result
+    if status == "no_funds":
+        await query.answer(f"💸 Не хватает OAC — нужно {price}. Ферма зовёт.", show_alert=True)
+        return
+    await query.answer(f"✅ Куплено! −{price} OAC", show_alert=False)
+    player = await ctx.repo.get_by_id(uid)
+    balance = (player.balance if player else 0) or 0
+    text, kb = _build_shop_view(balance, now)
+    banner = (f"✅ <b>{item['emoji']} {item['name']} — твоё!</b>\n"
+              f"📦 Теперь у тебя: <b>{new_total}</b>\n\n")
+    await query.message.edit_text(banner + text, reply_markup=kb, parse_mode='HTML')
 
 @cb
 async def setbluntpic(update, context, ctx):
@@ -6981,6 +7088,7 @@ PREFIX_HANDLERS: Dict[str, Callable] = {
     "quest_": handle_quest_action,
     "mines_open_": _mines_open_cell_wrapper,
     "mines_bet_": _mines_bet_wrapper,
+    "shop_buy_": shop_buy_callback,
 }
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):

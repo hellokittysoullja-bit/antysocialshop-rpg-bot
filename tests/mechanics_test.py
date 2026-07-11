@@ -185,6 +185,28 @@ def test_pure(passed):
     assert _plant_pending(0, pn - timedelta(hours=4), pn) == (0, 0.0, False)  # не посажено
     passed.append("Плантация: rate/cost/pending + лимит накопления")
 
+    # --- Прилавок: скидка ранга, цена, ротация витрины, таймер ---
+    from bot import (_shop_discount_pct, _shop_price, _shop_today,
+                     _shop_time_left, _build_shop_view, SHOP_ITEMS)
+    assert (_shop_discount_pct(0), _shop_discount_pct(4999)) == (0, 0)
+    assert (_shop_discount_pct(5000), _shop_discount_pct(20000),
+            _shop_discount_pct(50000)) == (5, 10, 15)
+    assert _shop_price(100, 0) == 100 and _shop_price(100, 10) == 90
+    assert _shop_price(1, 15) >= 1                       # цена никогда не 0
+    for field in {it["field"] for it in SHOP_ITEMS.values()}:
+        assert field in Player.model_fields, f"товар пишет в несуществующее поле {field}"
+    ordn = datetime(2026, 1, 1).toordinal()
+    today = _shop_today(ordn)
+    assert len(today) == 3 and len(set(today)) == 3      # 3 различных товара
+    assert _shop_today(ordn) != _shop_today(ordn + 1)    # витрина сменилась назавтра
+    h, m = _shop_time_left(datetime(2026, 1, 1, 23, 30))
+    assert (h, m) == (0, 30)                             # до полуночи
+    txt, kb = _build_shop_view(6000, datetime(2026, 1, 1, 12, 0))
+    cbs = [b.callback_data for row in kb.inline_keyboard for b in row if b.callback_data]
+    assert "privilege" in cbs and "catalog" in cbs and "menu" in cbs  # мост в реальный магазин сохранён
+    assert any(c and c.startswith("shop_buy_") for c in cbs)
+    passed.append("Прилавок: скидка/цена/ротация/таймер + мост в магазин цел")
+
     # --- Война гильдий: дней до итогов + мотивационная строка (долг/соревнование) ---
     assert _days_left_in_week(datetime(2024, 1, 1)) == 7   # понедельник
     assert _days_left_in_week(datetime(2024, 1, 7)) == 1   # воскресенье
