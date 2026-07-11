@@ -82,6 +82,28 @@ def main() -> int:
     assert not bad_ach, f"Достижения без рабочих условий: {bad_ach}"
     passed.append(f"достижения: {len(ACHIEVEMENTS)} шт, все условия на реальных полях Player")
 
+    # 5. Каждый ключ задания обрабатывается в handle_quest_action — иначе кнопка
+    #    задания выдаёт «Неизвестное задание» (баг donate/lab в главе 2).
+    QUEST_ACTION_KEYS = {"farm", "craft", "smoke", "ritual", "repent", "train", "pet", "donate", "lab"}
+    bad_keys = []
+    for qid, tpl in QUEST_TEMPLATES.items():
+        for task in tpl.get("tasks", []):
+            if task["key"] not in QUEST_ACTION_KEYS:
+                bad_keys.append(f"{qid}:{task['key']}")
+    assert not bad_keys, f"Ключи заданий без обработчика в handle_quest_action: {bad_keys}"
+    passed.append("все ключи заданий обрабатываются в handle_quest_action")
+
+    # 6. Гильдейское действие в главе не должно быть только для одной стороны —
+    #    иначе вторая гильдия получает непроходимое задание (баг: Светлая видела
+    #    Ритуал вместо Исповеди в главе 2).
+    bad_guild = []
+    for qid, tpl in QUEST_TEMPLATES.items():
+        conds = {t.get("condition") for t in tpl.get("tasks", [])}
+        if ("guild_black" in conds) != ("guild_white" in conds):
+            bad_guild.append(qid)
+    assert not bad_guild, f"Гильдейское задание только для одной стороны (другая застрянет): {bad_guild}"
+    passed.append("гильдейские задания симметричны (ни одна сторона не застревает)")
+
     for name in passed:
         print(f"  OK  {name}")
     print(f"\nТест контента пройден: {len(passed)}/{len(passed)}")

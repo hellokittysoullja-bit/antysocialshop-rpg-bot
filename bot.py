@@ -4257,9 +4257,14 @@ async def guild_war_callback(update, context):
 
 @cb
 async def repent_callback(update, context, ctx):
+    # Работает и как кнопка (callback), и как команда /repent (текст, без
+    # callback_query). Раньше безусловный query.answer() ронял AttributeError
+    # на команде → «Внутренняя ошибка», хотя кнопка исповеди работала.
     query = update.callback_query
-    await query.answer()
-    uid = query.from_user.id
+    if query:
+        await query.answer()
+    user, _msg = get_user_and_msg(update)
+    uid = user.id
 
     async def _repent(p, conn):
         now = datetime.now()
@@ -4816,9 +4821,12 @@ async def _mines_open_cell(update, context, state, redis_key, uid, ctx):
     query = update.callback_query
     if not query:
         return
-    # Парсим координаты
-    _, r_str, c_str = query.data.split("_")
-    row, col = int(r_str), int(c_str)
+    # Парсим координаты. callback = "mines_open_{r}_{c}" → split даёт 4 части
+    # (["mines","open","r","c"]), а не 3. Раньше распаковка в 3 переменные
+    # роняла ValueError → клик по клетке молча ничего не делал. Берём последние
+    # два сегмента.
+    parts = query.data.split("_")
+    row, col = int(parts[-2]), int(parts[-1])
 
     field = state["field"]
     if field[row][col] != 0:
@@ -5609,8 +5617,10 @@ async def handle_gift_username(update: Update, context: ContextTypes.DEFAULT_TYP
 # ============================================================
 @cb
 async def pet_preview(update, context, ctx):
-    query = update.callback_query
-    uid = query.from_user.id
+    # Робастно к вызову и кнопкой, и командой /pet (edit_or_reply сам решает
+    # редактировать сообщение или прислать новое; раньше query.message.edit_text
+    # ронял команду /pet).
+    uid = update.effective_user.id
     player = await ctx.repo.get_by_id(uid)
 
     if player and player.pet:
@@ -5621,20 +5631,20 @@ async def pet_preview(update, context, ctx):
             [InlineKeyboardButton("🍖 Покормить", callback_data="pet_feed")],
             [InlineKeyboardButton("🔙 Назад", callback_data="menu")],
         ])
-        await query.message.edit_text(
+        await edit_or_reply(
+            update, context,
             f"🐾 <b>Твой питомец: {player.pet}{name_str}</b>\n\n"
             f"🍖 <b>Сытость:</b> {hbar} {hunger}/100",
-            reply_markup=kb, parse_mode='HTML'
-        )
+            reply_markup=kb)
     else:
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton(f"🐕 Купить Песика ({PET_CONFIG['dog']['price']} 🍬)", callback_data="pet_buy_dog")],
             [InlineKeyboardButton("🔙 Назад", callback_data="menu")]
         ])
-        await query.message.edit_text(
+        await edit_or_reply(
+            update, context,
             "🐾 <b>ПИТОМЦЫ</b>\n\nПока доступен только Песик.",
-            reply_markup=kb, parse_mode='HTML'
-        )
+            reply_markup=kb)
 
 @cb
 async def pet_feed_handler(update, context, ctx):
@@ -5774,11 +5784,13 @@ def _build_shop_view(balance, now):
 
 @cb
 async def shop_callback(update, context, ctx):
-    query = update.callback_query
-    player = await ctx.repo.get_by_id(query.from_user.id)
+    # Робастно к кнопке и команде /shop (раньше query.from_user на команде
+    # (без callback_query) ронял «внутреннюю ошибку»).
+    uid = update.effective_user.id
+    player = await ctx.repo.get_by_id(uid)
     balance = (player.balance if player else 0) or 0
     text, kb = _build_shop_view(balance, datetime.now())
-    await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
+    await edit_or_reply(update, context, text, reply_markup=kb)
 
 
 async def shop_buy_callback(update, context):
@@ -6672,9 +6684,17 @@ async def handle_quest_action(update, context):
             await query.answer("Сначала заведи питомца! (в разделе «Мир»)", show_alert=True)
         else:
             await query.answer("🐾 Питомец накормлен!")
+    elif action == "donate":
+        # Пожертвование идёт через Храм гильдии. Раньше 'donate'/'lab' не
+        # обрабатывались → кнопки заданий главы 2 выдавали «Неизвестная команда».
+        await guild_shrine_callback(update, context)
+        return
+    elif action == "lab":
+        await lab_enter(update, context)
+        return
     else:
         await query.answer("Неизвестное задание", show_alert=True)
-        
+
     # Обновляем экран заданий после любой попытки
     await daily_quest_hub(update, context, ctx)
 

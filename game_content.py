@@ -206,7 +206,11 @@ QUEST_TEMPLATES = {
         "tasks": [
             {"label": "🌿 Крафт", "key": "craft", "target": 5},
             {"label": "💨 Дунуть", "key": "smoke", "target": 5},
-            {"label": "🕯️ Ритуал", "key": "ritual", "target": 3},
+            # Гильдейское действие — по стороне: Тёмная делает Ритуал, Светлая —
+            # Исповедь. Раньше стоял безусловный «ritual» → Светлая гильдия
+            # видела непроходимый Ритуал и не имела Исповеди (глава непроходима).
+            {"label": "🕯️ Ритуал", "key": "ritual", "target": 3, "condition": "guild_black"},
+            {"label": "⚜️ Исповедь", "key": "repent", "target": 3, "condition": "guild_white"},
             {"label": "💎 Пожертвовать", "key": "donate", "target": 200},
             {"label": "🏛️ Лабиринт", "key": "lab", "target": 1},
         ],
