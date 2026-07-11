@@ -3637,6 +3637,68 @@ async def profile_callback(update, context, ctx, player):
         await msg.reply_text(text, reply_markup=kb, parse_mode='HTML')
 
 # Все мои бланты
+# Порядок и мета редкостей — единый источник для Кодекса.
+_RARITY_TIERS = (
+    ("legendary", "🟡", "Легендарные"),
+    ("epic",      "🟣", "Эпические"),
+    ("rare",      "🔵", "Редкие"),
+    ("common",    "🟢", "Обычные"),
+)
+
+
+def _codex_prestige_title(named):
+    """Титул коллекционера по размеру/качеству коллекции. Чистая функция."""
+    n = len(named)
+    has_leg = any(it.get("rarity") == "legendary" for it in named)
+    if has_leg and n >= 15:
+        return "👑 Владыка Искажения"
+    if n >= 15:
+        return "🏛️ Архивариус"
+    if n >= 5:
+        return "🗝️ Коллекционер"
+    if n >= 1:
+        return "🌱 Начинающий собиратель"
+    return "🕳️ Пустая витрина"
+
+
+def _build_codex_header(named):
+    """Богатая шапка Кодекса: визитка + метр редкостей + аспирация.
+
+    Чистая функция (только список инвентаря игрока), поэтому тестируется без
+    БД. Активирует эндаумент (это ТВОЁ), Зейгарник (незакрытая коллекция) и
+    статус (визитка + титул)."""
+    from collections import Counter
+    counts = Counter(it.get("rarity", "common") for it in named)
+    total = len(named)
+    owned_tiers = sum(1 for k, _, _ in _RARITY_TIERS if counts.get(k, 0) > 0)
+
+    # Визитка — редчайший блант игрока (named уже отсортирован по редкости).
+    sig = named[0] if named else None
+    sig_emoji = {"legendary": "🟡", "epic": "🟣", "rare": "🔵"}.get(
+        (sig or {}).get("rarity"), "🟢") if sig else ""
+
+    lines = ["<b>📜 КОДЕКС ИСКАЖЕНИЯ</b>", f"<i>{_codex_prestige_title(named)}</i>", ""]
+    if sig:
+        lines.append(f"🔱 <b>Твоя визитка:</b> {sig_emoji} «{html.escape(sig.get('name','?'))}»")
+        lines.append(f"   <i>#{sig.get('rare_number', '?-????')} · один из {total} твоих</i>")
+        lines.append("")
+    lines.append(f"<b>🎴 Собрано редкостей: {owned_tiers}/4</b>")
+    for k, emoji, label in _RARITY_TIERS:
+        c = counts.get(k, 0)
+        if c > 0:
+            lines.append(f"{emoji} {label}: <b>{c}</b>")
+        else:
+            lines.append(f"🔒 <s>{label}</s>: <b>0</b> — ещё не в коллекции")
+    # Аспирация: чего не хватает до вершины (Зейгарник — тянет закрыть пробел).
+    if counts.get("legendary", 0) == 0:
+        lines.append("\n✨ <i>Легендарного пока нет — 2% с крафта или 🎰 джекпот дыма. "
+                     "Скрути его и войди в легенды Гильдии.</i>")
+    elif counts.get("epic", 0) == 0:
+        lines.append("\n✨ <i>Нет Эпического — 13% с крафта. Коллекция ждёт печать искажения.</i>")
+    lines.append("")
+    return "\n".join(lines)
+
+
 @rate_limit(1)
 @game_handler
 async def my_blunts_callback(update, context, ctx, player, page=0):
@@ -3652,8 +3714,12 @@ async def my_blunts_callback(update, context, ctx, player, page=0):
                                x.get("serial") or 999999))
 
     if not named:
-        await edit_or_reply(update, context, "💎 У тебя пока нет именных блантов.",
+        await edit_or_reply(update, context,
+                            "<b>📜 КОДЕКС ИСКАЖЕНИЯ</b>\n<i>🕳️ Пустая витрина</i>\n\n"
+                            "💎 У тебя пока нет именных блантов.\n"
+                            "🌿 Скрути первый — и начни свою коллекцию легенд.",
                             reply_markup=InlineKeyboardMarkup([
+                                [InlineKeyboardButton("🌿 Крафт", callback_data="craft")],
                                 [InlineKeyboardButton("🔙 В профиль", callback_data="profile")]
                             ]))
         return
@@ -3663,7 +3729,12 @@ async def my_blunts_callback(update, context, ctx, player, page=0):
     end = start + BLUNTS_PER_PAGE
     page_blunts = named[start:end]
 
-    text = f"<b>💎 ТВОИ ИМЕННЫЕ БЛАНТЫ ({len(named)} всего, стр. {page+1}/{total_pages})</b>\n\n"
+    # Кодекс-шапка на первой странице; на прочих — компактный заголовок.
+    if page == 0:
+        text = _build_codex_header(named)
+        text += f"<b>💎 Твои бланты (стр. {page+1}/{total_pages}):</b>\n\n"
+    else:
+        text = f"<b>💎 ТВОИ ИМЕННЫЕ БЛАНТЫ ({len(named)} всего, стр. {page+1}/{total_pages})</b>\n\n"
     for i, item in enumerate(page_blunts, 1):
         name = item["name"]
         rarity = item.get("rarity", "common")

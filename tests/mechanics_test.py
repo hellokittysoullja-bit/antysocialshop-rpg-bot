@@ -240,6 +240,29 @@ def test_pure(passed):
     assert not unpersisted, f"поля Player не сохраняются в БД (потеряются при сбросе кэша): {unpersisted}"
     passed.append(f"Персистентность: все {len(Player.model_fields)} полей Player пишутся в БД")
 
+    # --- Кодекс блантов: визитка, метр редкостей, аспирация, титул ---
+    from bot import _build_codex_header, _codex_prestige_title
+    coll = [
+        {"rarity": "epic", "name": "Пепел Короля", "rare_number": "E-1"},
+        {"rarity": "rare", "name": "Шёпот", "rare_number": "R-1"},
+        {"rarity": "common", "name": "Дым", "rare_number": "C-1"},
+    ]
+    ro = {"legendary": 0, "epic": 1, "rare": 2, "common": 3}
+    coll.sort(key=lambda x: (ro[x["rarity"]], 999999))
+    h = _build_codex_header(coll)
+    assert "КОДЕКС" in h and "Твоя визитка" in h
+    assert "Пепел Короля" in h                    # редчайший = визитка (epic > rare > common)
+    assert "3/4" in h                             # 3 из 4 редкостей
+    assert "🔒" in h and "Легендарного пока нет" in h   # незакрытый слот + аспирация
+    # с легендаркой аспирация про легендарку исчезает
+    coll2 = coll + [{"rarity": "legendary", "name": "Бездна", "rare_number": "L-9"}]
+    coll2.sort(key=lambda x: (ro[x["rarity"]], 999999))
+    h2 = _build_codex_header(coll2)
+    assert "Бездна" in h2 and "Легендарного пока нет" not in h2 and "4/4" in h2
+    assert _codex_prestige_title([]) == "🕳️ Пустая витрина"
+    assert "Владыка" in _codex_prestige_title([{"rarity": "legendary"}] * 16)
+    passed.append("Кодекс блантов: визитка/метр/аспирация/титул честны")
+
     # --- Война гильдий: дней до итогов + мотивационная строка (долг/соревнование) ---
     assert _days_left_in_week(datetime(2024, 1, 1)) == 7   # понедельник
     assert _days_left_in_week(datetime(2024, 1, 7)) == 1   # воскресенье
