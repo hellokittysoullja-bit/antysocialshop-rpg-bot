@@ -219,6 +219,18 @@ def test_pure(passed):
     assert "вершине" in top                          # у топ-ранга нет «дальше»
     passed.append("Возвышение: карточка ранга честна, goal-gradient, без дублей")
 
+    # --- Час Удачи: баннер с отсчётом только когда активен ---
+    from bot import _happy_hour_banner
+    class _Ctx:
+        def __init__(self, cache): self.cache = cache
+    n = datetime(2026, 1, 1, 12, 0)
+    on = _happy_hour_banner(_Ctx({"happy_hour": True, "happy_hour_end": n + timedelta(minutes=18)}), n)
+    assert "ЧАС УДАЧИ" in on and "18м" in on
+    assert _happy_hour_banner(_Ctx({"happy_hour": False}), n) == ""
+    assert _happy_hour_banner(None, n) == ""                    # fail-closed без ctx
+    assert "ЧАС УДАЧИ" in _happy_hour_banner(_Ctx({"happy_hour": True}), n)  # без end не падает
+    passed.append("Час Удачи: баннер FOMO с отсчётом, fail-closed")
+
     # --- Война гильдий: дней до итогов + мотивационная строка (долг/соревнование) ---
     assert _days_left_in_week(datetime(2024, 1, 1)) == 7   # понедельник
     assert _days_left_in_week(datetime(2024, 1, 7)) == 1   # воскресенье

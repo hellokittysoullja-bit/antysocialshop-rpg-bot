@@ -5811,6 +5811,21 @@ async def debug_pet(update, context, ctx):
 # ───────────────────────────────────────────────
 # НОВАЯ ГЛАВНАЯ ПАНЕЛЬ (КАРТА 3, СОСТОЯНИЯ А–З)
 # ───────────────────────────────────────────────
+def _happy_hour_banner(ctx, now):
+    """Живой баннер Часа Удачи с обратным отсчётом. Чистая, тестируемая.
+    Показывается в момент входа → FOMO бьёт именно когда игрок уже в игре."""
+    if not (ctx and getattr(ctx, "cache", None) and ctx.cache.get("happy_hour")):
+        return ""
+    end = ctx.cache.get("happy_hour_end")
+    if end and now < end:
+        mins = max(1, math.ceil((end - now).total_seconds() / 60))
+        tail = f"Осталось {mins}м — фарми и дуй прямо сейчас!"
+    else:
+        tail = "Лови момент — всё приносит вдвое больше!"
+    return (f"🌟🌟🌟 <b>ЧАС УДАЧИ!</b> 🌟🌟🌟\n"
+            f"<b>Все действия ×{HAPPY_HOUR_MULTIPLIER} OAC 🍬.</b> {tail}")
+
+
 async def build_main_menu(player, ctx, context=None, full_mode=False):
     now = datetime.now()
     guild = player.guild
@@ -5919,15 +5934,22 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
     if _streak >= 3:
         lines.append(f"🔥 <b>Серия входов: {_streak} дн.</b> — не разорви её, вернись завтра за наградой!")
 
+    # Час Удачи — баннер поверх всего меню (peak-момент нельзя прятать)
+    hh_banner = _happy_hour_banner(ctx, now)
+    if hh_banner:
+        lines.insert(0, hh_banner)
+        lines.insert(1, "")
+
     text = "\n".join(lines)
 
 # ── КЛАВИАТУРА ──
     keyboard = []
+    happy_now = bool(hh_banner)
 
     # Кнопка фарма с живым таймером кулдауна — конец «слепым кликам»
     farm_ready = not _farm_on_cooldown(player.farm_count, player.last_farm, now)
     if farm_ready:
-        farm_label = "🍬 Фармить"
+        farm_label = "🍬 Фармить ×2 🌟" if happy_now else "🍬 Фармить"
     else:
         _remain = timedelta(hours=FARM_COOLDOWN_HOURS) - (now - player.last_farm)
         _mins = max(1, math.ceil(_remain.total_seconds() / 60))
