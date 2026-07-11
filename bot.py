@@ -3598,7 +3598,9 @@ async def profile_callback(update, context, ctx, player):
 
     neuro = random.choice(NEURO_STATUSES)
     skins = player.profile_skins or {}
-    bg = skins.get("active_background", "")
+    # Фон по умолчанию читаемый, иначе строка «🫧 Фон: » висела пустой (выглядит
+    # как баг). Пустой active_background → «🌑 Обычный».
+    bg = skins.get("active_background") or "🌑 Обычный"
     active_title = skins.get("active_title", "—")
 
     inv_data = player.inventory or []
@@ -3663,10 +3665,14 @@ async def profile_callback(update, context, ctx, player):
     kb_rows = []
     if not guild:
         kb_rows.append([InlineKeyboardButton("🕋 Вступить в Гильдию", callback_data="guild_info")])
+    # Кодекс блантов — приоритетная, полноширинная (это про статус/коллекцию).
     if len(named) > 2:
         kb_rows.append([InlineKeyboardButton(f"💍 Все именные бланты ({len(named)})", callback_data="my_blunts")])
-    kb_rows.append([InlineKeyboardButton("📖 Правила мира", callback_data="rules")])
-    kb_rows.append([InlineKeyboardButton("🎨 Кастомизация", callback_data="skins_menu")])
+    # Утилитарные — парой в ряд: короче вертикаль, удобнее большому пальцу.
+    kb_rows.append([
+        InlineKeyboardButton("📖 Правила мира", callback_data="rules"),
+        InlineKeyboardButton("🎨 Кастомизация", callback_data="skins_menu"),
+    ])
     kb_rows.append([InlineKeyboardButton("🏰 В меню", callback_data="menu")])
     kb = InlineKeyboardMarkup(kb_rows)
 
