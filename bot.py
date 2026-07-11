@@ -1064,6 +1064,9 @@ async def _run_migrations(conn):
 
 # ===== ОПТИМИЗАЦИЯ ХРАНЕНИЯ (Render Free Tier) =====
     # JSONB поля — сжатие + хранение вне таблицы при размере > 2KB
+    # Индекс под рейтинг (снимок лидерборда + топ-10). Ускоряет сортировку по
+    # балансу, когда игроков станет много — лидерборд теперь на главном экране.
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_players_balance ON players (balance DESC);")
     await conn.execute("ALTER TABLE players ALTER COLUMN inventory SET STORAGE EXTENDED;")
     await conn.execute("ALTER TABLE players ALTER COLUMN profile_skins SET STORAGE EXTENDED;")
     await conn.execute("ALTER TABLE players ALTER COLUMN daily_progress SET STORAGE EXTENDED;")
@@ -5971,6 +5974,40 @@ async def debug_pet(update, context, ctx):
 # ───────────────────────────────────────────────
 # НОВАЯ ГЛАВНАЯ ПАНЕЛЬ (КАРТА 3, СОСТОЯНИЯ А–З)
 # ───────────────────────────────────────────────
+async def _leaderboard_standing(ctx, my_balance):
+    """Позиция игрока и разрыв до следующего места. Снимок балансов кэшируется
+    на 60с в ctx.cache — меню остаётся мгновенным, БД не долбим на каждый рендер.
+    Лучший-эффорт: любая ошибка → None (строка статуса просто не покажется)."""
+    try:
+        now = datetime.now()
+        snap = None
+        try:
+            snap = ctx.cache.get("lb_snapshot")
+        except Exception:
+            snap = None
+        if not snap or (now - snap[0]).total_seconds() > 60:
+            async with ctx.db_pool.acquire() as conn:
+                rows = await conn.fetch(
+                    'SELECT balance FROM players WHERE COALESCE("exists", TRUE)')
+            balances = sorted((int(r["balance"] or 0) for r in rows), reverse=True)
+            snap = (now, balances)
+            try:
+                ctx.cache["lb_snapshot"] = snap
+            except Exception:
+                pass
+        balances = snap[1]
+        if not balances:
+            return None
+        mb = my_balance or 0
+        higher = [b for b in balances if b > mb]
+        position = len(higher) + 1
+        gap = (min(higher) - mb) if higher else None
+        return {"position": position, "total": len(balances), "gap": gap}
+    except Exception:
+        logger.debug("leaderboard standing failed", exc_info=True)
+        return None
+
+
 def _happy_hour_banner(ctx, now):
     """Живой баннер Часа Удачи с обратным отсчётом. Чистая, тестируемая.
     Показывается в момент входа → FOMO бьёт именно когда игрок уже в игре."""
@@ -6093,6 +6130,18 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
     _streak = player.login_streak or 0
     if _streak >= 3:
         lines.append(f"🔥 <b>Серия входов: {_streak} дн.</b> — не разорви её, вернись завтра за наградой!")
+
+    # Живой статус в рейтинге прямо в меню: серотонин (статус) + дофамин
+    # (goal-gradient до следующего места) + соперничество — каждый вход.
+    standing = await _leaderboard_standing(ctx, balance)
+    if standing and standing["total"] >= 3:
+        pos, gap = standing["position"], standing["gap"]
+        if pos == 1:
+            lines.append("👑 <b>Ты #1 в Гильдии</b> — держи трон, за ним уже идут!")
+        elif gap is not None:
+            lines.append(f"🏅 <b>Ты #{pos} из {standing['total']}</b> · до #{pos-1} — всего <b>{gap} OAC</b> 🍬")
+        else:
+            lines.append(f"🏅 <b>Ты #{pos} из {standing['total']}</b> в рейтинге")
 
     # Час Удачи — баннер поверх всего меню (peak-момент нельзя прятать)
     hh_banner = _happy_hour_banner(ctx, now)

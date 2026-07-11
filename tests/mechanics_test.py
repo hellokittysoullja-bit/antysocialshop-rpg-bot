@@ -397,6 +397,22 @@ async def test_services(passed):
         await conn.execute("DELETE FROM players WHERE user_id=$1", PLANT_UID)
     passed.append("Плантация: round-trip полей + расчёт урожая на БД")
 
+    # --- Рейтинг в меню: позиция/разрыв из кэш-снимка (без БД, лучший-эффорт) ---
+    from bot import _leaderboard_standing
+    from types import SimpleNamespace
+    snap_ctx = SimpleNamespace(
+        cache={"lb_snapshot": (datetime.now(), [100, 90, 80, 50, 10])}, db_pool=None)
+    s_top = await _leaderboard_standing(snap_ctx, 100)
+    assert s_top["position"] == 1 and s_top["total"] == 5 and s_top["gap"] is None
+    s_mid = await _leaderboard_standing(snap_ctx, 80)
+    assert s_mid["position"] == 3 and s_mid["gap"] == 10        # до 90 = 10
+    s_low = await _leaderboard_standing(snap_ctx, 10)
+    assert s_low["position"] == 5 and s_low["gap"] == 40        # до 50 = 40
+    # пустой снимок → None, не падает
+    empty_ctx = SimpleNamespace(cache={"lb_snapshot": (datetime.now(), [])}, db_pool=None)
+    assert await _leaderboard_standing(empty_ctx, 0) is None
+    passed.append("Рейтинг в меню: позиция/разрыв из кэш-снимка, без БД")
+
     async with pool.acquire() as conn:
         await conn.execute("DELETE FROM players WHERE user_id=$1", TEST_UID)
     await redis_client.aclose()
