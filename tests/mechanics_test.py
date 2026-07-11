@@ -207,6 +207,18 @@ def test_pure(passed):
     assert any(c and c.startswith("shop_buy_") for c in cbs)
     passed.append("Прилавок: скидка/цена/ротация/таймер + мост в магазин цел")
 
+    # --- Возвышение: карточка ранг-апа честна и не дублирует имя ---
+    from bot import _build_ascension_card
+    from game_content import RANKS, RANK_LORE
+    card = _build_ascension_card("🪦 Призрак", 20010)
+    assert "ПРИЗРАК" in card and "В О З В Ы Ш Е Н И Е" in card
+    assert RANK_LORE["🪦 Призрак"]["line"] in card
+    assert "🪬 Некромант — ещё 29990 OAC" in card   # следующая ступень, без дубля имени
+    assert "Призрак Призрак" not in card            # регрессия на дубль
+    top = _build_ascension_card("🪬 Некромант", 50010)
+    assert "вершине" in top                          # у топ-ранга нет «дальше»
+    passed.append("Возвышение: карточка ранга честна, goal-gradient, без дублей")
+
     # --- Война гильдий: дней до итогов + мотивационная строка (долг/соревнование) ---
     assert _days_left_in_week(datetime(2024, 1, 1)) == 7   # понедельник
     assert _days_left_in_week(datetime(2024, 1, 7)) == 1   # воскресенье

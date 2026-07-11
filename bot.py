@@ -42,7 +42,7 @@ from game_content import (
     WHISPERS, NEURO_STATUSES, FUNNY_REACTIONS, RANKS,
     ACHIEVEMENTS, ACHIEVEMENTS_DICT, ACHIEVEMENT_CONDITIONS, SMOKE_FLAVORS,
     QUEST_TEMPLATES, BLUNTS_PER_PAGE, BLUNT_IMAGES, LUCK_CONFIG, LABYRINTH_ROOMS,
-    SHOP_ITEMS,
+    SHOP_ITEMS, RANK_LORE,
 )
 # Слой моделей
 from game_models import Player
@@ -697,6 +697,34 @@ async def check_achievements(user_id: int, context, ctx: AppContext = None) -> N
                 except Exception as e:
                     logger.error(f"Achievement notify error: {e}")
                 
+def _build_ascension_card(rank_label, new_balance):
+    """Карточка возвышения. Чистая функция → тестируется без БД.
+
+    rank_label = строка ранга из RANKS[i][0] (напр. '⚔️ Ветеран')."""
+    emoji, _, name = rank_label.partition(" ")
+    lore = RANK_LORE.get(rank_label, {})
+    lines = [
+        "🌑 ⚡ 🌑",
+        "━━━━━━━━━━━━━",
+        "<b>В О З В Ы Ш Е Н И Е</b>",
+        f"<b>{emoji} {name.upper()}</b>",
+        "━━━━━━━━━━━━━",
+    ]
+    if lore.get("line"):
+        lines.append(f"<i>{lore['line']}</i>")
+    if lore.get("unlock"):
+        lines.append(f"\n🔓 <b>Открыто:</b> {lore['unlock']}")
+    lines.append(f"\n💰 <b>Баланс:</b> {new_balance} OAC 🍬")
+    # goal-gradient: показать следующую ступень и дистанцию до неё
+    for e, th, nm in RANKS:
+        if th > new_balance:
+            lines.append(f"🎯 <b>Дальше:</b> {e} — ещё {th - new_balance} OAC")
+            break
+    else:
+        lines.append("👑 <i>Ты на вершине. Легенды говорят о тебе.</i>")
+    return "\n".join(lines)
+
+
 async def check_rank_up(context, user_id, username, old_balance, new_balance):
     old_idx = 0
     new_idx = 0
@@ -705,16 +733,30 @@ async def check_rank_up(context, user_id, username, old_balance, new_balance):
             old_idx = i
         if new_balance >= threshold:
             new_idx = i
-    if new_idx > old_idx:
-        rank_name = emoji_to_name(RANKS[new_idx][0])
+    if new_idx <= old_idx:
+        return
+    rank_label = RANKS[new_idx][0]
+    ctx = context.bot_data.get("ctx")
+    try:
+        # мини-предвкушение: вспышка перед раскрытием ранга
+        msg = await context.bot.send_message(
+            chat_id=user_id, text="🌑 <i>Что-то меняется в тебе…</i>", parse_mode='HTML')
+        await asyncio.sleep(1.1)
+        await msg.edit_text(_build_ascension_card(rank_label, new_balance), parse_mode='HTML')
+    except Exception:
         try:
             await context.bot.send_message(
                 chat_id=user_id,
-                text=f"⚜️ <b>Новый ранг:</b> {rank_name}\n\nТвой баланс теперь {new_balance} OAC.",
-                parse_mode='HTML'
-            )
+                text=_build_ascension_card(rank_label, new_balance), parse_mode='HTML')
         except Exception:
             pass
+    # аспирационные ранги — анонс в гильдию (социальное доказательство + FOMO)
+    if ctx and RANK_LORE.get(rank_label, {}).get("big"):
+        who = f"@{username}" if username else "Один из наших"
+        asyncio.create_task(_safe_send_guild_message(
+            ctx,
+            f"⚡ <b>ВОЗВЫШЕНИЕ</b>\n{who} достиг ранга <b>{rank_label}</b> 🌑\n"
+            f"<i>Ступень, до которой доходят немногие. Кто следующий?</i>"))
 
 
 
