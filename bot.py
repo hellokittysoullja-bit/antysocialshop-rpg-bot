@@ -4630,6 +4630,29 @@ def _calc_multiplier(step: int) -> float:
     return round(1.0 + (step / max_step) * 2.0, 2)
 
 # Основная функция – замена _process_berserk
+async def _mines_state_get(ctx, uid):
+    """Состояние игры «Мины»: Redis, если он есть, иначе in-memory кэш.
+
+    Приложение по дизайну работает и без Redis (main.py: «без Redis продолжим»),
+    но мины дёргали ctx.redis напрямую → при отсутствующем/упавшем Redis
+    ctx.redis был None и кнопка «Рискнуть» молча падала на None.get(). Фолбэк
+    на ctx.cache (TTL ~10мин, партии хватает) чинит мины без Redis."""
+    key = f"mines_game:{uid}"
+    if getattr(ctx, "redis", None):
+        raw = await ctx.redis.get(key)
+        return json.loads(raw) if raw else None
+    val = ctx.cache.get(key)
+    return json.loads(val) if isinstance(val, (str, bytes)) else val
+
+
+async def _mines_state_set(ctx, uid, state):
+    key = f"mines_game:{uid}"
+    if getattr(ctx, "redis", None):
+        await ctx.redis.setex(key, 3600, json.dumps(state))
+    else:
+        ctx.cache[key] = state
+
+
 async def _process_mines(update, context, uid, player, cfg, ctx):
     """
     Запускает игру «Мины» (вместо Берсерка).
@@ -4645,12 +4668,10 @@ async def _process_mines(update, context, uid, player, cfg, ctx):
         await _notify_user(update, context, f"💣 Недостаточно OAC. Минимальная ставка: {min_bet} OAC.")
         return
 
-    # --- 2. Загружаем или создаём состояние игры в Redis ---
+    # --- 2. Загружаем или создаём состояние игры (Redis или in-memory) ---
     redis_key = f"mines_game:{uid}"
-    state_json = await ctx.redis.get(redis_key)
-    if state_json:
-        state = json.loads(state_json)
-    else:
+    state = await _mines_state_get(ctx, uid)
+    if not state:
         # Если игра не начата – показываем меню выбора ставки
         await _show_mines_bet_menu(update, context, player, cfg)
         return
@@ -4738,7 +4759,7 @@ async def _mines_start_game(update, context, uid, bet, ctx):
         "created_at": time.time()
     }
     redis_key = f"mines_game:{uid}"
-    await ctx.redis.setex(redis_key, 3600, json.dumps(state))
+    await _mines_state_set(ctx, uid, state)
     await _mines_show_field(update, context, state, redis_key, uid, ctx)
 
 async def _mines_show_field(update, context, state, redis_key, uid, ctx):
@@ -4840,7 +4861,7 @@ async def _mines_open_cell(update, context, state, redis_key, uid, ctx):
         field[row][col] = 2
         state["status"] = "lost"
         # Ставка уже списана, ничего не возвращаем
-        await ctx.redis.setex(redis_key, 3600, json.dumps(state))
+        await _mines_state_set(ctx, uid, state)
         await _mines_show_field(update, context, state, redis_key, uid, ctx)
         return
 
@@ -4863,12 +4884,12 @@ async def _mines_open_cell(update, context, state, redis_key, uid, ctx):
             logger.error(f"Ошибка начисления выигрыша {win} у {uid}: {e}")
             await query.answer("Ошибка при начислении", show_alert=True)
             return
-        await ctx.redis.setex(redis_key, 3600, json.dumps(state))
+        await _mines_state_set(ctx, uid, state)
         await _mines_show_field(update, context, state, redis_key, uid, ctx)
         return
 
     # Игра продолжается
-    await ctx.redis.setex(redis_key, 3600, json.dumps(state))
+    await _mines_state_set(ctx, uid, state)
     await _mines_show_field(update, context, state, redis_key, uid, ctx)
 
 async def _mines_cashout(update, context, state, redis_key, uid, ctx):
@@ -4901,11 +4922,10 @@ async def _mines_open_cell_wrapper(update, context):
     uid = query.from_user.id
     ctx = context.bot_data.get("ctx")
     redis_key = f"mines_game:{uid}"
-    state_json = await ctx.redis.get(redis_key)
-    if not state_json:
+    state = await _mines_state_get(ctx, uid)
+    if not state:
         await query.answer("Игра не найдена. Начните новую.", show_alert=True)
         return
-    state = json.loads(state_json)
     await _mines_open_cell(update, context, state, redis_key, uid, ctx)
 
 async def _mines_cashout_wrapper(update, context):
@@ -4913,15 +4933,14 @@ async def _mines_cashout_wrapper(update, context):
     uid = query.from_user.id
     ctx = context.bot_data.get("ctx")
     redis_key = f"mines_game:{uid}"
-    state_json = await ctx.redis.get(redis_key)
-    if not state_json:
+    state = await _mines_state_get(ctx, uid)
+    if not state:
         await query.answer("Игра не найдена.", show_alert=True)
         return
-    state = json.loads(state_json)
     await _mines_cashout(update, context, state, redis_key, uid, ctx)
 
     state["status"] = "cashed_out"
-    await ctx.redis.setex(redis_key, 3600, json.dumps(state))
+    await _mines_state_set(ctx, uid, state)
     await _mines_show_field(update, context, state, redis_key, uid, ctx)
 
 
