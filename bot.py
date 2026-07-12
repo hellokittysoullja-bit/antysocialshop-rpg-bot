@@ -6215,9 +6215,9 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
         # Приветствие и гильдия (пункты 1, 2, 3 — возвращены к оригиналу)
         lines.append(f"⚔️ С возвращением в <b>Гильдию, {rank_display} {display_name}</b>")
         if guild == "BLACK":
-            lines.append("🔮 Ты — часть <b>Темной Гильдии. 🕯️Ритуалы ждут тебя</b>")
+            lines.append("🔮 Ты — часть <b>Темной Гильдии. 🕯️ Ритуалы ждут тебя</b>")
         elif guild == "WHITE":
-            lines.append("🪽 Ты — часть <b>Светлой Гильдии. ⚜️Исповедь очищает душу и ждёт тебя</b>")
+            lines.append("🪽 Ты — часть <b>Светлой Гильдии. ⚜️ Исповедь очищает душу и ждёт тебя</b>")
         else:
             lines.append("<b>🕯️⚜️ Ты ещё не ВЫБРАЛ сторону!</b>")
             lines.append("🔮 Гильдия откроет <b>ритуалы, исповеди и войну</b>")
@@ -6327,9 +6327,9 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
         bar = "▰" * done + "▱" * (total - done)
         remaining = total - done
         if remaining == 1:
-            task_label = f"🔥 Задания {bar} {done}/{total} · остался 1 шаг!"
+            task_label = f"🔥 Задания {bar} {done}/{total} · остался 1 шаг! ›"
         else:
-            task_label = f"📋 Задания {bar} {done}/{total}"
+            task_label = f"📋 Задания {bar} {done}/{total} ›"
         keyboard.append([InlineKeyboardButton(task_label, callback_data="daily_quest_hub")])
     else:
         keyboard.append([_farm_btn()])
