@@ -2831,7 +2831,11 @@ async def handle_named_name(update, context):
                     f"💎 Этот блант навсегда останется в твоей коллекции!"
                 )
                 
-                await update.message.reply_text(caption,parse_mode='HTML')
+                await update.message.reply_text(caption, parse_mode='HTML',
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("💍 Мои бланты", callback_data="my_blunts")],
+                        [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+                    ]))
                 context.user_data.pop('awaiting_named_blunt', None)
                 return
 
@@ -2852,7 +2856,13 @@ async def handle_named_name(update, context):
             return
         status, data = result[0], result[1] if len(result) > 1 else None
         if status == "no_money":
-            await update.message.reply_text(f"<b>🔮 ИСКАЖЕНИЕ МОЛЧИТ</b>\n\n<i>🛡️ Недостаточно OAC.</i>\n🕯️ Требуется <b>{GAME_CONFIG['named_blunt_cost']} OAC 🍬</b>.")
+            await update.message.reply_text(
+                f"<b>🔮 ИСКАЖЕНИЕ МОЛЧИТ</b>\n\n<i>🛡️ Недостаточно OAC.</i>\n🕯️ Требуется <b>{GAME_CONFIG['named_blunt_cost']} OAC 🍬</b>.",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🍬 Фармить", callback_data="farm")],
+                    [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+                ]))
             return
 
         item = data
@@ -5706,7 +5716,12 @@ async def handle_gift_username(update: Update, context: ContextTypes.DEFAULT_TYP
     await ctx.repo.save(player)
     await ctx.repo.save(target_player)
 
-    await update.message.reply_text(f"✅ Блант «{item.get('name')}» подарен @{target_username}!")
+    await update.message.reply_text(
+        f"✅ Блант «{item.get('name')}» подарен @{target_username}!",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("💍 Мои бланты", callback_data="my_blunts")],
+            [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+        ]))
     context.user_data.pop('gifting_blunt_id', None)
 
 # ============================================================
@@ -5781,7 +5796,11 @@ async def pet_buy_dog_handler(update, context, ctx):
 async def pet_name_skip_handler(update, context, ctx):
     query = update.callback_query
     context.user_data.pop('awaiting_pet_name', None)
-    await query.message.edit_text("🐕 Хорошо, твой питомец будет просто Песиком!")
+    await query.message.edit_text("🐕 Хорошо, твой питомец будет просто Песиком!",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🐾 Питомец", callback_data="pet_preview")],
+            [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+        ]))
 
 async def handle_pet_name(update, context):
     ctx = context.bot_data.get("ctx")
@@ -5798,9 +5817,15 @@ async def handle_pet_name(update, context):
     uid = update.effective_user.id
     success = await ctx.pet_service.set_name(uid, name)
     if not success:
-        await update.message.reply_text("Ошибка сохранения имени.")
+        await update.message.reply_text("Ошибка сохранения имени.",
+            reply_markup=get_back_to_menu_keyboard())
     else:
-        await update.message.reply_text(f"Отлично! Теперь твоего питомца зовут «{name}»! 🐕")
+        await update.message.reply_text(
+            f"Отлично! Теперь твоего питомца зовут «{name}»! 🐕",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🐾 Питомец", callback_data="pet_preview")],
+                [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+            ]))
     context.user_data.pop('awaiting_pet_name', None)
 
 async def pet_locked_handler(update, context):
