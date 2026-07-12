@@ -6686,7 +6686,11 @@ async def handle_quest_action(update, context):
     elif action == "craft":
         await handle_craft_normal_v2(update, context)
     elif action == "smoke":
+        # do_smoke рисует результат НА МЕСТЕ и со своей навигацией
+        # ([Дунуть ещё][Меню]). Ре-рендер хаба ниже затёр бы его — дофаминовый
+        # пик «дунуть» из хаба заданий пропадал. Отдаём экран действию.
         await do_smoke(update, context)
+        return
     elif action == "ritual":
         if player.guild == "BLACK":
             await ritual_callback(update, context)
