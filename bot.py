@@ -6304,9 +6304,10 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
     if not reward_claimed and total > 0 and done == total:
         keyboard.append([InlineKeyboardButton("🎁 Забрать награду!", callback_data="claim_reward")])
     elif not reward_claimed and hero_task is not None:
+        # ── ДВА КОМПЛЕМЕНТАРНЫХ ЭЛЕМЕНТА (как Continue+прогресс у топ-студий) ──
+        # 1) ГЕРОЙ — прямое лучшее действие (минус трение до дофамина, «one tap
+        #    to fun»). Совпадает со счётчиком (берётся из задач главы).
         hkey = hero_task["key"]
-        # фарм-задача на кулдауне → предложи СЛЕДУЮЩУЮ задачу главы (не случайное
-        # действие), чтобы герой всегда двигал счётчик и не вёл в кулдаун-тупик.
         if hkey == "farm" and not farm_ready:
             alt = next((t for t in filtered_tasks
                         if not progress.get(t["key"]) and t["key"] != "farm"), None)
@@ -6314,13 +6315,22 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
                 hkey = alt["key"]
         hlabel, hcb = QUEST_HERO_ACTIONS.get(hkey, ("📋 Задания дня", "daily_quest_hub"))
         if hkey == "farm":
-            # у фарма богатый лейбл (Happy Hour / таймер) — сохраняем его
-            keyboard.append([InlineKeyboardButton(f"{farm_label} · {done}/{total} ›", callback_data="farm")])
+            keyboard.append([InlineKeyboardButton(f"{farm_label} →", callback_data="farm")])
             featured_cb = "farm"
         else:
-            keyboard.append([InlineKeyboardButton(f"{hlabel} · {done}/{total} ›", callback_data=hcb)])
+            keyboard.append([InlineKeyboardButton(f"{hlabel} →", callback_data=hcb)])
             if hcb in ("craft", "smoke"):
                 featured_cb = hcb
+        # 2) ЗЕЙГАРНИК — визуальная сегментная шкала (незакрытые ▱ создают тягу
+        #    достроить) + вход в полный чек-лист в ОДИН тап. Near-done →
+        #    goal-gradient: у самой цели тяга максимальна («финальный рывок»).
+        bar = "▰" * done + "▱" * (total - done)
+        remaining = total - done
+        if remaining == 1:
+            task_label = f"🔥 Задания {bar} {done}/{total} · остался 1 шаг!"
+        else:
+            task_label = f"📋 Задания {bar} {done}/{total}"
+        keyboard.append([InlineKeyboardButton(task_label, callback_data="daily_quest_hub")])
     else:
         keyboard.append([_farm_btn()])
         featured_cb = "farm"
