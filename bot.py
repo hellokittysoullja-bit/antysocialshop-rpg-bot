@@ -6140,6 +6140,21 @@ def _happy_hour_banner(ctx, now):
             f"<b>Все действия ×{HAPPY_HOUR_MULTIPLIER} OAC 🍬.</b> {tail}")
 
 
+# Ключ задания квеста → (лейбл, callback) для геройской кнопки. Гарантирует,
+# что действие героя совпадает со счётчиком N/M (действие двигает прогресс).
+QUEST_HERO_ACTIONS = {
+    "farm":   ("🍬 Фармить", "farm"),
+    "craft":  ("🌿 Крафтить", "craft"),
+    "smoke":  ("💨 Дунуть", "smoke"),
+    "ritual": ("🕯️ Ритуал", "ritual"),
+    "repent": ("⚜️ Исповедь", "repent"),
+    "donate": ("💎 Пожертвовать", "guild_shrine"),
+    "lab":    ("🏛️ Лабиринт", "lab_start"),
+    "pet":    ("🐾 Покормить питомца", "pet_preview"),
+    "train":  ("⚔️ Тренировка", "train"),
+}
+
+
 async def build_main_menu(player, ctx, context=None, full_mode=False):
     now = datetime.now()
     guild = player.guild
@@ -6167,8 +6182,13 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
             filtered_tasks.append(task)
         total = len(filtered_tasks)
         done = sum(1 for task in filtered_tasks if progress.get(task["key"], False))
+        # Геройская кнопка берётся из ЭТИХ ЖЕ задач (не из get_next_action с
+        # захардкоженным списком) — иначе в главе 2+ герой предлагал «Фармить»,
+        # которого нет в задачах главы, и счётчик N/M не двигался после действия.
+        hero_task = next((t for t in filtered_tasks if not progress.get(t["key"])), None)
     else:
         total = 0
+        hero_task = None
         done = 0
 
     reward_claimed = progress.get("reward_claimed", False)
@@ -6283,18 +6303,24 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
     featured_cb = None   # действие, поднятое в героя — убираем его из row2 (без дублей)
     if not reward_claimed and total > 0 and done == total:
         keyboard.append([InlineKeyboardButton("🎁 Забрать награду!", callback_data="claim_reward")])
-    elif not reward_claimed and total > 0:
-        hero_txt, hero_cb, _ = get_next_action(player)
-        if hero_cb == "farm" and not farm_ready:
-            hero_txt, hero_cb = "🌿 Крафтить", "craft"   # не веди в кулдаун-тупик
-        if hero_cb == "farm":
-            # у фарма богатый лейбл (Happy Hour) — сохраняем его
+    elif not reward_claimed and hero_task is not None:
+        hkey = hero_task["key"]
+        # фарм-задача на кулдауне → предложи СЛЕДУЮЩУЮ задачу главы (не случайное
+        # действие), чтобы герой всегда двигал счётчик и не вёл в кулдаун-тупик.
+        if hkey == "farm" and not farm_ready:
+            alt = next((t for t in filtered_tasks
+                        if not progress.get(t["key"]) and t["key"] != "farm"), None)
+            if alt:
+                hkey = alt["key"]
+        hlabel, hcb = QUEST_HERO_ACTIONS.get(hkey, ("📋 Задания дня", "daily_quest_hub"))
+        if hkey == "farm":
+            # у фарма богатый лейбл (Happy Hour / таймер) — сохраняем его
             keyboard.append([InlineKeyboardButton(f"{farm_label} · {done}/{total} ›", callback_data="farm")])
             featured_cb = "farm"
         else:
-            keyboard.append([InlineKeyboardButton(f"{hero_txt} · {done}/{total} ›", callback_data=hero_cb)])
-            if hero_cb in ("craft", "smoke"):
-                featured_cb = hero_cb
+            keyboard.append([InlineKeyboardButton(f"{hlabel} · {done}/{total} ›", callback_data=hcb)])
+            if hcb in ("craft", "smoke"):
+                featured_cb = hcb
     else:
         keyboard.append([_farm_btn()])
         featured_cb = "farm"
