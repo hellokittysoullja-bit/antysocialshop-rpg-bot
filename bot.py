@@ -7768,19 +7768,32 @@ async def keep_db_alive(ctx: AppContext):
         logger.error(f"keep_db_alive failed: {e}")
 
 
-def _reengagement_text(last_farm, login_streak, last_login_date, now, farm_cooldown):
+def _reengagement_text(last_farm, login_streak, last_login_date, now, farm_cooldown,
+                       passive_level=0, passive_collected=None):
     """Выбирает текст пуш-возврата (или None, если повода нет). Чистая функция.
 
-    Приоритет: серия под угрозой (вечером) > созревший фарм.
+    Каждый триггер — честная лосс-авёрсия (страх потерять конкретное):
+    плантация встала на пределе > серия под угрозой > созревший фарм.
     """
     streak = login_streak or 0
     logged_today = (last_login_date is not None
                     and str(last_login_date) == now.date().isoformat())
-    # Серия под угрозой: есть серия, сегодня не заходил, уже вечер
+
+    # Приоритет 1: плантация уперлась в потолок — РОСТ встал (честно: урожай не
+    # пропадает, но пока не соберёшь, империя простаивает = потеря времени роста).
+    if passive_level and passive_collected:
+        earned, _hrs, capped = _plant_pending(passive_level, passive_collected, now)
+        if capped and earned > 0:
+            return (f"🌾 <b>Плантация достигла предела!</b>\n"
+                    f"<b>{earned} OAC</b> простаивают, а рост встал. Собери урожай — "
+                    f"и империя снова заработает на тебя.")
+
+    # Приоритет 2: серия под угрозой (есть серия, сегодня не заходил, уже вечер)
     if streak >= 2 and not logged_today and now.hour >= 18:
         return (f"🔥 <b>Твоя серия входов ({streak} дн.) сгорит в полночь!</b>\n"
                 f"Загляни в игру, чтобы сохранить её и забрать награду дня.")
-    # Фарм созрел
+
+    # Приоритет 3: фарм созрел
     if last_farm and (now - last_farm) >= farm_cooldown:
         return ("🍬 <b>Грядка созрела!</b>\n"
                 "Твои OAC ждут сбора — вернись и продолжи путь. 🌿")
@@ -7808,7 +7821,8 @@ async def reengagement_push(ctx: AppContext) -> None:
     try:
         async with ctx.db_pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT user_id, last_farm, login_streak, last_login_date "
+                "SELECT user_id, last_farm, login_streak, last_login_date, "
+                "passive_level, passive_collected "
                 "FROM players "
                 "WHERE last_farm IS NOT NULL AND last_farm BETWEEN $1 AND $2",
                 active_window, drift_min,
@@ -7833,6 +7847,7 @@ async def reengagement_push(ctx: AppContext) -> None:
             text = _reengagement_text(
                 row["last_farm"], row["login_streak"],
                 row["last_login_date"], now, farm_cd,
+                row["passive_level"], row["passive_collected"],
             )
             if not text:
                 continue

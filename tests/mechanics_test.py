@@ -155,7 +155,15 @@ def test_pure(passed):
     assert "Грядка" in _reengagement_text(old_farm_morning, 3, None, morning, cd)
     # нет повода: фарм не готов, серии нет
     assert _reengagement_text(fresh_farm, 0, None, morning, cd) is None
-    passed.append("_reengagement_text: серия/фарм/пусто по приоритету")
+    # плантация на пределе — высший приоритет (лосс-авёрсия на конкретном OAC)
+    capped = _reengagement_text(fresh_farm, 5, morning.date().isoformat(), morning, cd,
+                                passive_level=3, passive_collected=morning - timedelta(hours=20))
+    assert capped and "Плантация" in capped and "OAC" in capped
+    # плантация ещё не на пределе → не триггерит (нет ложного повода)
+    not_capped = _reengagement_text(fresh_farm, 0, morning.date().isoformat(), morning, cd,
+                                    passive_level=3, passive_collected=morning - timedelta(hours=1))
+    assert not_capped is None
+    passed.append("_reengagement_text: плантация/серия/фарм/пусто по приоритету")
 
     # --- грейс-фарм: первые фармы без кулдауна, потом кулдаун действует ---
     now2 = datetime(2026, 1, 1, 12, 0)
