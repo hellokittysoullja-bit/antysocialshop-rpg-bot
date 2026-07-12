@@ -1755,24 +1755,38 @@ async def edit_or_reply(update, context, text, reply_markup=None, parse_mode='HT
         except Exception:
             pass
 
-async def animate_progress_bar(update, context, title="", duration=0.6, steps=4):
+async def animate_progress_bar(update, context, title="", duration=0.6, steps=4, in_place=False):
     """
     Быстрая и надёжная анимация прогресс-бара.
     - duration: общее время анимации в секундах (рекомендуется 0.4–0.8).
     - steps: количество кадров (3–5). Чем меньше шагов, тем меньше запросов.
+    - in_place: редактировать сообщение с кнопкой (чистая единая поверхность,
+      без орфан-меню), а не слать новое. Требует, чтобы экран-результат нёс
+      свои кнопки навигации — иначе тупик. Фолбэк на новое сообщение, если
+      редактирование невозможно (команда/фото/старое сообщение).
     Возвращает None, если не удалось отправить даже первое сообщение.
     """
     chat_id = update.effective_chat.id
     title_text = f"<b>{title}</b>" if title else ""
+    first_frame = f"{title_text}\n[░░░░░░░░░░] 0%"
 
-    try:
-        msg = await context.bot.send_message(
-            chat_id=chat_id,
-            text=f"{title_text}\n[░░░░░░░░░░] 0%",
-            parse_mode='HTML'
-        )
-    except Exception:
-        return None
+    msg = None
+    query = update.callback_query
+    if in_place and query and query.message:
+        try:
+            await query.message.edit_text(first_frame, parse_mode='HTML')
+            msg = query.message
+        except Exception:
+            msg = None
+    if msg is None:
+        try:
+            msg = await context.bot.send_message(
+                chat_id=chat_id,
+                text=first_frame,
+                parse_mode='HTML'
+            )
+        except Exception:
+            return None
 
     step_delay = duration / steps
     for i in range(1, steps + 1):
@@ -2525,15 +2539,27 @@ async def farm_callback_v2(update, context, ctx, player):
     target = get_medal_target(new_count, FARM_MEDALS)
     text = _format_farm_message(earned, crit, happy, medal_text, new_count, target, new_balance)
 
-    anim_msg = await animate_progress_bar(update, context, title="🍬 Фармим...")
+    # Экран-результат несёт свою навигацию → анимация редактирует меню на месте
+    # (единая чистая поверхность, без орфан-меню). Кнопка «ещё» знает кулдаун.
+    farm_ready_next = not _farm_on_cooldown(new_count, now, now)
+    again_btn = (InlineKeyboardButton("🍬 Фармить ещё", callback_data="farm")
+                 if farm_ready_next
+                 else InlineKeyboardButton(f"🍬 Грядка зреет · {int(FARM_COOLDOWN_HOURS*60)}м",
+                                           callback_data="farm"))
+    result_kb = InlineKeyboardMarkup([
+        [again_btn, InlineKeyboardButton("🌿 Крафт", callback_data="craft")],
+        [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+    ])
+    anim_msg = await animate_progress_bar(update, context, title="🍬 Фармим...", in_place=True)
     if anim_msg is not None:
-        await anim_msg.edit_text(text, parse_mode='HTML')
+        await anim_msg.edit_text(text, parse_mode='HTML', reply_markup=result_kb)
     else:
         await safe_send_message(
             context,
             update.effective_chat.id,
             text,
-            parse_mode='HTML'
+            parse_mode='HTML',
+            reply_markup=result_kb,
         )
 
     asyncio.create_task(check_achievements(uid, context))
