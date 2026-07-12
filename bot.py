@@ -6275,26 +6275,40 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
     if player.onboarding_step != -1:
         keyboard.append([InlineKeyboardButton("✨ Все возможности ›", callback_data="all_features")])
 
-    farm_in_cta = False
-    if not reward_claimed and total > 0:
-        if done == total:
-            keyboard.append([InlineKeyboardButton("🎁 Забрать награду!", callback_data="claim_reward")])
+    # ЕДИНАЯ ГЕРОЙСКАЯ КНОПКА: один бесспорный следующий ход наверху меню.
+    # Снимает «проблему первого решения» (закон Хика) → привычка без трения,
+    # «one tap to fun». Раньше при незакрытых заданиях верхняя кнопка была
+    # прогресс-баром «⚠️ Задания N/M», ведущим в СПИСОК (ещё одно решение);
+    # теперь это ПРЯМОЕ лучшее действие + счётчик дня (эффект Зейгарник).
+    featured_cb = None   # действие, поднятое в героя — убираем его из row2 (без дублей)
+    if not reward_claimed and total > 0 and done == total:
+        keyboard.append([InlineKeyboardButton("🎁 Забрать награду!", callback_data="claim_reward")])
+    elif not reward_claimed and total > 0:
+        hero_txt, hero_cb, _ = get_next_action(player)
+        if hero_cb == "farm" and not farm_ready:
+            hero_txt, hero_cb = "🌿 Крафтить", "craft"   # не веди в кулдаун-тупик
+        if hero_cb == "farm":
+            # у фарма богатый лейбл (Happy Hour) — сохраняем его
+            keyboard.append([InlineKeyboardButton(f"{farm_label} · {done}/{total} ›", callback_data="farm")])
+            featured_cb = "farm"
         else:
-            bar_filled = done
-            bar_empty = total - done
-            bar_text = "⚠️ Задания " + "▰" * bar_filled + "▱" * bar_empty + f" {done}/{total}"
-            keyboard.append([InlineKeyboardButton(bar_text, callback_data="daily_quest_hub")])
+            keyboard.append([InlineKeyboardButton(f"{hero_txt} · {done}/{total} ›", callback_data=hero_cb)])
+            if hero_cb in ("craft", "smoke"):
+                featured_cb = hero_cb
     else:
         keyboard.append([_farm_btn()])
-        farm_in_cta = True
+        featured_cb = "farm"
 
-    # Вторая строка: фарм включаем только если его НЕТ в первой строке —
-    # иначе «🍬 Фармить» дублировалась бы двумя одинаковыми кнопками подряд.
-    row2 = ([] if farm_in_cta else [_farm_btn()]) + [
-        InlineKeyboardButton("🌿 Крафт ›", callback_data="craft"),
-        InlineKeyboardButton("💨 Дунуть", callback_data="smoke"),
-    ]
-    keyboard.append(row2)
+    # Вторая строка: стандартные действия, минус вынесенное в героя (без дублей).
+    row2 = []
+    if featured_cb != "farm":
+        row2.append(_farm_btn())
+    if featured_cb != "craft":
+        row2.append(InlineKeyboardButton("🌿 Крафт ›", callback_data="craft"))
+    if featured_cb != "smoke":
+        row2.append(InlineKeyboardButton("💨 Дунуть", callback_data="smoke"))
+    if row2:
+        keyboard.append(row2)
 
     # ===== АДАПТИВНАЯ КНОПКА ГИЛЬДИИ =====
     if guild:
@@ -6525,10 +6539,15 @@ async def progress_hub_handler(update, context, ctx):
              InlineKeyboardButton("🏆 Достижения", callback_data="achievements_menu"),
              InlineKeyboardButton("🏅 Лидеры", callback_data="top")]
         ]
-        
+
+        # Полный интерактивный чек-лист заданий дня переехал сюда, в свой
+        # логичный дом (Прогресс), когда меню получило единую геройскую кнопку.
+        # Так планировщики/завершители не теряют «увидеть все задачи разом».
         if done == total and not progress.get("reward_claimed"):
             kb_rows.insert(0, [InlineKeyboardButton("🎁 Забрать награду!", callback_data="claim_reward")])
-        
+        else:
+            kb_rows.insert(0, [InlineKeyboardButton(f"📋 Задания дня · {done}/{total}", callback_data="daily_quest_hub")])
+
         kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="menu")])
         kb = InlineKeyboardMarkup(kb_rows)
 
