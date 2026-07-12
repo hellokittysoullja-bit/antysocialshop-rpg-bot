@@ -6213,7 +6213,9 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
         rank_display = f"{rank_emoji} {rank_name}" if rank_name else rank_emoji
 
         # Приветствие и гильдия (пункты 1, 2, 3 — возвращены к оригиналу)
-        lines.append(f"⚔️ С возвращением в <b>Гильдию, {rank_display} {display_name}</b>")
+        # Ведущий значок — нейтральный 🏰 (замок Гильдии), а не ⚔️: у ранга
+        # Ветеран эмодзи тоже ⚔️ → раньше в строке было двойное ⚔️⚔️. Слова те же.
+        lines.append(f"🏰 С возвращением в <b>Гильдию, {rank_display} {display_name}</b>")
         if guild == "BLACK":
             lines.append("🔮 Ты — часть <b>Темной Гильдии. 🕯️ Ритуалы ждут тебя</b>")
         elif guild == "WHITE":
