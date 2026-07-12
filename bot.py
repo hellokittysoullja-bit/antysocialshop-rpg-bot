@@ -1538,9 +1538,12 @@ async def process_daily_login(user_id: int, context) -> None:
                     p.titles = reward.title
 
         # Предметы (только blunts, остальное — просто текст в сообщении)
+        # Начисляем ЛЮБОЕ реальное поле Player (не только blunts) — иначе
+        # награда, показанная в сообщении, молча не начислялась бы (как было с
+        # фантомными focus/lives). hasattr-гард отсекает несуществующее.
         for field, qty in reward.inventory_items.items():
-            if field == "blunts":
-                p.blunts += qty
+            if hasattr(p, field):
+                setattr(p, field, (getattr(p, field, 0) or 0) + qty)
         return True
 
     result = await ctx.repo.atomic_update(user_id, _apply_daily)
@@ -2152,10 +2155,12 @@ class StreakConfig:
     random_bonus_chance: float = 0.2
 
     random_bonus_weights: Dict[str, float] = field(default_factory=lambda: {
-        "extra_oac": 0.4,
-        "blunt": 0.3,
-        "focus": 0.2,
-        "life": 0.1
+        # Только реально существующие награды. Раньше тут были «focus»/«life»,
+        # которых нет ни полем в Player, ни механикой: сообщение обещало «+1
+        # Фокус/жизнь», а начислялись только бланты → ~30% дневных бонусов были
+        # фантомом (обман дофаминовой петли). Их доля перераспределена в реальное.
+        "extra_oac": 0.6,
+        "blunt": 0.4,
     })
     extra_oac_range: tuple = (5, 20)
 
@@ -2168,16 +2173,13 @@ class StreakConfig:
         "🔮": "🎁 Бонус 14-го дня:\n🎉 Разблокирован Титул: 🔮 «Хранитель Хрустального Шара» 💎"
     })
 
-    # Маппинг item (из конфига) → поле модели и читаемое имя
+    # Маппинг item (из конфига) → поле модели и читаемое имя. Только реальные
+    # поля Player (focus/lives убраны — их не существует).
     item_to_field: Dict[str, str] = field(default_factory=lambda: {
         "blunt": "blunts",
-        "focus": "focus",
-        "life": "lives"
     })
     item_display_names: Dict[str, str] = field(default_factory=lambda: {
         "blunts": "+1 блант",
-        "focus": "+1 Фокус",
-        "lives": "+1 жизнь"
     })
 
 

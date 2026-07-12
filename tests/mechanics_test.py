@@ -81,6 +81,21 @@ def test_pure(passed):
     assert r14.title == "🔮" and r14.total_oac >= int(100 * 1.1)
     passed.append("_calculate_reward: титулы 7/14 и hot-streak множитель")
 
+    # --- анти-фантом: любой предметный бонус стрика ложится на реальное поле
+    #     Player (иначе награда показывается, но не начисляется — как focus/lives) ---
+    _pf = set(Player.model_fields.keys())
+    for _bt in daily_config.random_bonus_weights:
+        if _bt == "extra_oac":
+            continue
+        _fld = daily_config.item_to_field.get(_bt)
+        assert _fld and _fld in _pf, f"стрик-бонус '{_bt}' → поле '{_fld}' не существует в Player (фантом-награда)"
+    # прогон: всё, что реально выпадает, применимо к Player
+    import random as _rnd
+    for _ in range(3000):
+        for _fld in _calculate_reward(_rnd.randint(1, 14), daily_config).inventory_items:
+            assert _fld in _pf, f"стрик выдал несуществующее поле {_fld}"
+    passed.append("Стрик: все предметные бонусы ложатся на реальные поля Player (не фантом)")
+
     # --- множитель мин: 1.0 → 3.0, монотонно, границы точные ---
     assert _calc_multiplier(0) == 1.0
     assert _calc_multiplier(22) == 3.0
