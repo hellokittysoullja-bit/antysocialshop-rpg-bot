@@ -4496,9 +4496,17 @@ async def privilege_callback(update, context):
     await msg.reply_text(text, parse_mode='HTML', reply_markup=get_back_to_menu_keyboard())
 
 async def catalog_callback(update, context):
-    user, msg = get_user_and_msg(update)
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔗 Перейти", url="https://t.me/antysocialshop")]])
-    await msg.reply_text("<b>🕯️ ANTYSOCIALSHOP · КАТАЛОГ</b>", parse_mode='HTML', reply_markup=kb)
+    # Раньше был тупик: только внешняя ссылка, назад в игру — никак (приходилось
+    # писать /menu). Добавлена навигация; экран редактируется на месте.
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔗 Открыть Каталог", url="https://t.me/antysocialshop")],
+        [InlineKeyboardButton("🛒 Магазин", callback_data="shop"),
+         InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+    ])
+    await edit_or_reply(update, context,
+        "<b>🕯️ ANTYSOCIALSHOP · КАТАЛОГ</b>\n\n"
+        "<i>Настоящие артефакты Фабрики ждут по ссылке.</i>",
+        reply_markup=kb)
 
 # ============================================================
 # УДАЧА – полная сеньорская версия
@@ -4508,14 +4516,27 @@ async def catalog_callback(update, context):
 
 # ── Хелперы ─────────────────────────────────────────────────
 async def _notify_user(update, context, text, show_alert=False, reply_markup=None):
+    # Анти-тупик: раньше без reply_markup экран заменялся текстом БЕЗ кнопок →
+    # игрок застревал (Удача/Алхимия/Лабиринт: «Колесо недоступно», «нет OAC»…).
+    # Теперь: (1) show_alert — это попап-предупреждение, экран НЕ трогаем, если
+    # своей клавы нет (игрок остаётся где был); (2) без клавы даём выход в меню.
     if update.callback_query:
         if show_alert:
             await update.callback_query.answer(text, show_alert=True)
-        else:
-            await update.callback_query.answer()
-        await update.callback_query.message.edit_text(text, reply_markup=reply_markup, parse_mode='HTML')
+            if reply_markup is not None:
+                try:
+                    await update.callback_query.message.edit_text(
+                        text, reply_markup=reply_markup, parse_mode='HTML')
+                except Exception:
+                    pass
+            return
+        await update.callback_query.answer()
+        await update.callback_query.message.edit_text(
+            text, reply_markup=reply_markup or get_back_to_menu_keyboard(), parse_mode='HTML')
     else:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=reply_markup, parse_mode='HTML')
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id, text=text,
+            reply_markup=reply_markup or get_back_to_menu_keyboard(), parse_mode='HTML')
 
 def _check_wheel_availability(player, now, cooldown_hours):
     last = player.last_daily
