@@ -6329,9 +6329,9 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
         bar = "▰" * done + "▱" * (total - done)
         remaining = total - done
         if remaining == 1:
-            task_label = f"🔥 Задания {bar} {done}/{total} · остался 1 шаг! ›"
+            task_label = f"🔥 Задания {bar} {done}/{total} · ещё 1! ›"
         else:
-            task_label = f"📋 Задания {bar} {done}/{total} ›"
+            task_label = f"🔥 Задания {bar} {done}/{total} ›"
         keyboard.append([InlineKeyboardButton(task_label, callback_data="daily_quest_hub")])
     else:
         keyboard.append([_farm_btn()])
