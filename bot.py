@@ -1758,24 +1758,38 @@ async def edit_or_reply(update, context, text, reply_markup=None, parse_mode='HT
         except Exception:
             pass
 
-async def animate_progress_bar(update, context, title="", duration=0.6, steps=4):
+async def animate_progress_bar(update, context, title="", duration=0.6, steps=4, in_place=False):
     """
     Быстрая и надёжная анимация прогресс-бара.
     - duration: общее время анимации в секундах (рекомендуется 0.4–0.8).
     - steps: количество кадров (3–5). Чем меньше шагов, тем меньше запросов.
+    - in_place=True: анимация РЕДАКТИРУЕТ нажатый экран вместо нового сообщения
+      («единый живой экран», ноль мёртвых сообщений). Требование: экран-результат
+      обязан нести свою навигацию, иначе тупик. Фолбэк — новое сообщение
+      (команда без callback, фото, слишком старое сообщение).
     Возвращает None, если не удалось отправить даже первое сообщение.
     """
     chat_id = update.effective_chat.id
     title_text = f"<b>{title}</b>" if title else ""
+    first_frame = f"{title_text}\n[░░░░░░░░░░] 0%"
 
-    try:
-        msg = await context.bot.send_message(
-            chat_id=chat_id,
-            text=f"{title_text}\n[░░░░░░░░░░] 0%",
-            parse_mode='HTML'
-        )
-    except Exception:
-        return None
+    msg = None
+    query = update.callback_query
+    if in_place and query and query.message:
+        try:
+            await query.message.edit_text(first_frame, parse_mode='HTML')
+            msg = query.message
+        except Exception:
+            msg = None
+    if msg is None:
+        try:
+            msg = await context.bot.send_message(
+                chat_id=chat_id,
+                text=first_frame,
+                parse_mode='HTML'
+            )
+        except Exception:
+            return None
 
     step_delay = duration / steps
     for i in range(1, steps + 1):
@@ -2513,12 +2527,14 @@ async def farm_callback_v2(update, context, ctx, player):
                 f"💡 <b>Совет:</b> {advice}"
             )
     
-        await safe_send_message(
-            context,
-            update.effective_chat.id,
-            message_text,
-            parse_mode='HTML',
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(btn_text, callback_data=btn_callback)]])
+        # Единый живой экран: кулдаун-подсказка заменяет текущий экран,
+        # а не плодит новое сообщение (fallback внутри edit_or_reply).
+        await edit_or_reply(
+            update, context, message_text,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(btn_text, callback_data=btn_callback)],
+                [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+            ])
         )
         return
 
@@ -2527,15 +2543,27 @@ async def farm_callback_v2(update, context, ctx, player):
     target = get_medal_target(new_count, FARM_MEDALS)
     text = _format_farm_message(earned, crit, happy, medal_text, new_count, target, new_balance)
 
-    anim_msg = await animate_progress_bar(update, context, title="🍬 Фармим...")
+    # Экран-результат обязан нести навигацию (единый живой экран).
+    # Кнопка «ещё» знает кулдаун: в грейсе зовёт снова, после — показывает таймер.
+    farm_ready_next = not _farm_on_cooldown(new_count, now, now)
+    again_btn = (InlineKeyboardButton("🍬 Фармить ещё", callback_data="farm")
+                 if farm_ready_next
+                 else InlineKeyboardButton(f"🍬 Грядка зреет · {int(FARM_COOLDOWN_HOURS*60)}м",
+                                           callback_data="farm"))
+    result_kb = InlineKeyboardMarkup([
+        [again_btn, InlineKeyboardButton("🌿 Крафт", callback_data="craft")],
+        [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+    ])
+    anim_msg = await animate_progress_bar(update, context, title="🍬 Фармим...", in_place=True)
     if anim_msg is not None:
-        await anim_msg.edit_text(text, parse_mode='HTML')
+        await anim_msg.edit_text(text, parse_mode='HTML', reply_markup=result_kb)
     else:
         await safe_send_message(
             context,
             update.effective_chat.id,
             text,
-            parse_mode='HTML'
+            parse_mode='HTML',
+            reply_markup=result_kb,
         )
 
     asyncio.create_task(check_achievements(uid, context))
@@ -2688,10 +2716,13 @@ async def handle_craft_normal_v2(update, context, ctx, player):
 
     status, data = result
     if status == CraftStatus.NO_MONEY:
-        await safe_send(context, chat_id,
+        # Единый живой экран: отказ заменяет текущий экран, не плодит новый.
+        await edit_or_reply(update, context,
             f"<b>❌ Недостаточно OAC.</b>\n🕯️ Требуется <b>{GAME_CONFIG['craft_cost']} OAC</b> 🍬.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]]),
-            parse_mode='HTML'
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🍬 Фармить", callback_data="farm")],
+                [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+            ])
         )
         return
 
@@ -2700,12 +2731,13 @@ async def handle_craft_normal_v2(update, context, ctx, player):
     text = _format_normal_craft_message(medal_text, new_count, target, blunts, new_balance)
 
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🌿 Скрафтить ещё", callback_data="craft_normal")],
-        [InlineKeyboardButton("🔙 Назад", callback_data="craft")]
+        [InlineKeyboardButton("🌿 Скрафтить ещё", callback_data="craft_normal"),
+         InlineKeyboardButton("💨 Дунуть", callback_data="smoke")],
+        [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
     ])
 
-    # Элегантная отправка результата без дублирования
-    anim_msg = await animate_progress_bar(update, context, title="🌿 Скручиваем Блант...")
+    # Единый живой экран: анимация и результат редактируют нажатый экран.
+    anim_msg = await animate_progress_bar(update, context, title="🌿 Скручиваем Блант...", in_place=True)
     if anim_msg is not None:
         await anim_msg.edit_text(text, reply_markup=kb, parse_mode='HTML')
     else:
@@ -3368,9 +3400,13 @@ async def ritual_callback(update, context):
     if status == "cooldown":
         hrs, mins = data[0], data[1]
         wait = f"{hrs} ч {mins} мин" if hrs else f"{mins} мин"
-        await safe_send_message(context, update.effective_chat.id,
+        # Единый живой экран: кулдаун заменяет текущий экран, не плодит новый.
+        await edit_or_reply(update, context,
             f"<b>🕯️ Тёмный алтарь истощён 🌙</b>\n\n<b>🗝️ Жди {wait}</b>",
-            parse_mode='HTML')
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🍬 Фармить", callback_data="farm")],
+                [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+            ]))
         return
 
     reward, extra, medal_text, new_count, new_balance = data
@@ -3385,11 +3421,18 @@ async def ritual_callback(update, context):
         f"<b>🕯️ Ритуалы:</b> {new_count}/{target}\n"
         f"<b>{progress_bar_str}</b>"
     )
-    anim_msg = await animate_progress_bar(update, context, title="🕯️ Ритуал проводится...")
+    # Единый живой экран: результат ритуала заменяет экран и несёт навигацию.
+    ritual_kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🏛️ Храм", callback_data="guild_shrine"),
+         InlineKeyboardButton("🏰 Гильдия", callback_data="guild_info")],
+        [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+    ])
+    anim_msg = await animate_progress_bar(update, context, title="🕯️ Ритуал проводится...", in_place=True)
     if anim_msg is not None:
-        await anim_msg.edit_text(text, parse_mode='HTML')
+        await anim_msg.edit_text(text, parse_mode='HTML', reply_markup=ritual_kb)
     else:
-        await safe_send_message(context, update.effective_chat.id, text, parse_mode='HTML')
+        await safe_send_message(context, update.effective_chat.id, text,
+                                parse_mode='HTML', reply_markup=ritual_kb)
 
     await check_achievements(uid, context)
 
@@ -4345,11 +4388,17 @@ async def repent_callback(update, context, ctx):
     status, data = result[0], result[1] if len(result) > 1 else ""
 
     if status == "ok":
-        anim_msg = await animate_progress_bar(update, context, title="🕊️ Исповедь...", duration=0.6, steps=4)
+        # Единый живой экран: исповедь анимируется и завершается на месте.
+        repent_kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🏛️ Храм", callback_data="guild_shrine"),
+             InlineKeyboardButton("🏰 Гильдия", callback_data="guild_info")],
+            [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+        ])
+        anim_msg = await animate_progress_bar(update, context, title="🕊️ Исповедь...", duration=0.6, steps=4, in_place=True)
         if anim_msg is not None:
             await anim_msg.edit_text(
                 data,
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="guild_info")]]),
+                reply_markup=repent_kb,
                 parse_mode='HTML'
             )
         else:
@@ -4357,14 +4406,13 @@ async def repent_callback(update, context, ctx):
             await context.bot.send_message(
                 chat_id=update.effective_chat.id,
                 text=data,
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="guild_info")]]),
+                reply_markup=repent_kb,
                 parse_mode='HTML'
             )
     else:
-        # Ошибки – отправляем новое сообщение
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=data,
+        # Ошибки (кулдаун/не та гильдия/нет блантов) — тоже на месте.
+        await edit_or_reply(
+            update, context, data,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="guild_info")]]),
             parse_mode='HTML'
         )
@@ -6681,26 +6729,28 @@ async def handle_quest_action(update, context):
         await query.answer("Игрок не найден", show_alert=True)
         return
 
+    # Ядро цикла рисует результат НА МЕСТЕ со своей навигацией (единый живой
+    # экран). Ре-рендер хаба ниже затирал бы reveal-награду — поэтому эти
+    # действия владеют экраном и возвращают управление (return).
     if action == "farm":
         await farm_callback_v2(update, context)
+        return
     elif action == "craft":
         await handle_craft_normal_v2(update, context)
+        return
     elif action == "smoke":
-        # do_smoke рисует результат НА МЕСТЕ и со своей навигацией
-        # ([Дунуть ещё][Меню]). Ре-рендер хаба ниже затёр бы его — дофаминовый
-        # пик «дунуть» из хаба заданий пропадал. Отдаём экран действию.
         await do_smoke(update, context)
         return
     elif action == "ritual":
         if player.guild == "BLACK":
             await ritual_callback(update, context)
-        else:
-            await query.answer("Ты не в Тёмной Гильдии", show_alert=True)
+            return
+        await query.answer("Ты не в Тёмной Гильдии", show_alert=True)
     elif action == "repent":
         if player.guild == "WHITE":
             await repent_callback(update, context)
-        else:
-            await query.answer("Ты не в Светлой Гильдии", show_alert=True)
+            return
+        await query.answer("Ты не в Светлой Гильдии", show_alert=True)
     elif action == "train":
         await train_callback(update, context)
     elif action == "pet":
