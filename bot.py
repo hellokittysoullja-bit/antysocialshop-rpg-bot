@@ -2543,17 +2543,24 @@ async def farm_callback_v2(update, context, ctx, player):
     target = get_medal_target(new_count, FARM_MEDALS)
     text = _format_farm_message(earned, crit, happy, medal_text, new_count, target, new_balance)
 
-    # Экран-результат обязан нести навигацию (единый живой экран).
-    # Кнопка «ещё» знает кулдаун: в грейсе зовёт снова, после — показывает таймер.
-    farm_ready_next = not _farm_on_cooldown(new_count, now, now)
-    again_btn = (InlineKeyboardButton("🍬 Фармить ещё", callback_data="farm")
-                 if farm_ready_next
-                 else InlineKeyboardButton(f"🍬 Грядка зреет · {int(FARM_COOLDOWN_HOURS*60)}м",
-                                           callback_data="farm"))
-    result_kb = InlineKeyboardMarkup([
-        [again_btn, InlineKeyboardButton("🌿 Крафт", callback_data="craft")],
-        [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
-    ])
+    # Экран-результат несёт навигацию (единый живой экран). На кулдауне НЕ
+    # показываем «фарм» — это тупик (тап вернёт тот же кулдаун). Вместо этого
+    # уводим в следующий шаг петли (крафт/дунуть), а таймер — в текст. В грейсе
+    # (первые фармы без кулдауна) предлагаем «Фармить ещё» — петля плотная.
+    if not _farm_on_cooldown(new_count, now, now):
+        result_kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🍬 Фармить ещё", callback_data="farm"),
+             InlineKeyboardButton("🌿 Крафт", callback_data="craft")],
+            [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+        ])
+    else:
+        text += (f"\n\n🌱 <i>Грядка зреет — новый фарм через "
+                 f"{int(FARM_COOLDOWN_HOURS*60)} мин. А пока — в дело:</i>")
+        result_kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🌿 Крафт", callback_data="craft"),
+             InlineKeyboardButton("💨 Дунуть", callback_data="smoke")],
+            [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+        ])
     anim_msg = await animate_progress_bar(update, context, title="🍬 Фармим...", in_place=True)
     if anim_msg is not None:
         await anim_msg.edit_text(text, parse_mode='HTML', reply_markup=result_kb)
