@@ -6306,9 +6306,9 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
             # Есть незавершённые задания → прогресс-бар
             remaining = total - done
             if remaining == 1:
-                bar_text = "🔥 Задания ›" + "▰" * done + "▱" * remaining + f" {done}/{total} · ещё 1! ›"
+                bar_text = "🔥 Задания " + "▰" * done + "▱" * remaining + f" {done}/{total} · ещё 1! ›"
             else:
-                bar_text = "⚠️ Задания ›" + "▰" * done + "▱" * remaining + f" {done}/{total}"
+                bar_text = "⚠️ Задания " + "▰" * done + "▱" * remaining + f" {done}/{total} ›"
             keyboard.append([InlineKeyboardButton(bar_text, callback_data="daily_quest_hub")])
     else:
         # Награда уже получена или заданий нет → фарм в первой строке
