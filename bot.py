@@ -6297,32 +6297,23 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
     if player.onboarding_step != -1:
         keyboard.append([InlineKeyboardButton("✨ Все возможности ›", callback_data="all_features")])
 
-    farm_in_cta = False
+    farm_in_cta = False    
     if not reward_claimed and total > 0:
         if done == total:
+            # Все задания выполнены → кнопка "Забрать награду"
             keyboard.append([InlineKeyboardButton("🎁 Забрать награду!", callback_data="claim_reward")])
         else:
-            bar_filled = done
-            bar_empty = total - done
-            bar_text = "⚠️ Задания ›" + "▰" * bar_filled + "▱" * bar_empty + f" {done}/{total}"
+            # Есть незавершённые задания → прогресс-бар
+            remaining = total - done
+            if remaining == 1:
+                bar_text = "🔥 Задания ›" + "▰" * done + "▱" * remaining + f" {done}/{total} · ещё 1! ›"
+            else:
+                bar_text = "⚠️ Задания ›" + "▰" * done + "▱" * remaining + f" {done}/{total}"
             keyboard.append([InlineKeyboardButton(bar_text, callback_data="daily_quest_hub")])
     else:
+        # Награда уже получена или заданий нет → фарм в первой строке
         keyboard.append([_farm_btn()])
         farm_in_cta = True
-
-        # 2) ЗЕЙГАРНИК — визуальная сегментная шкала (незакрытые ▱ создают тягу
-        #    достроить) + вход в полный чек-лист в ОДИН тап. Near-done →
-        #    goal-gradient: у самой цели тяга максимальна («финальный рывок»).
-        bar = "▰" * done + "▱" * (total - done)
-        remaining = total - done
-        if remaining == 1:
-            task_label = f"🔥 Задания {bar} {done}/{total} · ещё 1! ›"
-        else:
-            task_label = f"🔥 Задания {bar} {done}/{total} ›"
-        keyboard.append([InlineKeyboardButton(task_label, callback_data="daily_quest_hub")])
-    else:
-        keyboard.append([_farm_btn()])
-        featured_cb = "farm"
 
     # Вторая строка: фарм включаем только если его НЕТ в первой строке —
     # иначе «🍬 Фармить» дублировалась бы двумя одинаковыми кнопками подряд.
