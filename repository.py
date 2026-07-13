@@ -26,7 +26,7 @@ PLAYER_COLUMNS = (
     "user_id", "username", "balance", "blunts", "guild", "last_farm",
     "last_ritual", "last_repent", "last_daily", "titles", "last_farm_date", "passive_level",
     "passive_collected", "karma", "inhaled", "smoke_count", "farm_count",
-    "craft_count", "ritual_count", "referral_count", "last_berserk",
+    "craft_count", "ritual_count", "referral_count", "last_mines",
     "inventory", "invited_by", "profile_skins", "login_streak",
     "last_login_date", "oath", "keys", "check_count", "m_essence",
     "lab_chests", "lab_deaths", "alchemy_count", "last_lab_attempt",
