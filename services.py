@@ -30,8 +30,8 @@ class WarAction(enum.Enum):
     CRAFT = "craft"
     NAMED_CRAFT = "named_craft"
     DUST_USE = "dust_use"
-    BERSERK_WIN = "berserk_win"
-    BERSERK_LOSE = "berserk_lose"
+    MINES_WIN = "mines_win"
+    MINES_LOSE = "mines_lose"
     ALCHEMY = "alchemy"
     LAB_WIN = "lab_win"
     LAB_DEATH = "lab_death"
@@ -48,8 +48,8 @@ class WarConfig(BaseModel):
         WarAction.CRAFT: 10,
         WarAction.NAMED_CRAFT: 25,
         WarAction.DUST_USE: 50,
-        WarAction.BERSERK_WIN: 200,
-        WarAction.BERSERK_LOSE: -300,
+        WarAction.MINES_WIN: 200,
+        WarAction.MINES_LOSE: -300,
         WarAction.ALCHEMY: 30,
         WarAction.LAB_WIN: 80,
         WarAction.LAB_DEATH: 0,
