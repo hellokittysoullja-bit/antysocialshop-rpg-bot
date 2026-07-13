@@ -237,7 +237,7 @@ class Player(BaseModel):
     ritual_count: int = 0
     repent_count: int = 0
     referral_count: int = 0
-    last_berserk: Optional[datetime] = None
+    last_mines: Optional[datetime] = None
     inventory: List[Any] = Field(default_factory=list)
     invited_by: Optional[int] = None
     profile_skins: dict = Field(default_factory=dict)
@@ -306,7 +306,7 @@ class PlayerRepository:
                 "user_id", "username", "balance", "blunts", "guild", "last_farm",
                 "last_ritual", "last_repent", "last_daily", "titles", "last_farm_date", "passive_level",
                 "passive_collected", "karma", "inhaled", "smoke_count", "farm_count",
-                "craft_count", "ritual_count", "referral_count", "last_berserk",
+                "craft_count", "ritual_count", "referral_count", "last_mines",
                 "inventory", "invited_by", "profile_skins", "login_streak",
                 "last_login_date", "oath", "keys", "check_count", "m_essence",
                 "lab_chests", "lab_deaths", "alchemy_count", "last_lab_attempt",
@@ -351,7 +351,7 @@ class PlayerRepository:
             "user_id", "username", "balance", "blunts", "guild", "last_farm",
             "last_ritual", "last_repent", "last_daily", "titles", "last_farm_date", "passive_level",
             "passive_collected", "karma", "inhaled", "smoke_count", "farm_count",
-            "craft_count", "ritual_count", "referral_count", "last_berserk",
+            "craft_count", "ritual_count", "referral_count", "last_mines",
             "inventory", "invited_by", "profile_skins", "login_streak",
             "last_login_date", "oath", "keys", "check_count", "m_essence",
             "lab_chests", "lab_deaths", "alchemy_count", "last_lab_attempt",
@@ -406,7 +406,7 @@ class PlayerRepository:
                     "user_id", "username", "balance", "blunts", "guild", "last_farm",
                     "last_ritual", "last_repent", "last_daily", "titles", "last_farm_date", "passive_level",
                     "passive_collected", "karma", "inhaled", "smoke_count", "farm_count",
-                    "craft_count", "ritual_count", "referral_count", "last_berserk",
+                    "craft_count", "ritual_count", "referral_count", "last_mines",
                     "inventory", "invited_by", "profile_skins", "login_streak",
                     "last_login_date", "oath", "keys", "check_count", "m_essence",
                     "lab_chests", "lab_deaths", "alchemy_count", "last_lab_attempt",
@@ -554,8 +554,8 @@ class WarAction(enum.Enum):
     CRAFT = "craft"
     NAMED_CRAFT = "named_craft"
     DUST_USE = "dust_use"
-    BERSERK_WIN = "berserk_win"
-    BERSERK_LOSE = "berserk_lose"
+    MINES_WIN = "mines_win"
+    MINES_LOSE = "mines_lose"
     ALCHEMY = "alchemy"
     LAB_WIN = "lab_win"
     LAB_DEATH = "lab_death"
@@ -572,8 +572,8 @@ class WarConfig(BaseModel):
         WarAction.CRAFT: 10,
         WarAction.NAMED_CRAFT: 25,
         WarAction.DUST_USE: 50,
-        WarAction.BERSERK_WIN: 200,
-        WarAction.BERSERK_LOSE: -300,
+        WarAction.MINES_WIN: 200,
+        WarAction.MINES_LOSE: -300,
         WarAction.ALCHEMY: 30,
         WarAction.LAB_WIN: 80,
         WarAction.LAB_DEATH: 0,
@@ -1679,7 +1679,7 @@ async def create_tables(conn):
             craft_count INTEGER DEFAULT 0,
             ritual_count INTEGER DEFAULT 0,
             referral_count INTEGER DEFAULT 0,
-            last_berserk TIMESTAMP,
+            last_mines TIMESTAMP,
             inventory JSONB DEFAULT '[]',
             invited_by BIGINT DEFAULT NULL,
             profile_skins JSONB DEFAULT '{}',
@@ -4500,7 +4500,7 @@ LUCK_CONFIG = {
         ],
         "cooldown_hours": 24,
     },
-    "berserk": {
+    "mines": {
         "cost": 300,          # ставка по умолчанию
         "win_amount": 200,
         "lose_amount": 300,
@@ -4550,17 +4550,17 @@ def _check_wheel_availability(player, now, cooldown_hours):
     return not last_dt or (now - last_dt) >= timedelta(hours=cooldown_hours)
 
 
-def _check_berserk_availability(player, now, cost, cooldown_hours):
+def _check_mines_availability(player, now, cost, cooldown_hours):
     if player.balance < cost:
         return False
-    last = player.last_berserk
+    last = player.last_mines
     if not last:
         return True
     last_dt = _to_datetime(last)
     return not last_dt or (now - last_dt) >= timedelta(hours=cooldown_hours)
 
 
-def _build_luck_keyboard(now, player, cfg, wheel_ok, berserk_ok, alchemy_ok):
+def _build_luck_keyboard(now, player, cfg, wheel_ok, mines_ok, alchemy_ok):
     rows = []
     if wheel_ok:
         rows.append([InlineKeyboardButton("🎡 Крутить", callback_data="luck_wheel")])
@@ -4570,17 +4570,17 @@ def _build_luck_keyboard(now, player, cfg, wheel_ok, berserk_ok, alchemy_ok):
         hrs, mins = _format_remaining(diff)
         rows.append([InlineKeyboardButton(f"🎡 Колесо набирает силу. Ещё {hrs} ч {mins} мин", callback_data="luck_wheel")])
 
-    if berserk_ok:
-        rows.append([InlineKeyboardButton("🍀 Рискнуть", callback_data="luck_berserk")])
+    if mines_ok:
+        rows.append([InlineKeyboardButton("🎰 Мины", callback_data="luck_mines")])
     else:
-        if player.balance < cfg["berserk"]["cost"]:
-            need = cfg["berserk"]["cost"] - player.balance
-            rows.append([InlineKeyboardButton(f"🍀 нужно ещё {need} 🍬", callback_data="luck_berserk")])
+        if player.balance < cfg["mines"]["cost"]:
+            need = cfg["mines"]["cost"] - player.balance
+            rows.append([InlineKeyboardButton(f"🍀 нужно ещё {need} 🍬", callback_data="luck_mines")])
         else:
-            last_dt = _to_datetime(player.last_berserk)
-            diff = timedelta(hours=cfg["berserk"]["cooldown_hours"]) - (now - last_dt)
+            last_dt = _to_datetime(player.last_mines)
+            diff = timedelta(hours=cfg["mines"]["cooldown_hours"]) - (now - last_dt)
             hrs, mins = _format_remaining(diff)
-            rows.append([InlineKeyboardButton(f"🍀 Бездна шепчет всё громче. Жди {hrs} ч {mins} мин", callback_data="luck_berserk")])
+            rows.append([InlineKeyboardButton(f"🍀 Бездна шепчет всё громче. Жди {hrs} ч {mins} мин", callback_data="luck_mines")])
 
     rows.append([InlineKeyboardButton("🔮 Алхимия", callback_data="alchemy_start") if alchemy_ok else InlineKeyboardButton("🔮 Алхимия 🔒", callback_data="alchemy_start")])
     rows.append([InlineKeyboardButton("🏰 В меню", callback_data="menu")])
@@ -4612,13 +4612,13 @@ async def luck_callback(update, context, action=None):
     cfg = LUCK_CONFIG
 
     wheel_ok = _check_wheel_availability(player, now, cfg["wheel"]["cooldown_hours"])
-    berserk_ok = _check_berserk_availability(player, now, cfg["berserk"]["cost"], cfg["berserk"]["cooldown_hours"])
+    mines_ok = _check_mines_availability(player, now, cfg["mines"]["cost"], cfg["mines"]["cooldown_hours"])
     alchemy_ok = player.balance >= cfg["alchemy"]["required_balance"]
 
     if action == "luck_wheel":
         await _process_wheel(update, context, uid, player, cfg, ctx)     
         return
-    if action == "luck_berserk":
+    if action == "luck_mines":
         await _process_mines(update, context, uid, player, cfg, ctx)
         return
     if action == "alchemy_start":
@@ -4633,10 +4633,10 @@ async def luck_callback(update, context, action=None):
         "<b>🍀 УДАЧА</b>\n\n"
         "<i>🌀 «Испытай свою удачу и выиграй OAC 🍬 и редкие эксклюзивные вещи!» 🪽</i>\n\n"
         "🎡 <b>Крутить Колесо</b> — ежедневный выигрыш 🎉\n"
-        "🍀 <b>Рискнуть</b> — бросить вызов и отдать 300 оас ради джекпота 💫\n"
+        "🎰 <b>Мины</b> — бросить вызов 💣 и отдать деньги ради выигрыша 💫\n"
         "⚗️ <b>Алхимия</b> — древнее искусство, магия для достойных 🔮"
     )
-    kb_rows = _build_luck_keyboard(now, player, cfg, wheel_ok, berserk_ok, alchemy_ok)
+    kb_rows = _build_luck_keyboard(now, player, cfg, wheel_ok, mines_ok, alchemy_ok)
     kb = InlineKeyboardMarkup(kb_rows)
     await edit_or_reply(update, context, text, reply_markup=kb, parse_mode='HTML')
 
@@ -4711,7 +4711,7 @@ def _calc_multiplier(step: int) -> float:
     max_step = 22  # всего безопасных клеток (25-3)
     return round(1.0 + (step / max_step) * 2.0, 2)
 
-# Основная функция – замена _process_berserk
+# Основная функция – замена _process_mines
 async def _process_mines(update, context, uid, player, cfg, ctx):
     """
     Запускает игру «Мины» (вместо Берсерка).
@@ -7057,8 +7057,8 @@ async def guild_join_handler(update, context, ctx):
 # ============================================================
 async def luck_wheel_handler(update, context):
     await luck_callback(update, context, action="luck_wheel")
-async def luck_berserk_handler(update, context):
-    await luck_callback(update, context, action="luck_berserk")
+async def luck_mines_handler(update, context):
+    await luck_callback(update, context, action="luck_mines")
 async def alchemy_start_handler(update, context):
     await luck_callback(update, context, action="alchemy_start")
 async def alchemy_confirm_handler(update, context):
@@ -7175,7 +7175,7 @@ EXACT_HANDLERS: Dict[str, Callable] = {
     "lab_focus_use": handle_lab_option,
     "lab_escape": handle_lab_option,
     "luck_wheel": luck_wheel_handler,
-    "luck_berserk": luck_berserk_handler,
+    "luck_mines": luck_mines_handler,
     "mines_cashout": _mines_cashout_wrapper,
     "alchemy_start": alchemy_start_handler,
     "alchemy_confirm": alchemy_confirm_handler,
