@@ -293,7 +293,7 @@ LUCK_CONFIG = {
         ],
         "cooldown_hours": 24,
     },
-    "berserk": {
+    "mines": {
         "cost": 300,          # ставка по умолчанию
         "win_amount": 200,
         "lose_amount": 300,
