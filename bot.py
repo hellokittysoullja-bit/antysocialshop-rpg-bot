@@ -365,7 +365,7 @@ class AchievementService:
                 m = re.search(r"\+(\d+)", clean)
                 if m:
                     amount = int(m.group(1))
-                    player.balance = (player.balance or 0) + amount
+                    player.credit(amount)
             elif part.startswith("Титул "):
                 title = part.replace("Титул ", "").strip()
                 if title:
@@ -893,7 +893,7 @@ class CraftStatus(Enum):
 
 
 async def _run_migrations(conn):
-    """Все миграции, которые необходимо применить перед запуском."""
+    """Все миграции, которые необходимо пр��менить перед запуском."""
     # Добавление столбца war_active в guild_weekly (если его ещё нет)
     await conn.execute("""
         DO $$
@@ -1061,6 +1061,14 @@ async def _run_migrations(conn):
     # кормление питомца не сохранялось. Теперь — настоящие колонки.
     await conn.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS onboarding_step INTEGER DEFAULT 0;")
     await conn.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS pet_hunger INTEGER DEFAULT 100;")
+    # total_earned: пожизненный заработок — метрика рангов/ачивок.
+    # Бэкфилл GREATEST(total_earned, balance) идемпотентен и самолечащийся:
+    # при миграции ни один игрок не теряет ранг (total_earned >= balance).
+    await conn.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS total_earned BIGINT DEFAULT 0;")
+    await conn.execute("""
+        UPDATE players SET total_earned = GREATEST(COALESCE(total_earned, 0), COALESCE(balance, 0))
+        WHERE COALESCE(total_earned, 0) < COALESCE(balance, 0);
+    """)
 
 # ===== ОПТИМИЗАЦИЯ ХРАНЕНИЯ (Render Free Tier) =====
     # JSONB поля — сжатие + хранение вне таблицы при размере > 2KB
@@ -1126,7 +1134,8 @@ async def create_tables(conn):
             lab_deaths INTEGER DEFAULT 0,
             alchemy_count INTEGER DEFAULT 0,
             last_lab_attempt TIMESTAMP,
-            donated INTEGER DEFAULT 0
+            donated INTEGER DEFAULT 0,
+            total_earned BIGINT DEFAULT 0
         )
     """)
     await conn.execute("""
@@ -1524,7 +1533,7 @@ async def process_daily_login(user_id: int, context) -> None:
         if p_date == today:
             return False   # уже начислено другим запросом
 
-        p.balance += reward.total_oac
+        p.credit(reward.total_oac)
         p.login_streak = streak
         p.last_login_date = today
 
@@ -2381,7 +2390,7 @@ def _calculate_farm_reward(player, context) -> tuple[int, bool, bool]:
 
 def _format_farm_message(earned: int, crit: bool, happy: bool,
                          medal_text: str, new_count: int, target: int,
-                         new_balance: int) -> str:
+                         new_balance: int, rank_value: int = None) -> str:
     """Сообщение после фарма – чистая структура, как в крафте."""
     # Крит-эмодзи
     is_mega = crit and earned >= FARM_MAX * 10
@@ -2410,7 +2419,7 @@ def _format_farm_message(earned: int, crit: bool, happy: bool,
 
     # Прогресс-бары
     progress_bar_str = get_medal_progress(new_count, FARM_MEDALS)
-    rank_progress = get_rank_progress(new_balance)
+    rank_progress = get_rank_progress(rank_value if rank_value is not None else new_balance)
 
     # Сборка сообщения
     msg = (
@@ -2443,14 +2452,14 @@ async def farm_callback_v2(update, context, ctx, player):
             remain = math.ceil((timedelta(hours=FARM_COOLDOWN_HOURS) - (now - p.last_farm)).seconds / 60)
             return ("cooldown", remain)
 
-        old_balance = p.balance
+        old_metric = p.rank_metric
         earned, crit, happy = _calculate_farm_reward(p, context)
 
         old_count = p.farm_count
         new_count = old_count + 1
         medal_text, medal_bonus = get_medal_text_and_reward(old_count, new_count, FARM_MEDALS)
 
-        p.balance += earned + medal_bonus
+        p.credit(earned + medal_bonus)
         p.daily_progress = p.daily_progress or {}
         p.daily_progress["farm"] = True
         p.farm_count = new_count
@@ -2460,7 +2469,7 @@ async def farm_callback_v2(update, context, ctx, player):
         if ctx.war_service:
             await ctx.war_service.add_score_raw(uid, earned + medal_bonus, conn)
 
-        return ("ok", earned, crit, happy, medal_text, new_count, p.balance, old_balance)
+        return ("ok", earned, crit, happy, medal_text, new_count, p.balance, old_metric, p.rank_metric)
 
     result = await ctx.repo.atomic_update(uid, _farm)
     if result is None:
@@ -2538,10 +2547,10 @@ async def farm_callback_v2(update, context, ctx, player):
         )
         return
 
-    earned, crit, happy, medal_text, new_count, new_balance, old_balance = data
+    earned, crit, happy, medal_text, new_count, new_balance, old_metric, new_metric = data
 
     target = get_medal_target(new_count, FARM_MEDALS)
-    text = _format_farm_message(earned, crit, happy, medal_text, new_count, target, new_balance)
+    text = _format_farm_message(earned, crit, happy, medal_text, new_count, target, new_balance, new_metric)
 
     # Экран-результат несёт навигацию (единый живой экран). На кулдауне НЕ
     # показываем «фарм» — это тупик (тап вернёт тот же кулдаун). Вместо этого
@@ -2574,7 +2583,7 @@ async def farm_callback_v2(update, context, ctx, player):
         )
 
     asyncio.create_task(check_achievements(uid, context))
-    asyncio.create_task(check_rank_up(context, uid, uname, old_balance, new_balance))
+    asyncio.create_task(check_rank_up(context, uid, uname, old_metric, new_metric))
 
     if player.onboarding_step == 1:
         player.onboarding_step = 2
@@ -2705,7 +2714,7 @@ async def handle_craft_normal_v2(update, context, ctx, player):
         if random.random() < 0.05:
             p.blunts += 1
 
-        p.balance += medal_bonus
+        p.credit(medal_bonus)
 
         # Безопасное начисление очков войны
         if ctx.war_service:
@@ -3107,7 +3116,7 @@ async def onboarding_reward(update, context, ctx, player):
     query = update.callback_query
     await query.answer()
     async def _reward(p, conn):
-        p.balance += 30
+        p.credit(30)
         p.blunts += 1
         return ("ok", p.balance, p.blunts)
     result = await ctx.repo.atomic_update(query.from_user.id, _reward)
@@ -3212,7 +3221,7 @@ async def gift_blunt_start(update, context, ctx, player):
         elapsed = time.time() - (fomo_start or 0)
         if elapsed <= 300:
             async def _add_fomo_bonus(p, conn):
-                p.balance += 10
+                p.credit(10)
                 return p
             await ctx.repo.atomic_update(uid, _add_fomo_bonus)
             await context.bot.send_message(uid, "✅ Бонус +10 OAC за скорость начислен!")
@@ -3235,7 +3244,7 @@ async def gift_blunt_start(update, context, ctx, player):
     sent_msg = await context.bot.send_message(
         chat_id=chat_id,
         text=(
-            "🎁 <b>ПОДАРИТЬ БЛАНТ</b>\n\n"
+            "🎁 <b>ПОДАР��ТЬ БЛАНТ</b>\n\n"
             "Введи <b>@username</b> или <b>числовой ID</b> игрока.\n"
             "Для отмены нажми кнопку ниже."
         ),
@@ -3395,7 +3404,7 @@ async def ritual_callback(update, context):
         new_count = old_count + 1
         medal_text, medal_bonus = get_medal_text_and_reward(old_count, new_count, RITUAL_MEDALS)
 
-        player.balance += reward + extra + medal_bonus
+        player.credit(reward + extra + medal_bonus)
         player.daily_progress = player.daily_progress or {}
         player.daily_progress["guild_action"] = True
         player.daily_progress["ritual"] = True
@@ -3469,7 +3478,7 @@ def _plant_rate(level: int) -> int:
 
 
 def _plant_upgrade_cost(level: int) -> int:
-    """Стоимость апгрейда с текущего level на level+1 (растущая кривая = сток экономики)."""
+    """Стоимость апгрейда с текущего level на level+1 (растущая кр��вая = сток экономики)."""
     return 150 * (level + 1) * (level + 1)
 
 
@@ -3581,7 +3590,7 @@ async def plant_harvest_handler(update, context, ctx):
             earned *= HAPPY_HOUR_MULTIPLIER
         if earned < 1:
             return ("not_ready",)
-        p.balance += earned
+        p.credit(earned)
         p.passive_collected = now
         if ctx.war_service:
             await ctx.war_service.add_score_raw(uid, earned, conn)
@@ -3613,7 +3622,7 @@ async def plant_upgrade_handler(update, context, ctx):
             return ("no_money", cost)
         # Сначала собираем накопленное по старой ставке (честно), потом апаем
         pending, _h, _c = _plant_pending(level, _to_datetime(p.passive_collected), now)
-        p.balance += pending
+        p.credit(pending)
         p.balance -= cost
         p.passive_level = level + 1
         p.passive_collected = now
@@ -3813,7 +3822,7 @@ def _build_codex_header(named):
     # Аспирация: чего не хватает до вершины (Зейгарник — тянет закрыть пробел).
     if counts.get("legendary", 0) == 0:
         lines.append("\n✨ <i>Легендарного пока нет — 2% с крафта или 🎰 джекпот дыма. "
-                     "Скрути его и войди в легенды Гильдии.</i>")
+                     "Скрути его и войди в легенды Гил��дии.</i>")
     elif counts.get("epic", 0) == 0:
         lines.append("\n✨ <i>Нет Эпического — 13% с крафта. Коллекция ждёт печать искажения.</i>")
     lines.append("")
@@ -4321,7 +4330,7 @@ async def guild_war_callback(update, context):
 async def repent_callback(update, context, ctx):
     # Работает и как кнопка (callback), и как команда /repent (текст, без
     # callback_query). Раньше безусловный query.answer() ронял AttributeError
-    # на команде → «Внутренняя ошибка», хотя кнопка исповеди работала.
+    # на кома��де → «Внутренняя ошибка», хотя кнопка исповеди работала.
     query = update.callback_query
     if query:
         await query.answer()
@@ -4366,7 +4375,7 @@ async def repent_callback(update, context, ctx):
 
         if r < 0.70:
             reward = random.randint(100, 200)
-            p.balance += reward + medal_bonus  # ← добавили medal_bonus
+            p.credit(reward + medal_bonus)  # ← добавили medal_bonus
             result_line = f"Исповедь принесла тебе <b>{reward} OAC</b> 🍬"
         elif r < 0.95:
             p.m_essence = (p.m_essence or 0) + 1
@@ -4666,7 +4675,7 @@ async def _process_wheel(update, context, uid, player, cfg, ctx):
             prize *= HAPPY_HOUR_MULTIPLIER
 
         if ptype in ("oac", "jackpot"):
-            p.balance += prize
+            p.credit(prize)
         else:
             p.blunts += prize
         p.last_daily = datetime.now()
@@ -4723,7 +4732,7 @@ async def _mines_state_get(ctx, uid):
     Приложение по дизайну работает и без Redis (main.py: «без Redis продолжим»),
     но мины дёргали ctx.redis напрямую → при отсутствующем/упавшем Redis
     ctx.redis был None и кнопка «Рискнуть» молча падала на None.get(). Фолбэк
-    на ctx.cache (TTL ~10мин, партии хватает) чинит мины без Redis."""
+    ��а ctx.cache (TTL ~10мин, партии хватает) чинит мины без Redis."""
     key = f"mines_game:{uid}"
     if getattr(ctx, "redis", None):
         raw = await ctx.redis.get(key)
@@ -4838,7 +4847,7 @@ async def _mines_start_game(update, context, uid, bet, ctx):
     field, mines = _generate_mines_field()
     state = {
         "field": field,
-        "mines": list(mines),  # для сериализации
+        "mines": list(mines),  # для сериализаци��
         "bet": bet,
         "step": 0,
         "multiplier": 1.0,
@@ -4961,9 +4970,12 @@ async def _mines_open_cell(update, context, state, redis_key, uid, ctx):
     if state["step"] == 22:
         state["status"] = "won"
         win = int(state["bet"] * state["multiplier"])
-        # Начисляем выигрыш атомарно
+        # Начисляем выигрыш атомарно. В total_earned идёт только ЧИСТАЯ прибыль
+        # (win - bet): прокрутка баланса через ставки не накручивает статус.
+        bet = int(state["bet"])
         async def _win(p, conn):
             p.balance += win
+            p.total_earned = (p.total_earned or 0) + max(0, win - bet)
             return p.balance
         try:
             await ctx.repo.atomic_update(uid, _win)
@@ -4992,9 +5004,12 @@ async def _mines_cashout(update, context, state, redis_key, uid, ctx):
         return
 
     win = int(state["bet"] * state["multiplier"])
-    # Начисляем выигрыш
+    # Начисляем выигрыш. В total_earned — только чистая прибыль (win - bet),
+    # чтобы статус нельзя было накрутить прокруткой баланса через ставки.
+    bet = int(state["bet"])
     async def _cash(p, conn):
         p.balance += win
+        p.total_earned = (p.total_earned or 0) + max(0, win - bet)
         return p.balance
     try:
         await ctx.repo.atomic_update(uid, _cash)
@@ -5066,7 +5081,7 @@ async def _process_alchemy_start(update, context, player, cfg):
         "   ✨ Мерцающая Пыльца (2 дозы) — 15%\n"
         "   🌟 Философский Камень (легендарный блант) — 10%\n\n"
         "<i>«Только тот, кто достиг <b>ветерана</b> и не боится потерь — "
-        "обретёт право 🗝️ использовать магию и истинную силу»</i> 🔮"
+        "обретёт право 🗝️ использовать магию и истин��ую силу»</i> 🔮"
     )
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🧪 Запустить реакцию ⚗️", callback_data="alchemy_confirm")],
@@ -5550,7 +5565,7 @@ async def show_lab_final(update, context):
     total_oac = sum(rewards) + 50
 
     async def _lab_win(p, conn):
-        p.balance += total_oac
+        p.credit(total_oac)
         p.m_essence += 1
         p.lab_chests += 1
         p.lab_depth += 1
@@ -5589,7 +5604,7 @@ async def show_lab_death(update, context):
 
     # атомарно начисляем утешительный приз и военные очки
     async def _lab_die(p, conn):
-        p.balance += 50
+        p.credit(50)
         p.lab_deaths += 1
 
         await ctx.war_service.add_score(uid, WarAction.LAB_DEATH, conn)
@@ -6700,7 +6715,7 @@ async def handle_choice(update, context, ctx):
         return
 
     async def _apply(p, conn):
-        p.balance += choice.get("reward_oac", 0)
+        p.credit(choice.get("reward_oac", 0))
         reward_title = choice.get("reward_title")
         if reward_title:
             titles = (p.titles or "").split()
@@ -6769,7 +6784,7 @@ async def train_callback(update, context, ctx, player):
         if p.daily_progress.get("train"):
             return ("already",)
         reward = random.randint(20, 45)
-        p.balance += reward
+        p.credit(reward)
         p.daily_progress["train"] = True
         return ("ok", reward, p.balance)
 
@@ -6809,7 +6824,7 @@ async def handle_quest_action(update, context):
         return
 
     # Ядро цикла рисует результат НА МЕСТЕ со своей навигацией (единый живой
-    # экран). Ре-рендер хаба ниже затирал бы reveal-награду — поэтому эти
+    # экран). Ре-рендер ��аба ниже затирал бы reveal-награду — поэтому эти
     # действия владеют экраном и возвращают управление (return).
     if action == "farm":
         await farm_callback_v2(update, context)
@@ -6907,7 +6922,7 @@ async def claim_reward_handler(update, context, ctx):
     # ---- Начисляем награду из шаблона ----
     async def _reward(p, conn):
         reward_oac = template.get("reward_oac", 150)
-        p.balance += reward_oac
+        p.credit(reward_oac)
 
         reward_title = template.get("reward_title")
         if reward_title:
@@ -7306,7 +7321,7 @@ async def guild_join_handler(update, context, ctx):
         # отложил его и играл без гильдии). Раньше было gated на step==0, и
         # отложившие фракцию теряли +50 — теперь честно один раз.
         if player.onboarding_step == 0 or was_guildless:
-            player.balance += 50
+            player.credit(50)
         g_emoji = "🕯️" if guild == "BLACK" else "⚜️"
         g_name = "Тёмная" if guild == "BLACK" else "Светлая"
 
@@ -7689,7 +7704,7 @@ async def weekly_guild_rating(ctx: AppContext):
             winners_count = len(rows)
             for r in rows:
                 async def _reward(p, conn):
-                    p.balance += oac
+                    p.credit(oac)
                     p.blunts += blunts
                     p.m_essence += dust
                 try:
