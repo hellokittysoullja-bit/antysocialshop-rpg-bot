@@ -55,3 +55,29 @@ class Player(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     pet_hunger: int = 100
     daily_progress: dict = Field(default_factory=dict)
+    # Пожизненный заработок OAC — метрика статуса (рангов и balance-ачивок).
+    # В отличие от balance, никогда не уменьшается: траты (крафт, магазин,
+    # донаты, ставки) больше не наказывают прогресс к рангу.
+    total_earned: int = 0
+
+    def credit(self, amount: int) -> int:
+        """Единственная точка начисления OAC.
+
+        Положительный заработок увеличивает и balance, и total_earned.
+        Отрицательное значение (проигрыш/штраф) меняет только balance —
+        потеря не может «заработать» статус. Возвращает amount.
+        """
+        if amount > 0:
+            self.total_earned = (self.total_earned or 0) + amount
+        self.balance = (self.balance or 0) + amount
+        return amount
+
+    @property
+    def rank_metric(self) -> int:
+        """Метрика статуса: пожизненный заработок.
+
+        max(total_earned, balance) — страховка миграции и самолечение:
+        ранг математически не может оказаться ниже прежнего (по балансу),
+        поэтому ни один игрок не понижается ни при каких условиях.
+        """
+        return max(self.total_earned or 0, self.balance or 0)
