@@ -7769,11 +7769,11 @@ async def keep_db_alive(ctx: AppContext):
 
 
 def _reengagement_text(last_farm, login_streak, last_login_date, now, farm_cooldown,
-                       passive_level=0, passive_collected=None):
+                       passive_level=0, passive_collected=None, rival_drop=None):
     """Выбирает текст пуш-возврата (или None, если повода нет). Чистая функция.
 
     Каждый триггер — честная лосс-авёрсия (страх потерять конкретное):
-    плантация встала на пределе > серия под угрозой > созревший фарм.
+    плантация встала > серия под угрозой > обошли в рейтинге > созревший фарм.
     """
     streak = login_streak or 0
     logged_today = (last_login_date is not None
@@ -7793,7 +7793,14 @@ def _reengagement_text(last_farm, login_streak, last_login_date, now, farm_coold
         return (f"🔥 <b>Твоя серия входов ({streak} дн.) сгорит в полночь!</b>\n"
                 f"Загляни в игру, чтобы сохранить её и забрать награду дня.")
 
-    # Приоритет 3: фарм созрел
+    # Приоритет 3: тебя обошли в рейтинге (соц-статус — сильный возвратный крючок).
+    if rival_drop:
+        prev_r, cur_r = rival_drop
+        return (f"🏅 <b>Тебя обошли в рейтинге!</b>\n"
+                f"Ты был #{prev_r}, теперь #{cur_r}. Пока ты медлишь — соперники растут. "
+                f"Вернись и отбей своё место.")
+
+    # Приоритет 4: фарм созрел
     if last_farm and (now - last_farm) >= farm_cooldown:
         return ("🍬 <b>Грядка созрела!</b>\n"
                 "Твои OAC ждут сбора — вернись и продолжи путь. 🌿")
@@ -7831,12 +7838,39 @@ async def reengagement_push(ctx: AppContext) -> None:
         logger.error(f"reengagement query error: {e}")
         return
 
+    # Снимок рангов по балансу (один запрос, дешёв с индексом) для детекции
+    # обгона: сравниваем текущий ранг с сохранённым в Redis прошлым.
+    rank_map = {}
+    try:
+        async with ctx.db_pool.acquire() as conn:
+            brows = await conn.fetch(
+                'SELECT user_id FROM players WHERE COALESCE("exists", TRUE) '
+                'ORDER BY balance DESC')
+        for pos, br in enumerate(brows, 1):
+            rank_map[br["user_id"]] = pos
+    except Exception:
+        rank_map = {}
+
     token = ctx.settings.bot_token
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     sent = 0
     async with httpx.AsyncClient(timeout=10) as client:
         for row in rows:
             uid = row["user_id"]
+
+            # Ранг: детекция обгона + всегда обновляем сохранённый ранг.
+            rival_drop = None
+            cur_rank = rank_map.get(uid)
+            if cur_rank:
+                try:
+                    prev_v = await ctx.redis.get(f"rank:{uid}")
+                    prev_rank = int(prev_v) if prev_v else None
+                    if prev_rank and cur_rank > prev_rank and cur_rank <= 20:
+                        rival_drop = (prev_rank, cur_rank)
+                    await ctx.redis.setex(f"rank:{uid}", 7 * 24 * 3600, str(cur_rank))
+                except Exception:
+                    pass
+
             guard_key = f"reengage:{uid}"
             try:
                 if await ctx.redis.get(guard_key):
@@ -7848,6 +7882,7 @@ async def reengagement_push(ctx: AppContext) -> None:
                 row["last_farm"], row["login_streak"],
                 row["last_login_date"], now, farm_cd,
                 row["passive_level"], row["passive_collected"],
+                rival_drop,
             )
             if not text:
                 continue
