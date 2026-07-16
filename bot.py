@@ -2022,43 +2022,75 @@ async def defer_faction_handler(update, context):
             "<b>🍬 Твой первый шаг — фарм!</b> Жми «Фармить».",
             reply_markup=kb, parse_mode='HTML')
     
-def get_next_action(player, exclude_callback: str = None) -> tuple[str, str, str]:
+# Подсказки под каждый шаг квеста — одна таблица, единый источник копирайта.
+QUEST_STEP_ADVICE = {
+    "farm":   "🍬 Фарм — основа роста. Заполни шкалу!",
+    "craft":  "🌿 Скрути блант — получишь случайный эффект!",
+    "smoke":  "🧿 Испытай удачу — выкури блант!",
+    "ritual": "🕯️ Тёмная магия ждёт тебя!",
+    "repent": "🪽 Светлая удача улыбнётся тебе!",
+    "lab":    "🏛️ Глубины Лабиринта полны сокровищ!",
+    "donate": "💎 Укрепи гильдию пожертвованием!",
+    "pet":    "🐾 Твой питомец проголодался — покорми его!",
+    "train":  "⚔️ Закали себя в тренировке!",
+}
+
+
+def next_quest_step(player, exclude_key: str = None):
+    """Единый источник «следующего шага дня».
+
+    Берёт незакрытые шаги ИЗ ТОГО ЖЕ шаблона квеста, что и прогресс-бар меню
+    (одна модель истины вместо параллельной, которую вёл старый get_next_action —
+    та врала числом «+50» и вела в profile). Возвращает (label, callback, advice)
+    для кнопки или None, если предлагать нечего.
+
+    callback = f"quest_{key}" → нажатие выполняет само действие и отмечает шаг
+    (через handle_quest_action). Когда все видимые шаги закрыты, а награда не
+    забрана — предлагает «Забрать награду» с ЧЕСТНЫМ числом из шаблона.
+    """
     progress = getattr(player, 'daily_progress', {}) or {}
+    if progress.get("reward_claimed"):
+        return None
+    quest_id = progress.get("quest_id", "chapter1")
+    template = QUEST_TEMPLATES.get(quest_id)
+    if not template:
+        return None
+
     balance = getattr(player, 'balance', 0) or 0
-    guild = getattr(player, 'guild', None)
-    has_pet = bool(getattr(player, 'pet', ''))
-    is_veteran = balance >= 5000
+    conditions = {
+        "guild_black": getattr(player, 'guild', None) == "BLACK",
+        "guild_white": getattr(player, 'guild', None) == "WHITE",
+        "is_veteran_and_has_pet": balance >= 5000 and bool(getattr(player, 'pet', '')),
+    }
 
-    # Динамический тотал действий
-    total_actions = 5 if (is_veteran and has_pet) else 4
-    done = sum(1 for k in ["farm", "craft", "smoke", "guild_action"] if progress.get(k))
-    if is_veteran and has_pet and progress.get("pet"):
-        done += 1
+    next_step = None
+    all_done = True
+    for task in template.get("tasks", []):
+        cond = task.get("condition")
+        if cond and not conditions.get(cond, False):
+            continue
+        key = task["key"]
+        if progress.get(key, False):
+            continue
+        all_done = False
+        if key != exclude_key and next_step is None:
+            advice = QUEST_STEP_ADVICE.get(key, "Заверши шаг квеста — и ближе к награде!")
+            next_step = (task.get("label", "Играть"), f"quest_{key}", advice)
 
-    # Приоритет №1: Гильдия
-    if not guild and exclude_callback != "guild_info":
-        return ("🕋 Выбрать Гильдию", "guild_info", "Выбери собственную Гильдию, и открой Войну ⚔️ Гильдий, Ритуалы 🔮 или Исповеди! 🪽")
-
-    # Приоритет №2: Всё готово
-    if done == total_actions:
-        return ("🎁 ЗАБРАТЬ +50 OAC", "profile", "🎉 Всё готово! Награда ждёт тебя в профиле!")
-
-    # Приоритет №3: Незавершённые дела
-    if not progress.get("farm") and exclude_callback != "farm":
-        return ("🍬 Фармить", "farm", "🍬 Фарм — основа роста. Заполни шкалу!")
-    if not progress.get("craft") and exclude_callback != "craft":
-        return ("🌿 Крафтить", "craft", "🌿 Скрути блант — получишь случайный эффект!")
-    if not progress.get("smoke") and exclude_callback != "smoke":
-        return ("💨 Дунуть", "smoke", "🧿 Испытай удачу — выкури блант!")
-    if guild and not progress.get("guild_action") and exclude_callback != "guild_action":
-        if guild == "BLACK":
-            return ("🕯️ Ритуал", "ritual", "🕯️ Тёмная магия ждёт тебя!")
-        elif guild == "WHITE":
-            return ("⚜️ Исповедь", "repent", "🪽 Светлая удача улыбнётся тебе!")
-    if is_veteran and has_pet and not progress.get("pet") and exclude_callback != "pet_preview":
-        return ("🐾 Покормить питомца", "pet_preview", "Твой питомец проголодался! Покорми его.")
-
-    return ("🏰 В меню", "menu", "Все дела пока недоступны. Загляни позже!")
+    if next_step:
+        return next_step
+    if all_done:
+        # Главы с выбором архетипа (choices) завершаются НЕ через claim_reward, а
+        # через выбор в хабе заданий. Если увести их в claim_reward — игрок теряет
+        # награду выбора (OAC/титул/предмет) и сага не продвигается. Ведём в хаб,
+        # где живут кнопки выбора.
+        if template.get("choices"):
+            return ("🎁 Заверши главу — сделай выбор ›", "daily_quest_hub",
+                    "Все шаги готовы — тебя ждёт судьбоносный выбор!")
+        reward = template.get("reward_oac", 0)
+        label = f"🎁 Забрать награду (+{reward} OAC)" if reward > 0 else "🎁 Забрать награду"
+        return (label, "claim_reward", "🎉 Все задания выполнены — забери награду!")
+    return None
 
 
 def _resolve_referrer(args, uid):
@@ -2470,7 +2502,18 @@ async def farm_callback_v2(update, context, ctx, player):
     status, *data = result
     if status == "cooldown":
         remain = data[0]
-        btn_text, btn_callback, advice = get_next_action(player, exclude_callback="farm")
+        _step = next_quest_step(player, exclude_key="farm")
+        if _step:
+            btn_text, btn_callback, advice = _step
+        elif not getattr(player, 'guild', None) and getattr(player, 'onboarding_step', 0) == -1:
+            # Все шаги сделаны, но гильдии нет — мягкий нудж ТОЛЬКО прошедшим
+            # онбординг (новичков не трогаем: у них флоу «сначала играй, гильдия
+            # позже»). Ничей шаг квеста не вытесняется — чистый апгрейд.
+            btn_text, btn_callback, advice = ("🏰 Выбрать Гильдию", "guild_info",
+                "Гильдия открывает Войну ⚔️, Ритуалы 🕯️ и Исповеди ⚜️ — выбери сторону!")
+        else:
+            btn_text, btn_callback, advice = ("🏰 В меню", "menu",
+                                              "Все шаги на сегодня сделаны — загляни позже!")
     
         progress = getattr(player, 'daily_progress', {}) or {}
         balance = getattr(player, 'balance', 0) or 0
@@ -6181,13 +6224,8 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
             filtered_tasks.append(task)
         total = len(filtered_tasks)
         done = sum(1 for task in filtered_tasks if progress.get(task["key"], False))
-        # Геройская кнопка берётся из ЭТИХ ЖЕ задач (не из get_next_action с
-        # захардкоженным списком) — иначе в главе 2+ герой предлагал «Фармить»,
-        # которого нет в задачах главы, и счётчик N/M не двигался после действия.
-        hero_task = next((t for t in filtered_tasks if not progress.get(t["key"])), None)
     else:
         total = 0
-        hero_task = None
         done = 0
 
     reward_claimed = progress.get("reward_claimed", False)
@@ -6299,8 +6337,13 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
     farm_in_cta = False    
     if not reward_claimed and total > 0:
         if done == total:
-            # Все задания выполнены → кнопка "Забрать награду"
-            keyboard.append([InlineKeyboardButton("🎁 Забрать награду!", callback_data="claim_reward")])
+            # Главы с выбором архетипа (choices) завершаются выбором в хабе, а не
+            # claim_reward — иначе claim крадёт награду выбора (OAC/титул/предмет)
+            # и сага не движется. Такие ведём в хаб, где живут кнопки выбора.
+            if template and template.get("choices"):
+                keyboard.append([InlineKeyboardButton("🎁 Заверши главу — сделай выбор!", callback_data="daily_quest_hub")])
+            else:
+                keyboard.append([InlineKeyboardButton("🎁 Забрать награду!", callback_data="claim_reward")])
         else:
             # Есть незавершённые задания → прогресс-бар
             remaining = total - done
@@ -6553,7 +6596,11 @@ async def progress_hub_handler(update, context, ctx):
         ]
 
         if done == total and not progress.get("reward_claimed"):
-            kb_rows.insert(0, [InlineKeyboardButton("🎁 Забрать награду!", callback_data="claim_reward")])
+            # Главы с выбором архетипа завершаются выбором в хабе, а не claim_reward.
+            if template.get("choices"):
+                kb_rows.insert(0, [InlineKeyboardButton("🎁 Заверши главу — сделай выбор!", callback_data="daily_quest_hub")])
+            else:
+                kb_rows.insert(0, [InlineKeyboardButton("🎁 Забрать награду!", callback_data="claim_reward")])
 
         kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="menu")])
         kb = InlineKeyboardMarkup(kb_rows)
@@ -6904,6 +6951,16 @@ async def claim_reward_handler(update, context, ctx):
         await query.answer("Выполни все доступные этапы квеста!", show_alert=True)
         return
 
+    # Корневая защита: главы с выбором архетипа НЕ забираются через claim — иначе
+    # игрок теряет награду выбора (250 OAC/титул/предмет) и сага застревает. Все
+    # UI-поверхности уже ведут такие главы в хаб; это — последний рубеж.
+    if template.get("choices"):
+        try:
+            await query.answer("Все шаги готовы — сделай выбор в «Заданиях дня» 👇", show_alert=True)
+        except Exception:
+            pass
+        return
+
     # ---- Начисляем награду из шаблона ----
     async def _reward(p, conn):
         reward_oac = template.get("reward_oac", 150)
@@ -6979,32 +7036,8 @@ async def bush_preview_handler(update, context):
     query = update.callback_query
     await query.answer("❌ Доступно с ранга ⚔️ Ветеран (5000 OAC 🍬)", show_alert=True)
 
-@cb
-async def activate_menu_handler(update, context, ctx):
-    query = update.callback_query
-    user = query.from_user
-    uname = user.username or user.first_name
-    uid = user.id
-    player = await ctx.repo.get_by_id(uid, with_inventory=False)
-    if player is None:
-        player = Player(user_id=uid, username=uname, balance=800)
-        new_name = random.choice(["Крик Бездны","Пепел Короля","Шёпот Склепа"])
-        await create_named_blunt(uid, new_name, ctx=ctx)
-        await ctx.repo.save(player)
-        bonus = "🎁 Смотритель дарует тебе <code>800</code> 🍬 и твой первый именной блант!\n\n"
-    else:
-        bonus = ""
-    welcome = (
-        "<b><i>🎉 Добро пожаловать в Гильдию Antysocialshop!</i></b>\n\n"
-        "🕯️ <b>Тёмная Гильдия</b> — стабильность, ритуалы, тёмное благословение.\n"
-        "⚜️ <b>Светлая Гильдия</b> — азарт, удача, танец на лезвии.\n\n"
-        "▸ <i>Выбери свой путь:</i>"
-    )
-    guild_kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🕯️ Тёмная Гильдия", callback_data="guild_join_BLACK"),
-         InlineKeyboardButton("⚜️ Светлая Гильдия", callback_data="guild_join_WHITE")]
-    ])
-    await query.message.edit_text(bonus + welcome, reply_markup=guild_kb, parse_mode='HTML')
+# NB: activate_menu_handler удалён как мёртвый код — ни одна кнопка/команда на
+# него не вела (недостижимый второй велком, расходившийся с каноничным онбордингом).
 
 @cb
 async def skins_menu_handler(update, context, ctx):
@@ -7467,7 +7500,6 @@ CALLBACKS: Dict[str, Callable] = {
     "repent": repent_callback,
     "shop": shop_callback,
     "bush_preview": bush_preview_handler,
-    "activate_menu": activate_menu_handler,
     "skins_menu": skins_menu_handler,
     "choose_title": choose_title_handler,
     "choose_bg": choose_bg_handler,
