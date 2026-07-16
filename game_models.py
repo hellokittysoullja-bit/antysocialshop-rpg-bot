@@ -31,7 +31,7 @@ class Player(BaseModel):
     ritual_count: int = 0
     repent_count: int = 0
     referral_count: int = 0
-    last_berserk: Optional[datetime] = None
+    last_mines: Optional[datetime] = None
     inventory: List[Any] = Field(default_factory=list)
     invited_by: Optional[int] = None
     profile_skins: dict = Field(default_factory=dict)
