@@ -1062,6 +1062,26 @@ async def _run_migrations(conn):
     await conn.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS onboarding_step INTEGER DEFAULT 0;")
     await conn.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS pet_hunger INTEGER DEFAULT 100;")
 
+    # Переименование last_berserk → last_mines (механика «Рискнуть» на самом
+    # деле запускает Мины, не берсерк — имя приведено в соответствие). RENAME,
+    # а не ADD COLUMN, чтобы не потерять существующий кулдаун игроков.
+    # Идемпотентно: сработает только один раз, на старой схеме.
+    await conn.execute("""
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='players' AND column_name='last_berserk'
+            ) AND NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='players' AND column_name='last_mines'
+            ) THEN
+                ALTER TABLE players RENAME COLUMN last_berserk TO last_mines;
+            END IF;
+        END $$;
+    """)
+    await conn.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS last_mines TIMESTAMP;")
+
 # ===== ОПТИМИЗАЦИЯ ХРАНЕНИЯ (Render Free Tier) =====
     # JSONB поля — сжатие + хранение вне таблицы при размере > 2KB
     # Индекс под рейтинг (снимок лидерборда + топ-10). Ускоряет сортировку по
@@ -6139,21 +6159,6 @@ def _happy_hour_banner(ctx, now):
             f"<b>Все действия ×{HAPPY_HOUR_MULTIPLIER} OAC 🍬.</b> {tail}")
 
 
-# Ключ задания квеста → (лейбл, callback) для геройской кнопки. Гарантирует,
-# что действие героя совпадает со счётчиком N/M (действие двигает прогресс).
-QUEST_HERO_ACTIONS = {
-    "farm":   ("🍬 Фармить", "farm"),
-    "craft":  ("🌿 Крафтить", "craft"),
-    "smoke":  ("💨 Дунуть", "smoke"),
-    "ritual": ("🕯️ Ритуал", "ritual"),
-    "repent": ("⚜️ Исповедь", "repent"),
-    "donate": ("💎 Пожертвовать", "guild_shrine"),
-    "lab":    ("🏛️ Лабиринт", "lab_start"),
-    "pet":    ("🐾 Покормить питомца", "pet_preview"),
-    "train":  ("⚔️ Тренировка", "train"),
-}
-
-
 async def build_main_menu(player, ctx, context=None, full_mode=False):
     now = datetime.now()
     guild = player.guild
@@ -6181,13 +6186,8 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
             filtered_tasks.append(task)
         total = len(filtered_tasks)
         done = sum(1 for task in filtered_tasks if progress.get(task["key"], False))
-        # Геройская кнопка берётся из ЭТИХ ЖЕ задач (не из get_next_action с
-        # захардкоженным списком) — иначе в главе 2+ герой предлагал «Фармить»,
-        # которого нет в задачах главы, и счётчик N/M не двигался после действия.
-        hero_task = next((t for t in filtered_tasks if not progress.get(t["key"])), None)
     else:
         total = 0
-        hero_task = None
         done = 0
 
     reward_claimed = progress.get("reward_claimed", False)
