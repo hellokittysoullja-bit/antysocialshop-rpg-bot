@@ -1837,6 +1837,11 @@ def get_medal_progress(new_count, medals_list):
         progress = int((new_count - cur_th) / (next_th - cur_th) * 100) if next_th != cur_th else 100
         bar = "▓" * (progress // 10) + "░" * (10 - progress // 10)
         goal_str = f"<b>{cur_medal}</b> → <b>{next_medal}</b>"
+        # Goal-gradient: на последних 1–3 шагах до медали — явный крючок близости
+        # к цели (дофаминовый пик предвкушения тем сильнее, чем ближе награда).
+        remaining = next_th - new_count
+        if 1 <= remaining <= 3:
+            goal_str += f"\n🔥 <b>Ещё {remaining} до {next_medal}!</b>"
     return f"{bar} {progress}%\n{goal_str}"
 
 def get_rank_progress(balance):
