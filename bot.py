@@ -933,6 +933,20 @@ async def _run_migrations(conn):
         END $$;
     """)
 
+    # Добавление streak_freezes в players (заморозки серии). Дефолт 1 —
+    # существующие игроки тоже получают одну заморозку (чистый бонус игроку).
+    await conn.execute("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='players' AND column_name='streak_freezes'
+            ) THEN
+                ALTER TABLE players ADD COLUMN streak_freezes INTEGER DEFAULT 1;
+            END IF;
+        END $$;
+    """)
+
     # ===== Новые миграции для сервиса войны =====
     # 1. Таблица состояния войны
     await conn.execute("""
@@ -1517,8 +1531,22 @@ async def process_daily_login(user_id: int, context) -> None:
     if last == today:
         return
 
-    streak = (player.login_streak or 0) + 1 if last and (today - last).days == 1 else 1
+    # Streak-freeze (механика удержания №1 у Duolingo): пропуск РОВНО одного дня
+    # не рвёт серию, если есть заморозка. Снимает тревогу «сорвётся серия» →
+    # убивает «what-the-hell effect» (бросить совсем после одного пропуска).
+    gap = (today - last).days if last else None
+    freezes_available = player.streak_freezes or 0
+    used_freeze = False
+    if gap == 1:
+        streak = (player.login_streak or 0) + 1
+    elif gap == 2 and freezes_available > 0:
+        streak = (player.login_streak or 0) + 1
+        used_freeze = True
+    else:
+        streak = 1
     reward = _calculate_reward(streak, daily_config)
+
+    freeze_info = {}
 
     # Атомарно применяем награду с повторной проверкой даты после блокировки
     async def _apply_daily(p, conn):
@@ -1529,6 +1557,17 @@ async def process_daily_login(user_id: int, context) -> None:
         p.balance += reward.total_oac
         p.login_streak = streak
         p.last_login_date = today
+
+        # Тратим заморозку, если она спасла серию.
+        if used_freeze and (p.streak_freezes or 0) > 0:
+            p.streak_freezes = (p.streak_freezes or 0) - 1
+        # Начисляем заморозку за верность: каждые 7 дней серии (кап 3).
+        granted_freeze = streak > 0 and streak % 7 == 0
+        if granted_freeze:
+            p.streak_freezes = min(3, (p.streak_freezes or 0) + 1)
+        freeze_info["used"] = used_freeze
+        freeze_info["granted"] = granted_freeze
+        freeze_info["count"] = p.streak_freezes or 0
 
         # Начисление титула
         if reward.title:
@@ -1564,6 +1603,12 @@ async def process_daily_login(user_id: int, context) -> None:
 
     try:
         text = _build_daily_message(streak, reward, daily_config)
+        # Прозрачно сообщаем про заморозку — именно ЗНАНИЕ о сети безопасности
+        # снимает тревогу разрыва и работает на удержание.
+        if freeze_info.get("used"):
+            text += f"\n\n❄️ <b>Заморозка спасла твою серию!</b> Осталось: {freeze_info.get('count', 0)} ❄️"
+        elif freeze_info.get("granted"):
+            text += f"\n\n❄️ <b>+1 Заморозка серии за верность!</b> Всего: {freeze_info.get('count', 0)} ❄️"
         await safe_send_message(context, user_id, text, parse_mode='HTML')
     except Exception as e:
         logger.error("Failed to send daily login msg", extra={"user_id": user_id}, exc_info=True)
@@ -6369,7 +6414,9 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
     # Loss-aversion по серии входов: показываем, что можно потерять
     _streak = player.login_streak or 0
     if _streak >= 3:
-        lines.append(f"🔥 <b>Серия входов: {_streak} дн.</b> — не разорви её, вернись завтра за наградой!")
+        _fz = player.streak_freezes or 0
+        _fz_note = f" · ❄️{_fz}" if _fz > 0 else ""
+        lines.append(f"🔥 <b>Серия входов: {_streak} дн.</b>{_fz_note} — вернись завтра за наградой!")
 
     # Час Удачи — баннер поверх всего меню (peak-момент нельзя прятать)
     hh_banner = _happy_hour_banner(ctx, now)
