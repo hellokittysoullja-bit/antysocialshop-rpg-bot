@@ -865,16 +865,18 @@ def build_smoke_effect(outcome, earned):
 
 def calculate_smoke_reward(p, happy_hour):
     """Возвращает (earned, outcome). Одна руч­ка — и число, и флейвор.
-    Раньше число и текст брались из двух разных бросков и противоречили друг
-    другу. Джекпот (2%) вырезан из доли выигрыша — суммарный шанс плюса тот же
-    (18%), но у него есть дофаминовый пик."""
+
+    Баланс смягчён: раньше 52% тяг отнимали −5 OAC («постоянное наказание»
+    ослабляет дофаминовую петлю — выученная беспомощность). Теперь потерь
+    вдвое меньше и они мягче (25% × −3), нейтралов больше (55%), а плюс чуть
+    вырос (2% джекпот + 18% выигрыш = 20%). Пик-момент (джекпот) сохранён."""
     r = random.random()
     if r < 0.02:
         earned, outcome = random.randint(80, 160), "jackpot"
-    elif r < 0.18:
+    elif r < 0.20:
         earned, outcome = random.randint(15, 40), "win"
-    elif r < 0.70:
-        earned, outcome = -5, "loss"
+    elif r < 0.45:
+        earned, outcome = -3, "loss"
     else:
         earned, outcome = 0, "neutral"
     if happy_hour and earned > 0:
@@ -4721,6 +4723,9 @@ async def _process_wheel(update, context, uid, player, cfg, ctx):
             if r < prob:
                 prize, ptype = amount, kind
                 break
+        # Near-miss: попал в последнюю НЕ-джекпот полосу (сразу под джекпотом) —
+        # мозг реагирует на «почти» почти как на выигрыш → тяга «ещё разок».
+        near_miss = ptype != "jackpot" and r >= 0.90
         if ptype == "jackpot" and random.random() < 0.5:
             prize *= 2
         if ctx.cache.get("happy_hour") and ptype in ("oac", "jackpot"):
@@ -4735,14 +4740,14 @@ async def _process_wheel(update, context, uid, player, cfg, ctx):
         if ctx.war_service and ptype in ("oac", "jackpot"):
             await ctx.war_service.add_score_raw(uid, prize, conn)
 
-        return prize, ptype, p.balance
+        return prize, ptype, p.balance, near_miss
 
     result = await ctx.repo.atomic_update(uid, _wheel)
     if result is None:
         logger.error("wheel atomic_update failed", extra={"user_id": uid})
         await _notify_user(update, context, "❌ Ошибка при обработке. Попробуй позже.")
         return
-    prize, ptype, new_balance = result
+    prize, ptype, new_balance, near_miss = result
 
     uname = html.escape(update.effective_user.username or update.effective_user.first_name)
     if ptype == "jackpot":
@@ -4751,6 +4756,9 @@ async def _process_wheel(update, context, uid, player, cfg, ctx):
         msg_text = f"<b>🩸 ДАР ИСКАЖЕНИЯ</b>\n\n<b>💎 Ты нафармил +{prize} OAC 🍬!</b>\n⚜️ <b>У тебя:</b> <i>{new_balance} OAC</i>"
     else:
         msg_text = f"<b><i>🌱 КОЛЕСО СМОТРИТЕЛЯ</i></b>\n\n+{prize} 🌿 Блант → 🍬 <b>{new_balance} OAC</b> 🍬"
+
+    if near_miss:
+        msg_text += "\n\n😤 <i>Стрелка замерла у самого ДЖЕКПОТА (1000 OAC)! Ещё чуть-чуть — крутани снова завтра.</i>"
 
     await edit_or_reply(update, context, msg_text,
                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]))
@@ -5626,6 +5634,7 @@ async def show_lab_final(update, context):
     # Рекорд забега (peak-end триумф): личный лучший банк за один заход. Хранится
     # в Redis — без миграций; если Redis нет, строка рекорда просто опускается.
     record_line = ""
+    new_record = False
     try:
         if ctx.redis:
             best_key = f"lab_best:{uid}"
@@ -5634,6 +5643,7 @@ async def show_lab_final(update, context):
             if total_oac > prev:
                 await ctx.redis.set(best_key, total_oac)
                 record_line = "\n🏆 <b>НОВЫЙ РЕКОРД ЗАБЕГА!</b>"
+                new_record = prev > 0  # первый-в-жизни рекорд не броадкастим (нет базы для «побил»)
             elif prev:
                 record_line = f"\n📈 <i>Твой рекорд: {prev} OAC</i>"
     except Exception:
@@ -5644,6 +5654,15 @@ async def show_lab_final(update, context):
         context.user_data.pop(key, None)
 
     depth = player.lab_depth + 1
+
+    # Соц-доказательство/аспирация: рекордный забег — в гильдию (как джекпот
+    # «Дунуть»). Естественно rate-limited 12-часовым кулдауном лабиринта → не спам.
+    if new_record:
+        who = f"@{player.username}" if player.username else "Один из наших"
+        asyncio.create_task(_safe_send_guild_message(
+            ctx,
+            f"🏛️ <b>{who}</b> вынес рекордные <b>{total_oac} OAC</b> из Лабиринта "
+            f"(Этаж {depth})! 🏆\n<i>Кто глубже?</i>"))
     rooms_line = f"🗝️ <b>Покорено комнат: {total_rooms}</b>\n" if total_rooms else ""
     text = (
         f"<b>🎁 СУНДУК ИСКАЖЕНИЯ</b>\n\n"
