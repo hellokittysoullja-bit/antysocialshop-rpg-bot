@@ -3399,6 +3399,19 @@ async def do_smoke(update, context, ctx, player):
          else InlineKeyboardButton("🌿 Крафтить ещё", callback_data="craft")],
         [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
     ])
+    # Suspense-ревил ТОЛЬКО на джекпоте (2%): предвкушение поднимает дофаминовый
+    # пик именно там, где он редкий и ценный (dopamine живёт на фазе ожидания).
+    # Обычные тяги (98%) не тормозим ни на миллисекунду — никакого минуса на
+    # массовом пути, апгрейд бьёт точечно в самый яркий момент.
+    if outcome == "jackpot":
+        try:
+            for frame in ("🎰 <b>Дым сгущается…</b>",
+                          "🌌 <b>Ткань мира дрожит…</b>",
+                          "💥 <b>ХЛЫНУЛО ЗОЛОТО!</b>"):
+                await query.message.edit_text(frame, parse_mode='HTML')
+                await asyncio.sleep(0.6)
+        except Exception:
+            pass
     await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
 
     asyncio.create_task(check_achievements(uid, context))
@@ -5603,15 +5616,35 @@ async def show_lab_final(update, context):
 
     await ctx.repo.atomic_update(uid, _lab_win)
 
+    total_rooms = context.user_data.get("lab_total_rooms", 0)
+
+    # Рекорд забега (peak-end триумф): личный лучший банк за один заход. Хранится
+    # в Redis — без миграций; если Redis нет, строка рекорда просто опускается.
+    record_line = ""
+    try:
+        if ctx.redis:
+            best_key = f"lab_best:{uid}"
+            prev = await ctx.redis.get(best_key)
+            prev = int(prev) if prev else 0
+            if total_oac > prev:
+                await ctx.redis.set(best_key, total_oac)
+                record_line = "\n🏆 <b>НОВЫЙ РЕКОРД ЗАБЕГА!</b>"
+            elif prev:
+                record_line = f"\n📈 <i>Твой рекорд: {prev} OAC</i>"
+    except Exception:
+        pass
+
     # очистка состояний
-    for key in ("lab_hp", "lab_focus", "lab_room"):
+    for key in ("lab_hp", "lab_focus", "lab_room", "lab_total_rooms", "lab_rewards"):
         context.user_data.pop(key, None)
 
     depth = player.lab_depth + 1
+    rooms_line = f"🗝️ <b>Покорено комнат: {total_rooms}</b>\n" if total_rooms else ""
     text = (
         f"<b>🎁 СУНДУК ИСКАЖЕНИЯ</b>\n\n"
         f"<i>Ты достиг цели! Древние награждают достойных.</i>\n\n"
-        f"<b>+{total_oac} OAC</b>\n"
+        f"{rooms_line}"
+        f"<b>+{total_oac} OAC</b>{record_line}\n"
         f"<b>💠 Кристальная Пыль: 1</b>\n"
         f"<b>🏆 Глубина увеличена! (Этаж {depth})</b>"
     )
@@ -5629,6 +5662,9 @@ async def show_lab_death(update, context):
     if not player:
         return
     depth = player.lab_depth or 1
+    # Читаем прогресс забега ДО очистки состояния (для peak-end признания пути).
+    reached = context.user_data.get("lab_room", 0)
+    total_rooms = context.user_data.get("lab_total_rooms", 0)
 
     # атомарно начисляем утешительный приз и военные очки
     async def _lab_die(p, conn):
@@ -5639,15 +5675,19 @@ async def show_lab_death(update, context):
 
     await ctx.repo.atomic_update(uid, _lab_die)
 
-    context.user_data.pop("lab_hp", None)
-    context.user_data.pop("lab_focus", None)
-    context.user_data.pop("lab_room", None)
+    for key in ("lab_hp", "lab_focus", "lab_room", "lab_total_rooms", "lab_rewards"):
+        context.user_data.pop(key, None)
 
+    # Признание пройденного пути + форвард-фрейминг вместо наказующего регрета:
+    # мозг запоминает конец (peak-end), поэтому финал зовёт вперёд, а не добивает.
+    progress_line = f"🗝️ <b>Ты дошёл до комнаты {reached} из {total_rooms}</b>\n" if (reached and total_rooms) else ""
     text = (
         f"<b>🪦 БЕЗДНА ПОГЛОТИЛА ТЕБЯ</b>\n\n"
         f"<i>Твоё здоровье иссякло</i>\n\n"
+        f"{progress_line}"
         f"<b>+50 OAC</b> (утешительный приз)\n"
-        f"<b>Глубина: {depth}</b>"
+        f"<b>Глубина: {depth}</b>\n\n"
+        f"<i>💪 В следующий раз донеси добычу до Сундука!</i>"
     )
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 К Лабиринту", callback_data="lab_start")],
                                [InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
