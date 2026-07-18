@@ -1667,8 +1667,8 @@ async def world_hub(update, context, ctx):
 
     kb_rows = []
 
-    # Путь к власти — north-star «кем ты становишься» (смысл/фантазия)
-    kb_rows.append([InlineKeyboardButton("🎯 Твой Путь к власти", callback_data="destiny_hub")])
+    # «Путь к власти» переехал в 📊 Прогресс (там теперь живёт вся статус-линия:
+    # лестница рангов + легенда). «Мир» — это МЕСТА, а не прогресс.
 
     # Плантация — idle-крючок «зайди собрать». Кнопка живая: показывает
     # созревший урожай (goal-gradient тянет вернуться) или зовёт посадить.
@@ -6556,20 +6556,30 @@ async def progress_hub_handler(update, context, ctx):
         balance = player.balance or 0
         username = html_escape(player.username or str(uid))
 
-        # ===== 1. РАНГ И ПРОГРЕСС =====
+        # ===== 1. РАНГ + ЛЕСТНИЦА ВОСХОЖДЕНИЯ (шапка «куда я расту») =====
         rank_emoji, rank_name, next_rank_emoji, next_rank_name, next_threshold, prev_threshold = compute_rank_info(balance)
+
+        # Лестница рангов перенесена из «Пути к власти»: вопрос статуса «куда я
+        # расту» отвечается в ОДНОМ месте (Прогресс), а не размазан по 4 экранам.
+        ladder = []
+        for _e, _th, _ in RANKS:
+            _em = _e.split(' ', 1)[0]
+            _nm = _e.split(' ', 1)[1] if ' ' in _e else _e
+            if balance >= _th:
+                ladder.append(f"✅ {_em} <b>{_nm}</b>")
+            elif _th == next_threshold:
+                ladder.append(f"➡️ {_em} <b>{_nm}</b> — осталось {_th - balance} OAC")
+            else:
+                ladder.append(f"🔒 {_em} {_nm}")
+        ladder_str = "<b>⚜️ Восхождение:</b>\n" + "\n".join(ladder)
 
         if next_threshold:
             progress_percent = int((balance - prev_threshold) / (next_threshold - prev_threshold) * 100) if next_threshold > prev_threshold else 100
             progress_percent = min(100, max(0, progress_percent))
             bar = "▓" * (progress_percent // 10) + "░" * (10 - progress_percent // 10)
-            rank_line = (
-                f"<b>⚜️ Ранг: {rank_emoji} {rank_name} → {next_rank_emoji} {next_rank_name}</b>\n"
-                f"<b>{balance} / {next_threshold} OAC</b>\n"
-                f"{bar} <b>{progress_percent}</b>%"
-            )
+            rank_line = f"{ladder_str}\n<b>{balance} / {next_threshold} OAC</b>  {bar} <b>{progress_percent}%</b>"
         else:
-            rank_line = f"<b>⚜️ Ранг: {rank_emoji} {rank_name}</b> (Максимум!)"
+            rank_line = f"{ladder_str}\n<b>⚡ Ты достиг вершины!</b>"
 
         # ===== 2. ЕЖЕДНЕВНЫЕ ЗАДАНИЯ =====
         progress = await ensure_daily_progress(player, ctx)
@@ -6718,7 +6728,7 @@ async def progress_hub_handler(update, context, ctx):
         kb_rows = [
             [InlineKeyboardButton("👤 Профиль", callback_data="profile"),
              InlineKeyboardButton("🏆 Достижения", callback_data="achievements_menu"),
-             InlineKeyboardButton("🏅 Лидеры", callback_data="top")]
+             InlineKeyboardButton("🎯 Путь", callback_data="destiny_hub")]
         ]
 
         if done == total and not progress.get("reward_claimed"):
