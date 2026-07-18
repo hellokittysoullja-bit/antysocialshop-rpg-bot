@@ -3082,17 +3082,24 @@ async def handle_named_name(update, context):
         asyncio.create_task(fomo_reminder())
 
         await asyncio.sleep(0.5)
-        bonus_msg = await context.bot.send_message(
-            uid,
-            "⚡ <b>БОНУС ЗА СКОРОСТЬ!</b>\n\n"
-            "Если ты <b>подаришь</b> или <b>поделишься</b> этим блантом за 5 минут, получишь <b>+10 OAC</b> на счёт.\n"
-            "Просто нажми одну из кнопок выше!",
-            parse_mode='HTML'
-        )
-
-        context.user_data['fomo_bonus_msg'] = bonus_msg.message_id
-        context.user_data['fomo_blunt_id'] = blunt_id
-        context.user_data['fomo_start'] = time.time()
+        # Раньше — сырой context.bot.send_message без try/except (в отличие от
+        # соседнего fomo_reminder() выше, который уже защищён). Любая ошибка
+        # Telegram (Forbidden/BadRequest/сеть) роняла весь handle_named_name с
+        # необработанным исключением. safe_send_message даёт ретраи; try/except
+        # не даёт сбою здесь испортить уже успешный крафт бланта.
+        try:
+            bonus_msg = await safe_send_message(
+                context, uid,
+                "⚡ <b>БОНУС ЗА СКОРОСТЬ!</b>\n\n"
+                "Если ты <b>подаришь</b> или <b>поделишься</b> этим блантом за 5 минут, получишь <b>+10 OAC</b> на счёт.\n"
+                "Просто нажми одну из кнопок выше!",
+                parse_mode='HTML'
+            )
+            context.user_data['fomo_bonus_msg'] = bonus_msg.message_id
+            context.user_data['fomo_blunt_id'] = blunt_id
+            context.user_data['fomo_start'] = time.time()
+        except Exception:
+            logger.warning("FOMO-бонус: не удалось отправить сообщение uid=%d", uid)
         
         # ── Оповещение в канал (закомментировано) ──
         # try:
@@ -6684,9 +6691,14 @@ async def progress_hub_handler(update, context, ctx):
         if in_top10:
             comparison_lines.append(f"🎯 <b>Позиция в топе: #{position}</b>")
         else:
-            tenth_row = await conn.fetchrow(
-                "SELECT balance FROM players ORDER BY balance DESC LIMIT 1 OFFSET 9"
-            )
+            # Прежний код звал conn.fetchrow ЗДЕСЬ, а connection к этому моменту
+            # уже вернулось в пул (async with выше закрылся) → "connection has
+            # been released back to the pool" для любого игрока не из топ-10.
+            # Берём свежее соединение.
+            async with ctx.db_pool.acquire() as conn2:
+                tenth_row = await conn2.fetchrow(
+                    "SELECT balance FROM players ORDER BY balance DESC LIMIT 1 OFFSET 9"
+                )
             if tenth_row:
                 tenth_balance = tenth_row["balance"]
                 gap_top10 = tenth_balance - my_balance
@@ -7326,7 +7338,7 @@ async def blunt_details_handler(update, context, ctx, player):
          InlineKeyboardButton("🎁 Подарить", callback_data=f"gift_blunt_{blunt_id}")],
         [InlineKeyboardButton("🏆 К списку", callback_data="my_blunts")]
     ])
-    sent = await safe_send_blunt_image(context, query.message.chat.id, rarity, caption=text, reply_markup=kb, ctx=ctx)
+    sent = await safe_send_blunt_image(context, query.message.chat.id, rarity, caption=text, reply_markup=kb)
     if sent:
         try:
             await query.message.delete()
