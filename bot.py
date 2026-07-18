@@ -18,8 +18,7 @@ from tenacity import (
     retry, stop_after_attempt, wait_exponential,
     retry_if_exception_type, before_sleep_log
 )
-from pydantic import BaseModel, ConfigDict, Field   # <-- добавлен Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
@@ -30,21 +29,36 @@ from functools import wraps
 
 try:
     import pybreaker
-    redis_breaker = pybreaker.CircuitBreaker(fail_max=5, reset_timeout=30)
-    db_breaker = pybreaker.CircuitBreaker(fail_max=5, reset_timeout=30)
-    tg_breaker = pybreaker.CircuitBreaker(fail_max=3, reset_timeout=30)
-except Exception as e:
-    print(f"WARNING: pybreaker not available: {e}", file=sys.stderr)
-    class DummyBreaker:
-        def call(self, func, *args, **kwargs):
-            return func(*args, **kwargs)
-    redis_breaker = DummyBreaker()
-    db_breaker = DummyBreaker()
-    tg_breaker = DummyBreaker()
-
-from cachetools import TTLCache
+except Exception:  # pragma: no cover
+    pybreaker = None
+# Circuit breakers вынесены в инфраструктурный слой
+from infra import redis_breaker, db_breaker, tg_breaker, _json_safe_load
 
 import httpx
+
+# Статический игровой контент/константы вынесены в отдельный модуль (слой данных)
+from game_content import (
+    FARM_MEDALS, CRAFT_MEDALS, SMOKE_MEDALS, RITUAL_MEDALS, REPENT_MEDALS,
+    WHISPERS, NEURO_STATUSES, FUNNY_REACTIONS, RANKS,
+    ACHIEVEMENTS, ACHIEVEMENTS_DICT, ACHIEVEMENT_CONDITIONS, SMOKE_FLAVORS,
+    QUEST_TEMPLATES, BLUNTS_PER_PAGE, BLUNT_IMAGES, LUCK_CONFIG, LABYRINTH_ROOMS,
+    SHOP_ITEMS, RANK_LORE,
+)
+# Слой моделей
+from game_models import Player
+# Слой конфигурации
+from config import (
+    settings, FARM_MIN, FARM_MAX, FARM_COOLDOWN_HOURS, FARM_GRACE_COUNT,
+    HAPPY_HOUR_MULTIPLIER, GAME_CONFIG, PET_CONFIG,
+)
+# Слой доступа к данным
+from repository import PlayerRepository
+# Слой доменных сервисов
+from services import (
+    UnknownWarActionError, WarAction, WarConfig, WarSettings,
+    GuildWarService, AlchemyResult, PetService,
+)
+from enum import Enum, auto  # для SmokeStatus/CraftStatus ниже
 
 # ============================================================
 # ДЕКОРАТОРЫ
@@ -215,279 +229,7 @@ def _create_wrapper(func, show_alert_on_error):
     return wrapper
 
 # НАСТРОЙКИ через пидантик
-class Player(BaseModel):
-    user_id: int
-    username: str = ""
-    balance: int = 0
-    blunts: int = 0
-    guild: Optional[str] = None
-    last_farm: Optional[datetime] = None
-    last_ritual: Optional[datetime] = None
-    last_repent: Optional[datetime] = None
-    last_daily: Optional[datetime] = None
-    titles: str = ""
-    last_farm_date: Optional[date] = None
-    passive_level: int = 0
-    passive_collected: Optional[datetime] = None
-    karma: int = 0
-    inhaled: int = 0
-    smoke_count: int = 0
-    farm_count: int = 0
-    craft_count: int = 0
-    ritual_count: int = 0
-    repent_count: int = 0
-    referral_count: int = 0
-    last_mines: Optional[datetime] = None
-    inventory: List[Any] = Field(default_factory=list)
-    invited_by: Optional[int] = None
-    profile_skins: dict = Field(default_factory=dict)
-    login_streak: int = 0
-    last_login_date: Optional[date] = None
-    oath: str = ""
-    keys: int = 0
-    check_count: int = 0
-    m_essence: int = 0
-    lab_chests: int = 0
-    lab_deaths: int = 0
-    alchemy_count: int = 0
-    last_lab_attempt: Optional[datetime] = None
-    donated: int = 0
-    pending_transfer: Optional[dict] = None
-    lab_depth: int = 1
-    pet: str = ""
-    pet_name: str = ""
-    onboarding_step: int = 0
-    exists: bool = False
-    model_config = ConfigDict(populate_by_name=True)
-    pet_hunger: int = 100
-    daily_progress: dict = Field(default_factory=dict)
-    
-class PlayerRepository:
-    """Репозиторий игроков с Circuit Breaker, кэшем и автоматическими ретраями."""
-
-    def __init__(self, db_pool, redis_client, cache: TTLCache):
-        self.db_pool = db_pool
-        self.redis = redis_client
-        self.cache = cache
-
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=5))
-    async def get_by_id(self, user_id: int, with_inventory: bool = True) -> Player:
-        """Возвращает игрока из Redis → in‑memory → БД."""
-        if not user_id or user_id <= 0:
-            raise ValueError("Некорректный user_id при загрузке")
-
-        # Redis с Circuit Breaker
-        if self.redis:
-            try:
-                data = await redis_breaker.call(self.redis.get, f"player:{user_id}")
-                if data:
-                    return Player.model_validate_json(data)
-            except pybreaker.CircuitBreakerError:
-                logger.warning("Circuit breaker открыт для Redis при загрузке %d", user_id)
-            except Exception as e:
-                logger.warning("Ошибка загрузки из Redis для %d: %s", user_id, e)
-
-        # In‑memory кэш
-        if user_id in self.cache:
-            logger.debug("Игрок %d загружен из in‑memory кэша", user_id)
-            return Player(**self.cache[user_id])
-
-        # БД
-        async with self.db_pool.acquire() as conn:
-            try:
-                await db_breaker.call(conn.set_statement_timeout, 10.0)
-            except pybreaker.CircuitBreakerError:
-                logger.warning("Circuit breaker открыт для БД при загрузке %d", user_id)
-                raise
-            except Exception:
-                pass  # таймаут не критичен
-
-            columns = [
-                "user_id", "username", "balance", "blunts", "guild", "last_farm",
-                "last_ritual", "last_repent", "last_daily", "titles", "last_farm_date", "passive_level",
-                "passive_collected", "karma", "inhaled", "smoke_count", "farm_count",
-                "craft_count", "ritual_count", "referral_count", "last_mines",
-                "inventory", "invited_by", "profile_skins", "login_streak",
-                "last_login_date", "oath", "keys", "check_count", "m_essence",
-                "lab_chests", "lab_deaths", "alchemy_count", "last_lab_attempt",
-                "donated", "daily_progress", "pending_transfer", "lab_depth", "pet", "pet_name", "exists",
-            ]
-            cols_sql = ", ".join(f'"{c}"' for c in columns)
-            row = await db_breaker.call(
-                conn.fetchrow,
-                f"SELECT {cols_sql} FROM players WHERE user_id = $1",
-                user_id
-            )
-
-        if row:
-            p = dict(row)
-            if with_inventory:
-                p["inventory"] = _json_safe_load(p.get("inventory"), [])
-            else:
-                p["inventory"] = []
-
-            p["profile_skins"] = _json_safe_load(p.get("profile_skins"), {})
-            p["pending_transfer"] = _json_safe_load(p.get("pending_transfer"), None)
-            p["daily_progress"] = _json_safe_load(p.get("daily_progress"), {})
-            player = Player(**p)
-            player.exists = True
-            await self._cache_put(user_id, player)
-            return player
-
-        logger.debug("Игрок %d не найден в БД", user_id)
-        return Player(user_id=user_id)
-
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=5))
-    async def save(self, player: Player, conn=None) -> None:
-        """Сохраняет игрока в БД и обновляет кэш."""
-        if player.balance < 0:
-            logger.warning("Попытка сохранить игрока %d с отрицательным балансом", player.user_id)
-            player.balance = 0
-        player.exists = True
-        if conn and conn.is_closed():
-            conn = None
-
-        columns = [
-            "user_id", "username", "balance", "blunts", "guild", "last_farm",
-            "last_ritual", "last_repent", "last_daily", "titles", "last_farm_date", "passive_level",
-            "passive_collected", "karma", "inhaled", "smoke_count", "farm_count",
-            "craft_count", "ritual_count", "referral_count", "last_mines",
-            "inventory", "invited_by", "profile_skins", "login_streak",
-            "last_login_date", "oath", "keys", "check_count", "m_essence",
-            "lab_chests", "lab_deaths", "alchemy_count", "last_lab_attempt",
-            "donated", "daily_progress", "pending_transfer", "lab_depth", "pet", "pet_name", "exists",
-        ]
-        json_cols = {"inventory", "profile_skins", "pending_transfer", "daily_progress"}
-        cols_sql = ", ".join(f'"{c}"' for c in columns)
-        placeholders = ", ".join(f"${i+1}" for i in range(len(columns)))
-        update_set = ", ".join(f'"{c}" = EXCLUDED."{c}"' for c in columns if c != "user_id")
-        values = [getattr(player, col) for col in columns]
-        for idx, col in enumerate(columns):
-            if col in json_cols:
-                values[idx] = json.dumps(getattr(player, col), separators=(',', ':'), default=str)
-
-        sql = f"""
-            INSERT INTO players ({cols_sql})
-            VALUES ({placeholders})
-            ON CONFLICT (user_id) DO UPDATE SET
-                {update_set}
-        """
-
-        async def _write(c):
-            await c.execute(sql, *values)
-
-        if conn:
-            await _write(conn)
-        else:
-            async with self.db_pool.acquire() as new_conn:
-                await _write(new_conn)
-
-        await self._cache_put(player.user_id, player)
-
-        # Инвалидация кэша меню (если функция существует)
-        try:
-            invalidate_menu_cache(player.user_id)
-        except NameError:
-            pass
-        except Exception as e:
-            logger.debug("Инвалидация кэша меню для %d не удалась: %s", player.user_id, e)
-
-        logger.info("Игрок %d успешно сохранён", player.user_id)
-
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=5))
-    async def atomic_update(self, user_id: int, update_func):
-        """Атомарно блокирует игрока, выполняет update_func и сохраняет."""
-        if not user_id or user_id <= 0:
-            raise ValueError("Некорректный user_id при атомарном обновлении")
-
-        async with self.db_pool.acquire() as conn:
-            async with conn.transaction():
-                columns = [
-                    "user_id", "username", "balance", "blunts", "guild", "last_farm",
-                    "last_ritual", "last_repent", "last_daily", "titles", "last_farm_date", "passive_level",
-                    "passive_collected", "karma", "inhaled", "smoke_count", "farm_count",
-                    "craft_count", "ritual_count", "referral_count", "last_mines",
-                    "inventory", "invited_by", "profile_skins", "login_streak",
-                    "last_login_date", "oath", "keys", "check_count", "m_essence",
-                    "lab_chests", "lab_deaths", "alchemy_count", "last_lab_attempt",
-                    "donated", "pending_transfer", "daily_progress", "lab_depth", "pet", "pet_name", "exists",
-                ]
-                cols_sql = ", ".join(f'"{c}"' for c in columns)
-                row = await conn.fetchrow(
-                    f"SELECT {cols_sql} FROM players WHERE user_id = $1 FOR UPDATE",
-                    user_id
-                )
-                if not row:
-                    logger.warning("atomic_update: игрок %d не найден", user_id)
-                    return None
-
-                p = dict(row)
-                p["inventory"] = _json_safe_load(p.get("inventory"), [])
-                p["profile_skins"] = _json_safe_load(p.get("profile_skins"), {})
-                p["pending_transfer"] = _json_safe_load(p.get("pending_transfer"), None)
-                p["daily_progress"] = _json_safe_load(p.get("daily_progress"), {})
-                player = Player(**p)
-
-                result = await update_func(player, conn)
-                await self.save(player, conn=conn)
-                logger.info("Атомарное обновление для игрока %d успешно завершено", user_id)
-                return result
-
-    async def _cache_put(self, user_id: int, player: Player):
-        """Сохраняет игрока в Redis или in‑memory кэш."""
-        try:
-            if self.redis:
-                await redis_breaker.call(
-                    self.redis.setex,
-                    f"player:{user_id}",
-                    10,
-                    player.model_dump_json()
-                )
-            else:
-                self.cache[user_id] = player.model_dump()
-        except pybreaker.CircuitBreakerError:
-            logger.warning("Circuit breaker открыт при кэшировании игрока %d", user_id)
-        except Exception as e:
-            logger.warning("Не удалось обновить кэш для игрока %d: %s", user_id, e)
-            self.cache.pop(user_id, None)
         
-class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_prefix="")
-
-    bot_token: str = Field(..., alias="TOKEN")
-    database_url: str = Field(..., alias="DATABASE_URL_AIVEN")
-    render_url: str = Field("", alias="RENDER_URL")
-    redis_url: str = Field("", alias="REDIS_URL")
-    port: int = Field(default=10000, alias="PORT")
-    webhook_path: str = "/webhook"
-    webhook_secret: str = "SuperSecret"
-    sentry_dsn: str = ""
-    environment: str = "production"
-    admin_id: int = 0
-
-    # Игровые конфиги
-    farm_cooldown_hours: float = 0.5
-    farm_min: int = 45
-    farm_max: int = 100
-    happy_hour_multiplier: int = 2
-    happy_hour_duration_min: int = 30
-    veteran_threshold: int = 5000
-    phantom_threshold: int = 20000
-    necromant_threshold: int = 50000
-    lab_cooldown_hours: int = 12
-    ritual_cooldown_hours: int = 12
-    repent_cooldown_hours: int = 12
-
-    @property
-    def webhook_url(self) -> str:
-        return f"{self.render_url}{self.webhook_path}"
-
-settings = Settings()
-FARM_MIN = settings.farm_min
-FARM_MAX = settings.farm_max
-FARM_COOLDOWN_HOURS = settings.farm_cooldown_hours
-HAPPY_HOUR_MULTIPLIER = settings.happy_hour_multiplier
-
 # ── JSON-логгер ──
 class JsonFormatter(logging.Formatter):
     def format(self, record):
@@ -506,22 +248,6 @@ handler.setFormatter(JsonFormatter())
 logging.basicConfig(level=logging.INFO, handlers=[handler])
 logger = logging.getLogger(__name__)
 
-# ── Глобальные конфиги игры ──
-GAME_CONFIG = {
-    "craft_cost": 15,
-    "named_blunt_cost": 50,
-    "farm_cooldown_hours": settings.farm_cooldown_hours,
-    "ritual_cooldown_hours": settings.ritual_cooldown_hours,
-    "repent_cooldown_hours": settings.repent_cooldown_hours,
-    "lab_cooldown_hours": settings.lab_cooldown_hours,
-    "veteran_threshold": settings.veteran_threshold,
-    "phantom_threshold": settings.phantom_threshold,
-    "necromant_threshold": settings.necromant_threshold,
-}
-PET_CONFIG = {
-    "dog": {"name": "🐕 Песик", "price": 3000, "max_name_len": 15},
-}
-
 # ── Хелперы ──
 def has_rank(balance: int, rank_name: str = "Ветеран") -> bool:
     thresholds = {
@@ -536,220 +262,8 @@ from urllib.parse import quote
 
 def build_share_url(share_text: str) -> str:
     return f"https://t.me/share/url?text={quote(share_text, safe='')}"
-    
-import secrets
-import string
-
-def generate_short_code(length=6):
-    alphabet = string.ascii_letters + string.digits
-    return ''.join(secrets.choice(alphabet) for _ in range(length))
 
 # ── Исключения ──────────────────────────────────────────────
-class UnknownWarActionError(Exception):
-    """В конфиге отсутствует цена действия."""
-
-# ── Enum действий ───────────────────────────────────────────
-class WarAction(enum.Enum):
-    FARM = "farm"
-    CRAFT = "craft"
-    NAMED_CRAFT = "named_craft"
-    DUST_USE = "dust_use"
-    MINES_WIN = "mines_win"
-    MINES_LOSE = "mines_lose"
-    ALCHEMY = "alchemy"
-    LAB_WIN = "lab_win"
-    LAB_DEATH = "lab_death"
-    RITUAL = "ritual"
-    REPENT = "repent"
-    DAILY = "daily"
-
-
-# ── Конфиг очков (frozen) ──
-class WarConfig(BaseModel):
-    model_config = ConfigDict(frozen=True)
-    points: dict[WarAction, int] = Field(default_factory=lambda: {
-        WarAction.FARM: 0,
-        WarAction.CRAFT: 10,
-        WarAction.NAMED_CRAFT: 25,
-        WarAction.DUST_USE: 50,
-        WarAction.MINES_WIN: 200,
-        WarAction.MINES_LOSE: -300,
-        WarAction.ALCHEMY: 30,
-        WarAction.LAB_WIN: 80,
-        WarAction.LAB_DEATH: 0,
-        WarAction.RITUAL: 0,
-        WarAction.REPENT: 0,
-        WarAction.DAILY: 0,
-    })
-
-# ── Настройки окружения ──
-class WarSettings:
-    def __init__(self):
-        self.cache_ttl = int(os.getenv("WAR_CACHE_TTL", "60"))
-        self.retry_max = int(os.getenv("WAR_RETRY_MAX", "3"))
-        self.retry_wait_sec = float(os.getenv("WAR_RETRY_WAIT_SEC", "0.5"))
-        self.redis_url = os.getenv("WAR_REDIS_URL", "redis://localhost")
-
-# ── Сервис войны ──
-class GuildWarService:
-    CACHE_KEY = "war_active"
-
-    def __init__(self, db_pool, redis_client, config: WarConfig, settings: WarSettings):
-        self.db_pool = db_pool
-        self.redis = redis_client
-        self.config = config
-        self.settings = settings
-        self.logger = logging.getLogger("war_service")
-        self._last_redis_err = 0.0
-
-        self._add_score_retry = retry(
-            stop=stop_after_attempt(self.settings.retry_max),
-            wait=wait_exponential(multiplier=1, min=self.settings.retry_wait_sec, max=5),
-            retry=retry_if_exception_type((asyncpg.exceptions.PostgresConnectionError, OSError, TimeoutError)),
-            before_sleep=before_sleep_log(self.logger, logging.WARNING),
-            reraise=True,
-        )(self._add_score_impl)
-
-    async def _get_active(self, conn):
-        row = await conn.fetchrow("SELECT is_active FROM war_state WHERE id=1")
-        return row["is_active"] if row else False
-
-    async def is_war_active(self, conn=None) -> bool:
-        try:
-            if self.redis:
-                cached = await self.redis.get(self.CACHE_KEY)
-                if cached is not None:
-                    return cached == b"1"
-        except Exception:
-            now = time.time()
-            if now - self._last_redis_err > 60:
-                self.logger.warning("Redis unavailable for war cache")
-                self._last_redis_err = now
-
-        if conn is not None:
-            active = await self._get_active(conn)
-        else:
-            async with self.db_pool.acquire() as c:
-                active = await self._get_active(c)
-
-        try:
-            if self.redis:
-                await self.redis.setex(self.CACHE_KEY, self.settings.cache_ttl,
-                                       b"1" if active else b"0")
-        except Exception:
-            pass
-        return active
-
-    async def start_war(self):
-        async with self.db_pool.acquire() as conn:
-            async with conn.transaction():
-                await conn.execute("SELECT pg_advisory_xact_lock(1)")
-                await conn.execute("UPDATE war_state SET is_active = TRUE WHERE id=1")
-                week_start = datetime.now().date() - timedelta(days=datetime.now().weekday())
-                await conn.execute("DELETE FROM guild_weekly WHERE week_start < $1", week_start)
-        await self.invalidate_cache()
-        self.logger.info("War started")
-
-    async def stop_war(self):
-        async with self.db_pool.acquire() as conn:
-            async with conn.transaction():
-                await conn.execute("SELECT pg_advisory_xact_lock(1)")
-                await conn.execute("UPDATE war_state SET is_active = FALSE WHERE id=1")
-        await self.invalidate_cache()
-        self.logger.info("War stopped")
-
-    async def add_score(self, user_id: int, action: WarAction, conn=None) -> None:
-        points = self.config.points.get(action)
-        if points is None:
-            raise UnknownWarActionError(f"No points defined for {action}")
-        if points == 0:
-            return
-
-        if self.redis:
-            week_start = (datetime.now().date() - timedelta(days=datetime.now().weekday())).isoformat()
-            idemp_key = f"war_score:{user_id}:{action.value}:{week_start}"
-            success = await self.redis.setnx(idemp_key, 1)
-            if success:
-                await self.redis.expire(idemp_key, 60 * 60 * 24 * 7)
-            else:
-                self.logger.debug("Duplicate war score blocked: %s", idemp_key)
-                return
-
-        await self._add_score_retry(user_id, points, action, conn)
-
-    async def add_score_raw(self, user_id: int, points: int, conn=None) -> None:
-        if points == 0:
-            return
-        await self._add_score_retry(user_id, points, None, conn)
-
-    async def _add_score_impl(self, user_id: int, points: int, action: WarAction | None, conn=None):
-        async def _execute(c):
-            row = await c.fetchrow("SELECT is_active FROM war_state WHERE id=1 FOR UPDATE")
-            if not row or not row["is_active"]:
-                return
-            guild_row = await c.fetchrow("SELECT guild FROM players WHERE user_id=$1", user_id)
-            guild = guild_row["guild"] if guild_row else None
-            if guild not in ("BLACK", "WHITE"):
-                return
-            week_start = datetime.now().date() - timedelta(days=datetime.now().weekday())
-            await c.execute(
-                "INSERT INTO guild_weekly (guild, week_start, total_score) "
-                "VALUES ($1, $2, $3) "
-                "ON CONFLICT (guild, week_start) DO UPDATE SET "
-                "total_score = guild_weekly.total_score + EXCLUDED.total_score",
-                guild, week_start, points,
-            )
-            self.logger.info("War score: user=%d action=%s guild=%s points=%d",
-                             user_id, action.value if action else "raw", guild, points)
-
-        if conn is not None:
-            await _execute(conn)
-        else:
-            async with self.db_pool.acquire() as c:
-                async with c.transaction():
-                    await _execute(c)
-
-    async def invalidate_cache(self):
-        try:
-            if self.redis:
-                await self.redis.delete(self.CACHE_KEY)
-        except Exception:
-            pass
-            
-from enum import Enum, auto
-
-class AlchemyResult(Enum):
-    SUCCESS = auto()
-    NO_RESOURCES = auto()
-            
-class PetService:
-    def __init__(self, repo: PlayerRepository, config: dict):
-        self.repo = repo
-        self.config = config
-
-    async def buy(self, user_id: int, pet_type: str) -> dict | None:
-        async def _buy(p, conn):
-            if p.pet:
-                return {"status": "already_have"}
-            price = self.config[pet_type]["price"]
-            if p.balance < price:
-                return {"status": "no_money"}
-            p.balance -= price
-            p.pet = self.config[pet_type]["name"]
-            p.pet_name = ""
-            return {"status": "ok"}
-        return await self.repo.atomic_update(user_id, _buy)
-
-    async def set_name(self, user_id: int, name: str) -> bool:
-        async def _set(p, conn):
-            p.pet_name = name[:self.config["dog"]["max_name_len"]]
-            return True
-        result = await self.repo.atomic_update(user_id, _set)
-        return result is not None
-
-    async def has_pet(self, user_id: int) -> bool:
-        player = await self.repo.get_by_id(user_id)
-        return player is not None and bool(player.pet)
         
 class AchievementService:
     def __init__(self, db_pool, redis_client, repo: PlayerRepository):
@@ -810,7 +324,7 @@ class AchievementService:
                                 f"<i>{ach['emoji']} «{ach['name']}» {ach['emoji']}</i>\n\n"
                                 f"<b>📜 Запись добавлена! 💎</b>"
                             )
-                            await safe_send_message(context, uid, text, parse_mode='HTML')
+                            await safe_send_message(context, user_id, text, parse_mode='HTML')
                         except Exception as e:
                             logger.error(f"Achievement notify error: {e}")
             # lunar_lord
@@ -837,7 +351,7 @@ class AchievementService:
                         f"<i>{lunar['emoji']} «{lunar['name']}» {lunar['emoji']}</i>\n\n"
                         f"<b>📜 Запись добавлена! 💎</b>"
                     )
-                    await safe_send_message(context, uid, text, parse_mode='HTML')
+                    await safe_send_message(context, user_id, text, parse_mode='HTML')
                 except Exception as e:
                     logger.error(f"Achievement notify error (lunar): {e}")
 
@@ -968,19 +482,6 @@ async def check_rate_limit_redis(ctx, user_id: int, action: str, limit: int, per
         #return True
     #except pybreaker.CircuitBreakerError:
         #return True
-
-def _json_safe_load(value, default):
-    if isinstance(value, (list, dict)):
-        return value
-    if value in (None, ""):
-        return default.copy() if isinstance(default, (list, dict)) else default
-    try:
-        parsed = json.loads(value)
-        if parsed is None:
-            return default.copy() if isinstance(default, (list, dict)) else default
-        return parsed
-    except Exception:
-        return default.copy() if isinstance(default, (list, dict)) else default
 
 def _to_datetime(value):
     if value is None or isinstance(value, datetime):
@@ -1196,6 +697,34 @@ async def check_achievements(user_id: int, context, ctx: AppContext = None) -> N
                 except Exception as e:
                     logger.error(f"Achievement notify error: {e}")
                 
+def _build_ascension_card(rank_label, new_balance):
+    """Карточка возвышения. Чистая функция → тестируется без БД.
+
+    rank_label = строка ранга из RANKS[i][0] (напр. '⚔️ Ветеран')."""
+    emoji, _, name = rank_label.partition(" ")
+    lore = RANK_LORE.get(rank_label, {})
+    lines = [
+        "🌑 ⚡ 🌑",
+        "━━━━━━━━━━━━━",
+        "<b>В О З В Ы Ш Е Н И Е</b>",
+        f"<b>{emoji} {name.upper()}</b>",
+        "━━━━━━━━━━━━━",
+    ]
+    if lore.get("line"):
+        lines.append(f"<i>{lore['line']}</i>")
+    if lore.get("unlock"):
+        lines.append(f"\n🔓 <b>Открыто:</b> {lore['unlock']}")
+    lines.append(f"\n💰 <b>Баланс:</b> {new_balance} OAC 🍬")
+    # goal-gradient: показать следующую ступень и дистанцию до неё
+    for e, th, nm in RANKS:
+        if th > new_balance:
+            lines.append(f"🎯 <b>Дальше:</b> {e} — ещё {th - new_balance} OAC")
+            break
+    else:
+        lines.append("👑 <i>Ты на вершине. Легенды говорят о тебе.</i>")
+    return "\n".join(lines)
+
+
 async def check_rank_up(context, user_id, username, old_balance, new_balance):
     old_idx = 0
     new_idx = 0
@@ -1204,46 +733,32 @@ async def check_rank_up(context, user_id, username, old_balance, new_balance):
             old_idx = i
         if new_balance >= threshold:
             new_idx = i
-    if new_idx > old_idx:
-        rank_name = emoji_to_name(RANKS[new_idx][0])
+    if new_idx <= old_idx:
+        return
+    rank_label = RANKS[new_idx][0]
+    ctx = context.bot_data.get("ctx")
+    try:
+        # мини-предвкушение: вспышка перед раскрытием ранга
+        msg = await context.bot.send_message(
+            chat_id=user_id, text="🌑 <i>Что-то меняется в тебе…</i>", parse_mode='HTML')
+        await asyncio.sleep(1.1)
+        await msg.edit_text(_build_ascension_card(rank_label, new_balance), parse_mode='HTML')
+    except Exception:
         try:
             await context.bot.send_message(
                 chat_id=user_id,
-                text=f"⚜️ <b>Новый ранг:</b> {rank_name}\n\nТвой баланс теперь {new_balance} OAC.",
-                parse_mode='HTML'
-            )
+                text=_build_ascension_card(rank_label, new_balance), parse_mode='HTML')
         except Exception:
             pass
+    # аспирационные ранги — анонс в гильдию (социальное доказательство + FOMO)
+    if ctx and RANK_LORE.get(rank_label, {}).get("big"):
+        who = f"@{username}" if username else "Один из наших"
+        asyncio.create_task(_safe_send_guild_message(
+            ctx,
+            f"⚡ <b>ВОЗВЫШЕНИЕ</b>\n{who} достиг ранга <b>{rank_label}</b> 🌑\n"
+            f"<i>Ступень, до которой доходят немногие. Кто следующий?</i>"))
 
-FARM_MEDALS = [(1, "🥉 Бронза", 25), (10, "🥈 Серебро", 75), (50, "🥇 Золото", 140), (250, "💎 Платина", 250)]
-CRAFT_MEDALS = [(1, "🥉 Бронза", 25), (10, "🥈 Серебро", 75), (50, "🥇 Золото", 140), (250, "💎 Платина", 250)]
-SMOKE_MEDALS = [(1, "🥉 Бронза", 25), (10, "🥈 Серебро", 75), (50, "🥇 Золото", 140), (250, "💎 Платина", 250)]
-RITUAL_MEDALS = [(1, "🥉 Бронза", 25), (10, "🥈 Серебро", 75), (25, "🥇 Золото", 140), (100, "💎 Платина", 300)]
-REPENT_MEDALS = [(1, "🥉 Бронза", 25), (10, "🥈 Серебро", 75), (25, "🥇 Золото", 140), (100, "💎 Платина", 300)]
 
-WHISPERS = [
-    "💠 Кристалл твоей судьбы пульсирует",
-    "🩸 Искажение шепчет твоё имя",
-    "🌙 «Ночь опустилась на Гильдию. Смотритель пробудился.»",
-    "🍃 Ветер приносит запах свежего бланта.",
-    "💎 ОАС — не просто монеты, это кровь Искажения.",
-    "🕯️ Алтари ждут твоих подношений.",
-    "🌿 Сегодня отличный день для крафта.",
-    "⚔️ Война гильдий уже близко – готовься."
-]
-NEURO_STATUSES = ["Альфа-ритмы нестабильны", "Сенсорная депривация 80%", "Фаза быстрого сна", "Нейро-шунт активен", "Предел синаптической проводимости", "Резонанс с Искажением: 12%"]
-FUNNY_REACTIONS = [
-    'Выглядит как NFT, если которым не поделиться — он навсегда останется обычным',
-    'Даже Бездна от такого названия закашлялась. Жми "Поделиться"!',
-    'Этот блант настолько ужасен, что его нужно срочно подарить кому-нибудь',
-    'Искажение занесло это название в чёрный список.',
-    '10/10, лучший блант для того чтобы осчастливить врага. Подари его кому-то!',
-    'Пахнет так, будто его скрутил сам Ктулху. Поделись им, осчастливь кого-то',
-    'Этот блант вызывает желание помыть руки.',
-    'Этот блант создан, чтобы его увидели все. Не прячь позор — монетизируй.',
-    'Если оставишь это себе, OAC начнут плакать. Подари — и они засмеются.'
-]
-RANKS = [("🪓 Рекрут", 0, 0), ("⚔️ Ветеран", 5000, 1500), ("🪦 Призрак", 20000, 6000), ("🪬 Некромант", 50000, 15000)]
 
 
 def compute_rank_info(balance: int):
@@ -1277,177 +792,94 @@ def compute_rank_info(balance: int):
     return rank_emoji, rank_name, next_rank_emoji, next_rank_name, next_threshold, prev_threshold
 
 
-ACHIEVEMENTS = [
-    {"id": "farm_1", "name": "Первый Шаг", "emoji": "🕯️", "desc": "Совершить 1 фарм очков (АнтиСошл)", "reward": "Титул 🕯️"},
-    {"id": "craft_1", "name": "О! Росточек!", "emoji": "🌱", "desc": "Скрутить свой первый блант — главное средство успокоения от бед в этом мире", "reward": "Титул 🌱"},
-    {"id": "smoke_1", "name": "Затяжка", "emoji": "🚬", "desc": "Выкурить свой первый блант – выдох за которым следует тишина. Глаза краснеют...", "reward": "Титул 🕶️"},
-    {"id": "balance_1000", "name": "О-о-о! Блестяшки!", "emoji": "🍬", "desc": "Накопить 1000 OAC — главную валюту этого мира, за которую говорят даже тени.", "reward": "Титул 🍬"},
-    {"id": "smoke_10", "name": "Дымный след", "emoji": "💨", "desc": "Выкурить 10 блантов. Ты перестал замечать пелену", "reward": ""},
-    {"id": "craft_15", "name": "Скрученный", "emoji": "🌿", "desc": "Скрутить 15 блантов — каждый сгиб отточен, бумага больше не рвётся.", "reward": "+100 OAC"},
-    {"id": "ritual_5", "name": "Прислужник тьмы", "emoji": "🕯️", "desc": "Совершить пять ритуалов — мрачных церемоний и тайных обрядов у алтарей", "reward": ""},
-    {"id": "craft_50", "name": "Мастер Кручения", "emoji": "🗞️", "desc": "Скрутить 50 Блантов — довести ремесло до автоматизма, когда руки работают сами.", "reward": "+300 OAC, Рамка 🫧"},
-    {"id": "smoke_25", "name": "Вечно Накуренный", "emoji": "🫩", "desc": "Выкурить 25 блантов — грань между воздухом и дымом начинает стираться окончательно.", "reward": "Титул 🫩"},
-    {"id": "lab_first", "name": "Скрытое в тени", "emoji": "📿", "desc": "Найти в лабиринте свой первый сундук — драгоценности спрятанные в глубоких чертогах этого мира", "reward": "Титул 📿"},
-    {"id": "referral_1", "name": "Пожиратель Душ", "emoji": "🩸", "desc": "Привести 1 друга — ещё одну душу в мир, где связи прочнее стали.", "reward": "Титул 🩸, Рамка 🩸"},
-    {"id": "streak_7", "name": "Семь Шагов", "emoji": "🕊️", "desc": "Заходить 7 дней подряд — неделю неразрывного присутствия.", "reward": "Титул 🕊️"},
-    {"id": "balance_20000", "name": "Груда блестяшек", "emoji": "🪦", "desc": "Накопить 20000 ОАС — богатство, от которого веет холодом и обещанием власти.", "reward": "Фон ⚰️"},
-    {"id": "lab_chest_3", "name": "Ооо! Костяшки!!", "emoji": "🦴", "desc": "Открыть 3 Костяных сундука — первых три трофея из глубин, где покоятся останки.", "reward": "Титул 🦴"},
-    {"id": "rank_phantom", "name": "Призрачный Гончий", "emoji": "👻", "desc": "Достигнуть ранга \"Призрак\" — стать частью тех, чьё присутствие ощущают только во мраке.", "reward": "Титул 👻"},
-    {"id": "balance_50000", "name": "Повелитель Мёртвых", "emoji": "🩸", "desc": "Накопить 50 000 OAC — гора валюты, что заставляет всех о вас шептаться.", "reward": "+10000 OAC, Рамка 🩸, Фон 💀"},
-    {"id": "check_10", "name": "Всевидящий", "emoji": "👁️", "desc": "Проверить 10 блантов через /check", "reward": "Фон 👁️"},
-    {"id": "lab_death_5", "name": "Похоронен заживо", "emoji": "🪦", "desc": "Умереть в Лабиринте 5 раз — возрождаться и вновь погружаться во тьму комнат.", "reward": "Титул 🪦"},
-    {"id": "lab_chest_10", "name": "Костяной ключ", "emoji": "🗝️", "desc": "Открыть 10 Костяных сундуков — замков что отдают вам свои секреты.", "reward": "Титул 🗝️"},
-    {"id": "craft_250", "name": "Поклонник Плантеры", "emoji": "🌿", "desc": "Скрутить 250 обычных блантов — урожай свитков достойный благословения джунглей.", "reward": "Титул 🌿"},
-    {"id": "alchemy_15", "name": "Алхимик", "emoji": "🔮", "desc": "15 раз воспользоваться магией — навыком тайных жестов, доступным не каждому.", "reward": "Титул 🔮"},
-    {"id": "lunar_lord", "name": "Лунный лорд", "emoji": "🌀", "desc": "Выполнить все остальные достижения", "reward": "Уникальный фон 🌀"}
-]
-ACHIEVEMENTS_DICT = {a["id"]: a for a in ACHIEVEMENTS}
+async def ensure_daily_progress(player, ctx) -> dict:
+    """Сбрасывает daily_progress при наступлении нового дня (сохраняя текущий квест).
 
-ACHIEVEMENT_CONDITIONS = {
-    "farm_1": ("farm_count", 1),
-    "craft_1": ("craft_count", 1),
-    "smoke_1": ("smoke_count", 1),
-    "balance_1000": ("balance", 1000),
-    "smoke_10": ("smoke_count", 10),
-    "craft_15": ("craft_count", 15),
-    "ritual_5": ("ritual_count", 5),
-    "craft_50": ("craft_count", 50),
-    "smoke_25": ("smoke_count", 25),
-    "lab_first": ("lab_chests", 1),
-    "referral_1": ("referral_count", 1),
-    "streak_7": ("login_streak", 7),
-    "balance_20000": ("balance", 20000),
-    "lab_chest_3": ("lab_chests", 3),
-    "rank_phantom": ("balance", 20000),
-    "balance_50000": ("balance", 50000),
-    "check_10": ("check_count", 10),
-    "lab_death_5": ("lab_deaths", 5),
-    "lab_chest_10": ("lab_chests", 10),
-    "craft_250": ("craft_count", 250),
-    "alchemy_15": ("alchemy_count", 15),
-}
+    Единый источник (раньше этот блок был скопирован в build_main_menu,
+    progress_hub_handler и daily_quest_hub). Возвращает актуальный dict progress.
+    """
+    today = date.today().isoformat()
+    progress = getattr(player, 'daily_progress', {}) or {}
+    if progress.get("reset_date") != today:
+        current_quest = progress.get("quest_id", "chapter1")
+        progress = {"reset_date": today, "quest_id": current_quest, "reward_claimed": False}
+        player.daily_progress = progress
+        await ctx.repo.save(player)
+    return progress
 
-SMOKE_EFFECTS = [
-    (0.18, "😵‍💫 Лёгкий приход", "«Станки Фабрики №9 работают в ритме твоего сердца»", True),
-    (0.36, "💤 Полный Штиль", "«Дым рассеялся, оставив лишь лёгкий шлейф»", False),
-    (0.53, "😵‍💫 Паранойя", "Всё идёт не так. Тени сгущаются…", False),
-    (0.70, "💨 Кашель", "«Первая тяга была слишком жёсткой, пробило на кашель»", True),
-    (0.85, "🛋️ Паралич", "«Тело стало ватным, смотришь в одну точку и не можешь пошевелиться»", False),
-    (1.0,  "🧘 Глубокое Озарение", "«Ты понял, что блант — это ключ к разгадке бытия»", False),
-]
 
-QUEST_TEMPLATES = {
-    "chapter1": {
-        "title": "ГЛАВА 1: «Тень в лесу»",
-        "chapter_number": 1,
-        "total_chapters": 3,
-        "description": "🌙 «Ты слышишь шёпот из чащи. Кто-то зовёт тебя на помощь.»",
-        "tasks": [
-            {"label": "🍬 Фармить", "key": "farm", "target": 100},
-            {"label": "🌿 Крафт", "key": "craft", "target": 3},
-            {"label": "💨 Дунуть", "key": "smoke", "target": 2},
-            {"label": "🕯️ Ритуал", "key": "ritual", "target": 1, "condition": "guild_black"},
-            {"label": "⚜️ Исповедь", "key": "repent", "target": 1, "condition": "guild_white"},
-            {"label": "🐾 Покормить питомца", "key": "pet", "target": 1, "condition": "is_veteran_and_has_pet"},
-        ],
-        "reward_oac": 150,
-        "reward_title": "Теневой охотник",
-        "reward_items": {},
-        "next_quest": "chapter2"
-    },
-    "chapter2": {
-        "title": "ГЛАВА 2: «Пепел Короля»",
-        "chapter_number": 2,
-        "total_chapters": 3,
-        
-        "description": "🔥 Древний король восстал из пепла. Ты должен успокоить его дух.",
-        "tasks": [
-            {"label": "🌿 Крафт", "key": "craft", "target": 5},
-            {"label": "💨 Дунуть", "key": "smoke", "target": 5},
-            {"label": "🕯️ Ритуал", "key": "ritual", "target": 3},
-            {"label": "💎 Пожертвовать", "key": "donate", "target": 200},
-            {"label": "🏛️ Лабиринт", "key": "lab", "target": 1},
-        ],
-        "reward_oac": 0,
-        "reward_title": None,
-        "reward_items": {},
-        "choices": [
-            {
-                "label": "⚔️ Взять клинок",
-                "archetype": "warrior",
-                "next_quest": "chapter3_warrior",
-                "reward_title": "Воитель Теней",
-                "reward_oac": 250,
-                "reward_items": {"claw_of_beast": 1},
-                "result_text": "⚔️ Ты сжал клинок. Сила предков наполнила тебя.\n🛡️ Ты стал ВОИТЕЛЕМ ТЕНЕЙ."
-            },
-            {
-                "label": "🕊️ Отпустить с миром",
-                "archetype": "benefactor",
-                "next_quest": "chapter3_benefactor",
-                "reward_title": "Благодетель Рощи",
-                "reward_oac": 250,
-                "reward_items": {"seed_of_life": 1},
-                "result_text": "🕊️ Ты отпустил духа. Свет коснулся твоей души.\n🌿 Ты стал БЛАГОДЕТЕЛЕМ РОЩИ."
-            }
-        ]
-    },  
-    "chapter3_warrior": {
-        "title": "ГЛАВА 3: «Тропа войны»",
-        "chapter_number": 3,
-        "total_chapters": 3,
-        "description": "⚔️ Ты избрал путь воина. Веди гильдию к битве.",
-        "tasks": [
-            {"label": "⚔️ Тренировка", "key": "train", "target": 3},
-            {"label": "💨 Дунуть", "key": "smoke", "target": 5},
-            {"label": "💎 Пожертвовать", "key": "donate", "target": 300},
-            {"label": "🏛️ Лабиринт", "key": "lab", "target": 1},
-        ],
-        "reward_oac": 250,
-        "reward_title": "Вожак стаи",
-        "reward_items": {"war_essence": 1},
-        "next_quest": None
-    },
-    "chapter3_benefactor": {
-        "title": "ГЛАВА 3: «Дар исцеления»",
-        "chapter_number": 3,
-        "total_chapters": 3,
-        "description": "🌿 Ты выбрал путь мира. Исцели раны мира.",
-        "tasks": [
-            {"label": "🌿 Крафт", "key": "craft", "target": 10},
-            {"label": "🍬 Фармить", "key": "farm", "target": 300},
-            {"label": "⚜️ Исповедь", "key": "repent", "target": 1},
-            {"label": "🐾 Покормить питомца", "key": "pet", "target": 1, "condition": "is_veteran_and_has_pet"},
-        ],
-        "reward_oac": 250,
-        "reward_title": "Хранитель сада",
-        "reward_items": {"life_essence": 1},
-        "next_quest": None
+def _quest_progress_counts(template, progress, guild, is_veteran, has_pet):
+    """(done, total) по заданиям квеста с учётом условий видимости. Чистая функция."""
+    if not template:
+        return (0, 0)
+    conditions = {
+        "guild_black": guild == "BLACK",
+        "guild_white": guild == "WHITE",
+        "is_veteran_and_has_pet": is_veteran and has_pet,
     }
-}
+    tasks = [t for t in template.get("tasks", [])
+             if not t.get("condition") or conditions.get(t["condition"], False)]
+    done = sum(1 for t in tasks if progress.get(t["key"], False))
+    return (done, len(tasks))
 
-def build_smoke_effect(roll, earned):
-    for threshold, name, flavor, has_earned in SMOKE_EFFECTS:
-        if roll < threshold:
-            earned_str = f"🍬 <b>+{earned} OAC</b>" if has_earned and earned else ""
-            return (
-                f"<b>💨 ДЫМ РАССЕЯЛСЯ</b>\n"
-                f"– {name}\n"
-                f"– <i>{flavor}</i>\n\n"
-                f"{earned_str}"
-            )
-    return ""
+
+def _plural_steps(n: int) -> str:
+    """Русское склонение слова «шаг» для числа n."""
+    n = abs(n) % 100
+    if 11 <= n <= 14:
+        return "шагов"
+    d = n % 10
+    if d == 1:
+        return "шаг"
+    if 2 <= d <= 4:
+        return "шага"
+    return "шагов"
+
+
+
+
+
+
+def build_smoke_effect(outcome, earned):
+    """Собирает карточку исхода. Текст берётся из корзины, соответствующей
+    исходу (jackpot/win/loss/neutral), поэтому подпись OAC всегда честна."""
+    name, flavor = random.choice(SMOKE_FLAVORS.get(outcome, SMOKE_FLAVORS["neutral"]))
+    if outcome == "jackpot":
+        header = "<b>🎰 ДЖЕКПОТ! ДЫМ ХЛЫНУЛ ЗОЛОТОМ</b>"
+        earned_str = f"🎰 <b>+{earned} OAC</b>"
+    elif earned > 0:
+        header = "<b>💨 ДЫМ РАССЕЯЛСЯ</b>"
+        earned_str = f"🍬 <b>+{earned} OAC</b>"
+    elif earned < 0:
+        header = "<b>💨 ДЫМ РАССЕЯЛСЯ</b>"
+        earned_str = f"🕳️ <b>{earned} OAC</b>"
+    else:
+        header = "<b>💨 ДЫМ РАССЕЯЛСЯ</b>"
+        earned_str = "<i>Ни капли OAC осело на дне…</i>"
+    return (
+        f"{header}\n"
+        f"– {name}\n"
+        f"– <i>{flavor}</i>\n\n"
+        f"{earned_str}"
+    )
 
 def calculate_smoke_reward(p, happy_hour):
+    """Возвращает (earned, outcome). Одна руч­ка — и число, и флейвор.
+    Раньше число и текст брались из двух разных бросков и противоречили друг
+    другу. Джекпот (2%) вырезан из доли выигрыша — суммарный шанс плюса тот же
+    (18%), но у него есть дофаминовый пик."""
     r = random.random()
-    earned = 0
-    if r < 0.18:
-        earned = random.randint(15, 40)
-        if happy_hour:
-            earned *= HAPPY_HOUR_MULTIPLIER
+    if r < 0.02:
+        earned, outcome = random.randint(80, 160), "jackpot"
+    elif r < 0.18:
+        earned, outcome = random.randint(15, 40), "win"
     elif r < 0.70:
-        earned = -5
-    return earned
+        earned, outcome = -5, "loss"
+    else:
+        earned, outcome = 0, "neutral"
+    if happy_hour and earned > 0:
+        earned *= HAPPY_HOUR_MULTIPLIER
+    return earned, outcome
 
 class SmokeStatus(Enum):
     NO_BLUNTS = "no_blunts"
@@ -1458,14 +890,7 @@ class CraftStatus(Enum):
     OK = "ok"
 
 # ========== БАЗА ДАННЫХ ==========
-BLUNTS_PER_PAGE = 3
 
-BLUNT_IMAGES = {
-    "common": "",
-    "rare": "",
-    "epic": "",
-    "legendary": ""
-}
 
 async def _run_migrations(conn):
     """Все миграции, которые необходимо применить перед запуском."""
@@ -1631,9 +1056,37 @@ async def _run_migrations(conn):
     await conn.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS pet TEXT DEFAULT '';")
     await conn.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS pet_name TEXT DEFAULT '';")
     await conn.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS \"exists\" BOOLEAN DEFAULT TRUE;")
+    # Долговечность онбординга и сытости питомца: раньше эти поля жили только
+    # в кэше (Redis TTL 10с) → прогресс онбординга сбрасывался при паузе, а
+    # кормление питомца не сохранялось. Теперь — настоящие колонки.
+    await conn.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS onboarding_step INTEGER DEFAULT 0;")
+    await conn.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS pet_hunger INTEGER DEFAULT 100;")
+
+    # Переименование last_berserk → last_mines (механика «Рискнуть» на самом
+    # деле запускает Мины, не берсерк — имя приведено в соответствие). RENAME,
+    # а не ADD COLUMN, чтобы не потерять существующий кулдаун игроков.
+    # Идемпотентно: сработает только один раз, на старой схеме.
+    await conn.execute("""
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='players' AND column_name='last_berserk'
+            ) AND NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='players' AND column_name='last_mines'
+            ) THEN
+                ALTER TABLE players RENAME COLUMN last_berserk TO last_mines;
+            END IF;
+        END $$;
+    """)
+    await conn.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS last_mines TIMESTAMP;")
 
 # ===== ОПТИМИЗАЦИЯ ХРАНЕНИЯ (Render Free Tier) =====
     # JSONB поля — сжатие + хранение вне таблицы при размере > 2KB
+    # Индекс под рейтинг (снимок лидерборда + топ-10). Ускоряет сортировку по
+    # балансу, когда игроков станет много — лидерборд теперь на главном экране.
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_players_balance ON players (balance DESC);")
     await conn.execute("ALTER TABLE players ALTER COLUMN inventory SET STORAGE EXTENDED;")
     await conn.execute("ALTER TABLE players ALTER COLUMN profile_skins SET STORAGE EXTENDED;")
     await conn.execute("ALTER TABLE players ALTER COLUMN daily_progress SET STORAGE EXTENDED;")
@@ -2105,9 +1558,12 @@ async def process_daily_login(user_id: int, context) -> None:
                     p.titles = reward.title
 
         # Предметы (только blunts, остальное — просто текст в сообщении)
+        # Начисляем ЛЮБОЕ реальное поле Player (не только blunts) — иначе
+        # награда, показанная в сообщении, молча не начислялась бы (как было с
+        # фантомными focus/lives). hasattr-гард отсекает несуществующее.
         for field, qty in reward.inventory_items.items():
-            if field == "blunts":
-                p.blunts += qty
+            if hasattr(p, field):
+                setattr(p, field, (getattr(p, field, 0) or 0) + qty)
         return True
 
     result = await ctx.repo.atomic_update(user_id, _apply_daily)
@@ -2184,9 +1640,20 @@ async def world_hub(update, context, ctx):
 
     kb_rows = []
 
-    # Куст – только ветеранам
-    if is_veteran:
-        kb_rows.append([InlineKeyboardButton("🪴 Куст", callback_data="collect")])
+    # Путь к власти — north-star «кем ты становишься» (смысл/фантазия)
+    kb_rows.append([InlineKeyboardButton("🎯 Твой Путь к власти", callback_data="destiny_hub")])
+
+    # Плантация — idle-крючок «зайди собрать». Кнопка живая: показывает
+    # созревший урожай (goal-gradient тянет вернуться) или зовёт посадить.
+    plant_lvl = player.passive_level or 0
+    _pending, _h, _c = _plant_pending(plant_lvl, player.passive_collected, datetime.now())
+    if plant_lvl <= 0:
+        plant_label = "🪴 Плантация · посадить 🌱"
+    elif _pending > 0:
+        plant_label = f"🪴 Плантация · собрать {_pending} 🌾"
+    else:
+        plant_label = "🪴 Плантация"
+    kb_rows.append([InlineKeyboardButton(plant_label, callback_data="collect")])
 
     # Питомец – виден всем
     if is_veteran and has_pet:
@@ -2207,8 +1674,60 @@ async def world_hub(update, context, ctx):
         reply_markup=kb, parse_mode='HTML'
     )
 
+@cb
+async def destiny_hub(update, context, ctx):
+    """Северная звезда: «кем ты становишься». Отвечает на «зачем эта игра» —
+    показывает фантазию (восхождение к власти) как видимый путь + твою легенду.
+    """
+    query = update.callback_query
+    await query.answer()
+    player = await ctx.repo.get_by_id(query.from_user.id)
+    if not player or not player.exists:
+        await query.answer("Профиль не найден", show_alert=True)
+        return
+
+    balance = player.balance or 0
+    _re, _rn, _ne, _nn, next_th, _pt = compute_rank_info(balance)
+
+    # Лестница восхождения: пройденное ✅, следующее ➡️, заблокированное 🔒
+    ladder = []
+    for emoji, threshold, _ in RANKS:
+        e = emoji.split(' ', 1)[0]
+        nm = emoji.split(' ', 1)[1] if ' ' in emoji else emoji
+        if balance >= threshold:
+            ladder.append(f"✅ {e} <b>{nm}</b>")
+        elif threshold == next_th:
+            ladder.append(f"➡️ {e} <b>{nm}</b> — осталось {threshold - balance} OAC")
+        else:
+            ladder.append(f"🔒 {e} {nm}")
+
+    inv = player.inventory or []
+    named = sum(1 for it in inv if it.get("type") == "named")
+    legendaries = sum(1 for it in inv if it.get("type") == "named" and it.get("rarity") == "legendary")
+    plant_lvl = player.passive_level or 0
+    guild = {"BLACK": "🕯️ Тёмная", "WHITE": "⚜️ Светлая"}.get(player.guild, "— не выбрана")
+
+    text = (
+        "🎯 <b>ТВОЙ ПУТЬ К ВЛАСТИ</b>\n\n"
+        "<i>Ты начал никем. Стань 🪬 Некромантом Искажения — тем, о ком шепчутся оба мира.</i>\n\n"
+        "<b>⚜️ Восхождение:</b>\n"
+        + "\n".join(ladder) +
+        "\n\n<b>👑 Твоя легенда:</b>\n"
+        f"💍 Именных блантов: <b>{named}</b>  (🟡 легендарных: <b>{legendaries}</b>)\n"
+        f"🪴 Плантация-империя: <b>уровень {plant_lvl}</b>\n"
+        f"🏰 Гильдия: <b>{guild}</b>\n\n"
+        "<i>Каждый фарм, каждый блант, каждая победа гильдии — шаг к власти.</i>"
+    )
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🪴 Растить империю", callback_data="collect"),
+         InlineKeyboardButton("💍 Крафт", callback_data="craft")],
+        [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
+    ])
+    await edit_or_reply(update, context, text, reply_markup=kb, parse_mode='HTML')
+
+
 # ========== ОБРАБОТЧИКИ КОМАНД (полный, надёжный, с лабиринтом) ==========
-logger = logging.getLogger(__name__)   # ← 
+logger = logging.getLogger(__name__)   # ←
 
 # --- Retry-обёртки для Telegram API (обработка 429) ---
 @retry(
@@ -2259,24 +1778,38 @@ async def edit_or_reply(update, context, text, reply_markup=None, parse_mode='HT
         except Exception:
             pass
 
-async def animate_progress_bar(update, context, title="", duration=0.6, steps=4):
+async def animate_progress_bar(update, context, title="", duration=0.6, steps=4, in_place=False):
     """
     Быстрая и надёжная анимация прогресс-бара.
     - duration: общее время анимации в секундах (рекомендуется 0.4–0.8).
     - steps: количество кадров (3–5). Чем меньше шагов, тем меньше запросов.
+    - in_place=True: анимация РЕДАКТИРУЕТ нажатый экран вместо нового сообщения
+      («единый живой экран», ноль мёртвых сообщений). Требование: экран-результат
+      обязан нести свою навигацию, иначе тупик. Фолбэк — новое сообщение
+      (команда без callback, фото, слишком старое сообщение).
     Возвращает None, если не удалось отправить даже первое сообщение.
     """
     chat_id = update.effective_chat.id
     title_text = f"<b>{title}</b>" if title else ""
+    first_frame = f"{title_text}\n[░░░░░░░░░░] 0%"
 
-    try:
-        msg = await context.bot.send_message(
-            chat_id=chat_id,
-            text=f"{title_text}\n[░░░░░░░░░░] 0%",
-            parse_mode='HTML'
-        )
-    except Exception:
-        return None
+    msg = None
+    query = update.callback_query
+    if in_place and query and query.message:
+        try:
+            await query.message.edit_text(first_frame, parse_mode='HTML')
+            msg = query.message
+        except Exception:
+            msg = None
+    if msg is None:
+        try:
+            msg = await context.bot.send_message(
+                chat_id=chat_id,
+                text=first_frame,
+                parse_mode='HTML'
+            )
+        except Exception:
+            return None
 
     step_delay = duration / steps
     for i in range(1, steps + 1):
@@ -2406,13 +1939,17 @@ async def _handle_referral(update, context, uid, player):
     #     logger.error(f"Ошибка отправки в канал: {e}")
 
 
-async def _create_new_player(update, context, uid, username):
+async def _create_new_player(update, context, uid, username, invited_by=None,
+                             inviter_name=None, shared_blunt=None):
     ctx = context.bot_data.get("ctx")
     new_name = random.choice(["Крик Бездны", "Шёпот Склепа"])
+    # Двусторонний реферал: приглашённый получает бонус к старту
+    start_balance = 800 + (100 if invited_by else 0)
 
     async with ctx.db_pool.acquire() as conn:
         async with conn.transaction():
-            player = Player(user_id=uid, username=username, balance=800)
+            player = Player(user_id=uid, username=username, balance=start_balance)
+            player.invited_by = invited_by
             # Установка daily_progress ДО сохранения
             player.daily_progress = {
                 "reset_date": date.today().isoformat(),
@@ -2422,10 +1959,31 @@ async def _create_new_player(update, context, uid, username):
             await ctx.repo.save(player, conn=conn)
             await create_named_blunt(uid, new_name, ctx=ctx, conn=conn)
 
+    # Тёплое, социально-связанное прибытие: закрывает обещание шеринга
+    # («забери уникальный Блант»), называет друга (соц-доказательство +
+    # принадлежность) и показывает блант, что привёл. Пустое — если пришёл сам.
+    if invited_by:
+        friend = f"@{html.escape(inviter_name)}" if inviter_name else "Твой друг"
+        blunt_line = ""
+        if shared_blunt:
+            c = {"legendary": "🟡", "epic": "🟣", "rare": "🔵"}.get(shared_blunt["rarity"], "🟢")
+            blunt_line = (f"💍 Блант, что привёл тебя сюда: {c} "
+                          f"<b>«{html.escape(shared_blunt['name'])}»</b>\n")
+        ref_bonus_line = (
+            f"🤝 <b>{friend} позвал тебя в Гильдию</b> — он уже здесь.\n"
+            f"{blunt_line}"
+            f"🎁 <b>Дар за приход: +100 OAC 🍬</b> и твой первый именной блант — уже в свёртке!\n\n"
+        )
+    else:
+        ref_bonus_line = ""
     welcome_text = (
         "<b>🎉 Добро пожаловать в Гильдию Antysocialshop!</b>\n"
         "<i>Здесь курят бланты, поклоняются древним богам и воюют за OAC.</i>\n\n"
-        "🎁 <b>Смотритель дарует тебе</b> <code>800</code> 🍬 <b>и твой первый именной блант!</b>\n\n"
+        "🩸 <b>Твой путь:</b> <i>от нищего 🪓 Рекрута до 🪬 Некроманта Искажения — "
+        "скрути легендарные бланты, вырасти империю-плантацию и приведи гильдию к власти "
+        "над обоими мирами.</i>\n\n"
+        f"{ref_bonus_line}"
+        f"🎁 <b>Смотритель дарует тебе</b> <code>{start_balance}</code> 🍬 <b>и твой первый именной блант!</b>\n\n"
         "<b>🎓 ОБУЧЕНИЕ [▓░░░] 1/3</b>\n\n"
         "⚔️ <b>ВЫБЕРИ ФРАКЦИЮ — ПОЛУЧИ +50 OAC СРАЗУ!</b>\n\n"
         "🕯️ <b>Тёмная Гильдия</b>\n"
@@ -2439,7 +1997,10 @@ async def _create_new_player(update, context, uid, username):
     
     guild_kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🕯️ Тёмная Гильдия (+50 🍬)", callback_data="guild_join_BLACK"),
-         InlineKeyboardButton("⚜️ Светлая Гильдия (+50 🍬)", callback_data="guild_join_WHITE")]
+         InlineKeyboardButton("⚜️ Светлая Гильдия (+50 🍬)", callback_data="guild_join_WHITE")],
+        # Крючок перед коммитом: дать сначала попробовать петлю (дофамин от
+        # фарма), выбор стороны — позже, когда он осмыслен. +50 не теряется.
+        [InlineKeyboardButton("🍬 Позже — сначала играть →", callback_data="defer_faction")],
     ])
 
     await update.effective_message.reply_text(
@@ -2447,6 +2008,39 @@ async def _create_new_player(update, context, uid, username):
         reply_markup=guild_kb,
         parse_mode='HTML'
     )
+
+
+async def defer_faction_handler(update, context):
+    """Новичок отложил выбор фракции — сразу в фарм (дофамин до коммита).
+    Ставит onboarding_step=1, дальше работает штатный funnel фарм→крафт→готово.
+    Сторону выберет позже из меню и получит те же +50 (см. guild_join)."""
+    ctx = context.bot_data.get("ctx")
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+    player = await ctx.repo.get_by_id(uid, with_inventory=False)
+    if not player or not player.exists:
+        await query.answer("Профиль не найден, начните с /start", show_alert=True)
+        return
+    if player.onboarding_step == 0:
+        player.onboarding_step = 1
+        await ctx.repo.save(player)
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🍬 Фармить", callback_data="farm")],
+        [InlineKeyboardButton("⏭️ Пропустить обучение", callback_data="skip_onboarding")],
+    ])
+    try:
+        await query.message.edit_text(
+            "<b>🎓 ОБУЧЕНИЕ [▓░░░] 1/3</b>\n\n"
+            "<b>🍬 Твой первый шаг — фарм!</b>\n"
+            "Нажми кнопку ниже и получи первые <b>OAC</b> — прямо сейчас.\n\n"
+            "<i>💡 OAC — главная валюта. Сторону Гильдии выберешь позже, "
+            "когда почувствуешь игру (за вступление всё так же +50 🍬).</i>",
+            reply_markup=kb, parse_mode='HTML')
+    except Exception:
+        await safe_send_message(context, uid,
+            "<b>🍬 Твой первый шаг — фарм!</b> Жми «Фармить».",
+            reply_markup=kb, parse_mode='HTML')
     
 def get_next_action(player, exclude_callback: str = None) -> tuple[str, str, str]:
     progress = getattr(player, 'daily_progress', {}) or {}
@@ -2486,6 +2080,65 @@ def get_next_action(player, exclude_callback: str = None) -> tuple[str, str, str
 
     return ("🏰 В меню", "menu", "Все дела пока недоступны. Загляни позже!")
 
+
+def _resolve_referrer(args, uid):
+    """Из реф-ссылки blunt_... достаёт creator_id. Чистая функция, без БД.
+
+    Создатель зашит в самом blunt_id (blunt_{creator}_{ts}_{rand}), поэтому
+    скан таблицы не нужен — это O(1) и масштабируется. start-параметр =
+    "blunt_" + blunt_id. Возвращает creator_id (int) или None.
+    """
+    if not args or not str(args[0]).startswith("blunt_"):
+        return None
+    blunt_id = str(args[0])[len("blunt_"):]     # снимаем ведущий префикс
+    parts = blunt_id.split("_")
+    if len(parts) < 2 or not parts[1].isdigit():
+        return None
+    creator_id = int(parts[1])
+    return creator_id if creator_id != uid else None
+
+
+def _shared_blunt_info(ref_player, args):
+    """Достаёт блант, которым поделились (по blunt_id из ссылки), для тёплого
+    приветствия приглашённого. Возвращает {name, rarity} или None."""
+    if not ref_player or not args or not str(args[0]).startswith("blunt_"):
+        return None
+    blunt_id = str(args[0])[len("blunt_"):]
+    for it in (ref_player.inventory or []):
+        if it.get("id") == blunt_id and it.get("type") == "named":
+            return {"name": it.get("name", "?"), "rarity": it.get("rarity", "common")}
+    return None
+
+
+async def _reward_referrer(ctx, context, creator_id):
+    """Награда рефереру: +50 OAC, счётчик, легендарный блант, метка 🩸 + уведомление."""
+    async def _reward(p, conn):
+        p.balance = (p.balance or 0) + 50
+        p.referral_count = (p.referral_count or 0) + 1
+        if "🩸" not in (p.titles or ""):
+            p.titles = f"{p.titles or ''} 🩸".strip()
+        return p.referral_count
+    count = await ctx.repo.atomic_update(creator_id, _reward)
+    if count is None:
+        return
+    try:
+        await create_named_blunt(
+            creator_id,
+            random.choice(["Крик Бездны", "Пепел Короля", "Шёпот Склепа"]),
+            rarity="legendary", ctx=ctx)
+    except Exception:
+        logger.exception("referral: не удалось создать легендарный блант")
+    try:
+        await safe_send_message(
+            context, creator_id,
+            "🩸 <b>По твоей ссылке пришёл новый Странник!</b>\n"
+            "🎁 +50 OAC · легендарный блант · метка 🩸\n"
+            f"👥 Всего приглашено: {count}",
+            parse_mode='HTML')
+    except Exception:
+        pass
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ctx = context.bot_data.get("ctx")
     if not ctx:
@@ -2496,9 +2149,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         uid = user.id
         username = user.username or user.first_name or "Странник"
         player = await ctx.repo.get_by_id(uid)
-        await _handle_referral(update, context, uid, player)
         if not player or not player.exists:
-            await _create_new_player(update, context, uid, username)
+            # Реферал применяется только к НОВЫМ игрокам (анти-фарм)
+            creator_id = _resolve_referrer(context.args, uid)
+            inviter_name = None
+            shared_blunt = None
+            if creator_id:
+                ref = await ctx.repo.get_by_id(creator_id)
+                if not ref or not ref.exists:
+                    creator_id = None
+                else:
+                    inviter_name = ref.username or None
+                    shared_blunt = _shared_blunt_info(ref, context.args)
+            await _create_new_player(update, context, uid, username, invited_by=creator_id,
+                                     inviter_name=inviter_name, shared_blunt=shared_blunt)
+            if creator_id:
+                await _reward_referrer(ctx, context, creator_id)
         else:
             # Запускаем ежедневный бонус в фоне, чтобы меню появилось мгновенно:
             asyncio.create_task(process_daily_login(uid, context))
@@ -2523,10 +2189,12 @@ class StreakConfig:
     random_bonus_chance: float = 0.2
 
     random_bonus_weights: Dict[str, float] = field(default_factory=lambda: {
-        "extra_oac": 0.4,
-        "blunt": 0.3,
-        "focus": 0.2,
-        "life": 0.1
+        # Только реально существующие награды. Раньше тут были «focus»/«life»,
+        # которых нет ни полем в Player, ни механикой: сообщение обещало «+1
+        # Фокус/жизнь», а начислялись только бланты → ~30% дневных бонусов были
+        # фантомом (обман дофаминовой петли). Их доля перераспределена в реальное.
+        "extra_oac": 0.6,
+        "blunt": 0.4,
     })
     extra_oac_range: tuple = (5, 20)
 
@@ -2539,16 +2207,13 @@ class StreakConfig:
         "🔮": "🎁 Бонус 14-го дня:\n🎉 Разблокирован Титул: 🔮 «Хранитель Хрустального Шара» 💎"
     })
 
-    # Маппинг item (из конфига) → поле модели и читаемое имя
+    # Маппинг item (из конфига) → поле модели и читаемое имя. Только реальные
+    # поля Player (focus/lives убраны — их не существует).
     item_to_field: Dict[str, str] = field(default_factory=lambda: {
         "blunt": "blunts",
-        "focus": "focus",
-        "life": "lives"
     })
     item_display_names: Dict[str, str] = field(default_factory=lambda: {
         "blunts": "+1 блант",
-        "focus": "+1 Фокус",
-        "lives": "+1 жизнь"
     })
 
 
@@ -2591,6 +2256,25 @@ def _calculate_reward(streak: int, config: StreakConfig) -> RewardResult:
 
 # Формирование сообщения с улучшенным прогресс-баром (пункт 7)
 # ---------------------------------------------------------------------------
+
+def _build_next_day_preview(streak: int, config: StreakConfig) -> str:
+    """Предпросмотр завтрашней награды — крючок предвкушения + loss-aversion.
+
+    Показывает, что игрок получит, если вернётся завтра и продлит серию.
+    Чистая функция (детерминированная часть награды, без случайных бонусов).
+    """
+    next_streak = streak + 1
+    base = config.base_rewards.get(next_streak, 100)
+    if next_streak >= config.hot_streak_threshold:
+        base = int(base * config.hot_streak_multiplier)
+    next_title = config.title_rewards.get(next_streak)
+
+    if next_title:
+        return (f"\n\n🎁 <b>Завтра (День {next_streak}):</b> +{base} OAC "
+                f"<b>и титул {next_title}!</b>\n<i>Вернись и не разорви серию 🔥</i>")
+    return (f"\n\n⏳ <b>Завтра (День {next_streak}):</b> +{base} OAC ждут тебя.\n"
+            f"<i>Вернись и продли серию 🔥</i>")
+
 
 def _build_daily_message(streak: int, reward: RewardResult, config: StreakConfig) -> str:
     # Стиль заголовка
@@ -2642,6 +2326,7 @@ def _build_daily_message(streak: int, reward: RewardResult, config: StreakConfig
         f"<b>День {streak}.</b> {desc}\n\n"
         f"{bar}\n\n"
         f"<b>+{reward.total_oac} OAC</b>{title_msg}{item_msg}"
+        f"{_build_next_day_preview(streak, config)}"
     )
 # ---------------------------------------------------------------------------
 # Вспомогательные функции
@@ -2661,6 +2346,18 @@ def _parse_last_login_date(last) -> Optional[date]:
 # ============================================================
 # FARM – атомарный сбор OAC
 # ============================================================
+
+def _farm_on_cooldown(farm_count, last_farm, now) -> bool:
+    """True, если фарм сейчас на кулдауне.
+
+    Единый источник логики кулдауна (используется и хендлером фарма, и таймером
+    в главном меню). Первые FARM_GRACE_COUNT фармов — без кулдауна, чтобы новичок
+    сформировал привычку в первую сессию до включения 30-минутного ожидания.
+    """
+    if (farm_count or 0) < FARM_GRACE_COUNT:
+        return False
+    return bool(last_farm and (now - last_farm) < timedelta(hours=FARM_COOLDOWN_HOURS))
+
 
 def _calculate_farm_reward(player, context) -> tuple[int, bool, bool]:
     """
@@ -2762,7 +2459,7 @@ async def farm_callback_v2(update, context, ctx, player):
             pass
 
     async def _farm(p, conn):
-        if p.last_farm and (now - p.last_farm) < timedelta(hours=FARM_COOLDOWN_HOURS):
+        if _farm_on_cooldown(p.farm_count, p.last_farm, now):
             remain = math.ceil((timedelta(hours=FARM_COOLDOWN_HOURS) - (now - p.last_farm)).seconds / 60)
             return ("cooldown", remain)
 
@@ -2850,12 +2547,14 @@ async def farm_callback_v2(update, context, ctx, player):
                 f"💡 <b>Совет:</b> {advice}"
             )
     
-        await safe_send_message(
-            context,
-            update.effective_chat.id,
-            message_text,
-            parse_mode='HTML',
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(btn_text, callback_data=btn_callback)]])
+        # Единый живой экран: кулдаун-подсказка заменяет текущий экран,
+        # а не плодит новое сообщение (fallback внутри edit_or_reply).
+        await edit_or_reply(
+            update, context, message_text,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(btn_text, callback_data=btn_callback)],
+                [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+            ])
         )
         return
 
@@ -2864,15 +2563,34 @@ async def farm_callback_v2(update, context, ctx, player):
     target = get_medal_target(new_count, FARM_MEDALS)
     text = _format_farm_message(earned, crit, happy, medal_text, new_count, target, new_balance)
 
-    anim_msg = await animate_progress_bar(update, context, title="🍬 Фармим...")
+    # Экран-результат несёт навигацию (единый живой экран). На кулдауне НЕ
+    # показываем «фарм» — это тупик (тап вернёт тот же кулдаун). Вместо этого
+    # уводим в следующий шаг петли (крафт/дунуть), а таймер — в текст. В грейсе
+    # (первые фармы без кулдауна) предлагаем «Фармить ещё» — петля плотная.
+    if not _farm_on_cooldown(new_count, now, now):
+        result_kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🍬 Фармить ещё", callback_data="farm"),
+             InlineKeyboardButton("🌿 Крафт", callback_data="craft")],
+            [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+        ])
+    else:
+        text += (f"\n\n🌱 <i>Грядка зреет — новый фарм через "
+                 f"{int(FARM_COOLDOWN_HOURS*60)} мин. А пока — в дело:</i>")
+        result_kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🌿 Крафт", callback_data="craft"),
+             InlineKeyboardButton("💨 Дунуть", callback_data="smoke")],
+            [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+        ])
+    anim_msg = await animate_progress_bar(update, context, title="🍬 Фармим...", in_place=True)
     if anim_msg is not None:
-        await anim_msg.edit_text(text, parse_mode='HTML')
+        await anim_msg.edit_text(text, parse_mode='HTML', reply_markup=result_kb)
     else:
         await safe_send_message(
             context,
             update.effective_chat.id,
             text,
-            parse_mode='HTML'
+            parse_mode='HTML',
+            reply_markup=result_kb,
         )
 
     asyncio.create_task(check_achievements(uid, context))
@@ -3025,10 +2743,13 @@ async def handle_craft_normal_v2(update, context, ctx, player):
 
     status, data = result
     if status == CraftStatus.NO_MONEY:
-        await safe_send(context, chat_id,
+        # Единый живой экран: отказ заменяет текущий экран, не плодит новый.
+        await edit_or_reply(update, context,
             f"<b>❌ Недостаточно OAC.</b>\n🕯️ Требуется <b>{GAME_CONFIG['craft_cost']} OAC</b> 🍬.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]]),
-            parse_mode='HTML'
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🍬 Фармить", callback_data="farm")],
+                [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+            ])
         )
         return
 
@@ -3037,12 +2758,13 @@ async def handle_craft_normal_v2(update, context, ctx, player):
     text = _format_normal_craft_message(medal_text, new_count, target, blunts, new_balance)
 
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🌿 Скрафтить ещё", callback_data="craft_normal")],
-        [InlineKeyboardButton("🔙 Назад", callback_data="craft")]
+        [InlineKeyboardButton("🌿 Скрафтить ещё", callback_data="craft_normal"),
+         InlineKeyboardButton("💨 Дунуть", callback_data="smoke")],
+        [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
     ])
 
-    # Элегантная отправка результата без дублирования
-    anim_msg = await animate_progress_bar(update, context, title="🌿 Скручиваем Блант...")
+    # Единый живой экран: анимация и результат редактируют нажатый экран.
+    anim_msg = await animate_progress_bar(update, context, title="🌿 Скручиваем Блант...", in_place=True)
     if anim_msg is not None:
         await anim_msg.edit_text(text, reply_markup=kb, parse_mode='HTML')
     else:
@@ -3129,7 +2851,11 @@ async def handle_named_name(update, context):
                     f"💎 Этот блант навсегда останется в твоей коллекции!"
                 )
                 
-                await update.message.reply_text(caption,parse_mode='HTML')
+                await update.message.reply_text(caption, parse_mode='HTML',
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("💍 Мои бланты", callback_data="my_blunts")],
+                        [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+                    ]))
                 context.user_data.pop('awaiting_named_blunt', None)
                 return
 
@@ -3150,7 +2876,13 @@ async def handle_named_name(update, context):
             return
         status, data = result[0], result[1] if len(result) > 1 else None
         if status == "no_money":
-            await update.message.reply_text(f"<b>🔮 ИСКАЖЕНИЕ МОЛЧИТ</b>\n\n<i>🛡️ Недостаточно OAC.</i>\n🕯️ Требуется <b>{GAME_CONFIG['named_blunt_cost']} OAC 🍬</b>.")
+            await update.message.reply_text(
+                f"<b>🔮 ИСКАЖЕНИЕ МОЛЧИТ</b>\n\n<i>🛡️ Недостаточно OAC.</i>\n🕯️ Требуется <b>{GAME_CONFIG['named_blunt_cost']} OAC 🍬</b>.",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🍬 Фармить", callback_data="farm")],
+                    [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+                ]))
             return
 
         item = data
@@ -3181,7 +2913,14 @@ async def handle_named_name(update, context):
             label = "ОБЫЧНЫЙ"
             discovery = "3.5%"
 
-        caption = (
+        # Фанфары по редкости — эмоциональный пик («ахнуть»), твой текст ниже не тронут
+        fanfare = {
+            "legendary": "🎊✨🎊 <b>ЛЕГЕНДАРНЫЙ!!!</b> 🎊✨🎊\n<i>Такое рождается раз на тысячу. Ты уловил невозможное.</i>\n\n",
+            "epic": "🟣✨ <b>ЭПИЧЕСКИЙ!</b> Искажение благосклонно к тебе.\n\n",
+            "rare": "🔵 <b>РЕДКИЙ!</b> Достойный улов.\n\n",
+        }.get(rarity, "")
+
+        caption = fanfare + (
             f"<b>💍 ТЫ СОЗДАЛ ИМЕННОЙ БЛАНТ!</b>\n"
             f"🎉 Он навсегда останется в <b>твоей коллекции</b>.\n\n"
             f"{color}<b><i>«{html.escape(meme_name)}»</i></b>\n"
@@ -3194,9 +2933,9 @@ async def handle_named_name(update, context):
 
         # --- Текст для кнопки «Поделиться» ---
         bot_username = (await context.bot.get_me()).username
-        short_code = generate_short_code()
-        # сохрани в базу пару: short_code -> blunt_id
-        ref_link = f"https://t.me/{bot_username}?start=b_{short_code}"
+        # Рабочий реф-формат (согласован с _resolve_referrer): создатель зашит в blunt_id.
+        # Прежний ?start=b_<short_code> не работал — short_code нигде не сохранялся.
+        ref_link = f"https://t.me/{bot_username}?start=blunt_{blunt_id}"
         
         share_text = (
             f"{color} ИМЯ NFT Бланта: «{html.escape(meme_name)}»\n"
@@ -3217,11 +2956,42 @@ async def handle_named_name(update, context):
             [InlineKeyboardButton("🔙 В меню", callback_data="menu")]
         ])
 
+        # Суспенс-ревил: предвкушение перед результатом (дофаминовый пик гачи)
+        try:
+            suspense = await update.message.reply_text("🌀 <b>Искажение сгущается...</b>", parse_mode='HTML')
+            for frame in ("🌫️ <b>Скручиваем твой блант...</b>",
+                          "✨ <b>Проступает редкость...</b>",
+                          "💫 <b>Почти...</b>"):
+                await asyncio.sleep(0.7)
+                try:
+                    await suspense.edit_text(frame, parse_mode='HTML')
+                except Exception:
+                    pass
+            await asyncio.sleep(0.4)
+            try:
+                await suspense.delete()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
         sent_img = await safe_send_blunt_image(
             context, update.effective_chat.id, item["rarity"], caption=caption, reply_markup=kb
         )
         if not sent_img:
             await update.message.reply_text(caption, reply_markup=kb, parse_mode='HTML')
+
+        # Публичное признание редких блантов в чате гильдии — гордость + зависть + вирусность
+        if rarity in ("legendary", "epic"):
+            try:
+                await _safe_send_guild_message(
+                    ctx,
+                    f"{color} <b>@{html.escape(player.username or 'Странник')}</b> создал "
+                    f"<b>{'ЛЕГЕНДАРНЫЙ' if rarity == 'legendary' else 'ЭПИЧЕСКИЙ'}</b> блант "
+                    f"<b>«{html.escape(meme_name)}»</b>! 🩸"
+                )
+            except Exception:
+                pass
 
         # FOMO-бонус (без изменений)
         async def fomo_reminder():
@@ -3363,13 +3133,34 @@ async def onboarding_reward(update, context, ctx, player):
     result = await ctx.repo.atomic_update(query.from_user.id, _reward)
     if result:
         _, new_bal, new_blunts = result
+        # Убираем «обрыв обучения»: вместо «исследуй меню сам» — одна конкретная
+        # цель (goal-gradient + Zeigarnik) и путь к первому завершению квеста.
+        progress = getattr(player, 'daily_progress', {}) or {}
+        done, total = _quest_progress_counts(
+            QUEST_TEMPLATES.get("chapter1"), progress, player.guild, False, False)
+        left = max(0, total - done)
+
+        if left <= 0:
+            body = ("<b>Ты почти прошёл Главу 1 — первая награда Саги уже ждёт!</b>\n"
+                    "Забери её в «Заданиях дня» 👇")
+            cta = "🎁 Забрать награду Главы 1"
+        else:
+            body = (
+                "<b>Основы освоены. Но история только начинается…</b>\n\n"
+                f"📜 <b>Глава 1 почти пройдена — остал{'ся' if left == 1 else 'ось'} "
+                f"{left} {_plural_steps(left)} до первой награды Саги.</b>\n"
+                "<i>Заверши — и Смотритель наградит тебя. Один шаг за раз 👇</i>"
+            )
+            cta = f"📋 Продолжить · осталось {left}"
+
         await query.message.edit_text(
-            f"🎁 Ты получил бонус: +30 OAC, +1 блант!\n\n"
-            f"Твой баланс: {new_bal} OAC, блантов: {new_blunts}\n\n"
-            f"🎉 Поздравляю! Теперь ты можешь исследовать другие разделы меню.",
+            f"🎁 <b>Бонус за обучение: +30 OAC, +1 блант!</b>\n"
+            f"💎 Баланс: {new_bal} OAC · 🗞️ Блантов: {new_blunts}\n\n"
+            f"{body}",
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🏰 В меню", callback_data="menu")
-            ]])
+                InlineKeyboardButton(cta, callback_data="daily_quest_hub")
+            ]]),
+            parse_mode='HTML'
         )
     
 # ====== ФУНКЦИЯ ПЕРЕДАЧИ БЛАНТА (АТОМАРНАЯ, БЕЗОПАСНАЯ) =====
@@ -3528,7 +3319,7 @@ async def do_smoke(update, context, ctx, player):
             return SmokeStatus.NO_BLUNTS, None
 
         save = (p.guild == "WHITE" and random.randint(1, 100) <= 20)
-        earned = calculate_smoke_reward(p, ctx.cache.get("happy_hour", False))
+        earned, outcome = calculate_smoke_reward(p, ctx.cache.get("happy_hour", False))
 
         old_count = p.smoke_count or 0
         new_count = old_count + 1
@@ -3548,7 +3339,7 @@ async def do_smoke(update, context, ctx, player):
             except Exception:
                 logger.exception("War service error, proceeding without points")
 
-        return SmokeStatus.OK, (earned, save, medal_text, new_count, p.blunts, p.balance)
+        return SmokeStatus.OK, (earned, outcome, save, medal_text, new_count, p.blunts, p.balance)
 
     result = await ctx.repo.atomic_update(uid, _smoke)
     if result is None:
@@ -3567,8 +3358,8 @@ async def do_smoke(update, context, ctx, player):
         )
         return
 
-    earned, save, medal_text, new_count, bl_left, new_balance = data
-    effect = build_smoke_effect(random.random(), earned)
+    earned, outcome, save, medal_text, new_count, bl_left, new_balance = data
+    effect = build_smoke_effect(outcome, earned)
 
     text = (
         f"{effect}\n\n"
@@ -3588,6 +3379,13 @@ async def do_smoke(update, context, ctx, player):
     await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
 
     asyncio.create_task(check_achievements(uid, context))
+    if outcome == "jackpot":
+        who = f"@{player.username}" if player.username else "Кто-то из наших"
+        asyncio.create_task(_safe_send_guild_message(
+            ctx,
+            f"🎰 <b>ДЖЕКПОТ!</b>\n{who} сорвал <b>+{earned} OAC</b> одной тягой 🌌\n"
+            f"<i>Фабрика №9 сегодня щедра. Кто следующий?</i>"
+        ))
 
 @rate_limit(3)
 async def ritual_callback(update, context):
@@ -3604,8 +3402,9 @@ async def ritual_callback(update, context):
         if player.guild != "BLACK":
             return ("wrong_guild",)
         if player.last_ritual and (now - player.last_ritual) < timedelta(hours=GAME_CONFIG["ritual_cooldown_hours"]):
-            remain = int((timedelta(hours=GAME_CONFIG["ritual_cooldown_hours"]) - (now - player.last_ritual)).seconds / 3600)
-            return ("cooldown", remain)
+            remain = timedelta(hours=GAME_CONFIG["ritual_cooldown_hours"]) - (now - player.last_ritual)
+            hrs, rem = divmod(int(remain.total_seconds()), 3600)
+            return ("cooldown", hrs, rem // 60)
 
         reward = 150
         if ctx.cache.get("happy_hour", False):
@@ -3636,10 +3435,15 @@ async def ritual_callback(update, context):
         await send_whisper_dm(update, context, "❌ Только Тёмная Гильдия.")
         return
     if status == "cooldown":
-        remain = data[0]
-        await safe_send_message(context, update.effective_chat.id,
-            f"<b>🕯️ Тёмный алтарь истощён 🌙</b>\n\n<b>🗝️ Жди {remain} ч</b>",
-            parse_mode='HTML')
+        hrs, mins = data[0], data[1]
+        wait = f"{hrs} ч {mins} мин" if hrs else f"{mins} мин"
+        # Единый живой экран: кулдаун заменяет текущий экран, не плодит новый.
+        await edit_or_reply(update, context,
+            f"<b>🕯️ Тёмный алтарь истощён 🌙</b>\n\n<b>🗝️ Жди {wait}</b>",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🍬 Фармить", callback_data="farm")],
+                [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+            ]))
         return
 
     reward, extra, medal_text, new_count, new_balance = data
@@ -3654,74 +3458,196 @@ async def ritual_callback(update, context):
         f"<b>🕯️ Ритуалы:</b> {new_count}/{target}\n"
         f"<b>{progress_bar_str}</b>"
     )
-    anim_msg = await animate_progress_bar(update, context, title="🕯️ Ритуал проводится...")
+    # Единый живой экран: результат ритуала заменяет экран и несёт навигацию.
+    ritual_kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🏛️ Храм", callback_data="guild_shrine"),
+         InlineKeyboardButton("🏰 Гильдия", callback_data="guild_info")],
+        [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+    ])
+    anim_msg = await animate_progress_bar(update, context, title="🕯️ Ритуал проводится...", in_place=True)
     if anim_msg is not None:
-        await anim_msg.edit_text(text, parse_mode='HTML')
+        await anim_msg.edit_text(text, parse_mode='HTML', reply_markup=ritual_kb)
     else:
-        await safe_send_message(context, update.effective_chat.id, text, parse_mode='HTML')
+        await safe_send_message(context, update.effective_chat.id, text,
+                                parse_mode='HTML', reply_markup=ritual_kb)
 
     await check_achievements(uid, context)
 
-# КУСТИК (с защитой от None)
+# ============================================================
+# ПЛАНТАЦИЯ (idle-система: владение + апгрейды + лимит накопления)
+# Переиспользует поля passive_level (уровень) и passive_collected (последний сбор)
+# — без миграции БД. Доступна с самого старта (лечит ранний отток).
+# ============================================================
+PLANT_RATE_PER_LEVEL = 25     # OAC/час за каждый уровень плантации
+PLANT_CAP_HOURS = 8           # максимум накопления (создаёт крючок «зайди собрать»)
+PLANT_MAX_LEVEL = 10
+
+
+def _plant_rate(level: int) -> int:
+    """Пассивная скорость плантации, OAC/час."""
+    return PLANT_RATE_PER_LEVEL * max(0, level)
+
+
+def _plant_upgrade_cost(level: int) -> int:
+    """Стоимость апгрейда с текущего level на level+1 (растущая кривая = сток экономики)."""
+    return 150 * (level + 1) * (level + 1)
+
+
+def _plant_pending(level, last_collected, now):
+    """(earned, hours_used, capped) — сколько накоплено к сбору. Чистая функция.
+
+    Накопление ограничено PLANT_CAP_HOURS: производство «переполняется» и стоит,
+    пока не соберёшь → loss-aversion и ежедневный возврат (механика Clash/Township).
+    """
+    if (level or 0) < 1 or not last_collected:
+        return (0, 0.0, False)
+    hrs = (now - last_collected).total_seconds() / 3600
+    if hrs < 0:
+        hrs = 0.0
+    capped = hrs >= PLANT_CAP_HOURS
+    hrs_used = min(hrs, PLANT_CAP_HOURS)
+    earned = int(hrs_used * _plant_rate(level))
+    return (earned, hrs_used, capped)
+
+
 async def collect_callback(update, context):
+    """Вход в Плантацию (эволюция старого «кустика»/collect)."""
     ctx = context.bot_data.get("ctx")
     if not ctx:
         await update.effective_message.reply_text("⚠️ Бот инициализируется, попробуйте позже.")
         return
     user, msg = get_user_and_msg(update)
-    uid = user.id
-    uname = html.escape(user.username or user.first_name)
+    player = await ctx.repo.get_by_id(user.id)
+    if not player or not player.exists:
+        await _notify_user(update, context, "Сначала активируйся: /start")
+        return
+    await _show_plantation(update, context, ctx, player)
+
+
+async def _show_plantation(update, context, ctx, player):
+    now = datetime.now()
+    level = player.passive_level or 0
+
+    if level < 1:
+        text = (
+            "🪴 <b>ПЛАНТАЦИЯ</b>\n\n"
+            "<i>Пустая грядка ждёт первого ростка.</i>\n\n"
+            "🌱 Посади куст — и он будет приносить <b>OAC сам</b>, даже пока тебя нет.\n"
+            "Заглядывай собирать урожай и <b>прокачивай грядку</b>, чтобы она росла быстрее."
+        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🌱 Посадить (бесплатно)", callback_data="plant_start")],
+            [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+        ])
+    else:
+        earned, _hrs, capped = _plant_pending(level, _to_datetime(player.passive_collected), now)
+        rate = _plant_rate(level)
+        cap_total = rate * PLANT_CAP_HOURS
+        fill = min(100, int(earned / cap_total * 100)) if cap_total else 0
+        bar = "🟩" * (fill // 20) + "⬛️" * (5 - fill // 20)
+        cap_line = ("⚠️ <b>ПЕРЕПОЛНЕНО!</b> Собери, иначе урожай пропадает."
+                    if capped else f"📦 Хранилище: {bar} {fill}%")
+        if level < PLANT_MAX_LEVEL:
+            up_cost = _plant_upgrade_cost(level)
+            up_line = f"⬆️ <b>Апгрейд до ур.{level+1}:</b> {up_cost} OAC → {_plant_rate(level+1)}/ч"
+        else:
+            up_cost = None
+            up_line = "⭐️ <b>Максимальный уровень!</b>"
+        text = (
+            f"🪴 <b>ПЛАНТАЦИЯ · Уровень {level}</b>\n\n"
+            f"⚡ Скорость: <b>{rate} OAC/час</b>\n"
+            f"🌾 К сбору: <b>{earned} OAC</b>\n"
+            f"{cap_line}\n\n"
+            f"{up_line}"
+        )
+        rows = [[InlineKeyboardButton(f"🌾 Собрать ({earned} OAC)", callback_data="plant_harvest")]]
+        if up_cost is not None:
+            rows.append([InlineKeyboardButton(f"⬆️ Улучшить · {up_cost} OAC", callback_data="plant_upgrade")])
+        rows.append([InlineKeyboardButton("🏰 В меню", callback_data="menu")])
+        kb = InlineKeyboardMarkup(rows)
+
+    await edit_or_reply(update, context, text, reply_markup=kb, parse_mode='HTML')
+
+
+@cb
+async def plant_start_handler(update, context, ctx):
+    uid = update.callback_query.from_user.id
     now = datetime.now()
 
-    async def _collect(player, conn):
-        if not has_rank(player.balance, "Ветеран"):
-            return ("low_rank",)
-        lvl = 3 if player.balance >= 20000 else 2
-        if not player.passive_collected:
-            player.passive_collected = now
-            return ("activated",)
-        last_collect = _to_datetime(player.passive_collected)
-        hrs = (now - last_collect).total_seconds() / 3600 if last_collect else 0
-        earned = int(hrs * 30 * lvl)
-        if ctx.cache.get("happy_hour", False):
+    async def _plant(p, conn):
+        if (p.passive_level or 0) >= 1:
+            return False
+        p.passive_level = 1
+        p.passive_collected = now
+        return True
+    await ctx.repo.atomic_update(uid, _plant)
+    player = await ctx.repo.get_by_id(uid)
+    await _show_plantation(update, context, ctx, player)
+
+
+@cb
+async def plant_harvest_handler(update, context, ctx):
+    query = update.callback_query
+    uid = query.from_user.id
+    now = datetime.now()
+    happy = bool(ctx.cache.get("happy_hour", False))
+
+    async def _harvest(p, conn):
+        level = p.passive_level or 0
+        if level < 1:
+            return ("no_plant",)
+        earned, _hrs, _capped = _plant_pending(level, _to_datetime(p.passive_collected), now)
+        if happy:
             earned *= HAPPY_HOUR_MULTIPLIER
         if earned < 1:
             return ("not_ready",)
-        player.balance += earned
-        player.passive_collected = now
+        p.balance += earned
+        p.passive_collected = now
+        if ctx.war_service:
+            await ctx.war_service.add_score_raw(uid, earned, conn)
+        return ("ok", earned)
 
-        await ctx.war_service.add_score_raw(uid, earned, conn)
+    result = await ctx.repo.atomic_update(uid, _harvest)
+    if result and result[0] == "ok":
+        await query.answer(f"🌾 Урожай собран: +{result[1]} OAC!")
+    elif result and result[0] == "not_ready":
+        await query.answer("🌱 Ещё рано — куст копит урожай.")
+    player = await ctx.repo.get_by_id(uid)
+    await _show_plantation(update, context, ctx, player)
 
-        return ("ok", earned, player.balance)
 
-    result = await ctx.repo.atomic_update(uid, _collect)
-    if result is None:
-        await send_whisper_dm(update, context, "Профиль не найден.")
-        return
-    status, *data = result
-    if status == "low_rank":
-        await send_whisper_dm(update, context, "❌ Доступно с ранга ⚔️ Ветеран (5000 OAC 🍬)")
-        return
-    if status == "activated":
-        await safe_send_message(
-            context,
-            update.effective_chat.id,
-            "<b>🪴 Авто‑сборщик активирован 💎</b>\n\n<b>🌱 Загляни позже</b>",
-            parse_mode='HTML'
-        )
-        return
-    if status == "not_ready":
-        await safe_send_message(
-            context,
-            update.effective_chat.id,
-            "<b>🪴 Кустик ещё не созрел 💎</b>\n\n<b>🌱 Загляни позже</b>",
-            parse_mode='HTML'
-        )
-        return
+@cb
+async def plant_upgrade_handler(update, context, ctx):
+    query = update.callback_query
+    uid = query.from_user.id
+    now = datetime.now()
 
-    earned, new_bal = data
-    await send_whisper_dm(update, context,
-        f"<b><i>🪴 УРОЖАЙ СОБРАН</i></b>\n\nТвой куст принёс <b>{earned} OAC</b> 🍬.\n\n💎 <i>У тебя:</i> <b>{new_bal} OAC</b> 🍬")
+    async def _upgrade(p, conn):
+        level = p.passive_level or 0
+        if level < 1:
+            return ("no_plant",)
+        if level >= PLANT_MAX_LEVEL:
+            return ("max",)
+        cost = _plant_upgrade_cost(level)
+        if (p.balance or 0) < cost:
+            return ("no_money", cost)
+        # Сначала собираем накопленное по старой ставке (честно), потом апаем
+        pending, _h, _c = _plant_pending(level, _to_datetime(p.passive_collected), now)
+        p.balance += pending
+        p.balance -= cost
+        p.passive_level = level + 1
+        p.passive_collected = now
+        return ("ok", level + 1)
+
+    result = await ctx.repo.atomic_update(uid, _upgrade)
+    if result and result[0] == "ok":
+        await query.answer(f"⬆️ Плантация улучшена до ур.{result[1]}!")
+    elif result and result[0] == "no_money":
+        await query.answer(f"Недостаточно OAC. Нужно {result[1]}.", show_alert=True)
+    elif result and result[0] == "max":
+        await query.answer("Уже максимальный уровень!")
+    player = await ctx.repo.get_by_id(uid)
+    await _show_plantation(update, context, ctx, player)
 
 # Профиль – премиум-карточка, сеньорская версия (аватарка + текст + кнопки)
 @rate_limit(1)
@@ -3754,7 +3680,9 @@ async def profile_callback(update, context, ctx, player):
 
     neuro = random.choice(NEURO_STATUSES)
     skins = player.profile_skins or {}
-    bg = skins.get("active_background", "")
+    # Фон по умолчанию читаемый, иначе строка «🫧 Фон: » висела пустой (выглядит
+    # как баг). Пустой active_background → «🌑 Обычный».
+    bg = skins.get("active_background") or "🌑 Обычный"
     active_title = skins.get("active_title", "—")
 
     inv_data = player.inventory or []
@@ -3778,6 +3706,12 @@ async def profile_callback(update, context, ctx, player):
             pet_line += f" «{player.pet_name}»"
         pet_line += "\n"
 
+    # Плантация: показываем РЕАЛЬНОЕ состояние (уровень × ставку), а не прежнюю
+    # фантомную формулу от баланса, которая нигде не начислялась и врала игроку.
+    plant_lvl = player.passive_level or 0
+    bush_line = (f"🪴 <b>Плантация:</b> ур.{plant_lvl} · +{_plant_rate(plant_lvl)} OAC/ч"
+                 if plant_lvl > 0 else "🪴 <b>Плантация:</b> <i>не посажена — открой в 🌍 Мир</i>")
+
     text = (
         f"<b>⚜️ ПРОФИЛЬ</b>\n"
         f"👤 <b>{uname}</b>{guild_line}\n"
@@ -3785,7 +3719,7 @@ async def profile_callback(update, context, ctx, player):
         f"{rank_progress}\n\n"
         f"💎 <b>ОАС:</b> <b>{bal} OAC</b> 🍬\n"
         f"🌿 <b>Блантов в свёртке:</b> <b>{bl}</b>\n"
-        f"🪴 <b>Куст:</b> <b>+{30 * (3 if bal >= 20000 else 2 if bal >= 5000 else 0)} OAC/ч</b>\n"
+        f"{bush_line}\n"
         f"🧬 <b>Титул:</b> {active_title}\n"
         f"🧠 <b>Нейро-статус:</b> <i>{neuro}</i>\n"
         f"{pet_line}"
@@ -3813,10 +3747,14 @@ async def profile_callback(update, context, ctx, player):
     kb_rows = []
     if not guild:
         kb_rows.append([InlineKeyboardButton("🕋 Вступить в Гильдию", callback_data="guild_info")])
+    # Кодекс блантов — приоритетная, полноширинная (это про статус/коллекцию).
     if len(named) > 2:
         kb_rows.append([InlineKeyboardButton(f"💍 Все именные бланты ({len(named)})", callback_data="my_blunts")])
-    kb_rows.append([InlineKeyboardButton("📜 Кодекс", callback_data="rules")])
-    kb_rows.append([InlineKeyboardButton("🎨 Кастомизация", callback_data="skins_menu")])
+    # Утилитарные — парой в ряд: короче вертикаль, удобнее большому пальцу.
+    kb_rows.append([
+        InlineKeyboardButton("📖 Правила мира", callback_data="rules"),
+        InlineKeyboardButton("🎨 Кастомизация", callback_data="skins_menu"),
+    ])
     kb_rows.append([InlineKeyboardButton("🏰 В меню", callback_data="menu")])
     kb = InlineKeyboardMarkup(kb_rows)
 
@@ -3840,6 +3778,68 @@ async def profile_callback(update, context, ctx, player):
         await msg.reply_text(text, reply_markup=kb, parse_mode='HTML')
 
 # Все мои бланты
+# Порядок и мета редкостей — единый источник для Кодекса.
+_RARITY_TIERS = (
+    ("legendary", "🟡", "Легендарные"),
+    ("epic",      "🟣", "Эпические"),
+    ("rare",      "🔵", "Редкие"),
+    ("common",    "🟢", "Обычные"),
+)
+
+
+def _codex_prestige_title(named):
+    """Титул коллекционера по размеру/качеству коллекции. Чистая функция."""
+    n = len(named)
+    has_leg = any(it.get("rarity") == "legendary" for it in named)
+    if has_leg and n >= 15:
+        return "👑 Владыка Искажения"
+    if n >= 15:
+        return "🏛️ Архивариус"
+    if n >= 5:
+        return "🗝️ Коллекционер"
+    if n >= 1:
+        return "🌱 Начинающий собиратель"
+    return "🕳️ Пустая витрина"
+
+
+def _build_codex_header(named):
+    """Богатая шапка Кодекса: визитка + метр редкостей + аспирация.
+
+    Чистая функция (только список инвентаря игрока), поэтому тестируется без
+    БД. Активирует эндаумент (это ТВОЁ), Зейгарник (незакрытая коллекция) и
+    статус (визитка + титул)."""
+    from collections import Counter
+    counts = Counter(it.get("rarity", "common") for it in named)
+    total = len(named)
+    owned_tiers = sum(1 for k, _, _ in _RARITY_TIERS if counts.get(k, 0) > 0)
+
+    # Визитка — редчайший блант игрока (named уже отсортирован по редкости).
+    sig = named[0] if named else None
+    sig_emoji = {"legendary": "🟡", "epic": "🟣", "rare": "🔵"}.get(
+        (sig or {}).get("rarity"), "🟢") if sig else ""
+
+    lines = ["<b>📜 КОДЕКС ИСКАЖЕНИЯ</b>", f"<i>{_codex_prestige_title(named)}</i>", ""]
+    if sig:
+        lines.append(f"🔱 <b>Твоя визитка:</b> {sig_emoji} «{html.escape(sig.get('name','?'))}»")
+        lines.append(f"   <i>#{sig.get('rare_number', '?-????')} · один из {total} твоих</i>")
+        lines.append("")
+    lines.append(f"<b>🎴 Собрано редкостей: {owned_tiers}/4</b>")
+    for k, emoji, label in _RARITY_TIERS:
+        c = counts.get(k, 0)
+        if c > 0:
+            lines.append(f"{emoji} {label}: <b>{c}</b>")
+        else:
+            lines.append(f"🔒 <s>{label}</s>: <b>0</b> — ещё не в коллекции")
+    # Аспирация: чего не хватает до вершины (Зейгарник — тянет закрыть пробел).
+    if counts.get("legendary", 0) == 0:
+        lines.append("\n✨ <i>Легендарного пока нет — 2% с крафта или 🎰 джекпот дыма. "
+                     "Скрути его и войди в легенды Гильдии.</i>")
+    elif counts.get("epic", 0) == 0:
+        lines.append("\n✨ <i>Нет Эпического — 13% с крафта. Коллекция ждёт печать искажения.</i>")
+    lines.append("")
+    return "\n".join(lines)
+
+
 @rate_limit(1)
 @game_handler
 async def my_blunts_callback(update, context, ctx, player, page=0):
@@ -3855,8 +3855,12 @@ async def my_blunts_callback(update, context, ctx, player, page=0):
                                x.get("serial") or 999999))
 
     if not named:
-        await edit_or_reply(update, context, "💎 У тебя пока нет именных блантов.",
+        await edit_or_reply(update, context,
+                            "<b>📜 КОДЕКС ИСКАЖЕНИЯ</b>\n<i>🕳️ Пустая витрина</i>\n\n"
+                            "💎 У тебя пока нет именных блантов.\n"
+                            "🌿 Скрути первый — и начни свою коллекцию легенд.",
                             reply_markup=InlineKeyboardMarkup([
+                                [InlineKeyboardButton("🌿 Крафт", callback_data="craft")],
                                 [InlineKeyboardButton("🔙 В профиль", callback_data="profile")]
                             ]))
         return
@@ -3866,7 +3870,12 @@ async def my_blunts_callback(update, context, ctx, player, page=0):
     end = start + BLUNTS_PER_PAGE
     page_blunts = named[start:end]
 
-    text = f"<b>💎 ТВОИ ИМЕННЫЕ БЛАНТЫ ({len(named)} всего, стр. {page+1}/{total_pages})</b>\n\n"
+    # Кодекс-шапка на первой странице; на прочих — компактный заголовок.
+    if page == 0:
+        text = _build_codex_header(named)
+        text += f"<b>💎 Твои бланты (стр. {page+1}/{total_pages}):</b>\n\n"
+    else:
+        text = f"<b>💎 ТВОИ ИМЕННЫЕ БЛАНТЫ ({len(named)} всего, стр. {page+1}/{total_pages})</b>\n\n"
     for i, item in enumerate(page_blunts, 1):
         name = item["name"]
         rarity = item.get("rarity", "common")
@@ -4223,20 +4232,25 @@ async def guild_info_callback(update, context):
     if guild:
         g_emoji = "🕯️" if guild == "BLACK" else "⚜️"
         g_name = "Тёмная" if guild == "BLACK" else "Светлая"
+        # Кулдаун на кнопке должен совпадать с реальным (GAME_CONFIG), а не с
+        # захардкоженными 24ч — иначе таймер врёт (реально ритуал/исповедь через
+        # 12ч). Исповедь раньше вообще не показывала таймер — теперь симметрично.
+        def _action_label(base_label, last_time, cooldown_hours, cb):
+            if last_time:
+                lt = _to_datetime(last_time)
+                if lt and datetime.now() - lt < timedelta(hours=cooldown_hours):
+                    diff = timedelta(hours=cooldown_hours) - (datetime.now() - lt)
+                    hrs, rem = divmod(int(diff.total_seconds()), 3600)
+                    wait = f"{hrs} ч {rem // 60} мин" if hrs else f"{rem // 60} мин"
+                    return InlineKeyboardButton(f"{base_label} ({wait})", callback_data=cb)
+            return InlineKeyboardButton(base_label, callback_data=cb)
+
         if guild == "BLACK":
-            if player.last_ritual:
-                last_ritual = _to_datetime(player.last_ritual)
-                if last_ritual and datetime.now() - last_ritual < timedelta(hours=24):
-                    diff = timedelta(hours=24) - (datetime.now() - last_ritual)
-                    hrs = int(diff.seconds // 3600)
-                    mins = int((diff.seconds % 3600) // 60)
-                    kb_rows.append([InlineKeyboardButton(f"🕯️ Ритуал ({hrs} ч {mins} мин)", callback_data="ritual")])
-                else:
-                    kb_rows.append([InlineKeyboardButton("🕯️ Ритуал", callback_data="ritual")])
-            else:
-                kb_rows.append([InlineKeyboardButton("🕯️ Ритуал", callback_data="ritual")])
+            kb_rows.append([_action_label("🕯️ Ритуал", player.last_ritual,
+                            GAME_CONFIG["ritual_cooldown_hours"], "ritual")])
         elif guild == "WHITE":
-            kb_rows.append([InlineKeyboardButton("⚜️ Исповедь", callback_data="repent")])
+            kb_rows.append([_action_label("⚜️ Исповедь", player.last_repent,
+                            GAME_CONFIG["repent_cooldown_hours"], "repent")])
         kb_rows.append([
             InlineKeyboardButton("🏛️ Храм", callback_data="guild_shrine"),
             InlineKeyboardButton("⚔️ Война", callback_data="guild_war")
@@ -4250,24 +4264,40 @@ async def guild_info_callback(update, context):
 
     await edit_or_reply(update, context, text, reply_markup=kb, parse_mode='HTML')
 
+def _days_left_in_week(now) -> int:
+    """Дней до подведения итогов недели (понедельник — новая неделя). Чистая функция."""
+    return 7 - now.weekday()
+
+
+def _war_rally_line(my_guild, black, white) -> str:
+    """Мотивационная строка войны: долг + соревнование. Чистая функция.
+
+    Отстаём → «ты нужен»; ведём → «не дай догнать»; поровну → «твой вклад решит».
+    """
+    if my_guild not in ("BLACK", "WHITE"):
+        return "🏰 <b>Выбери гильдию</b>, чтобы сражаться за общую награду!"
+    mine = black if my_guild == "BLACK" else white
+    rival = white if my_guild == "BLACK" else black
+    if mine < rival:
+        return (f"🔥 <b>Твоя гильдия ОТСТАЁТ на {rival - mine}!</b>\n"
+                "Каждый твой фарм и сбор — очки гильдии. <b>Ты нужен.</b>")
+    if mine > rival:
+        return (f"🏆 <b>Твоя гильдия ВЕДЁТ (+{mine - rival})!</b>\n"
+                "Не дай сопернику догнать — продолжай приносить очки.")
+    return "⚖️ <b>Ноздря в ноздрю!</b> Твой вклад решит исход недели."
+
+
 async def guild_war_callback(update, context):
     ctx = context.application.bot_data["ctx"]
     query = update.callback_query
     await query.answer()
-    uid = query.from_user.id
+    player = await ctx.repo.get_by_id(query.from_user.id)
+    my_guild = player.guild if player else None
 
     async with ctx.db_pool.acquire() as conn:
-        # Загружаем очки гильдий и героев одним запросом
         scores = await conn.fetch("SELECT guild, total_score FROM guild_weekly")
         black_score = next((r["total_score"] for r in scores if r["guild"] == "BLACK"), 0)
         white_score = next((r["total_score"] for r in scores if r["guild"] == "WHITE"), 0)
-
-        # Если очков нет — война неактивна
-        if black_score == 0 and white_score == 0:
-            await edit_or_reply(update, context, "🕊️ Сейчас мирное время.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="guild_info")]]))
-            return
-
         top_black = await conn.fetch(
             "SELECT username, donated FROM players WHERE guild='BLACK' ORDER BY donated DESC LIMIT 3"
         )
@@ -4283,22 +4313,24 @@ async def guild_war_callback(update, context):
         filled = perc // 10
         return "▓" * filled + "░" * (10 - filled)
 
+    days_left = _days_left_in_week(datetime.now())
     text = (
-        f"<b>⚔️ БИТВА ГИЛЬДИЙ</b>\n\n"
-        f"🕯️ <b>Тёмная Гильдия:</b> {black_score} очков\n"
-        f"<b>{safe_bar(bp)} {bp}%</b>\n\n"
-        f"⚜️ <b>Светлая Гильдия:</b> {white_score} очков\n"
-        f"<b>{safe_bar(wp)} {wp}%</b>\n\n"
+        f"<b>⚔️ ВОЙНА ГИЛЬДИЙ</b>\n\n"
+        f"{_war_rally_line(my_guild, black_score, white_score)}\n\n"
+        f"🕯️ <b>Тёмные:</b> {black_score}\n<b>{safe_bar(bp)} {bp}%</b>\n\n"
+        f"⚜️ <b>Светлые:</b> {white_score}\n<b>{safe_bar(wp)} {wp}%</b>\n\n"
+        f"⏳ До итогов недели: <b>{days_left} дн.</b>\n"
+        f"🎁 <b>Победившая гильдия — награда КАЖДОМУ</b> (OAC + бланты + пыль)!\n\n"
     )
 
     if top_black:
         text += "🕯️ <b>Герои Тьмы:</b>\n"
         for i, row in enumerate(top_black, 1):
-            text += f"  {i}. {html.escape(row['username'])} — {row['donated']} очков\n"
+            text += f"  {i}. {html.escape(row['username'])} — {row['donated']}\n"
     if top_white:
         text += "⚜️ <b>Герои Света:</b>\n"
         for i, row in enumerate(top_white, 1):
-            text += f"  {i}. {html.escape(row['username'])} — {row['donated']} очков\n"
+            text += f"  {i}. {html.escape(row['username'])} — {row['donated']}\n"
 
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔙 Назад", callback_data="guild_info")]
@@ -4307,9 +4339,14 @@ async def guild_war_callback(update, context):
 
 @cb
 async def repent_callback(update, context, ctx):
+    # Работает и как кнопка (callback), и как команда /repent (текст, без
+    # callback_query). Раньше безусловный query.answer() ронял AttributeError
+    # на команде → «Внутренняя ошибка», хотя кнопка исповеди работала.
     query = update.callback_query
-    await query.answer()
-    uid = query.from_user.id
+    if query:
+        await query.answer()
+    user, _msg = get_user_and_msg(update)
+    uid = user.id
 
     async def _repent(p, conn):
         now = datetime.now()
@@ -4330,6 +4367,12 @@ async def repent_callback(update, context, ctx):
         p.last_repent = now
         p.daily_progress = p.daily_progress or {}
         p.repent_count = (p.repent_count or 0) + 1
+        # Исповедь СОСТОЯЛАСЬ (блант потрачен, кулдаун 12ч запущен) — квест
+        # обязан засчитаться при ЛЮБОМ исходе. Раньше отметка стояла только в
+        # ветке награды (70%): при удаче на эссенцию/легендарку задание не
+        # тикало, а повторить нельзя 12ч → Светлая гильдия застревала в главе.
+        p.daily_progress["repent"] = True
+        p.daily_progress["guild_action"] = True
 
         # === ДОБАВЛЕНО: Медали и прогресс (пункты 3 и 4) ===
         old_count = p.repent_count - 1
@@ -4344,8 +4387,6 @@ async def repent_callback(update, context, ctx):
         if r < 0.70:
             reward = random.randint(100, 200)
             p.balance += reward + medal_bonus  # ← добавили medal_bonus
-            p.daily_progress["repent"] = True
-            p.daily_progress["guild_action"] = True
             result_line = f"Исповедь принесла тебе <b>{reward} OAC</b> 🍬"
         elif r < 0.95:
             p.m_essence = (p.m_essence or 0) + 1
@@ -4384,11 +4425,17 @@ async def repent_callback(update, context, ctx):
     status, data = result[0], result[1] if len(result) > 1 else ""
 
     if status == "ok":
-        anim_msg = await animate_progress_bar(update, context, title="🕊️ Исповедь...", duration=0.6, steps=4)
+        # Единый живой экран: исповедь анимируется и завершается на месте.
+        repent_kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🏛️ Храм", callback_data="guild_shrine"),
+             InlineKeyboardButton("🏰 Гильдия", callback_data="guild_info")],
+            [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+        ])
+        anim_msg = await animate_progress_bar(update, context, title="🕊️ Исповедь...", duration=0.6, steps=4, in_place=True)
         if anim_msg is not None:
             await anim_msg.edit_text(
                 data,
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="guild_info")]]),
+                reply_markup=repent_kb,
                 parse_mode='HTML'
             )
         else:
@@ -4396,14 +4443,13 @@ async def repent_callback(update, context, ctx):
             await context.bot.send_message(
                 chat_id=update.effective_chat.id,
                 text=data,
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="guild_info")]]),
+                reply_markup=repent_kb,
                 parse_mode='HTML'
             )
     else:
-        # Ошибки – отправляем новое сообщение
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=data,
+        # Ошибки (кулдаун/не та гильдия/нет блантов) — тоже на месте.
+        await edit_or_reply(
+            update, context, data,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="guild_info")]]),
             parse_mode='HTML'
         )
@@ -4480,67 +4526,47 @@ async def privilege_callback(update, context):
     await msg.reply_text(text, parse_mode='HTML', reply_markup=get_back_to_menu_keyboard())
 
 async def catalog_callback(update, context):
-    user, msg = get_user_and_msg(update)
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔗 Перейти", url="https://t.me/antysocialshop")]])
-    await msg.reply_text("<b>🕯️ ANTYSOCIALSHOP · КАТАЛОГ</b>", parse_mode='HTML', reply_markup=kb)
+    # Раньше был тупик: только внешняя ссылка, назад в игру — никак (приходилось
+    # писать /menu). Добавлена навигация; экран редактируется на месте.
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔗 Открыть Каталог", url="https://t.me/antysocialshop")],
+        [InlineKeyboardButton("🛒 Магазин", callback_data="shop"),
+         InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+    ])
+    await edit_or_reply(update, context,
+        "<b>🕯️ ANTYSOCIALSHOP · КАТАЛОГ</b>\n\n"
+        "<i>Настоящие артефакты Фабрики ждут по ссылке.</i>",
+        reply_markup=kb)
 
 # ============================================================
 # УДАЧА – полная сеньорская версия
 # ============================================================
 
-LUCK_CONFIG = {
-    "wheel": {
-        "rewards": [
-            (0.40, 30, "oac"),
-            (0.65, 75, "oac"),
-            (0.80, 1, "blunt"),
-            (0.90, 150, "oac"),
-            (0.97, 2, "blunt"),
-            (1.0, 1000, "jackpot"),
-        ],
-        "cooldown_hours": 24,
-    },
-    "mines": {
-        "cost": 300,          # ставка по умолчанию
-        "win_amount": 200,
-        "lose_amount": 300,
-        "cooldown_hours": 24,
-    },
-    "alchemy": {
-        "cost_blunts": 10,
-        "cost_oac": 250,
-        "required_balance": 5000,
-        "reactions": [
-            (0.40, "dust", 1),
-            (0.75, "none", 0),
-            (0.90, "dust", 2),
-            (1.0, "legendary", 1),
-        ],
-        "legendary_names": [
-            "Крик Бездны", "Шёпот Склепа",
-            "Коготь Хаоса", "Вздох Пожирателя"
-        ],
-    },
-    "mines": {
-        "bet_options": [50, 100, 250, 500],   # доступные ставки
-        "default_bet": 50,
-        "mines_count": 3,
-        "cooldown_hours": 0,                  # можно поставить 0 – без кулдауна
-        "multiplier_max": 3.0,
-    }
-}
 
 
 # ── Хелперы ─────────────────────────────────────────────────
 async def _notify_user(update, context, text, show_alert=False, reply_markup=None):
+    # Анти-тупик: раньше без reply_markup экран заменялся текстом БЕЗ кнопок →
+    # игрок застревал (Удача/Алхимия/Лабиринт: «Колесо недоступно», «нет OAC»…).
+    # Теперь: (1) show_alert — это попап-предупреждение, экран НЕ трогаем, если
+    # своей клавы нет (игрок остаётся где был); (2) без клавы даём выход в меню.
     if update.callback_query:
         if show_alert:
             await update.callback_query.answer(text, show_alert=True)
-        else:
-            await update.callback_query.answer()
-        await update.callback_query.message.edit_text(text, reply_markup=reply_markup, parse_mode='HTML')
+            if reply_markup is not None:
+                try:
+                    await update.callback_query.message.edit_text(
+                        text, reply_markup=reply_markup, parse_mode='HTML')
+                except Exception:
+                    pass
+            return
+        await update.callback_query.answer()
+        await update.callback_query.message.edit_text(
+            text, reply_markup=reply_markup or get_back_to_menu_keyboard(), parse_mode='HTML')
     else:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=reply_markup, parse_mode='HTML')
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id, text=text,
+            reply_markup=reply_markup or get_back_to_menu_keyboard(), parse_mode='HTML')
 
 def _check_wheel_availability(player, now, cooldown_hours):
     last = player.last_daily
@@ -4688,8 +4714,7 @@ async def _process_wheel(update, context, uid, player, cfg, ctx):
     await edit_or_reply(update, context, msg_text,
                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]))
 
-
-# ── Берсерк ─────────────────────────────────────────────────
+# МИНЫ
 import json
 import time
 import random
@@ -4712,6 +4737,29 @@ def _calc_multiplier(step: int) -> float:
     return round(1.0 + (step / max_step) * 2.0, 2)
 
 # Основная функция – замена _process_mines
+async def _mines_state_get(ctx, uid):
+    """Состояние игры «Мины»: Redis, если он есть, иначе in-memory кэш.
+
+    Приложение по дизайну работает и без Redis (main.py: «без Redis продолжим»),
+    но мины дёргали ctx.redis напрямую → при отсутствующем/упавшем Redis
+    ctx.redis был None и кнопка «Рискнуть» молча падала на None.get(). Фолбэк
+    на ctx.cache (TTL ~10мин, партии хватает) чинит мины без Redis."""
+    key = f"mines_game:{uid}"
+    if getattr(ctx, "redis", None):
+        raw = await ctx.redis.get(key)
+        return json.loads(raw) if raw else None
+    val = ctx.cache.get(key)
+    return json.loads(val) if isinstance(val, (str, bytes)) else val
+
+
+async def _mines_state_set(ctx, uid, state):
+    key = f"mines_game:{uid}"
+    if getattr(ctx, "redis", None):
+        await ctx.redis.setex(key, 3600, json.dumps(state))
+    else:
+        ctx.cache[key] = state
+
+
 async def _process_mines(update, context, uid, player, cfg, ctx):
     """
     Запускает игру «Мины» (вместо Берсерка).
@@ -4727,12 +4775,10 @@ async def _process_mines(update, context, uid, player, cfg, ctx):
         await _notify_user(update, context, f"💣 Недостаточно OAC. Минимальная ставка: {min_bet} OAC.")
         return
 
-    # --- 2. Загружаем или создаём состояние игры в Redis ---
+    # --- 2. Загружаем или создаём состояние игры (Redis или in-memory) ---
     redis_key = f"mines_game:{uid}"
-    state_json = await ctx.redis.get(redis_key)
-    if state_json:
-        state = json.loads(state_json)
-    else:
+    state = await _mines_state_get(ctx, uid)
+    if not state:
         # Если игра не начата – показываем меню выбора ставки
         await _show_mines_bet_menu(update, context, player, cfg)
         return
@@ -4820,7 +4866,7 @@ async def _mines_start_game(update, context, uid, bet, ctx):
         "created_at": time.time()
     }
     redis_key = f"mines_game:{uid}"
-    await ctx.redis.setex(redis_key, 3600, json.dumps(state))
+    await _mines_state_set(ctx, uid, state)
     await _mines_show_field(update, context, state, redis_key, uid, ctx)
 
 async def _mines_show_field(update, context, state, redis_key, uid, ctx):
@@ -4903,9 +4949,12 @@ async def _mines_open_cell(update, context, state, redis_key, uid, ctx):
     query = update.callback_query
     if not query:
         return
-    # Парсим координаты
-    _, r_str, c_str = query.data.split("_")
-    row, col = int(r_str), int(c_str)
+    # Парсим координаты. callback = "mines_open_{r}_{c}" → split даёт 4 части
+    # (["mines","open","r","c"]), а не 3. Раньше распаковка в 3 переменные
+    # роняла ValueError → клик по клетке молча ничего не делал. Берём последние
+    # два сегмента.
+    parts = query.data.split("_")
+    row, col = int(parts[-2]), int(parts[-1])
 
     field = state["field"]
     if field[row][col] != 0:
@@ -4919,7 +4968,7 @@ async def _mines_open_cell(update, context, state, redis_key, uid, ctx):
         field[row][col] = 2
         state["status"] = "lost"
         # Ставка уже списана, ничего не возвращаем
-        await ctx.redis.setex(redis_key, 3600, json.dumps(state))
+        await _mines_state_set(ctx, uid, state)
         await _mines_show_field(update, context, state, redis_key, uid, ctx)
         return
 
@@ -4942,12 +4991,12 @@ async def _mines_open_cell(update, context, state, redis_key, uid, ctx):
             logger.error(f"Ошибка начисления выигрыша {win} у {uid}: {e}")
             await query.answer("Ошибка при начислении", show_alert=True)
             return
-        await ctx.redis.setex(redis_key, 3600, json.dumps(state))
+        await _mines_state_set(ctx, uid, state)
         await _mines_show_field(update, context, state, redis_key, uid, ctx)
         return
 
     # Игра продолжается
-    await ctx.redis.setex(redis_key, 3600, json.dumps(state))
+    await _mines_state_set(ctx, uid, state)
     await _mines_show_field(update, context, state, redis_key, uid, ctx)
 
 async def _mines_cashout(update, context, state, redis_key, uid, ctx):
@@ -4980,11 +5029,10 @@ async def _mines_open_cell_wrapper(update, context):
     uid = query.from_user.id
     ctx = context.bot_data.get("ctx")
     redis_key = f"mines_game:{uid}"
-    state_json = await ctx.redis.get(redis_key)
-    if not state_json:
+    state = await _mines_state_get(ctx, uid)
+    if not state:
         await query.answer("Игра не найдена. Начните новую.", show_alert=True)
         return
-    state = json.loads(state_json)
     await _mines_open_cell(update, context, state, redis_key, uid, ctx)
 
 async def _mines_cashout_wrapper(update, context):
@@ -4992,16 +5040,33 @@ async def _mines_cashout_wrapper(update, context):
     uid = query.from_user.id
     ctx = context.bot_data.get("ctx")
     redis_key = f"mines_game:{uid}"
-    state_json = await ctx.redis.get(redis_key)
-    if not state_json:
+    state = await _mines_state_get(ctx, uid)
+    if not state:
         await query.answer("Игра не найдена.", show_alert=True)
         return
-    state = json.loads(state_json)
     await _mines_cashout(update, context, state, redis_key, uid, ctx)
 
     state["status"] = "cashed_out"
-    await ctx.redis.setex(redis_key, 3600, json.dumps(state))
+    await _mines_state_set(ctx, uid, state)
     await _mines_show_field(update, context, state, redis_key, uid, ctx)
+
+
+async def _mines_bet_wrapper(update, context):
+    """Клик по кнопке ставки в минах: списывает ставку и стартует игру.
+
+    Раньше callback 'mines_bet_<n>' не был зарегистрирован ни в одном реестре,
+    поэтому выбор ставки выдавал «Неизвестная команда» и мины были непроходимы.
+    """
+    query = update.callback_query
+    await query.answer()
+    ctx = context.bot_data.get("ctx")
+    uid = query.from_user.id
+    try:
+        bet = int(query.data.split("_")[-1])
+    except (ValueError, AttributeError):
+        await query.answer("Некорректная ставка", show_alert=True)
+        return
+    await _mines_start_game(update, context, uid, bet, ctx)
 
 # ── Алхимия (начало) ────────────────────────────────────────
 async def _process_alchemy_start(update, context, player, cfg):
@@ -5125,91 +5190,6 @@ async def check_blunt(update, context):
 # ============================================================
 # ЛАБИРИНТ ИСКАЖЕНИЯ — ИТОГОВАЯ СЕНЬОР-ВЕРСИЯ (ПОЛНАЯ ЗАМЕНА)
 # ============================================================
-LABYRINTH_ROOMS = [
-    # === БАЗОВЫЕ КОМНАТЫ ===
-    {
-        "name": "👁️ Зал Наблюдателя",
-        "desc": "Тебе кажется, что глаза на потолке — это отражения твоих собственных сомнений. Но они моргают",
-        "actions": {
-            "attack": {"costs": [10, 25, 50], "risks": [0.20, 0.60, 0.85], "rewards": [(10,30), (40,80), (80,160)]},
-            "special": {"name": "🕯️ Зажечь свечу", "cost": 5, "risk": 0.70, "effect": "focus", "value": 1}
-        }
-    },
-    {
-        "name": "⚗️ Алтарь Теней",
-        "desc": "Густая кровь капает с алтаря. Тени шепчут о силе",
-        "actions": {
-            "attack": {"costs": [10, 25, 50], "risks": [0.20, 0.60, 0.85], "rewards": [(15,35), (45,85), (85,170)]},
-            "special": {"name": "📜 Прочесть руны", "cost": 5, "risk": 0.60, "effect": "amulet"}
-        }
-    },
-    {
-        "name": "🌀 Водоворот Хаоса",
-        "desc": "Воздух дрожит, затягивая в воронку. Прямо в центре — мерцающий сгусток",
-        "actions": {
-            "attack": {"costs": [10, 25, 50], "risks": [0.20, 0.60, 0.85], "rewards": [(20,40), (50,90), (90,180)]},
-            "special": {"name": "🌀 Схватить сгусток", "cost": 5, "risk": 0.50, "effect": "next_boost", "value": 0.5}
-        }
-    },
-    {
-        "name": "☠️ Склеп Короля",
-        "desc": "Груды костей, трон из черепов. С них свисают драгоценные камни",
-        "actions": {
-            "attack": {"costs": [10, 25, 50], "risks": [0.20, 0.60, 0.85], "rewards": [(25,50), (60,120), (120,250)]},
-            "special": {"name": "💎 Сорвать камень", "cost": 5, "risk": 0.80, "effect": "oac", "value": (20,50)}
-        }
-    },
-    # === ГЛУБОКИЕ ЭТАЖИ ===
-    {
-        "name": "🩸 Чертог Крови",
-        "desc": "Стены сочатся тёмной кровью. Воздух тяжёлый от древних жертв",
-        "actions": {
-            "attack": {"costs": [15, 30, 55], "risks": [0.25, 0.65, 0.90], "rewards": [(30,60), (70,130), (130,280)]},
-            "special": {"name": "💉 Испить из чаши", "cost": 5, "risk": 0.60, "effect": "heal", "value": 30}
-        }
-    },
-    {
-        "name": "🔮 Зал Пророчеств",
-        "desc": "Тысячи свечей озаряют карты судьбы. Грядущее можно увидеть, если осмелишься заглянуть",
-        "actions": {
-            "attack": {"costs": [10, 25, 50], "risks": [0.20, 0.60, 0.85], "rewards": [(20,40), (50,90), (90,200)]},
-            "special": {"name": "🔮 Заглянуть в будущее", "cost": 5, "risk": 1.0, "effect": "reveal"}
-        }
-    },
-    {
-        "name": "🗝️ Сокровищница Теней",
-        "desc": "Призрачные сундуки парят в воздухе. Они манят блеском, но стража не дремлет",
-        "actions": {
-            "attack": {"costs": [10, 25, 50], "risks": [0.20, 0.60, 0.85], "rewards": [(25,50), (60,120), (120,250)]},
-            "special": {"name": "💎 Взять самоцвет", "cost": 5, "risk": 0.80, "effect": "oac", "value": (20,50)}
-        }
-    },
-    {
-        "name": "🪞 Галерея Отражений",
-        "desc": "В зеркалах движутся не твои копии. Они живут своей жизнью и зовут тебя",
-        "actions": {
-            "attack": {"costs": [10, 25, 50], "risks": [0.20, 0.60, 0.85], "rewards": [(15,35), (45,85), (85,170)]},
-            "special": {"name": "🪞 Коснуться отражения", "cost": 5, "risk": 0.50, "effect": "mirror_hp"}
-        }
-    },
-    # === ДВЕ НОВЫЕ КОМНАТЫ ===
-    {
-        "name": "🔥 Жертвенный Костер",
-        "desc": "Языки пламени пляшут на костях. Брось в огонь часть себя — и получишь силу",
-        "actions": {
-            "attack": {"costs": [10, 25, 50], "risks": [0.20, 0.60, 0.85], "rewards": [(20,40), (50,90), (90,180)]},
-            "special": {"name": "🔥 Бросить в огонь 20 HP", "cost": 20, "risk": 0.90, "effect": "sacrifice_boost", "value": 0.8}
-        }
-    },
-    {
-        "name": "👻 Шепчущий Коридор",
-        "desc": "Голоса нашёптывают тебе удачу и погибель. Что выберешь?",
-        "actions": {
-            "attack": {"costs": [10, 25, 50], "risks": [0.20, 0.60, 0.85], "rewards": [(15,35), (45,85), (85,170)]},
-            "special": {"name": "👂 Прислушаться", "cost": 5, "risk": 0.50, "effect": "gamble"}
-        }
-    }
-]
 
 
 # ─── ВХОД В ЛАБИРИНТ ────────────────────────────────────────
@@ -5264,8 +5244,15 @@ async def lab_enter_confirm(update, context):
     depth = player.lab_depth or 1 if player else 1
     total_rooms = 4 + depth
     now = datetime.now()
-    async with ctx.db_pool.acquire() as conn:
-        await conn.execute("UPDATE players SET last_lab_attempt=$1 WHERE user_id=$2", now, uid)
+
+    async def _mark_lab(p, conn):
+        p.last_lab_attempt = now
+        # Отмечаем задание квеста «Лабиринт» (раньше не трекалось → глава 2
+        # была непроходима)
+        p.daily_progress = p.daily_progress or {}
+        p.daily_progress["lab"] = True
+        return True
+    await ctx.repo.atomic_update(uid, _mark_lab)
 
     context.user_data["lab_room"] = 1
     context.user_data["lab_hp"] = 100
@@ -5748,7 +5735,12 @@ async def handle_gift_username(update: Update, context: ContextTypes.DEFAULT_TYP
     await ctx.repo.save(player)
     await ctx.repo.save(target_player)
 
-    await update.message.reply_text(f"✅ Блант «{item.get('name')}» подарен @{target_username}!")
+    await update.message.reply_text(
+        f"✅ Блант «{item.get('name')}» подарен @{target_username}!",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("💍 Мои бланты", callback_data="my_blunts")],
+            [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+        ]))
     context.user_data.pop('gifting_blunt_id', None)
 
 # ============================================================
@@ -5756,22 +5748,46 @@ async def handle_gift_username(update: Update, context: ContextTypes.DEFAULT_TYP
 # ============================================================
 @cb
 async def pet_preview(update, context, ctx):
-    query = update.callback_query
-    uid = query.from_user.id
+    # Робастно к вызову и кнопкой, и командой /pet (edit_or_reply сам решает
+    # редактировать сообщение или прислать новое; раньше query.message.edit_text
+    # ронял команду /pet).
+    uid = update.effective_user.id
     player = await ctx.repo.get_by_id(uid)
 
     if player and player.pet:
         name_str = f" по кличке «{player.pet_name}»" if player.pet_name else ""
-        await query.message.edit_text(f"Твой питомец: {player.pet}{name_str}")
+        hunger = player.pet_hunger if player.pet_hunger is not None else 100
+        hbar = "🟩" * (hunger // 20) + "⬛️" * (5 - hunger // 20)
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🍖 Покормить", callback_data="pet_feed")],
+            [InlineKeyboardButton("🔙 Назад", callback_data="menu")],
+        ])
+        await edit_or_reply(
+            update, context,
+            f"🐾 <b>Твой питомец: {player.pet}{name_str}</b>\n\n"
+            f"🍖 <b>Сытость:</b> {hbar} {hunger}/100",
+            reply_markup=kb)
     else:
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton(f"🐕 Купить Песика ({PET_CONFIG['dog']['price']} 🍬)", callback_data="pet_buy_dog")],
             [InlineKeyboardButton("🔙 Назад", callback_data="menu")]
         ])
-        await query.message.edit_text(
+        await edit_or_reply(
+            update, context,
             "🐾 <b>ПИТОМЦЫ</b>\n\nПока доступен только Песик.",
-            reply_markup=kb, parse_mode='HTML'
-        )
+            reply_markup=kb)
+
+@cb
+async def pet_feed_handler(update, context, ctx):
+    query = update.callback_query
+    uid = query.from_user.id
+    result = await ctx.pet_service.feed(uid)
+    if not result or result.get("status") == "no_pet":
+        await query.answer("Сначала заведи питомца!", show_alert=True)
+        return
+    await query.answer("🐾 Питомец сыт и доволен!")
+    await pet_preview(update, context)
+
 
 @cb
 async def pet_buy_dog_handler(update, context, ctx):
@@ -5799,7 +5815,11 @@ async def pet_buy_dog_handler(update, context, ctx):
 async def pet_name_skip_handler(update, context, ctx):
     query = update.callback_query
     context.user_data.pop('awaiting_pet_name', None)
-    await query.message.edit_text("🐕 Хорошо, твой питомец будет просто Песиком!")
+    await query.message.edit_text("🐕 Хорошо, твой питомец будет просто Песиком!",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🐾 Питомец", callback_data="pet_preview")],
+            [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+        ]))
 
 async def handle_pet_name(update, context):
     ctx = context.bot_data.get("ctx")
@@ -5816,9 +5836,15 @@ async def handle_pet_name(update, context):
     uid = update.effective_user.id
     success = await ctx.pet_service.set_name(uid, name)
     if not success:
-        await update.message.reply_text("Ошибка сохранения имени.")
+        await update.message.reply_text("Ошибка сохранения имени.",
+            reply_markup=get_back_to_menu_keyboard())
     else:
-        await update.message.reply_text(f"Отлично! Теперь твоего питомца зовут «{name}»! 🐕")
+        await update.message.reply_text(
+            f"Отлично! Теперь твоего питомца зовут «{name}»! 🐕",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🐾 Питомец", callback_data="pet_preview")],
+                [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+            ]))
     context.user_data.pop('awaiting_pet_name', None)
 
 async def pet_locked_handler(update, context):
@@ -5828,15 +5854,130 @@ async def pet_locked_handler(update, context):
 # ============================================================
 # МАГАЗИН, АДМИН-КОМАНДЫ
 # ============================================================
+# ── Прилавок: чистая логика (тестируется без БД) ────────────
+def _shop_discount_pct(balance):
+    """Скидка прилавка по достатку — ранг даёт ощутимую выгоду в лавке.
+    Потолок 15%, чтобы не разгонять инфляцию."""
+    b = balance or 0
+    if b >= 50000:
+        return 15
+    if b >= 20000:
+        return 10
+    if b >= 5000:
+        return 5
+    return 0
+
+
+def _shop_price(base, discount_pct):
+    """Цена со скидкой, минимум 1 OAC."""
+    return max(1, round(base * (100 - discount_pct) / 100))
+
+
+def _shop_today(ordinal):
+    """3 товара дня — детерминированное окно по дате (без состояния в БД).
+    Витрина сдвигается на 1 позицию каждый день → ощущение живой лавки."""
+    pool = list(SHOP_ITEMS.keys())
+    start = ordinal % len(pool)
+    return [pool[(start + i) % len(pool)] for i in range(min(3, len(pool)))]
+
+
+def _shop_time_left(now):
+    """(часы, минуты) до смены витрины — до ближайшей полуночи. FOMO-таймер."""
+    tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    delta = tomorrow - now
+    return delta.seconds // 3600, (delta.seconds % 3600) // 60
+
+
+def _build_shop_view(balance, now):
+    """Собирает текст+клавиатуру прилавка. Чистая функция для тестов."""
+    disc = _shop_discount_pct(balance)
+    today = _shop_today(now.toordinal())
+    h, m = _shop_time_left(now)
+    lines = ["<b>🏪 ЛАВКА ФАБРИКИ №9</b>", ""]
+    if disc:
+        lines.append(f"🪪 <b>Скидка ранга: −{disc}%</b> на всё сегодня")
+    else:
+        lines.append("🪪 <i>Достигни Ветерана — откроется скидка ранга</i>")
+    lines.append(f"🔥 <i>Прилавок сменится через {h}ч {m:02d}м</i>")
+    lines.append(f"💰 <b>У тебя:</b> {balance} OAC 🍬")
+    lines.append("")
+    rows = []
+    for key in today:
+        it = SHOP_ITEMS[key]
+        price = _shop_price(it["price"], disc)
+        old = f" <s>{it['price']}</s>" if disc else ""
+        lines.append(f"{it['emoji']} <b>{it['name']}</b> — {price} OAC{old}")
+        lines.append(f"   <i>{it['blurb']}</i>")
+        afford = "" if balance >= price else "🔒 "
+        rows.append([InlineKeyboardButton(
+            f"{afford}{it['emoji']} {it['name']} · {price}",
+            callback_data=f"shop_buy_{key}")])
+    lines.append("")
+    lines.append("🕯️ <i>А за настоящими артефактами — в Каталог Фабрики.</i>")
+    # Мост в реальный магазин сохранён: Скидка (привилегия ранга) и Каталог.
+    rows.append([
+        InlineKeyboardButton("🪪 Скидка", callback_data="privilege"),
+        InlineKeyboardButton("📦 Каталог", callback_data="catalog"),
+    ])
+    rows.append([InlineKeyboardButton("🏰 В меню", callback_data="menu")])
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
 @cb
 async def shop_callback(update, context, ctx):
+    # Робастно к кнопке и команде /shop (раньше query.from_user на команде
+    # (без callback_query) ронял «внутреннюю ошибку»).
+    uid = update.effective_user.id
+    player = await ctx.repo.get_by_id(uid)
+    balance = (player.balance if player else 0) or 0
+    text, kb = _build_shop_view(balance, datetime.now())
+    await edit_or_reply(update, context, text, reply_markup=kb)
+
+
+async def shop_buy_callback(update, context):
+    """Покупка товара дня. Атомарно, с валидацией витрины и скидки."""
+    ctx = context.bot_data.get("ctx")
     query = update.callback_query
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🪪 Скидка", callback_data="privilege")],
-        [InlineKeyboardButton("📦 Каталог", callback_data="catalog")],
-        [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
-    ])
-    await query.message.edit_text("<b>🏰 Главное Меню › 🛒 Магазин</b>", reply_markup=kb, parse_mode='HTML')
+    if not ctx:
+        await query.answer("⚠️ Бот инициализируется.", show_alert=True)
+        return
+    uid = query.from_user.id
+    key = query.data[len("shop_buy_"):]
+    now = datetime.now()
+    item = SHOP_ITEMS.get(key)
+    # товар должен быть в сегодняшней витрине — защита от устаревших кнопок
+    if not item or key not in _shop_today(now.toordinal()):
+        await query.answer("🔥 Этого товара уже нет на прилавке — витрина сменилась.", show_alert=True)
+        await shop_callback(update, context)
+        return
+
+    async def _buy(p, conn):
+        # Возвращаем статус, а НЕ бросаем исключение: atomic_update обёрнут в
+        # tenacity-retry, который завернул бы кастомный exception в RetryError
+        # и вхолостую ретраил бы «нет денег». Статус-кортеж — принятый здесь
+        # паттерн (см. do_smoke/craft).
+        price = _shop_price(item["price"], _shop_discount_pct(p.balance or 0))
+        if (p.balance or 0) < price:
+            return ("no_funds", price, None)
+        p.balance = (p.balance or 0) - price
+        setattr(p, item["field"], (getattr(p, item["field"], 0) or 0) + item["qty"])
+        return ("ok", price, getattr(p, item["field"]))
+
+    result = await ctx.repo.atomic_update(uid, _buy)
+    if result is None:
+        await query.answer("Профиль не найден.", show_alert=True)
+        return
+    status, price, new_total = result
+    if status == "no_funds":
+        await query.answer(f"💸 Не хватает OAC — нужно {price}. Ферма зовёт.", show_alert=True)
+        return
+    await query.answer(f"✅ Куплено! −{price} OAC", show_alert=False)
+    player = await ctx.repo.get_by_id(uid)
+    balance = (player.balance if player else 0) or 0
+    text, kb = _build_shop_view(balance, now)
+    banner = (f"✅ <b>{item['emoji']} {item['name']} — твоё!</b>\n"
+              f"📦 Теперь у тебя: <b>{new_total}</b>\n\n")
+    await query.message.edit_text(banner + text, reply_markup=kb, parse_mode='HTML')
 
 @cb
 async def setbluntpic(update, context, ctx):
@@ -6003,6 +6144,21 @@ async def debug_pet(update, context, ctx):
 # ───────────────────────────────────────────────
 # НОВАЯ ГЛАВНАЯ ПАНЕЛЬ (КАРТА 3, СОСТОЯНИЯ А–З)
 # ───────────────────────────────────────────────
+def _happy_hour_banner(ctx, now):
+    """Живой баннер Часа Удачи с обратным отсчётом. Чистая, тестируемая.
+    Показывается в момент входа → FOMO бьёт именно когда игрок уже в игре."""
+    if not (ctx and getattr(ctx, "cache", None) and ctx.cache.get("happy_hour")):
+        return ""
+    end = ctx.cache.get("happy_hour_end")
+    if end and now < end:
+        mins = max(1, math.ceil((end - now).total_seconds() / 60))
+        tail = f"Осталось {mins}м — фарми и дуй прямо сейчас!"
+    else:
+        tail = "Лови момент — всё приносит вдвое больше!"
+    return (f"🌟🌟🌟 <b>ЧАС УДАЧИ!</b> 🌟🌟🌟\n"
+            f"<b>Все действия ×{HAPPY_HOUR_MULTIPLIER} OAC 🍬.</b> {tail}")
+
+
 async def build_main_menu(player, ctx, context=None, full_mode=False):
     now = datetime.now()
     guild = player.guild
@@ -6011,17 +6167,7 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
     is_veteran = balance >= 5000
 
     # ---- Автоматический сброс daily_progress ----
-    today = date.today().isoformat()
-    progress = getattr(player, 'daily_progress', {}) or {}
-    if progress.get("reset_date") != today:
-        current_quest = progress.get("quest_id", "chapter1")
-        player.daily_progress = {
-            "reset_date": today,
-            "quest_id": current_quest,
-            "reward_claimed": False
-        }
-        await ctx.repo.save(player)
-        progress = player.daily_progress
+    progress = await ensure_daily_progress(player, ctx)
 
     # ---- Вычисление total и done из шаблона квеста ----
     quest_id = progress.get("quest_id", "chapter1")
@@ -6066,11 +6212,13 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
         rank_display = f"{rank_emoji} {rank_name}" if rank_name else rank_emoji
 
         # Приветствие и гильдия (пункты 1, 2, 3 — возвращены к оригиналу)
-        lines.append(f"⚔️ С возвращением в <b>Гильдию, {rank_display} {display_name}</b>")
+        # Ведущий значок — нейтральный 🏰 (замок Гильдии), а не ⚔️: у ранга
+        # Ветеран эмодзи тоже ⚔️ → раньше в строке было двойное ⚔️⚔️. Слова те же.
+        lines.append(f"🏰 С возвращением в <b>Гильдию, {rank_display} {display_name}</b>")
         if guild == "BLACK":
-            lines.append("🔮 Ты — часть <b>Темной Гильдии. 🕯️Ритуалы ждут тебя</b>")
+            lines.append("🔮 Ты — часть <b>Темной Гильдии. 🕯️ Ритуалы ждут тебя</b>")
         elif guild == "WHITE":
-            lines.append("🪽 Ты — часть <b>Светлой Гильдии. ⚜️Исповедь очищает душу и ждёт тебя</b>")
+            lines.append("🪽 Ты — часть <b>Светлой Гильдии. ⚜️ Исповедь очищает душу и ждёт тебя</b>")
         else:
             lines.append("<b>🕯️⚜️ Ты ещё не ВЫБРАЛ сторону!</b>")
             lines.append("🔮 Гильдия откроет <b>ритуалы, исповеди и войну</b>")
@@ -6121,15 +6269,22 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
     if _streak >= 3:
         lines.append(f"🔥 <b>Серия входов: {_streak} дн.</b> — не разорви её, вернись завтра за наградой!")
 
+    # Час Удачи — баннер поверх всего меню (peak-момент нельзя прятать)
+    hh_banner = _happy_hour_banner(ctx, now)
+    if hh_banner:
+        lines.insert(0, hh_banner)
+        lines.insert(1, "")
+
     text = "\n".join(lines)
 
 # ── КЛАВИАТУРА ──
     keyboard = []
+    happy_now = bool(hh_banner)
 
     # Кнопка фарма с живым таймером кулдауна — конец «слепым кликам»
-    farm_ready = (not player.last_farm) or (now - player.last_farm) >= timedelta(hours=FARM_COOLDOWN_HOURS)
+    farm_ready = not _farm_on_cooldown(player.farm_count, player.last_farm, now)
     if farm_ready:
-        farm_label = "🍬 Фармить"
+        farm_label = "🍬 Фармить ×2 🌟" if happy_now else "🍬 Фармить"
     else:
         _remain = timedelta(hours=FARM_COOLDOWN_HOURS) - (now - player.last_farm)
         _mins = max(1, math.ceil(_remain.total_seconds() / 60))
@@ -6141,20 +6296,27 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
     if player.onboarding_step != -1:
         keyboard.append([InlineKeyboardButton("✨ Все возможности ›", callback_data="all_features")])
 
+    farm_in_cta = False    
     if not reward_claimed and total > 0:
         if done == total:
+            # Все задания выполнены → кнопка "Забрать награду"
             keyboard.append([InlineKeyboardButton("🎁 Забрать награду!", callback_data="claim_reward")])
         else:
-            bar_filled = done
-            bar_empty = total - done
-            bar_text = "⚠️ Задания " + "▰" * bar_filled + "▱" * bar_empty + f" {done}/{total}"
+            # Есть незавершённые задания → прогресс-бар
+            remaining = total - done
+            if remaining == 1:
+                bar_text = "🔥 Задания " + "▰" * done + "▱" * remaining + f" {done}/{total} · ещё 1! ›"
+            else:
+                bar_text = "⚠️ Задания " + "▰" * done + "▱" * remaining + f" {done}/{total} ›"
             keyboard.append([InlineKeyboardButton(bar_text, callback_data="daily_quest_hub")])
     else:
+        # Награда уже получена или заданий нет → фарм в первой строке
         keyboard.append([_farm_btn()])
+        farm_in_cta = True
 
-    # Вторая строка (row2) — раскладка едина (убран «мёртвый» дубль-ветка)
-    row2 = [
-        _farm_btn(),
+    # Вторая строка: фарм включаем только если его НЕТ в первой строке —
+    # иначе «🍬 Фармить» дублировалась бы двумя одинаковыми кнопками подряд.
+    row2 = ([] if farm_in_cta else [_farm_btn()]) + [
         InlineKeyboardButton("🌿 Крафт ›", callback_data="craft"),
         InlineKeyboardButton("💨 Дунуть", callback_data="smoke"),
     ]
@@ -6178,10 +6340,17 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
         if not last_time or (now - last_time) >= timedelta(hours=cooldown):
             keyboard.append([InlineKeyboardButton(label, callback_data=callback)])
 
+    # Навигация: 2 кнопки в ряд, чтобы длинные подписи не обрезались
+    # (3-в-ряд не помещались: «Прогресс…», «Гильди…»).
     keyboard.append([
-        InlineKeyboardButton("🌍 Мир ›", callback_data="world_hub"),
-        InlineKeyboardButton("📊 Прогресс ›", callback_data="progress_hub"),
         InlineKeyboardButton("🏰 Гильдия ›", callback_data="guild_info"),
+        InlineKeyboardButton("📊 Прогресс ›", callback_data="progress_hub"),
+    ])
+    # Лидерборд — из подвала на главный экран: сильнейший соц-крючок (топ-10 +
+    # твоя позиция + приз, который надо удержать). 2-в-ряд, без обрезки подписей.
+    keyboard.append([
+        InlineKeyboardButton("🏅 Лидеры ›", callback_data="top"),
+        InlineKeyboardButton("🌍 Мир ›", callback_data="world_hub"),
     ])
 
     return text, InlineKeyboardMarkup(keyboard)
@@ -6234,20 +6403,8 @@ async def progress_hub_handler(update, context, ctx):
             rank_line = f"<b>⚜️ Ранг: {rank_emoji} {rank_name}</b> (Максимум!)"
 
         # ===== 2. ЕЖЕДНЕВНЫЕ ЗАДАНИЯ =====
-        from datetime import date
-        today = date.today().isoformat()
-        progress = player.daily_progress or {}
-        if progress.get("reset_date") != today:
-            # Новый день – сбрасываем, сохраняя текущий квест
-            current_quest = progress.get("quest_id", "chapter1")
-            player.daily_progress = {
-                "reset_date": today,
-                "quest_id": current_quest,
-                "reward_claimed": False
-            }
-            await ctx.repo.save(player)
-            progress = player.daily_progress
-        
+        progress = await ensure_daily_progress(player, ctx)
+
         # Получаем текущий квест
         quest_id = progress.get("quest_id", "chapter1")
         template = QUEST_TEMPLATES.get(quest_id)
@@ -6394,10 +6551,10 @@ async def progress_hub_handler(update, context, ctx):
              InlineKeyboardButton("🏆 Достижения", callback_data="achievements_menu"),
              InlineKeyboardButton("🏅 Лидеры", callback_data="top")]
         ]
-        
+
         if done == total and not progress.get("reward_claimed"):
             kb_rows.insert(0, [InlineKeyboardButton("🎁 Забрать награду!", callback_data="claim_reward")])
-        
+
         kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="menu")])
         kb = InlineKeyboardMarkup(kb_rows)
 
@@ -6425,17 +6582,10 @@ async def daily_quest_hub(update, context, ctx):
     if not player:
         return
 
-# ===== ЕЖЕДНЕВНЫЙ СБРОС =====
-    from datetime import date
-    today = date.today().isoformat()
-    progress = player.daily_progress or {}
-    if progress.get("reset_date") != today:
-            current_quest = progress.get("quest_id", "chapter1")
-            progress = {"reset_date": today, "quest_id": current_quest, "reward_claimed": False}
-            player.daily_progress = progress
-            await ctx.repo.save(player)
+    # ===== ЕЖЕДНЕВНЫЙ СБРОС =====
+    progress = await ensure_daily_progress(player, ctx)
 
-    # === ВЫБОР ШАБЛОНА (ЭТО БЫЛО ПРОПУЩЕНО) ===
+    # === ВЫБОР ШАБЛОНА ===
     quest_id = progress.get("quest_id", "chapter1")
     template = QUEST_TEMPLATES.get(quest_id)
     if not template:
@@ -6480,7 +6630,7 @@ async def daily_quest_hub(update, context, ctx):
 
         kb_rows = []
         for i, choice in enumerate(template["choices"]):
-            kb_rows.append([InlineKeyboardButton(choice["label"], callback_data=f"choice_{i}")])
+            kb_rows.append([InlineKeyboardButton(choice["label"], callback_data=f"quest_choice_{i}")])
         kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="menu")])
         kb = InlineKeyboardMarkup(kb_rows)
         await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
@@ -6518,6 +6668,130 @@ async def daily_quest_hub(update, context, ctx):
     kb = InlineKeyboardMarkup(kb_rows)
     await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
 
+async def handle_choice(update, context, ctx):
+    """Выбор ветки сюжета (глава 2 → путь воина/благодетеля).
+
+    Раньше эта функция вызывалась из handle_quest_action, но НЕ БЫЛА ОПРЕДЕЛЕНА
+    (NameError), а кнопка шла как 'choice_<i>' вместо 'quest_choice_<i>' и не
+    маршрутизировалась. Из-за этого игроки застревали на главе 2. Логика наград
+    и продвижения квеста зеркалит claim_reward_handler, но берёт данные из выбора.
+    """
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+
+    player = await ctx.repo.get_by_id(uid)
+    if not player or not player.exists:
+        return
+
+    progress = getattr(player, 'daily_progress', {}) or {}
+    quest_id = progress.get("quest_id", "chapter1")
+    template = QUEST_TEMPLATES.get(quest_id)
+    choices = template.get("choices") if template else None
+    if not choices:
+        await query.answer("Выбор сейчас недоступен", show_alert=True)
+        return
+
+    try:
+        idx = int(query.data.split("_")[-1])
+        choice = choices[idx]
+    except (ValueError, IndexError):
+        await query.answer("Некорректный выбор", show_alert=True)
+        return
+
+    async def _apply(p, conn):
+        p.balance += choice.get("reward_oac", 0)
+        reward_title = choice.get("reward_title")
+        if reward_title:
+            titles = (p.titles or "").split()
+            if reward_title not in titles:
+                titles.append(reward_title)
+                p.titles = " ".join(titles).strip()
+        for item_key, qty in choice.get("reward_items", {}).items():
+            if hasattr(p, item_key):
+                setattr(p, item_key, getattr(p, item_key, 0) + qty)
+        reset_date = (p.daily_progress or {}).get("reset_date")
+        p.daily_progress = {
+            "reset_date": reset_date,
+            "quest_id": choice.get("next_quest", quest_id),
+            "reward_claimed": True,
+        }
+        return True
+
+    await ctx.repo.atomic_update(uid, _apply)
+    await context.bot.send_message(
+        chat_id=query.message.chat.id,
+        text=choice.get("result_text", "✨ Выбор сделан."),
+        parse_mode='HTML',
+    )
+
+
+async def skip_onboarding_handler(update, context):
+    """Кнопка «Пропустить обучение»: завершает онбординг и показывает меню.
+
+    Раньше callback 'skip_onboarding' не имел обработчика → «Неизвестная команда».
+    """
+    ctx = context.bot_data.get("ctx")
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+
+    player = await ctx.repo.get_by_id(uid)
+    if not player or not player.exists:
+        return
+    player.onboarding_step = -1
+    await ctx.repo.save(player)
+
+    text, kb = await build_main_menu(player, ctx, context, full_mode=True)
+    try:
+        await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
+    except Exception:
+        await safe_send_message(context, uid, text, reply_markup=kb, parse_mode='HTML')
+
+
+@rate_limit(2)
+@game_handler
+async def train_callback(update, context, ctx, player):
+    """Тренировка (ветка воина): раз в день, закаляет дух и даёт OAC.
+
+    Отмечает задание квеста «train». Кулдаун — раз в день через daily_progress
+    (сбрасывается вместе с дневным прогрессом), поэтому не требует новой колонки БД.
+    """
+    uid = update.effective_user.id
+    if update.callback_query:
+        try:
+            await update.callback_query.answer()
+        except Exception:
+            pass
+
+    async def _train(p, conn):
+        p.daily_progress = p.daily_progress or {}
+        if p.daily_progress.get("train"):
+            return ("already",)
+        reward = random.randint(20, 45)
+        p.balance += reward
+        p.daily_progress["train"] = True
+        return ("ok", reward, p.balance)
+
+    result = await ctx.repo.atomic_update(uid, _train)
+    if not result:
+        return
+    if result[0] == "already":
+        await safe_send_message(
+            context, uid,
+            "⚔️ <b>Ты уже тренировался сегодня.</b>\n"
+            "<i>Дух воина крепнет постепенно — возвращайся завтра.</i>",
+            parse_mode='HTML')
+        return
+    _, reward, new_balance = result
+    await safe_send_message(
+        context, uid,
+        f"⚔️ <b>ТРЕНИРОВКА ЗАВЕРШЕНА!</b>\n\n"
+        f"🛡️ Ты закалил дух воина. <b>+{reward} OAC</b>\n"
+        f"💎 <b>Баланс:</b> {new_balance} OAC",
+        parse_mode='HTML')
+
+
 # ─── Маршрутизатор заданий (вызывается при нажатии на кнопку задания) ───
 async def handle_quest_action(update, context):
     ctx = context.bot_data.get("ctx")
@@ -6529,32 +6803,52 @@ async def handle_quest_action(update, context):
         await handle_choice(update, context, ctx)
         return
 
-    player = await ctx.repo.get_by_id(uid)  
+    player = await ctx.repo.get_by_id(uid)
     if not player and action not in ["farm", "craft", "smoke", "pet"]:
         await query.answer("Игрок не найден", show_alert=True)
         return
 
+    # Ядро цикла рисует результат НА МЕСТЕ со своей навигацией (единый живой
+    # экран). Ре-рендер хаба ниже затирал бы reveal-награду — поэтому эти
+    # действия владеют экраном и возвращают управление (return).
     if action == "farm":
         await farm_callback_v2(update, context)
+        return
     elif action == "craft":
         await handle_craft_normal_v2(update, context)
+        return
     elif action == "smoke":
         await do_smoke(update, context)
+        return
     elif action == "ritual":
         if player.guild == "BLACK":
             await ritual_callback(update, context)
-        else:
-            await query.answer("Ты не в Тёмной Гильдии", show_alert=True)
+            return
+        await query.answer("Ты не в Тёмной Гильдии", show_alert=True)
     elif action == "repent":
         if player.guild == "WHITE":
             await repent_callback(update, context)
-        else:
-            await query.answer("Ты не в Светлой Гильдии", show_alert=True)
+            return
+        await query.answer("Ты не в Светлой Гильдии", show_alert=True)
+    elif action == "train":
+        await train_callback(update, context)
     elif action == "pet":
-        await pet_preview(update, context)
+        result = await ctx.pet_service.feed(uid)
+        if not result or result.get("status") == "no_pet":
+            await query.answer("Сначала заведи питомца! (в разделе «Мир»)", show_alert=True)
+        else:
+            await query.answer("🐾 Питомец накормлен!")
+    elif action == "donate":
+        # Пожертвование идёт через Храм гильдии. Раньше 'donate'/'lab' не
+        # обрабатывались → кнопки заданий главы 2 выдавали «Неизвестная команда».
+        await guild_shrine_callback(update, context)
+        return
+    elif action == "lab":
+        await lab_enter(update, context)
+        return
     else:
         await query.answer("Неизвестное задание", show_alert=True)
-        
+
     # Обновляем экран заданий после любой попытки
     await daily_quest_hub(update, context, ctx)
 
@@ -6666,15 +6960,16 @@ async def all_features_handler(update, context, ctx):
     text = (
         "<b>✨ ВСЕ ВОЗМОЖНОСТИ</b>\n\n"
         "• 🍬 <b>Фарм</b> — добыча OAC\n"
-        "• 🌿 <b>Крафт</b> — создание блантов\n"
+        "• 🌿 <b>Крафт</b> — создание Блантов\n"
         "• 💨 <b>Дунуть</b> — случайный эффект\n"
-        "• 🕯️ <b>Ритуал</b> — для Тёмной Гильдии\n"
-        "• ⚜️ <b>Исповедь</b> — для Светлой Гильдии\n"
-        "• 🐾 <b>Питомец</b> — появится позже\n"
-        "• 🎲 <b>Удача</b> — колесо, берсерк, алхимия\n"
-        "• 🏛️ <b>Лабиринт</b> — глубины и сокровища\n"
-        "• 🛒 <b>Магазин</b> — скидки и каталог\n"
-        "• 📜 <b>Кодекс</b> — правила мира\n\n"
+        "• 🪴 <b>Плантация</b> — развитие твоей <b>империи</b> дохода 📉\n"
+        "• 🕯️ <b>Ритуал</b> — для Тёмной Гильдии 🕯️\n"
+        "• ⚜️ <b>Исповедь</b> — для Светлой Гильдии 🪽\n"
+        "• 🐾 <b>Питомец</b> — появится с ранга Ветеран ⚔️\n"
+        "• 🍀 <b>Удача</b> — колесо, мины, алхимия ⚗️\n"
+        "• 🏛️ <b>Лабиринт</b> — глубины и сокровища 🎁\n"
+        "• 🛍️ <b>Магазин</b> — скидки и каталог магазина 🛒\n"
+        "• 📖 <b>Правила Мира</b> — команды и правила игры\n\n"
         "<i>Продолжай выполнять задания, и всё откроется!</i>"
     )
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
@@ -6866,8 +7161,7 @@ async def share_blunt_handler(update, context, ctx, player):
     username = html.escape(player.username or str(uid))
 
     if not item:
-        fallback_text = f"Блант не найден.\n{ref_link}"
-        await query.answer(switch_inline_query=fallback_text)
+        await query.answer("Блант не найден.", show_alert=True)
         return
 
     name = item["name"]
@@ -6884,8 +7178,20 @@ async def share_blunt_handler(update, context, ctx, player):
         f"<b>💎 Нажми на ссылку чтобы забрать уникальный Блант:</b>\n{ref_link}"
     )
 
-    # Вот новое: вместо отправки в чат — открываем список чатов для пересылки
-    await query.answer(switch_inline_query=share_text)
+    # Рабочий шеринг: switch_inline_query требует inline-режима/обработчика (их нет)
+    # → кнопка была мёртвой. Используем нативный t.me/share/url (без HTML — он там
+    # не рендерится) и мотивируем двусторонним бонусом (реферер+приглашённый).
+    share_plain = re.sub(r"<[^>]+>", "", share_text)
+    share_kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📤 Отправить другу", url=build_share_url(share_plain))],
+        [InlineKeyboardButton("🔙 Назад", callback_data="my_blunts")],
+    ])
+    await query.answer()
+    await query.message.edit_text(
+        share_text + "\n\n<i>👆 Отправь другу — когда он войдёт по ссылке, "
+        "<b>вы оба получите бонус!</b></i>",
+        reply_markup=share_kb, parse_mode='HTML'
+    )
 
 @rate_limit(1)
 @game_handler
@@ -6899,6 +7205,10 @@ async def shrine_donate_handler(update, context, ctx, player):
             return ("no_money",)
         p.balance -= amount
         p.donated = (p.donated or 0) + amount
+        # Отмечаем задание квеста «Пожертвовать» (раньше не трекалось → глава 2
+        # была непроходима)
+        p.daily_progress = p.daily_progress or {}
+        p.daily_progress["donate"] = True
         return ("ok",)
 
     result = await ctx.repo.atomic_update(uid, _donate)
@@ -6990,9 +7300,12 @@ async def guild_join_handler(update, context, ctx):
             await query.answer("Профиль не найден, начните с /start", show_alert=True)
             return
 
+        was_guildless = player.guild is None   # первый в жизни выбор стороны
         player.guild = guild
-        # Награда за вступление (только для новичков)
-        if player.onboarding_step == 0:
+        # Награда за вступление — за ПЕРВЫЙ выбор стороны (в т.ч. если игрок
+        # отложил его и играл без гильдии). Раньше было gated на step==0, и
+        # отложившие фракцию теряли +50 — теперь честно один раз.
+        if player.onboarding_step == 0 or was_guildless:
             player.balance += 50
         g_emoji = "🕯️" if guild == "BLACK" else "⚜️"
         g_name = "Тёмная" if guild == "BLACK" else "Светлая"
@@ -7040,10 +7353,12 @@ async def guild_join_handler(update, context, ctx):
             [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
         ])
 
+        bonus_line = "🎁 <b>+50 OAC 🍬 за выбор стороны!</b>\n\n" if was_guildless else ""
         await query.message.edit_text(
             f"<b><i>🏰 ГИЛЬДИЯ ПРИНЯЛА ТЕБЯ 🪽</i></b>\n\n"
             f"✨ Отныне ты — часть <b>{guild_name_genitive}</b>.\n"
             f"🩸 Искажение стало плотнее...\n\n"
+            f"{bonus_line}"
             f"<b>💡 Твой первый шаг:</b>",
             reply_markup=kb,
             parse_mode='HTML'
@@ -7127,6 +7442,9 @@ CALLBACKS: Dict[str, Callable] = {
     "smoke": smoke_callback,
     "ritual": ritual_callback,
     "collect": collect_callback,
+    "plant_start": plant_start_handler,
+    "plant_harvest": plant_harvest_handler,
+    "plant_upgrade": plant_upgrade_handler,
     "profile": profile_callback,
     "top": top_callback,
     "guild_info": guild_info_callback,
@@ -7159,15 +7477,19 @@ CALLBACKS: Dict[str, Callable] = {
     "guild_join_WHITE": guild_join_handler,
     "cancel_gift": cancel_gift_handler,
     "pet_preview": pet_preview,
+    "pet_feed": pet_feed_handler,
     "pet_buy_dog": pet_buy_dog_handler,
     "pet_name_skip": pet_name_skip_handler,
     "pet_locked": pet_locked_handler,
     "onboarding_reward": onboarding_reward,
     "daily_quest_hub": daily_quest_hub,
     "world_hub": world_hub,
+    "destiny_hub": destiny_hub,
     "progress_hub": progress_hub_handler,
     "all_features": all_features_handler,
     "claim_reward": claim_reward_handler,
+    "skip_onboarding": skip_onboarding_handler,
+    "defer_faction": defer_faction_handler,
 }
 
 EXACT_HANDLERS: Dict[str, Callable] = {
@@ -7193,6 +7515,8 @@ PREFIX_HANDLERS: Dict[str, Callable] = {
     "achievements_": achievements_callback,
     "quest_": handle_quest_action,
     "mines_open_": _mines_open_cell_wrapper,
+    "mines_bet_": _mines_bet_wrapper,
+    "shop_buy_": shop_buy_callback,
 }
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -7412,6 +7736,138 @@ async def keep_db_alive(ctx: AppContext):
         logger.debug("DB keep-alive executed")
     except Exception as e:
         logger.error(f"keep_db_alive failed: {e}")
+
+
+def _reengagement_text(last_farm, login_streak, last_login_date, now, farm_cooldown,
+                       passive_level=0, passive_collected=None, rival_drop=None):
+    """Выбирает текст пуш-возврата (или None, если повода нет). Чистая функция.
+
+    Каждый триггер — честная лосс-авёрсия (страх потерять конкретное):
+    плантация встала > серия под угрозой > обошли в рейтинге > созревший фарм.
+    """
+    streak = login_streak or 0
+    logged_today = (last_login_date is not None
+                    and str(last_login_date) == now.date().isoformat())
+
+    # Приоритет 1: плантация уперлась в потолок — РОСТ встал (честно: урожай не
+    # пропадает, но пока не соберёшь, империя простаивает = потеря времени роста).
+    if passive_level and passive_collected:
+        earned, _hrs, capped = _plant_pending(passive_level, passive_collected, now)
+        if capped and earned > 0:
+            return (f"🌾 <b>Плантация достигла предела!</b>\n"
+                    f"<b>{earned} OAC</b> простаивают, а рост встал. Собери урожай — "
+                    f"и империя снова заработает на тебя.")
+
+    # Приоритет 2: серия под угрозой (есть серия, сегодня не заходил, уже вечер)
+    if streak >= 2 and not logged_today and now.hour >= 18:
+        return (f"🔥 <b>Твоя серия входов ({streak} дн.) сгорит в полночь!</b>\n"
+                f"Загляни в игру, чтобы сохранить её и забрать награду дня.")
+
+    # Приоритет 3: тебя обошли в рейтинге (соц-статус — сильный возвратный крючок).
+    if rival_drop:
+        prev_r, cur_r = rival_drop
+        return (f"🏅 <b>Тебя обошли в рейтинге!</b>\n"
+                f"Ты был #{prev_r}, теперь #{cur_r}. Пока ты медлишь — соперники растут. "
+                f"Вернись и отбей своё место.")
+
+    # Приоритет 4: фарм созрел
+    if last_farm and (now - last_farm) >= farm_cooldown:
+        return ("🍬 <b>Грядка созрела!</b>\n"
+                "Твои OAC ждут сбора — вернись и продолжи путь. 🌿")
+    return None
+
+
+async def reengagement_push(ctx: AppContext) -> None:
+    """Личные пуш-возвраты дрейфующим игрокам (анти-churn).
+
+    Отбирает тех, кто недавно играл, но сейчас неактивен несколько часов, и у
+    кого есть повод вернуться. АНТИ-СПАМ:
+      • без Redis — не шлём вообще (fail-closed, иначе риск спама);
+      • не чаще ~1 раза в 20 ч на игрока (guard в Redis);
+      • окно активности 2 ч … 3 дня (не трогаем активных и давно ушедших);
+      • 403 (заблокировал бота) — молча пропускаем.
+    """
+    if not ctx or not ctx.db_pool or not ctx.redis:
+        return
+
+    now = datetime.now()
+    farm_cd = timedelta(hours=settings.farm_cooldown_hours)
+    drift_min = now - timedelta(hours=2)      # неактивен хотя бы 2 часа
+    active_window = now - timedelta(days=3)   # но не ушёл насовсем
+
+    try:
+        async with ctx.db_pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT user_id, last_farm, login_streak, last_login_date, "
+                "passive_level, passive_collected "
+                "FROM players "
+                "WHERE last_farm IS NOT NULL AND last_farm BETWEEN $1 AND $2",
+                active_window, drift_min,
+            )
+    except Exception as e:
+        logger.error(f"reengagement query error: {e}")
+        return
+
+    # Снимок рангов по балансу (один запрос, дешёв с индексом) для детекции
+    # обгона: сравниваем текущий ранг с сохранённым в Redis прошлым.
+    rank_map = {}
+    try:
+        async with ctx.db_pool.acquire() as conn:
+            brows = await conn.fetch(
+                'SELECT user_id FROM players WHERE COALESCE("exists", TRUE) '
+                'ORDER BY balance DESC')
+        for pos, br in enumerate(brows, 1):
+            rank_map[br["user_id"]] = pos
+    except Exception:
+        rank_map = {}
+
+    token = ctx.settings.bot_token
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    sent = 0
+    async with httpx.AsyncClient(timeout=10) as client:
+        for row in rows:
+            uid = row["user_id"]
+
+            # Ранг: детекция обгона + всегда обновляем сохранённый ранг.
+            rival_drop = None
+            cur_rank = rank_map.get(uid)
+            if cur_rank:
+                try:
+                    prev_v = await ctx.redis.get(f"rank:{uid}")
+                    prev_rank = int(prev_v) if prev_v else None
+                    if prev_rank and cur_rank > prev_rank and cur_rank <= 20:
+                        rival_drop = (prev_rank, cur_rank)
+                    await ctx.redis.setex(f"rank:{uid}", 7 * 24 * 3600, str(cur_rank))
+                except Exception:
+                    pass
+
+            guard_key = f"reengage:{uid}"
+            try:
+                if await ctx.redis.get(guard_key):
+                    continue
+            except Exception:
+                continue  # Redis-сбой → пропускаем (не рискуем спамом)
+
+            text = _reengagement_text(
+                row["last_farm"], row["login_streak"],
+                row["last_login_date"], now, farm_cd,
+                row["passive_level"], row["passive_collected"],
+                rival_drop,
+            )
+            if not text:
+                continue
+
+            try:
+                r = await client.post(url, json={"chat_id": uid, "text": text, "parse_mode": "HTML"})
+                if r.status_code == 200:
+                    sent += 1
+                    await ctx.redis.setex(guard_key, 20 * 3600, "1")
+                # 403/прочее — молча пропускаем
+            except Exception:
+                pass
+            await asyncio.sleep(0.05)  # мягкий rate-limit к Telegram API
+
+    logger.info("reengagement: sent %d pushes to %d candidates", sent, len(rows))
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
