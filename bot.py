@@ -6470,9 +6470,12 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
 
     # Вторая строка: фарм включаем только если его НЕТ в первой строке —
     # иначе «🍬 Фармить» дублировалась бы двумя одинаковыми кнопками подряд.
+    # «Дунуть» ведёт СРАЗУ в бросок (do_smoke), без экрана-прокладки «Блантов: N».
+    # Гача-цикл должен начинаться с первого тапа; остаток блантов и так виден в
+    # карточке результата. Нет блантов — do_smoke сам покажет пустой свёрток.
     row2 = ([] if farm_in_cta else [_farm_btn()]) + [
         InlineKeyboardButton("🌿 Крафт ›", callback_data="craft"),
-        InlineKeyboardButton("💨 Дунуть", callback_data="smoke"),
+        InlineKeyboardButton("💨 Дунуть", callback_data="do_smoke"),
     ]
     keyboard.append(row2)
 
@@ -6493,6 +6496,18 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
         # Показываем кнопку ТОЛЬКО если доступно
         if not last_time or (now - last_time) >= timedelta(hours=cooldown):
             keyboard.append([InlineKeyboardButton(label, callback_data=callback)])
+
+    # ===== АДАПТИВНАЯ КНОПКА ПЛАНТАЦИИ (idle-крючок «зайди собрать») =====
+    # Самый сильный повод вернуться в игру — созревший пассивный доход. Раньше он
+    # был виден только внутри «Мир › Плантация»; теперь всплывает на ГЛАВНЫЙ экран
+    # ровно когда есть что собрать, и исчезает после сбора — как кнопка Ритуала,
+    # без засорения экрана. Переполненное хранилище = loss-aversion (стоит зря).
+    _plant_earned, _ph, _pcapped = _plant_pending(
+        player.passive_level or 0, _to_datetime(player.passive_collected), now)
+    if _plant_earned > 0:
+        _harvest_label = (f"⚠️ Урожай переполнен · собрать {_plant_earned} 🌾"
+                          if _pcapped else f"🌾 Собрать урожай · {_plant_earned} OAC")
+        keyboard.append([InlineKeyboardButton(_harvest_label, callback_data="collect")])
 
     # Навигация: 2 кнопки в ряд, чтобы длинные подписи не обрезались
     # (3-в-ряд не помещались: «Прогресс…», «Гильди…»).
