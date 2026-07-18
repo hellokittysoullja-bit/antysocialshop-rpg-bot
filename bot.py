@@ -1748,7 +1748,7 @@ async def destiny_hub(update, context, ctx):
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🪴 Растить империю", callback_data="collect"),
          InlineKeyboardButton("💍 Крафт", callback_data="craft")],
-        [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
+        [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
     ])
     await edit_or_reply(update, context, text, reply_markup=kb, parse_mode='HTML')
 
@@ -3028,7 +3028,7 @@ async def handle_named_name(update, context):
                 InlineKeyboardButton("🎁 Подарить", callback_data=f"gift_blunt_{blunt_id}"),
                 InlineKeyboardButton("🔗 Поделиться", url=share_url)
             ],
-            [InlineKeyboardButton("🔙 В меню", callback_data="menu")]
+            [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
         ])
 
         # Суспенс-ревил: предвкушение перед результатом (дофаминовый пик гачи)
@@ -5014,12 +5014,12 @@ async def _mines_show_field(update, context, state, redis_key, uid, ctx):
                     row_btns.append(InlineKeyboardButton("  ", callback_data="noop"))
             keyboard.append(row_btns)
         keyboard.append([InlineKeyboardButton(f"🏆 Забрать {win} OAC", callback_data="mines_cashout")])
-        keyboard.append([InlineKeyboardButton("🔙 В меню", callback_data="luck")])
+        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="luck")])
     elif status == "won":
         text += f"🎉 **ПОБЕДА!** Ты открыл все клетки!\n"
         text += f"💰 Выигрыш: {win} OAC\n\n```\n{field_str}\n```"
         keyboard = [[InlineKeyboardButton("💣 Новая игра", callback_data="mines_bet_50")],
-                    [InlineKeyboardButton("🔙 В меню", callback_data="luck")]]
+                    [InlineKeyboardButton("🔙 Назад", callback_data="luck")]]
     elif status == "lost":
         text += f"💥 **ВЗРЫВ!** Ты попал на мину!\n"
         if step >= 1:
@@ -5029,12 +5029,12 @@ async def _mines_show_field(update, context, state, redis_key, uid, ctx):
         else:
             text += f"💰 Ты потерял ставку.\n\n```\n{field_str}\n```"
         keyboard = [[InlineKeyboardButton("💣 Попробовать снова", callback_data="mines_bet_50")],
-                    [InlineKeyboardButton("🔙 В меню", callback_data="luck")]]
+                    [InlineKeyboardButton("🔙 Назад", callback_data="luck")]]
     else:  # cashed_out
         text += f"✅ **Ты забрал выигрыш!**\n"
         text += f"💰 Выигрыш: {win} OAC\n\n```\n{field_str}\n```"
         keyboard = [[InlineKeyboardButton("💣 Новая игра", callback_data="mines_bet_50")],
-                    [InlineKeyboardButton("🔙 В меню", callback_data="luck")]]
+                    [InlineKeyboardButton("🔙 Назад", callback_data="luck")]]
 
     await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
