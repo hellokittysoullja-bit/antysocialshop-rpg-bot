@@ -7148,25 +7148,44 @@ async def claim_reward_handler(update, context, ctx):
 # ── Все возможности (для новичков) ──
 @cb
 async def all_features_handler(update, context, ctx):
+    """Карта пути (бывшая «Все возможности»).
+
+    Раньше — тупиковая стена из 11 строк текста: рассказывала, что есть, но не
+    давала попробовать и не отвечала на «зачем». Теперь — живая карта: каждая
+    открытая система — кнопка-вход (обучение действием), заблокированное показано
+    с условием разблокировки (аспирация, синхронная лестнице рангов), а заголовок
+    отвечает на «кем ты станешь» (identity до функциональности).
+    """
     query = update.callback_query
     await query.answer()
+    player = await ctx.repo.get_by_id(query.from_user.id)
+    balance = (player.balance if player else 0) or 0
+    is_veteran = balance >= 5000
+    rank_emoji, rank_name, *_ = compute_rank_info(balance)
+
     text = (
-        "<b>✨ ВСЕ ВОЗМОЖНОСТИ</b>\n\n"
-        "• 🍬 <b>Фарм</b> — добыча OAC\n"
-        "• 🌿 <b>Крафт</b> — создание Блантов\n"
-        "• 💨 <b>Дунуть</b> — случайный эффект\n"
-        "• 🪴 <b>Плантация</b> — развитие твоей <b>империи</b> дохода 📉\n"
-        "• 🕯️ <b>Ритуал</b> — для Тёмной Гильдии 🕯️\n"
-        "• ⚜️ <b>Исповедь</b> — для Светлой Гильдии 🪽\n"
-        "• 🐾 <b>Питомец</b> — появится с ранга Ветеран ⚔️\n"
-        "• 🍀 <b>Удача</b> — колесо, мины, алхимия ⚗️\n"
-        "• 🏛️ <b>Лабиринт</b> — глубины и сокровища 🎁\n"
-        "• 🛍️ <b>Магазин</b> — скидки и каталог магазина 🛒\n"
-        "• 📖 <b>Правила Мира</b> — команды и правила игры\n\n"
-        "<i>Продолжай выполнять задания, и всё откроется!</i>"
+        "🗺️ <b>ТВОЙ МИР</b>\n\n"
+        f"<i>Ты — {rank_emoji} {rank_name}. Впереди — трон 🪬 Некроманта Искажения.</i>\n\n"
+        "<b>Открыто сейчас — жми и пробуй:</b>"
     )
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
-    await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
+    kb_rows = [
+        [InlineKeyboardButton("🍬 Фарм", callback_data="farm"),
+         InlineKeyboardButton("🌿 Крафт", callback_data="craft"),
+         InlineKeyboardButton("💨 Дунуть", callback_data="do_smoke")],
+        [InlineKeyboardButton("🪴 Плантация", callback_data="collect"),
+         InlineKeyboardButton("🎲 Удача", callback_data="luck")],
+        [InlineKeyboardButton("🏛️ Лабиринт", callback_data="lab_start"),
+         InlineKeyboardButton("🛒 Магазин", callback_data="shop")],
+        [InlineKeyboardButton("🏰 Гильдия — ритуалы, война", callback_data="guild_info")],
+    ]
+    if is_veteran:
+        kb_rows.append([InlineKeyboardButton("🐾 Питомец", callback_data="pet_preview")])
+    else:
+        text += ("\n\n<b>Откроется с ⚔️ Ветерана (5000 🍬):</b>\n"
+                 "   🐾 Питомец — верный спутник в пути")
+    kb_rows.append([InlineKeyboardButton("📖 Правила мира", callback_data="rules"),
+                    InlineKeyboardButton("🏰 В меню", callback_data="menu")])
+    await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode='HTML')
 
 async def bush_preview_handler(update, context):
     query = update.callback_query
