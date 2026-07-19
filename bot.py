@@ -3839,7 +3839,7 @@ async def profile_callback(update, context, ctx, player):
         f"👤 <b>{uname}</b>{guild_line}\n"
         f"🫧 Фон: {bg}\n\n"
         f"{rank_progress}\n\n"
-        f"💎 <b>ОАС:</b> <b>{bal} OAC</b> 🍬\n"
+        f"💎 <b>OAC:</b> <b>{bal} OAC</b> 🍬\n"
         f"🌿 <b>Блантов в свёртке:</b> <b>{bl}</b>\n"
         f"{bush_line}\n"
         f"🧬 <b>Титул:</b> {active_title}\n"
@@ -4165,7 +4165,7 @@ async def top_callback(update, context, ctx, player):
         username = html.escape(row["username"])
 
         text += (
-            f"{prefix}<b>{username}</b> {g_emoji} — {bal} оас 🍬\n"
+            f"{prefix}<b>{username}</b> {g_emoji} — {bal} OAC 🍬\n"
             f"   <i>{bar} {percent}%</i>\n"
             f"   {g_emoji} {g_name} | {rank_emoji} <b>{rank_name}</b>\n\n"
         )
@@ -4202,7 +4202,7 @@ async def top_callback(update, context, ctx, player):
         if gap > 0:
             text += (
                 f"✦ 📊 Твоя позиция: {my_position} — "
-                f"осталось 🎯 {gap} оас 🍬 до ТРОЙКИ ЛИДЕРОВ 💎🏆 ✦\n"
+                f"осталось 🎯 {gap} OAC 🍬 до ТРОЙКИ ЛИДЕРОВ 💎🏆 ✦\n"
             )
         else:
             text += f"✦ 📊 Твоя позиция: {my_position} ✦\n"
@@ -4222,7 +4222,7 @@ async def top_callback(update, context, ctx, player):
         if gap_to_top10 > 0:
             text += (
                 f"✦ 📊 Твоя позиция: {pos} — "
-                f"осталось 🎯 {gap_to_top10} оас 🍬 до ТОП-10 💎🏆 ✦\n"
+                f"осталось 🎯 {gap_to_top10} OAC 🍬 до ТОП-10 💎🏆 ✦\n"
             )
         else:
             text += f"✦ 📊 Твоя позиция: {pos} — ты уже в топе! 💎 ✦\n"
@@ -4781,7 +4781,7 @@ async def luck_callback(update, context, action=None):
         "<b>🍀 УДАЧА</b>\n\n"
         "<i>🌀 «Испытай свою удачу и выиграй OAC 🍬 и редкие эксклюзивные вещи!» 🪽</i>\n\n"
         "🎡 <b>Крутить Колесо</b> — ежедневный выигрыш 🎉\n"
-        "🎰 <b>Мины</b> — бросить вызов 💣 и отдать деньги ради выигрыша 💫\n"
+        "🎰 <b>Мины</b> — рискни ставкой ради множителя 💣\n"
         "⚗️ <b>Алхимия</b> — древнее искусство, магия для достойных 🔮"
     )
     kb_rows = _build_luck_keyboard(now, player, cfg, wheel_ok, mines_ok, alchemy_ok)
