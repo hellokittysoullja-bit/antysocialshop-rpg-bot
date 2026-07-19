@@ -6569,6 +6569,15 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
         _harvest_label = (f"⚠️ Урожай переполнен · собрать {_plant_earned} 🌾"
                           if _pcapped else f"🌾 Собрать урожай · {_plant_earned} OAC")
         keyboard.append([InlineKeyboardButton(_harvest_label, callback_data="collect")])
+    elif (player.passive_level or 0) == 0 and player.onboarding_step == -1:
+        # D1→D2 мост: посадка «растёт пока тебя нет» доступна с первого дня, но
+        # живёт только внутри «Мир» → новичок уходит, НЕ активировав самый
+        # сильный повод вернуться к утру. Выносим посадку на ГЛАВНЫЙ экран, но
+        # ТОЛЬКО прошедшим онбординг (тутор farm→craft не засоряем) и ТОЛЬКО пока
+        # не посажено (после посадки слот займёт кнопка урожая). Бесплатно →
+        # чистый плюс: endowment («уже моё, растёт») + overnight-крючок возврата.
+        keyboard.append([InlineKeyboardButton(
+            "🌱 Посади Плантацию · растёт, пока тебя нет", callback_data="collect")])
 
     # Навигация: 2 кнопки в ряд, чтобы длинные подписи не обрезались
     # (3-в-ряд не помещались: «Прогресс…», «Гильди…»).
