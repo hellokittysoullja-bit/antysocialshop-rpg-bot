@@ -804,6 +804,13 @@ async def ensure_daily_progress(player, ctx) -> dict:
         current_quest = progress.get("quest_id", "chapter1")
         progress = {"reset_date": today, "quest_id": current_quest, "reward_claimed": False}
         player.daily_progress = progress
+        # Голод питомца: −25 за новый день. Раньше pet_hunger нигде не убывал —
+        # шкала сытости всегда стояла на 100 и была бутафорией, а «Покормить»
+        # ничего не значило. Теперь care-петля честная: кормление (ставит 100)
+        # реально нужно. Без штрафов — голодный пёс лишь грустит на своём экране.
+        if getattr(player, 'pet', ''):
+            _h = player.pet_hunger if player.pet_hunger is not None else 100
+            player.pet_hunger = max(0, _h - 25)
         await ctx.repo.save(player)
     return progress
 
@@ -5897,6 +5904,14 @@ async def pet_preview(update, context, ctx):
         name_str = f" по кличке «{player.pet_name}»" if player.pet_name else ""
         hunger = player.pet_hunger if player.pet_hunger is not None else 100
         hbar = "🟩" * (hunger // 20) + "⬛️" * (5 - hunger // 20)
+        # Состояние по уровню сытости — шкала теперь убывает (−25/день), и её
+        # значение должно ЧИТАТЬСЯ эмоционально, а не только числом.
+        if hunger >= 80:
+            mood = "😊 <i>Сыт и доволен — виляет хвостом!</i>"
+        elif hunger >= 40:
+            mood = "😋 <i>Проголодался и поглядывает на миску…</i>"
+        else:
+            mood = "🥺 <i>Совсем голодный! Покорми — он скучал по тебе.</i>"
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("🍖 Покормить", callback_data="pet_feed")],
             [InlineKeyboardButton("🔙 Назад", callback_data="menu")],
@@ -5904,7 +5919,8 @@ async def pet_preview(update, context, ctx):
         await edit_or_reply(
             update, context,
             f"🐾 <b>Твой питомец: {player.pet}{name_str}</b>\n\n"
-            f"🍖 <b>Сытость:</b> {hbar} {hunger}/100",
+            f"🍖 <b>Сытость:</b> {hbar} {hunger}/100\n"
+            f"{mood}",
             reply_markup=kb)
     else:
         kb = InlineKeyboardMarkup([
@@ -6885,6 +6901,17 @@ async def handle_choice(update, context, ctx):
     choices = template.get("choices") if template else None
     if not choices:
         await query.answer("Выбор сейчас недоступен", show_alert=True)
+        return
+
+    # Защита от «вчерашних» кнопок: после дневного сброса задачи главы обнуляются,
+    # но старое сообщение с кнопками выбора остаётся в чате — без этой проверки
+    # тап по нему выдавал награду выбора (250 OAC + титул + предмет) в обход задач.
+    _done, _total = _quest_progress_counts(
+        template, progress, player.guild,
+        (player.balance or 0) >= 5000, bool(player.pet))
+    if _done < _total:
+        await query.answer(
+            f"Сначала заверши все шаги главы! ({_done}/{_total})", show_alert=True)
         return
 
     try:

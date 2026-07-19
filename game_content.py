@@ -262,7 +262,12 @@ QUEST_TEMPLATES = {
         "tasks": [
             {"label": "🌿 Крафт", "key": "craft", "target": 10},
             {"label": "🍬 Фармить", "key": "farm", "target": 300},
-            {"label": "⚜️ Исповедь", "key": "repent", "target": 1},
+            # Гильдейское действие — по стороне (как в главах 1-2). Раньше стояла
+            # безусловная «Исповедь» → игрок Тёмной Гильдии (или без гильдии),
+            # выбравший путь Благодетеля, получал невыполнимую задачу и застревал
+            # в ФИНАЛЬНОЙ главе навсегда.
+            {"label": "🕯️ Ритуал", "key": "ritual", "target": 1, "condition": "guild_black"},
+            {"label": "⚜️ Исповедь", "key": "repent", "target": 1, "condition": "guild_white"},
             {"label": "🐾 Покормить питомца", "key": "pet", "target": 1, "condition": "is_veteran_and_has_pet"},
         ],
         "reward_oac": 250,
