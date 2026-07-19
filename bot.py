@@ -2683,7 +2683,29 @@ async def farm_callback_v2(update, context, ctx, player):
              InlineKeyboardButton("💨 Дунуть", callback_data="smoke")],
             [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
         ])
-    anim_msg = await animate_progress_bar(update, context, title="🍬 Фармим...", in_place=True)
+    # Juice ТОЛЬКО на mega-крит ×10 (1% фармов) — единственный сегмент, где по
+    # всем 4 призмам ревил строго-положителен: редко → латентность не
+    # хабитуируется в раздражение (в отличие от базы), пик → максимальное
+    # усиление reward prediction error, milestone → уместно «посмаковать».
+    # Раньше самый большой фарм подавался той же обыденной «Фармим...», что и
+    # рядовой — пик не отличался от базы. База (99%) — без изменений.
+    is_mega = crit and earned >= FARM_MAX * 10
+    anim_msg = None
+    if is_mega:
+        _q = update.callback_query
+        if _q and _q.message:
+            try:
+                for _frame in ("<b>🌑 Грядка задрожала…</b>",
+                               "<b>💥 ЧТО-ТО ПРОРЫВАЕТСЯ СКВОЗЬ ЗЕМЛЮ…</b>",
+                               "<b>💥💥💥 МЕГА-КРИТ ×10!</b>"):
+                    await _q.message.edit_text(_frame, parse_mode='HTML')
+                    await asyncio.sleep(0.55)
+                anim_msg = _q.message
+            except Exception:
+                anim_msg = None
+    else:
+        anim_msg = await animate_progress_bar(update, context, title="🍬 Фармим...", in_place=True)
+
     if anim_msg is not None:
         await anim_msg.edit_text(text, parse_mode='HTML', reply_markup=result_kb)
     else:
