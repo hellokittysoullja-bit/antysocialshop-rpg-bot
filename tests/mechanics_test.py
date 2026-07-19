@@ -165,6 +165,24 @@ def test_pure(passed):
     assert not_capped is None
     passed.append("_reengagement_text: плантация/серия/фарм/пусто по приоритету")
 
+    # --- обгон в рейтинге: соц-статус-триггер, приоритет ниже плантации/серии,
+    #     выше созревшего фарма ---
+    rival = _reengagement_text(fresh_farm, 0, morning.date().isoformat(), morning, cd,
+                               rival_drop=(5, 8))
+    assert rival and "#5" in rival and "#8" in rival and "обошли" in rival.lower()
+    # плантация приоритетнее обгона
+    both = _reengagement_text(fresh_farm, 0, morning.date().isoformat(), morning, cd,
+                              passive_level=3, passive_collected=morning - timedelta(hours=20),
+                              rival_drop=(5, 8))
+    assert "Плантация" in both
+    # серия приоритетнее обгона
+    both2 = _reengagement_text(old_farm, 3, None, evening, cd, rival_drop=(5, 8))
+    assert "серия" in both2.lower()
+    # без обгона (rival_drop=None) — фолбэк на фарм, как раньше
+    assert _reengagement_text(old_farm_morning, 0, None, morning, cd, rival_drop=None) and \
+           "Грядка" in _reengagement_text(old_farm_morning, 0, None, morning, cd, rival_drop=None)
+    passed.append("_reengagement_text: обгон в рейтинге — приоритет и текст корректны")
+
     # --- грейс-фарм: первые фармы без кулдауна, потом кулдаун действует ---
     now2 = datetime(2026, 1, 1, 12, 0)
     recent = now2 - timedelta(minutes=5)    # недавно (в пределах 30 мин)

@@ -28,3 +28,4 @@ env/
 .idea/
 *.swp
 .DS_Store
+dump.rdb
