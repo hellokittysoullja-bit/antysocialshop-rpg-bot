@@ -6367,6 +6367,36 @@ def _happy_hour_banner(ctx, now):
             f"<b>Все действия ×{HAPPY_HOUR_MULTIPLIER} OAC 🍬.</b> {tail}")
 
 
+def _north_star_line(balance: int) -> str:
+    """«Полярная звезда» — ответ на «зачем я играю», в каждой сессии.
+
+    Ядро проблемы драйва: игроку показывали ЦЕНУ ранга («осталось X OAC») —
+    счётчик к уплате, а не мечту. Цена без награды = гринд. Здесь — цель
+    (кем становишься) + НАГРАДА за неё (что откроется, из RANK_LORE) + прогресс
+    (goal-gradient). Специфичная желанная цель тянет сильнее абстрактного числа
+    (теория постановки целей Локка-Латэма). Показывается в ОБОИХ режимах меню.
+    """
+    # Максимум определяем по последнему порогу RANKS напрямую — надёжнее, чем
+    # доверять next_th (при балансе выше вершины он мог вернуть последний порог
+    # → отрицательный «разрыв»). Заодно чинит и старую строку цены.
+    if balance >= RANKS[-1][1]:
+        return ("👑 <b>Ты — вершина Искажения.</b>\n"
+                "<i>Имя, которым пугают в обоих мирах. Дальше — только легенда.</i>")
+    _re, _rn, ne, nn, next_th, prev_th = compute_rank_info(balance)
+    if not next_th or next_th <= balance:
+        return ("👑 <b>Ты — вершина Искажения.</b>\n"
+                "<i>Имя, которым пугают в обоих мирах. Дальше — только легенда.</i>")
+    gap = next_th - balance
+    pct = int((balance - prev_th) / (next_th - prev_th) * 100) if next_th > prev_th else 0
+    pct = min(100, max(0, pct))
+    bar = "▓" * (pct // 10) + "░" * (10 - pct // 10)
+    line = f"🎯 <b>Цель: {ne} {nn}</b> · ещё {gap} OAC\n{bar} {pct}%"
+    unlock = RANK_LORE.get(f"{ne} {nn}", {}).get("unlock", "")
+    if unlock:
+        line += f"\n🎁 <i>Откроется: {unlock}</i>"
+    return line
+
+
 async def build_main_menu(player, ctx, context=None, full_mode=False):
     now = datetime.now()
     guild = player.guild
@@ -6432,14 +6462,10 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
             lines.append("🔮 Гильдия откроет <b>ритуалы, исповеди и войну</b>")
             lines.append("👉 <b>Нажми кнопку «🏰 Гильдии» в меню чтобы ВСТУПИТЬ.</b>")
 
-        lines.append("")  # отступ перед мотивационной строкой
+        lines.append("")  # отступ перед Полярной звездой
 
-        # Мотивационная строка (до следующего ранга)
-        if next_threshold > 0:
-            gap = next_threshold - balance
-            lines.append(f"📈 До следующего ранга <b>{next_rank_emoji} {next_rank_name}</b> осталось — <b>{gap} OAC 🍬!</b>")
-        else:
-            lines.append(f"<b>⚡ Ты достиг вершины! Твой ранг — {rank_emoji} {rank_name}.</b>")
+        # Полярная звезда: цель + НАГРАДА за неё + прогресс (не голая цена).
+        lines.append(_north_star_line(balance))
 
         lines.append("")  # отступ перед подсказкой
 
@@ -6461,8 +6487,10 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
         lines.append(hint)
 
     else:
-        # Краткий режим (без изменений)
-        lines = [f"<i>{whisper}</i>"]
+        # Краткий режим: раньше показывал только whisper — цели «зачем я здесь»
+        # не было НИ на одной кнопочной сессии (90% входов). Теперь Полярная
+        # звезда присутствует всегда — постоянный ответ «к чему я иду».
+        lines = [f"<i>{whisper}</i>", "", _north_star_line(balance)]
 
     # Общие краткие сообщения (всегда) — новые фичи оставлены
     if context and context.user_data.get("return_after_pause"):
