@@ -298,12 +298,6 @@ LUCK_CONFIG = {
         ],
         "cooldown_hours": 24,
     },
-    "mines": {
-        "cost": 300,          # ставка по умолчанию
-        "win_amount": 200,
-        "lose_amount": 300,
-        "cooldown_hours": 24,
-    },
     "alchemy": {
         "cost_blunts": 10,
         "cost_oac": 250,
@@ -320,11 +314,19 @@ LUCK_CONFIG = {
         ],
     },
     "mines": {
-        "bet_options": [50, 100, 250, 500],   # доступные ставки
-        "default_bet": 50,
-        "mines_count": 3,
-        "cooldown_hours": 0,                  # можно поставить 0 – без кулдауна
-        "multiplier_max": 3.0,
+        # Раньше здесь было ДВА ключа "mines" в одном словаре (второй молча
+        # затирал первый) — реальный конфиг терял "cost", и любой тап по
+        # «🎲 Удача» падал с KeyError (весь хаб был мёртв: Колесо/Мины/Алхимия).
+        # cost = min(bet_options): гейт «хватает ли на минимальную ставку»
+        # соответствует реальной игре (ставка выбирается из bet_options).
+        # cooldown_hours=0 — сохранено как есть: это и было фактическим
+        # поведением (второй словарь перезаписывал первый), без отката.
+        # win_amount/lose_amount/mines_count/multiplier_max/default_bet
+        # убраны — код их нигде не читает (сетка/множитель захардкожены в
+        # _generate_mines_field/_calc_multiplier), это были мёртвые ключи.
+        "bet_options": [50, 100, 250, 500],
+        "cost": 50,
+        "cooldown_hours": 0,
     }
 }
 
