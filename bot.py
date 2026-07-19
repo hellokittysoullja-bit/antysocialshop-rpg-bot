@@ -2257,6 +2257,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if creator_id:
                 await _reward_referrer(ctx, context, creator_id)
         else:
+            # Возврат после паузы: оживляем МЁРТВЫЙ welcome-back момент. Флаг
+            # return_after_pause раньше только читался в build_main_menu, но нигде
+            # не выставлялся — фича «🎁 Пока вас не было…» не срабатывала никогда.
+            # Порог ≥2 дней: дневных игроков (gap=1, у них штатная daily-карточка)
+            # не трогаем; почти-ушедший лапс-игрок получает тёплый win-back.
+            # last_login_date берём из уже загруженного player — ДО фонового
+            # process_daily_login, который обновит дату на сегодня.
+            _last = _parse_last_login_date(player.last_login_date)
+            if _last and (date.today() - _last).days >= 2:
+                context.user_data["return_after_pause"] = True
+
             # Запускаем ежедневный бонус в фоне, чтобы меню появилось мгновенно:
             asyncio.create_task(process_daily_login(uid, context))
 
