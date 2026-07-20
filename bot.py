@@ -870,13 +870,25 @@ def build_smoke_effect(outcome, earned):
         f"{earned_str}"
     )
 
-def calculate_smoke_reward(p, happy_hour):
+# Пити-таймер гачи «Дунуть»: после SMOKE_PITY_THRESHOLD сухих тяг подряд
+# (нейтрал/минус) следующая гарантированно «выигрыш». Убивает фрустрацию серии
+# пустых тяг (80% исходов пусты) — честно, best-practice гача, не dark pattern
+# (реальный гарант, а не фейк-near-miss). Экономически мягко: гача остаётся нетто-
+# стоком, гарант лишь поднимает пол. Счётчик живёт в daily_progress (сброс/день).
+SMOKE_PITY_THRESHOLD = 6
+
+
+def calculate_smoke_reward(p, happy_hour, dry_count=0):
     """Возвращает (earned, outcome). Одна руч­ка — и число, и флейвор.
 
     Баланс смягчён: раньше 52% тяг отнимали −5 OAC («постоянное наказание»
     ослабляет дофаминовую петлю — выученная беспомощность). Теперь потерь
     вдвое меньше и они мягче (25% × −3), нейтралов больше (55%), а плюс чуть
-    вырос (2% джекпот + 18% выигрыш = 20%). Пик-момент (джекпот) сохранён."""
+    вырос (2% джекпот + 18% выигрыш = 20%). Пик-момент (джекпот) сохранён.
+
+    dry_count — число сухих тяг подряд ДО этой. Если с текущей их стало бы
+    SMOKE_PITY_THRESHOLD, форсим «выигрыш» (пити-гарант): серия пустых тяг не
+    может тянуться бесконечно."""
     r = random.random()
     if r < 0.02:
         earned, outcome = random.randint(80, 160), "jackpot"
@@ -886,6 +898,9 @@ def calculate_smoke_reward(p, happy_hour):
         earned, outcome = -3, "loss"
     else:
         earned, outcome = 0, "neutral"
+    # Пити-гарант: сухая тяга, добивающая серию до порога, превращается в выигрыш.
+    if outcome in ("loss", "neutral") and dry_count + 1 >= SMOKE_PITY_THRESHOLD:
+        earned, outcome = random.randint(15, 40), "win"
     if happy_hour and earned > 0:
         earned *= HAPPY_HOUR_MULTIPLIER
     return earned, outcome
@@ -3471,7 +3486,10 @@ async def do_smoke(update, context, ctx, player):
             return SmokeStatus.NO_BLUNTS, None
 
         save = (p.guild == "WHITE" and random.randint(1, 100) <= 20)
-        earned, outcome = calculate_smoke_reward(p, ctx.cache.get("happy_hour", False))
+        p.daily_progress = p.daily_progress or {}
+        _dry = p.daily_progress.get("smoke_dry", 0)
+        earned, outcome = calculate_smoke_reward(
+            p, ctx.cache.get("happy_hour", False), dry_count=_dry)
 
         old_count = p.smoke_count or 0
         new_count = old_count + 1
@@ -3481,8 +3499,12 @@ async def do_smoke(update, context, ctx, player):
             p.blunts -= 1
         p.smoke_count = new_count
         p.balance = (p.balance or 0) + earned + medal_bonus
-        p.daily_progress = p.daily_progress or {}
         p.daily_progress["smoke"] = True
+        # Пити-счётчик: растёт на сухих тягах, обнуляется на выигрыше/джекпоте.
+        if outcome in ("loss", "neutral"):
+            p.daily_progress["smoke_dry"] = _dry + 1
+        else:
+            p.daily_progress["smoke_dry"] = 0
         p.inhaled = 1
 
         if ctx.war_service:
@@ -3491,7 +3513,7 @@ async def do_smoke(update, context, ctx, player):
             except Exception:
                 logger.exception("War service error, proceeding without points")
 
-        return SmokeStatus.OK, (earned, outcome, save, medal_text, new_count, p.blunts, p.balance)
+        return SmokeStatus.OK, (earned, outcome, save, medal_text, new_count, p.blunts, p.balance, p.daily_progress["smoke_dry"])
 
     result = await ctx.repo.atomic_update(uid, _smoke)
     if result is None:
@@ -3510,14 +3532,23 @@ async def do_smoke(update, context, ctx, player):
         )
         return
 
-    earned, outcome, save, medal_text, new_count, bl_left, new_balance = data
+    earned, outcome, save, medal_text, new_count, bl_left, new_balance, dry = data
     effect = build_smoke_effect(outcome, earned)
+
+    # Пити-прогресс: сухая тяга перестаёт быть «ничем» — это шаг к гарантированному
+    # улову (anticipation + goal-gradient).
+    pity_line = ""
+    left = SMOKE_PITY_THRESHOLD - dry
+    if outcome in ("loss", "neutral") and left > 0:
+        filled = "🔥" * dry + "▫️" * left
+        pity_line = f"\n{filled} <i>ещё {left} до гарантированного улова</i>"
 
     text = (
         f"{effect}\n\n"
         f"{medal_text}"
         f"<b>💨 Дым:</b> {new_count}/{get_medal_target(new_count, SMOKE_MEDALS)}\n"
-        f"{get_medal_progress(new_count, SMOKE_MEDALS)}\n\n"
+        f"{get_medal_progress(new_count, SMOKE_MEDALS)}"
+        f"{pity_line}\n\n"
         f"<b>🍃 Блантов в свёртке:</b> <b>{bl_left}</b>"
     )
     if save:

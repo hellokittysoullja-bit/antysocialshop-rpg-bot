@@ -57,7 +57,7 @@ def test_pure(passed):
         elif outcome == "win":
             assert 15 <= val <= 40, f"выигрыш вернул {val}"
         elif outcome == "loss":
-            assert val == -5, f"проигрыш вернул {val}"
+            assert val == -3, f"проигрыш вернул {val}"
         else:
             assert val == 0, f"пусто вернул {val}"
         # флейвор не падает и рендерит знак корректно
