@@ -4190,12 +4190,20 @@ async def top_callback(update, context, ctx, player):
         else:
             g_emoji, g_name = "🩸", "<b>Без гильдии</b>"
 
-        rank_emoji, rank_name = "🪓", "Рекрут"
-        for emoji, threshold, _ in RANKS:
+        # Было: rank_emoji = emoji (полная строка "🪦 Призрак") → рендер дублировал
+        # имя ранга («🪦 Призрак <b>Призрак</b>»). Плюс: маркер статуса из
+        # RANK_LORE (единый источник с ascension-карточкой/Полярной звездой) —
+        # Призрак/Некромант получают видимый в лидерборде знак отличия
+        # (🩸/👑) — то самое «все видят, кто я» вместо невидимой скидки.
+        rank_label = "🪓 Рекрут"
+        for label, threshold, _ in RANKS:
             if bal >= threshold:
-                rank_emoji = emoji
-                rank_name = emoji_to_name(emoji)
+                rank_label = label
+        rank_emoji, rank_name = rank_label.split(" ", 1)
+        mark = RANK_LORE.get(rank_label, {}).get("mark")
         username = html.escape(row["username"])
+        if mark:
+            username = f"{mark}{username}{mark}"
 
         text += (
             f"{prefix}<b>{username}</b> {g_emoji} — {bal} OAC 🍬\n"
