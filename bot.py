@@ -2281,10 +2281,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Конфигурация (все правила в одном месте)
 @dataclass(frozen=True)
 class StreakConfig:
+    # Эскалирующая кривая с недельными пиками (peak-end + loss-aversion «серия
+    # растёт — не рви»). Раньше D1–D7 давали 10–50 OAC — НИЖЕ одного фарма
+    # (45–100): главный рычаг D1-ретеншна был эмоционально мёртв в самом важном
+    # окне формирования привычки. Кривая монотонна (каждый день ≥ вчера → возврат
+    # никогда не ощущается как нёрф), с пиками-скачками на D7 и D14. Инфляция
+    # ничтожна: даже D14 ниже дневного дохода активного игрока.
     base_rewards: Dict[int, int] = field(default_factory=lambda: {
-        1: 10, 2: 15, 3: 20, 4: 25, 5: 30, 6: 35, 7: 50,
-        8: 55, 9: 60, 10: 65, 11: 70, 12: 75, 13: 80, 14: 100
+        1: 50, 2: 80, 3: 120, 4: 160, 5: 200, 6: 250, 7: 500,
+        8: 530, 9: 570, 10: 620, 11: 690, 12: 780, 13: 880, 14: 1000
     })
+    # Плато после D14: сохранившим серию >2 недель не даём провалиться к жалким
+    # 100 (это карало бы самых лояльных — cliff после пика). Держим достойный
+    # устойчивый уровень ниже пикового приза D14.
+    plateau_reward: int = 400
     max_streak_display: int = 14
     hot_streak_threshold: int = 3
     hot_streak_multiplier: float = 1.1
@@ -2330,7 +2340,7 @@ class RewardResult(NamedTuple):
 # Расчёт награды (чистая функция)
 
 def _calculate_reward(streak: int, config: StreakConfig) -> RewardResult:
-    base = config.base_rewards.get(streak, 100)
+    base = config.base_rewards.get(streak, config.plateau_reward)
 
     title = config.title_rewards.get(streak)
 
@@ -2366,7 +2376,7 @@ def _build_next_day_preview(streak: int, config: StreakConfig) -> str:
     Чистая функция (детерминированная часть награды, без случайных бонусов).
     """
     next_streak = streak + 1
-    base = config.base_rewards.get(next_streak, 100)
+    base = config.base_rewards.get(next_streak, config.plateau_reward)
     if next_streak >= config.hot_streak_threshold:
         base = int(base * config.hot_streak_multiplier)
     next_title = config.title_rewards.get(next_streak)
