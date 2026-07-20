@@ -8,7 +8,7 @@ def log_uncaught(exc_type, exc_value, exc_tb):
     time.sleep(2)   # даём время Render прочитать
     sys.__excepthook__(exc_type, exc_value, exc_tb)
 sys.excepthook = log_uncaught
-import asyncio, json, logging, os, sys, time, random, re, hashlib, html, enum, copy, math
+import asyncio, json, logging, os, sys, time, random, re, hashlib, html, enum, copy, math, io
 from datetime import datetime, timedelta, date, timezone
 from typing import Optional, List, Any, Dict, Tuple, NamedTuple, Callable
 from dataclasses import dataclass, field  
@@ -59,6 +59,14 @@ from services import (
     GuildWarService, AlchemyResult, PetService,
 )
 from enum import Enum, auto  # для SmokeStatus/CraftStatus ниже
+
+# Процедурный рендер коллекционной карточки бланта. Мягкая деградация: если
+# Pillow не установлен или модуль сломан — карточки просто не рисуются, а весь
+# путь блантов остаётся текстовым (украшение, не критичный путь).
+try:
+    from blunt_art import render_blunt_card
+except Exception:  # pragma: no cover
+    render_blunt_card = None
 
 # ============================================================
 # ДЕКОРАТОРЫ
@@ -1516,6 +1524,60 @@ async def safe_send_blunt_image(context, chat_id, rarity, caption, reply_markup)
             logger.error("Непредвиденная ошибка отправки %s: %s", rarity, e)
             await safe_send_message(context, chat_id, "⚠️ Произошла ошибка при отправке изображения.", parse_mode=None)
         return False
+
+async def _persist_blunt_image(ctx, uid, blunt_id, file_id):
+    """Кэшируем сгенерированный Telegram file_id прямо на предмете инвентаря →
+    карточка рисуется ОДИН раз, дальше переиспользуется (без пере-рендера)."""
+    async def _set(p, conn):
+        for it in (p.inventory or []):
+            if it.get("id") == blunt_id:
+                it["image_file_id"] = file_id
+                return True
+        return False
+    try:
+        await ctx.repo.atomic_update(uid, _set)
+    except Exception:
+        logger.warning("Не удалось сохранить image_file_id для бланта %s", blunt_id)
+
+
+async def _send_blunt_card(context, chat_id, item, owner_name, caption, reply_markup,
+                           ctx=None, uid=None):
+    """Шлёт коллекционную карточку бланта фото-сообщением. True при успехе.
+
+    Порядок: (1) готовый кэш file_id → мгновенная отправка; (2) иначе рендерим
+    уникальную карточку (в executor, чтобы не блокировать loop), шлём, ловим
+    file_id и кэшируем на предмете. Любая осечка → False, вызывающий откатится
+    на текст (карточка — украшение, не критичный путь)."""
+    fid = item.get("image_file_id")
+    if fid:
+        try:
+            await _send_photo_with_retry(context, chat_id, fid, caption=caption, reply_markup=reply_markup)
+            return True
+        except Exception:
+            pass  # протух file_id — перегенерим ниже
+
+    if render_blunt_card is None:
+        return False
+    try:
+        png = await asyncio.get_event_loop().run_in_executor(
+            None, render_blunt_card, item, owner_name or "")
+    except Exception:
+        logger.exception("Рендер карточки бланта не удался")
+        return False
+    try:
+        msg = await _send_photo_with_retry(
+            context, chat_id, io.BytesIO(png), caption=caption, reply_markup=reply_markup)
+        new_fid = None
+        if msg and getattr(msg, "photo", None):
+            new_fid = msg.photo[-1].file_id
+        if new_fid and ctx and uid and item.get("id"):
+            item["image_file_id"] = new_fid
+            await _persist_blunt_image(ctx, uid, item.get("id"), new_fid)
+        return True
+    except Exception:
+        logger.exception("Отправка карточки бланта не удалась")
+        return False
+
 
 async def send_whisper_dm(update, context, text):
     if update.callback_query:
@@ -3135,9 +3197,16 @@ async def handle_named_name(update, context):
         except Exception:
             pass
 
-        sent_img = await safe_send_blunt_image(
-            context, update.effective_chat.id, item["rarity"], caption=caption, reply_markup=kb
-        )
+        # Уникальная коллекционная карточка (рисуется из хэша бланта → у каждого
+        # своя). Кэшируется как file_id на предмете. Откат: старая per-rarity
+        # картинка, затем текст — путь блантов не может упасть из-за рендера.
+        sent_img = await _send_blunt_card(
+            context, update.effective_chat.id, item, player.username or "",
+            caption=caption, reply_markup=kb, ctx=ctx, uid=uid)
+        if not sent_img:
+            sent_img = await safe_send_blunt_image(
+                context, update.effective_chat.id, item["rarity"], caption=caption, reply_markup=kb
+            )
         if not sent_img:
             await update.message.reply_text(caption, reply_markup=kb, parse_mode='HTML')
 
@@ -7670,7 +7739,13 @@ async def blunt_details_handler(update, context, ctx, player):
          InlineKeyboardButton("🎁 Подарить", callback_data=f"gift_blunt_{blunt_id}")],
         [InlineKeyboardButton("🏆 К списку", callback_data="my_blunts")]
     ])
-    sent = await safe_send_blunt_image(context, query.message.chat.id, rarity, caption=text, reply_markup=kb)
+    # Уникальная карточка бланта (кэш file_id на предмете; старым блантам
+    # дорисуется при первом просмотре). Откат: per-rarity картинка, затем текст.
+    sent = await _send_blunt_card(context, query.message.chat.id, item,
+                                  player.username or "", caption=text, reply_markup=kb,
+                                  ctx=ctx, uid=uid)
+    if not sent:
+        sent = await safe_send_blunt_image(context, query.message.chat.id, rarity, caption=text, reply_markup=kb)
     if sent:
         try:
             await query.message.delete()
