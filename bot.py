@@ -1700,7 +1700,7 @@ async def world_hub(update, context, ctx):
     # Плантация — idle-крючок «зайди собрать». Кнопка живая: показывает
     # созревший урожай (goal-gradient тянет вернуться) или зовёт посадить.
     plant_lvl = player.passive_level or 0
-    _pending, _h, _c = _plant_pending(plant_lvl, player.passive_collected, datetime.now())
+    _pending, _h, _c = _plant_pending_player(player, datetime.now())
     if plant_lvl <= 0:
         plant_label = "🪴 Плантация · посадить 🌱"
     elif _pending > 0:
@@ -3665,6 +3665,55 @@ def _plant_pending(level, last_collected, now):
     return (earned, hrs_used, capped)
 
 
+def _pet_cfg(player):
+    """Конфиг текущего питомца игрока или None. Единая точка сопоставления
+    Player.pet (хранит ИМЯ) ↔ PET_CONFIG (ключи по типу)."""
+    pet = player.pet
+    if not pet:
+        return None
+    return next((c for c in PET_CONFIG.values() if c.get("name") == pet), None)
+
+
+def _pet_bonus_pct(player, target: str) -> float:
+    """Эффективный бонус питомца к цели `target`, в процентах (data-driven).
+
+    Тип и величина эффекта берутся из PET_CONFIG (не из кода) → новый питомец
+    или иная цель = правка данных. Бонус масштабируется сытостью, но НЕ ниже пола
+    hunger_floor: заброшенный питомец выглядит голодным (эмоциональный крючок
+    «покорми»), но баф не обрывается в 0 — вернувшийся игрок всегда сохраняет
+    часть (никакого механического наказания за паузу). Возвращает 0.0, если
+    питомца нет или он не бустит эту цель.
+    """
+    cfg = _pet_cfg(player)
+    if not cfg or cfg.get("bonus_target") != target:
+        return 0.0
+    max_pct = cfg.get("bonus_max_pct", 0)
+    if max_pct <= 0:
+        return 0.0
+    floor_frac = cfg.get("hunger_floor", 0) / 100.0
+    hunger = player.pet_hunger if player.pet_hunger is not None else 100
+    frac = max(floor_frac, min(100, max(0, hunger)) / 100.0)
+    return max_pct * frac
+
+
+def _plant_pending_player(player, now):
+    """(earned, hours, capped) плантации ИГРОКА с учётом бонуса питомца.
+
+    Единая точка расчёта дохода: меню, экран плантации, сбор, апгрейд считают
+    одинаково → база и бонус никогда не разъезжаются. Питомец ускоряет
+    производство (бонус к earned), а не объём хранилища (кап-часы — по базовой
+    ставке в _plant_pending). Care-loop замыкается: кормишь → плантация даёт
+    больше → собираешь больше → апаешь быстрее.
+    """
+    earned, hrs, capped = _plant_pending(
+        player.passive_level or 0, _to_datetime(player.passive_collected), now)
+    if earned > 0:
+        bonus = _pet_bonus_pct(player, "plantation")
+        if bonus:
+            earned = int(earned * (1 + bonus / 100.0))
+    return (earned, hrs, capped)
+
+
 async def collect_callback(update, context):
     """Вход в Плантацию (эволюция старого «кустика»/collect)."""
     ctx = context.bot_data.get("ctx")
@@ -3695,7 +3744,7 @@ async def _show_plantation(update, context, ctx, player):
             [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
         ])
     else:
-        earned, _hrs, capped = _plant_pending(level, _to_datetime(player.passive_collected), now)
+        earned, _hrs, capped = _plant_pending_player(player, now)
         rate = _plant_rate(level)
         cap_total = rate * PLANT_CAP_HOURS
         fill = min(100, int(earned / cap_total * 100)) if cap_total else 0
@@ -3708,9 +3757,18 @@ async def _show_plantation(update, context, ctx, player):
         else:
             up_cost = None
             up_line = "⭐️ <b>Максимальный уровень!</b>"
+        # Строка питомца делает связь «забота → доход» видимой (peak-end): базовая
+        # ставка — интринзик уровня, бонус — вклад сытого питомца, отдельной строкой,
+        # чтобы математика апгрейда (по базовой ставке) не путалась.
+        _pet_pct = _pet_bonus_pct(player, "plantation")
+        pet_line = ""
+        if _pet_pct > 0:
+            _hunger = player.pet_hunger if player.pet_hunger is not None else 100
+            pet_line = f"🐾 <b>Питомец:</b> +{_pet_pct:.0f}% к сбору <i>(сытость {_hunger}%)</i>\n"
         text = (
             f"🪴 <b>ПЛАНТАЦИЯ · Уровень {level}</b>\n\n"
             f"⚡ Скорость: <b>{rate} OAC/час</b>\n"
+            f"{pet_line}"
             f"🌾 К сбору: <b>{earned} OAC</b>\n"
             f"{cap_line}\n\n"
             f"{up_line}"
@@ -3751,7 +3809,7 @@ async def plant_harvest_handler(update, context, ctx):
         level = p.passive_level or 0
         if level < 1:
             return ("no_plant",)
-        earned, _hrs, _capped = _plant_pending(level, _to_datetime(p.passive_collected), now)
+        earned, _hrs, _capped = _plant_pending_player(p, now)
         if happy:
             earned *= HAPPY_HOUR_MULTIPLIER
         if earned < 1:
@@ -3786,8 +3844,8 @@ async def plant_upgrade_handler(update, context, ctx):
         cost = _plant_upgrade_cost(level)
         if (p.balance or 0) < cost:
             return ("no_money", cost)
-        # Сначала собираем накопленное по старой ставке (честно), потом апаем
-        pending, _h, _c = _plant_pending(level, _to_datetime(p.passive_collected), now)
+        # Сначала собираем накопленное по старой ставке + бонусу питомца (честно), потом апаем
+        pending, _h, _c = _plant_pending_player(p, now)
         p.balance += pending
         p.balance -= cost
         p.passive_level = level + 1
@@ -5973,6 +6031,21 @@ async def pet_preview(update, context, ctx):
             mood = "😋 <i>Проголодался и поглядывает на миску…</i>"
         else:
             mood = "🥺 <i>Совсем голодный! Покорми — он скучал по тебе.</i>"
+        # Care-loop замыкается только когда забота ВИДНА как выгода: показываем,
+        # что даёт питомец сейчас и что даст сытым. Тогда кормёжка — не галка
+        # дейлика, а «верни/подними мой доход» (взаимность тамагочи + goal-gradient).
+        _pet_pct = _pet_bonus_pct(player, "plantation")
+        _cfg = _pet_cfg(player) or {}
+        _max_pct = _cfg.get("bonus_max_pct", 0)
+        bonus_block = ""
+        if _max_pct > 0:
+            if hunger >= 100:
+                bonus_block = (f"\n🪴 <b>Бонус плантации:</b> +{_pet_pct:.0f}% "
+                               f"<i>— досыта, максимум!</i>")
+            else:
+                bonus_block = (f"\n🪴 <b>Бонус плантации:</b> +{_pet_pct:.0f}% "
+                               f"<i>(сытым: +{_max_pct}%)</i>\n"
+                               f"🍖 <i>Покорми — подними бонус к пассивному доходу.</i>")
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("🍖 Покормить", callback_data="pet_feed")],
             [InlineKeyboardButton("🔙 Назад", callback_data="menu")],
@@ -5981,7 +6054,8 @@ async def pet_preview(update, context, ctx):
             update, context,
             f"🐾 <b>Твой питомец: {player.pet}{name_str}</b>\n\n"
             f"🍖 <b>Сытость:</b> {hbar} {hunger}/100\n"
-            f"{mood}",
+            f"{mood}"
+            f"{bonus_block}",
             reply_markup=kb)
     else:
         kb = InlineKeyboardMarkup([
@@ -6001,7 +6075,14 @@ async def pet_feed_handler(update, context, ctx):
     if not result or result.get("status") == "no_pet":
         await query.answer("Сначала заведи питомца!", show_alert=True)
         return
-    await query.answer("🐾 Питомец сыт и доволен!")
+    # Награда за заботу — в тот же момент, что и забота (замыкаем петлю видимо).
+    player = await ctx.repo.get_by_id(uid)
+    _cfg = _pet_cfg(player) or {}
+    _max_pct = _cfg.get("bonus_max_pct", 0)
+    if _max_pct > 0 and _cfg.get("bonus_target") == "plantation":
+        await query.answer(f"🐾 Сыт! Бонус плантации +{_max_pct}% на максимуме.")
+    else:
+        await query.answer("🐾 Питомец сыт и доволен!")
     await pet_preview(update, context)
 
 
@@ -6599,8 +6680,7 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
     # был виден только внутри «Мир › Плантация»; теперь всплывает на ГЛАВНЫЙ экран
     # ровно когда есть что собрать, и исчезает после сбора — как кнопка Ритуала,
     # без засорения экрана. Переполненное хранилище = loss-aversion (стоит зря).
-    _plant_earned, _ph, _pcapped = _plant_pending(
-        player.passive_level or 0, _to_datetime(player.passive_collected), now)
+    _plant_earned, _ph, _pcapped = _plant_pending_player(player, now)
     if _plant_earned > 0:
         _harvest_label = (f"⚠️ Урожай переполнен · собрать {_plant_earned} 🌾"
                           if _pcapped else f"🌾 Собрать урожай · {_plant_earned} OAC")
