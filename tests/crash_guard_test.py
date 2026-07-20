@@ -93,12 +93,50 @@ def check_conn_used_after_async_with():
     assert not bad, "Соединение используется после возврата в пул:\n  " + "\n  ".join(bad)
 
 
+def check_achievement_rewards_parseable():
+    """Каждая награда достижения должна полностью распарситься reward-DSL.
+
+    Баг «Лунный лорд»: reward="Уникальный фон 🌀" начиналось с «Уникальный», а не
+    «Фон » → парсер (_award_achievement_rewards / _give_reward) молча ронял её в
+    else-ветку, и высший completionist-приз (закрыть ВСЕ достижения) не давал
+    ничего. DSL допускает ровно: '+N OAC', 'Титул X', 'Фон X', 'Рамка X'
+    (через запятую). Любая иная формулировка = тихо потерянная награда → тут
+    падаем громко.
+    """
+    os.environ.setdefault("TOKEN", "1")
+    os.environ.setdefault("DATABASE_URL_AIVEN", "postgresql://x:y@127.0.0.1:5432/z")
+    os.environ.setdefault("REDIS_URL", "")
+    os.environ.setdefault("ADMIN_ID", "0")
+    os.environ.setdefault("RENDER_URL", "")
+    sys.path.insert(0, ROOT)
+    import re
+    from game_content import ACHIEVEMENTS
+
+    def part_ok(part):
+        if part.startswith("+") and "OAC" in part:
+            return re.search(r"\+(\d+)", part.replace(" ", "")) is not None
+        return part.startswith(("Титул ", "Фон ", "Рамка "))
+
+    bad = []
+    for a in ACHIEVEMENTS:
+        reward = a.get("reward", "")
+        if not reward:
+            continue
+        for part in (p.strip() for p in reward.split(",") if p.strip()):
+            if not part_ok(part):
+                bad.append(f"[{a['id']}] непарсибельная часть награды: {part!r}")
+    assert not bad, ("Награды достижений, которые парсер молча теряет:\n  "
+                     + "\n  ".join(bad))
+
+
 def main():
     passed = []
     check_duplicate_dict_keys()
     passed.append("нет дублей ключей в словарях (страж бага «мёртвая Удача»)")
     check_conn_used_after_async_with()
     passed.append("нет 'conn' вне своего async with (страж бага progress_hub)")
+    check_achievement_rewards_parseable()
+    passed.append("все награды достижений парсятся DSL (страж бага «Уникальный фон»)")
 
     for name in passed:
         print(f"  OK  {name}")
