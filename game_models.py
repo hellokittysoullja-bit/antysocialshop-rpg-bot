@@ -37,6 +37,7 @@ class Player(BaseModel):
     profile_skins: dict = Field(default_factory=dict)
     login_streak: int = 0
     last_login_date: Optional[date] = None
+    streak_freezes: int = 1  # «заморозки» серии: спасают стрик при пропуске ровно 1 дня
     oath: str = ""
     keys: int = 0
     check_count: int = 0
