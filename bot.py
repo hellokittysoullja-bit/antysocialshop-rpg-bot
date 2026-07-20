@@ -6740,6 +6740,47 @@ async def menu_handler(update, context, ctx):
     await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
 
 
+# Единицы вех для честной формулировки «ещё N <чего>» (goal-gradient конкретнее
+# абстрактного числа). Ключи — поля Player из ACHIEVEMENT_CONDITIONS.
+_MILESTONE_UNITS = {
+    "balance": "OAC", "farm_count": "фарм.", "craft_count": "крафт.",
+    "smoke_count": "затяжек", "ritual_count": "ритуал.", "repent_count": "исповед.",
+    "referral_count": "друзей", "login_streak": "дн. подряд", "lab_chests": "сундук.",
+    "lab_deaths": "смертей", "check_count": "проверок", "alchemy_count": "алхимии",
+    "passive_level": "ур. плантации",
+}
+
+
+def _nearest_milestone(player, awarded_ids):
+    """Ближайшая НЕвзятая веха-достижение по проценту прогресса (goal-gradient).
+
+    Плотно заполняет разреженный мид-гейм: между редкими рангами (5k→20k→50k)
+    всегда светит близкая конкретная цель из УЖЕ существующих ACHIEVEMENTS —
+    чистая визуализация, без новой экономики и контента. Data-driven: новые
+    достижения обогащают трекер сами. Берём максимум по %, поэтому всплывает
+    самое близкое (обычно активити-веха → разнообразие сверх балансового грайнда).
+    Возвращает (ach, current, target, pct) или None, если незакрытых счётных вех нет.
+    """
+    best = None
+    for ach in ACHIEVEMENTS:
+        ach_id = ach["id"]
+        if ach_id == "lunar_lord" or ach_id in awarded_ids:
+            continue
+        cond = ACHIEVEMENT_CONDITIONS.get(ach_id)
+        if not cond:
+            continue
+        field, target = cond
+        if target <= 0:
+            continue
+        current = getattr(player, field, 0) or 0
+        if current >= target:
+            continue  # вот-вот выдастся сама — это не «цель впереди»
+        pct = current / target * 100
+        if best is None or pct > best[3]:
+            best = (ach, current, target, pct)
+    return best
+
+
 # ── Прогресс-хаб (LVL 1) ──
 @cb
 async def progress_hub_handler(update, context, ctx):
@@ -6914,11 +6955,24 @@ async def progress_hub_handler(update, context, ctx):
 
         stats_text = "\n".join(stats_lines)
 
-        # ===== 5. ДОСТИЖЕНИЯ =====
+        # ===== 5. ДОСТИЖЕНИЯ + БЛИЖАЙШАЯ ВЕХА (плотный мид-гейм) =====
         async with ctx.db_pool.acquire() as conn:
-            awarded = await conn.fetchval("SELECT COUNT(*) FROM achievements_awarded WHERE user_id=$1", uid)
+            awarded_rows = await conn.fetch("SELECT ach_id FROM achievements_awarded WHERE user_id=$1", uid)
+        awarded_ids = {r["ach_id"] for r in awarded_rows}
         total_ach = len(ACHIEVEMENTS)
-        ach_line = f"🏆 Достижений: {awarded or 0} / {total_ach}"
+        ach_line = f"🏆 Достижений: {len(awarded_ids)} / {total_ach}"
+        # Между редкими рангами всегда должна светить близкая конкретная цель —
+        # иначе мид-гейм = плоский грайнд к далёкому числу. Мёртвый счётчик выше
+        # оживляем в живой goal-gradient к ближайшей невзятой вехе.
+        _ms = _nearest_milestone(player, awarded_ids)
+        if _ms:
+            _a, _cur, _tgt, _pct = _ms
+            _p = min(100, max(0, int(_pct)))
+            _mbar = "▓" * (_p // 10) + "░" * (10 - _p // 10)
+            _unit = _MILESTONE_UNITS.get(ACHIEVEMENT_CONDITIONS[_a["id"]][0], "")
+            _left = _tgt - _cur
+            ach_line += (f"\n🎯 <b>Ближайшая веха:</b> {_a['emoji']} {_a['name']}\n"
+                         f"{_mbar} {_p}% · ещё {_left} {_unit}".rstrip())
 
         # ===== СБОРКА =====
         text = (
