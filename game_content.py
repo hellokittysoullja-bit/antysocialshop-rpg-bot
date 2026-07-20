@@ -239,7 +239,12 @@ QUEST_TEMPLATES = {
                 "next_quest": "chapter3_warrior",
                 "reward_title": "Воитель Теней",
                 "reward_oac": 250,
-                "reward_items": {"claw_of_beast": 1},
+                # Раньше здесь было reward_items: {"claw_of_beast": 1} — поля
+                # claw_of_beast НЕТ в модели Player (hasattr всегда False), награда
+                # за самый крупный сюжетный выбор в игре молча НЕ начислялась.
+                # reward_bg — реально работающий канал (profile_skins →
+                # choose_bg_handler, тот же механизм, что у достижений).
+                "reward_bg": "🐺 Клык Зверя",
                 "result_text": "⚔️ Ты сжал клинок. Сила предков наполнила тебя.\n🛡️ Ты стал ВОИТЕЛЕМ ТЕНЕЙ."
             },
             {
@@ -248,7 +253,7 @@ QUEST_TEMPLATES = {
                 "next_quest": "chapter3_benefactor",
                 "reward_title": "Благодетель Рощи",
                 "reward_oac": 250,
-                "reward_items": {"seed_of_life": 1},
+                "reward_bg": "🌱 Семя Жизни",
                 "result_text": "🕊️ Ты отпустил духа. Свет коснулся твоей души.\n🌿 Ты стал БЛАГОДЕТЕЛЕМ РОЩИ."
             }
         ]
@@ -266,7 +271,8 @@ QUEST_TEMPLATES = {
         ],
         "reward_oac": 250,
         "reward_title": "Вожак стаи",
-        "reward_items": {"war_essence": 1},
+        # Раньше war_essence (несуществующее поле) — молча пропадало.
+        "reward_bg": "⚔️ Знамя Стаи",
         "next_quest": None
     },
     "chapter3_benefactor": {
@@ -287,7 +293,8 @@ QUEST_TEMPLATES = {
         ],
         "reward_oac": 250,
         "reward_title": "Хранитель сада",
-        "reward_items": {"life_essence": 1},
+        # Раньше life_essence (несуществующее поле) — молча пропадало.
+        "reward_bg": "🌿 Сад Исцеления",
         "next_quest": None
     }
 }

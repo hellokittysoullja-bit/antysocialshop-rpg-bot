@@ -7012,9 +7012,22 @@ async def handle_choice(update, context, ctx):
             if reward_title not in titles:
                 titles.append(reward_title)
                 p.titles = " ".join(titles).strip()
-        for item_key, qty in choice.get("reward_items", {}).items():
-            if hasattr(p, item_key):
-                setattr(p, item_key, getattr(p, item_key, 0) + qty)
+        # Было: setattr(p, item_key, ...) на поля (claw_of_beast и т.п.), которых
+        # НЕТ в модели Player → hasattr всегда False → награда за архетип-выбор
+        # молча не начислялась НИКОГДА. reward_bg — реальный канал (тот же, что
+        # у достижений: profile_skins → уже работающий choose_bg_handler).
+        # Инлайним (не зовём _award_achievement_rewards — та делает свой
+        # ctx.repo.save() ВНЕ этой транзакции, гонка с save() atomic_update).
+        reward_bg = choice.get("reward_bg")
+        if reward_bg:
+            skins = p.profile_skins or {}
+            if not isinstance(skins, dict):
+                skins = {}
+            unlocked = skins.get("unlocked_backgrounds", [])
+            if reward_bg not in unlocked:
+                unlocked.append(reward_bg)
+            skins["unlocked_backgrounds"] = unlocked
+            p.profile_skins = skins
         reset_date = (p.daily_progress or {}).get("reset_date")
         p.daily_progress = {
             "reset_date": reset_date,
@@ -7024,9 +7037,13 @@ async def handle_choice(update, context, ctx):
         return True
 
     await ctx.repo.atomic_update(uid, _apply)
+    _result_text = choice.get("result_text", "✨ Выбор сделан.")
+    _reward_bg = choice.get("reward_bg")
+    if _reward_bg:
+        _result_text += f"\n\n🖼️ <b>Новый фон профиля: {_reward_bg}</b>"
     await context.bot.send_message(
         chat_id=query.message.chat.id,
-        text=choice.get("result_text", "✨ Выбор сделан."),
+        text=_result_text,
         parse_mode='HTML',
     )
 
@@ -7231,9 +7248,19 @@ async def claim_reward_handler(update, context, ctx):
                 titles.append(reward_title)
                 p.titles = " ".join(titles).strip()
 
-        for item_key, qty in template.get("reward_items", {}).items():
-            if hasattr(p, item_key):
-                setattr(p, item_key, getattr(p, item_key, 0) + qty)
+        # Было: setattr на несуществующие поля (war_essence и т.п.) — молча
+        # ничего не начисляло. reward_bg — тот же реальный канал, что в
+        # handle_choice._apply (profile_skins → choose_bg_handler).
+        reward_bg = template.get("reward_bg")
+        if reward_bg:
+            skins = p.profile_skins or {}
+            if not isinstance(skins, dict):
+                skins = {}
+            unlocked = skins.get("unlocked_backgrounds", [])
+            if reward_bg not in unlocked:
+                unlocked.append(reward_bg)
+            skins["unlocked_backgrounds"] = unlocked
+            p.profile_skins = skins
 
         next_quest = template.get("next_quest")
         reset_date = p.daily_progress.get("reset_date")
@@ -7251,6 +7278,12 @@ async def claim_reward_handler(update, context, ctx):
     if result is not None:
         reward_oac = template.get("reward_oac", 150)
         reward_text = f"+{reward_oac} OAC 🍬" if reward_oac > 0 else ""
+        # Объявляем разблокированный фон явно — иначе награда снова невидима
+        # игроку (просто по другой причине: тихо добавлена в список вместо
+        # тихо потеряна). Забрать его можно в 🎨 Скины → Выбрать фон.
+        reward_bg = template.get("reward_bg")
+        if reward_bg:
+            reward_text += f"\n🖼️ <b>Новый фон профиля: {reward_bg}</b>"
         await context.bot.send_message(
             chat_id=query.message.chat.id,
             text=(
