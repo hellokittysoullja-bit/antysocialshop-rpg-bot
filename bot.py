@@ -5125,7 +5125,12 @@ async def _mines_show_field(update, context, state, redis_key, uid, ctx):
         lines.append("│ " + " │ ".join(row_cells) + " │")
     field_str = "┌───┬───┬───┬───┬───┐\n" + "\n├───┼───┼───┼───┼───┤\n".join(lines) + "\n└───┴───┴───┴───┴───┘"
 
-    win = int(bet * multiplier) if status == "playing" else 0
+    # Было: `int(bet * multiplier) if status == "playing" else 0` — то есть на
+    # экранах «ПОБЕДА» и «Ты забрал выигрыш» печаталось «Выигрыш: 0 OAC», хотя
+    # баланс начислялся верно. Пик механики обнулялся на витрине, а экран
+    # проигрыша при этом честно показывал «ты мог забрать N» — проигрыш звучал
+    # весомее победы. Ноль уместен только там, где ставка действительно сгорела.
+    win = 0 if status == "lost" else int(bet * multiplier)
 
     text = (
         f"💣 **МИНЫ**\n\n"
