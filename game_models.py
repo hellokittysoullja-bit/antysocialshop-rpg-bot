@@ -6,13 +6,18 @@
 from datetime import datetime, date
 from typing import Optional, List, Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 
 class Player(BaseModel):
     user_id: int
     username: str = ""
     balance: int = 0
+    # Кошелёк и статус — РАЗНЫЕ величины. balance тратится; total_earned только
+    # растёт (сумма всего заработанного за жизнь) и служит осью ранга, топа и
+    # гейтов. Раньше обе роли играл balance: любая трата отбирала ранг, скидку,
+    # доступ к алхимии и место в топе — игра наказывала за то, что в неё играют.
+    total_earned: int = 0
     blunts: int = 0
     guild: Optional[str] = None
     last_farm: Optional[datetime] = None
@@ -56,3 +61,9 @@ class Player(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     pet_hunger: int = 100
     daily_progress: dict = Field(default_factory=dict)
+
+    # «Инвентарь не загружался» ≠ «инвентарь пуст». get_by_id(with_inventory=
+    # False) отдаёт inventory=[] ради экономии, а save() писал этот пустой
+    # список в БД — и коллекция именных блантов (включая стартовый, обещанный
+    # в приветствии) исчезала. Флаг говорит save() не трогать колонку.
+    _inventory_loaded: bool = PrivateAttr(default=True)

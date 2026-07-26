@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 # Используется во всех операциях чтения/записи (get_by_id, save, atomic_update),
 # чтобы схема была описана ровно в одном месте.
 PLAYER_COLUMNS = (
-    "user_id", "username", "balance", "blunts", "guild", "last_farm",
+    "user_id", "username", "balance", "total_earned", "blunts", "guild", "last_farm",
     "last_ritual", "last_repent", "last_daily", "titles", "last_farm_date", "passive_level",
     "passive_collected", "karma", "inhaled", "smoke_count", "farm_count",
     "craft_count", "ritual_count", "referral_count", "last_mines",
@@ -95,7 +95,14 @@ class PlayerRepository:
             p["daily_progress"] = _json_safe_load(p.get("daily_progress"), {})
             player = Player(**p)
             player.exists = True
-            await self._cache_put(user_id, player)
+            # Помечаем частичную загрузку, чтобы save() не записал пустой
+            # инвентарь поверх реальной коллекции игрока.
+            player._inventory_loaded = bool(with_inventory)
+            # Частично загруженного игрока в кэш НЕ кладём: приватный флаг не
+            # переживает сериализацию, и следующий читатель принял бы пустой
+            # инвентарь за настоящий — баг вернулся бы через кэш.
+            if player._inventory_loaded:
+                await self._cache_put(user_id, player)
             return player
 
         logger.debug("Игрок %d не найден в БД", user_id)
@@ -107,15 +114,25 @@ class PlayerRepository:
         if player.balance < 0:
             logger.warning("Попытка сохранить игрока %d с отрицательным балансом", player.user_id)
             player.balance = 0
+        # Страховочный пол статуса: заработано не может быть меньше того, что
+        # игрок держит в руках. Нужен для (а) бэкфилла старых игроков, (б) путей,
+        # которые сохраняются напрямую через save() минуя atomic_update.
+        if (player.total_earned or 0) < player.balance:
+            player.total_earned = player.balance
         player.exists = True
         if conn and conn.is_closed():
             conn = None
 
         columns = PLAYER_COLUMNS
         json_cols = {"inventory", "profile_skins", "pending_transfer", "daily_progress"}
+        # Колонки, которые этот объект не вправе перезаписывать: инвентарь, если
+        # он не загружался (иначе пустой список затрёт коллекцию). Для новой
+        # строки INSERT всё равно проставит дефолт — терять нечего.
+        skip_update = set() if player._inventory_loaded else {"inventory"}
         cols_sql = ", ".join(f'"{c}"' for c in columns)
         placeholders = ", ".join(f"${i+1}" for i in range(len(columns)))
-        update_set = ", ".join(f'"{c}" = EXCLUDED."{c}"' for c in columns if c != "user_id")
+        update_set = ", ".join(f'"{c}" = EXCLUDED."{c}"' for c in columns
+                               if c != "user_id" and c not in skip_update)
         values = [getattr(player, col) for col in columns]
         for idx, col in enumerate(columns):
             if col in json_cols:
@@ -174,7 +191,16 @@ class PlayerRepository:
                 p["daily_progress"] = _json_safe_load(p.get("daily_progress"), {})
                 player = Player(**p)
 
+                # Единая точка учёта заработка. Все 40+ начислений (фарм, тяга,
+                # медали, ритуал, исповедь, плантация, квесты, колесо, лабиринт…)
+                # идут через atomic_update, поэтому дельту достаточно поймать
+                # здесь — не размазывая += по всему bot.py и не рискуя забыть
+                # источник. Растёт только вверх: траты статус не отбирают.
+                _bal_before = player.balance or 0
                 result = await update_func(player, conn)
+                _gain = (player.balance or 0) - _bal_before
+                if _gain > 0:
+                    player.total_earned = (player.total_earned or 0) + _gain
                 await self.save(player, conn=conn)
                 logger.info("Атомарное обновление для игрока %d успешно завершено", user_id)
                 return result

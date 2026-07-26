@@ -35,7 +35,9 @@ from bot import (
     _days_left_in_week, _war_rally_line,
     create_tables, _run_migrations, PlayerRepository, Player,
     PetService, GuildWarService, WarConfig, WarSettings, PET_CONFIG,
+    GAME_CONFIG,
 )
+from game_content import ACHIEVEMENT_CONDITIONS
 from datetime import datetime, timedelta
 
 TEST_UID = 999002
@@ -57,7 +59,9 @@ def test_pure(passed):
         elif outcome == "win":
             assert 15 <= val <= 40, f"выигрыш вернул {val}"
         elif outcome == "loss":
-            assert val == -5, f"проигрыш вернул {val}"
+            # Баланс тяги смягчён (25% × −3 вместо 52% × −5), а тест остался на
+            # старом числе → сьют был красным и БОЛЬШЕ НЕ СТОРОЖИЛ ядро гачи.
+            assert val == -3, f"проигрыш вернул {val}"
         else:
             assert val == 0, f"пусто вернул {val}"
         # флейвор не падает и рендерит знак корректно
@@ -325,6 +329,30 @@ def test_pure(passed):
     assert "Выбери гильдию" in _war_rally_line(None, 0, 0)   # без гильдии
     passed.append("Война гильдий: дни недели + рэлли-строка")
 
+    # --- Кошелёк ≠ статус: трата не имеет права отбирать ранг/скидку/цель ---
+    # Корневой баг: balance был одновременно кошельком, очками ранга и гейтом.
+    # Купил питомца за 3000 на пороге Ветерана (5000) — и мгновенно перестал
+    # быть Ветераном, потерял алхимию, скидку и место в топе. Игра наказывала
+    # за то, что в неё играют. Сторожим разделение осей.
+    from bot import has_rank, compute_rank_info, _shop_discount_pct, _north_star_line
+    veteran_th = GAME_CONFIG["veteran_threshold"]
+    assert has_rank(veteran_th, "Ветеран")            # дошёл — Ветеран
+    assert has_rank(veteran_th, "Ветеран") == has_rank(veteran_th + 10_000, "Ветеран")
+    # total_earned не убывает → ранг, посчитанный по нему, не может упасть
+    _, name_rich, *_ = compute_rank_info(veteran_th)
+    assert name_rich == "Ветеран", name_rich
+    # Скидка Прилавка — привилегия ранга, а не остатка кошелька
+    assert _shop_discount_pct(veteran_th) == 5
+    assert _shop_discount_pct(GAME_CONFIG["phantom_threshold"]) == 10
+    assert _shop_discount_pct(GAME_CONFIG["necromant_threshold"]) == 15
+    # «Полярная звезда» на пороге ведёт к СЛЕДУЮЩЕЙ цели, а не к уже взятой
+    assert "Призрак" in _north_star_line(veteran_th)
+    # Достижения «накопить N OAC» висят на заработанном, иначе трата делала бы
+    # их недостижимыми навсегда
+    for _ach in ("balance_1000", "balance_20000", "balance_50000", "rank_phantom"):
+        assert ACHIEVEMENT_CONDITIONS[_ach][0] == "total_earned", _ach
+    passed.append("Кошелёк ≠ статус: ранг/скидка/цель/ачивки живут на total_earned")
+
 
 async def test_services(passed):
     pool = await asyncpg.create_pool(os.environ["DATABASE_URL_AIVEN"], min_size=1, max_size=3)
@@ -353,6 +381,31 @@ async def test_services(passed):
     after = await repo.get_by_id(TEST_UID)
     assert after.balance == 5000 - PET_CONFIG["dog"]["price"] and after.pet
     passed.append("PetService.buy: no_money / ok / списание баланса")
+
+    # --- Покупка НЕ разжалует: ровно тот сценарий, что был сломан ---
+    # Питомец открывается на Ветеране (5000) и стоит 3000. Раньше покупка
+    # роняла balance до 2000 → игрок мгновенно переставал быть Ветераном,
+    # терял алхимию/скидку/место в топе, а «Полярная звезда» снова звала к
+    # уже взятому рангу. Теперь трата не трогает total_earned.
+    from bot import has_rank
+    assert after.total_earned == 5000, f"заработок съеден тратой: {after.total_earned}"
+    assert after.balance < GAME_CONFIG["veteran_threshold"]      # кошелёк просел
+    assert has_rank(after.total_earned, "Ветеран")               # ранг устоял
+    # и после ещё одной траты статус по-прежнему не падает
+    async def _spend(p, conn):
+        p.balance = max(0, p.balance - 1500)
+    await repo.atomic_update(TEST_UID, _spend)
+    broke = await repo.get_by_id(TEST_UID)
+    assert broke.total_earned == 5000, broke.total_earned
+    assert has_rank(broke.total_earned, "Ветеран")
+    # а новый заработок статус двигает вверх
+    async def _earn(p, conn):
+        p.balance += 700
+    await repo.atomic_update(TEST_UID, _earn)
+    richer = await repo.get_by_id(TEST_UID)
+    assert richer.total_earned == 5700, richer.total_earned
+    passed.append("Покупка не разжалует: трата не трогает ранг, заработок растит")
+
 
     # --- повторная покупка → already_have ---
     res = await pet_service.buy(TEST_UID, "dog")
@@ -452,6 +505,55 @@ async def test_services(passed):
     assert await _mines_state_get(ctx_r, 778) == st              # round-trip с Redis
     await redis_client.delete("mines_game:778")
     passed.append("Мины: состояние round-trip с Redis и без (in-memory фолбэк)")
+
+    # --- Награда за ПЕРВЫЙ фарм не должна стираться онбордингом ---
+    # Был потерянный апдейт: хендлер держит снимок игрока, загруженный ДО
+    # atomic_update, а затем save(снимок) переписывал ВСЕ колонки — награда за
+    # первый фарм, farm_count, last_farm и daily_progress откатывались.
+    # Игрок видел «+81 OAC» на экране и 800 в базе.
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM players WHERE user_id=$1", TEST_UID)
+    await repo.save(Player(user_id=TEST_UID, username="newbie", balance=800,
+                           onboarding_step=1, exists=True))
+    _stale = await repo.get_by_id(TEST_UID)           # снимок «до транзакции»
+    async def _first_farm(p, conn):
+        p.balance += 81; p.farm_count = 1; p.daily_progress = {"farm": True}
+    await repo.atomic_update(TEST_UID, _first_farm)
+    async def _advance(p, conn):                       # так делает онбординг ТЕПЕРЬ
+        p.onboarding_step = 2
+    await repo.atomic_update(TEST_UID, _advance)
+    fresh = await repo.get_by_id(TEST_UID)
+    assert fresh.balance == 881, f"награда за первый фарм потеряна: {fresh.balance}"
+    assert fresh.farm_count == 1 and fresh.daily_progress == {"farm": True}
+    assert fresh.onboarding_step == 2
+    assert _stale.balance == 800                       # снимок и правда устаревший
+    passed.append("Онбординг не стирает награду за первый фарм (потерянный апдейт)")
+
+    # --- Инвентарь переживает частичную загрузку ---
+    # get_by_id(with_inventory=False) отдаёт inventory=[], а save() писал этот
+    # пустой список в БД → стартовый именной блант, обещанный в приветствии,
+    # уничтожался первым же тапом по кнопке фракции.
+    _inv = [{"type": "named", "name": "Крик Бездны", "rarity": "rare"}]
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM players WHERE user_id=$1", TEST_UID)
+    await repo.save(Player(user_id=TEST_UID, username="newbie", balance=800,
+                           exists=True, inventory=_inv))
+    # Холодный кэш = путь через БД. С тёплым Redis (TTL 10 с) get_by_id отдаёт
+    # полный объект и баг не виден — он бьёт ровно тех, кто читал приветствие
+    # дольше 10 секунд.
+    async def _chill():
+        repo.cache.clear()
+        await redis_client.delete(f"player:{TEST_UID}")
+    await _chill()
+    light = await repo.get_by_id(TEST_UID, with_inventory=False)
+    assert light.inventory == [] and light._inventory_loaded is False
+    light.guild = "BLACK"
+    await repo.save(light)
+    await _chill()
+    restored = await repo.get_by_id(TEST_UID)
+    assert restored.guild == "BLACK", "гильдия не записалась"
+    assert restored.inventory == _inv, f"инвентарь стёрт: {restored.inventory}"
+    passed.append("Частичная загрузка не стирает инвентарь (стартовый блант цел)")
 
 
     async with pool.acquire() as conn:
