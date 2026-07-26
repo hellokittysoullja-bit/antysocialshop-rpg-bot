@@ -129,6 +129,30 @@ def check_achievement_rewards_parseable():
                      + "\n  ".join(bad))
 
 
+
+def check_war_actions_exist():
+    """Каждое WarAction.X, упомянутое в bot.py, обязано существовать и иметь цену.
+
+    Страж бага «тяга не приносит очков»: do_smoke вызывал WarAction.SMOKE,
+    которого в enum не было. AttributeError ловился общим `except Exception`
+    и уходил в лог — механика молча не работала месяцами, а второе по частоте
+    действие игры не давало гильдии ничего.
+    """
+    import re
+    from services import WarAction, WarConfig
+    src = open(os.path.join(ROOT, "bot.py"), encoding="utf-8").read()
+    used = set(re.findall(r"WarAction\.([A-Z_]+)", src))
+    # Членство в enum проверяем ДО WarConfig(): если действие пропало из enum,
+    # но осталось в таблице очков, конструктор упадёт первым и спрячет причину.
+    missing = sorted(n for n in used if not hasattr(WarAction, n))
+    assert not missing, ("bot.py ссылается на несуществующие WarAction: "
+                         + ", ".join(missing))
+    points = WarConfig().points
+    priceless = sorted(n for n in used if WarAction[n] not in points)
+    assert not priceless, ("У этих WarAction нет цены в WarConfig (add_score "
+                           "бросит UnknownWarActionError): " + ", ".join(priceless))
+
+
 def main():
     passed = []
     check_duplicate_dict_keys()
@@ -137,6 +161,8 @@ def main():
     passed.append("нет 'conn' вне своего async with (страж бага progress_hub)")
     check_achievement_rewards_parseable()
     passed.append("все награды достижений парсятся DSL (страж бага «Уникальный фон»)")
+    check_war_actions_exist()
+    passed.append("все WarAction из bot.py существуют и имеют цену (страж «тяга без очков»)")
 
     for name in passed:
         print(f"  OK  {name}")

@@ -32,6 +32,10 @@ class WarAction(enum.Enum):
     DUST_USE = "dust_use"
     MINES_WIN = "mines_win"
     MINES_LOSE = "mines_lose"
+    # SMOKE не существовало, хотя do_smoke его вызывает: каждая тяга роняла
+    # AttributeError внутри try, он молча уходил в лог, и «Дунуть» — второе по
+    # частоте действие в игре — не приносило гильдии ни одного очка.
+    SMOKE = "smoke"
     ALCHEMY = "alchemy"
     LAB_WIN = "lab_win"
     LAB_DEATH = "lab_death"
@@ -50,6 +54,8 @@ class WarConfig(BaseModel):
         WarAction.DUST_USE: 50,
         WarAction.MINES_WIN: 200,
         WarAction.MINES_LOSE: -300,
+        # На уровне крафта: скрутил и выкурил — один виток общей петли.
+        WarAction.SMOKE: 10,
         WarAction.ALCHEMY: 30,
         WarAction.LAB_WIN: 80,
         WarAction.LAB_DEATH: 0,
