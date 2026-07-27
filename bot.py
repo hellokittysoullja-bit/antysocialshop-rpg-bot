@@ -8,7 +8,7 @@ def log_uncaught(exc_type, exc_value, exc_tb):
     time.sleep(2)   # даём время Render прочитать
     sys.__excepthook__(exc_type, exc_value, exc_tb)
 sys.excepthook = log_uncaught
-import asyncio, json, logging, os, sys, time, random, re, hashlib, html, enum, copy, math
+import asyncio, json, logging, os, sys, time, random, re, hashlib, html, enum, copy, math, io
 from datetime import datetime, timedelta, date, timezone
 from typing import Optional, List, Any, Dict, Tuple, NamedTuple, Callable
 from dataclasses import dataclass, field  
@@ -59,6 +59,14 @@ from services import (
     GuildWarService, AlchemyResult, PetService,
 )
 from enum import Enum, auto  # для SmokeStatus/CraftStatus ниже
+
+# Процедурный рендер коллекционной карточки бланта. Мягкая деградация: если
+# Pillow не установлен или модуль сломан — карточки просто не рисуются, а весь
+# путь блантов остаётся текстовым (украшение, не критичный путь).
+try:
+    from blunt_art import render_blunt_card
+except Exception:  # pragma: no cover
+    render_blunt_card = None
 
 # ============================================================
 # ДЕКОРАТОРЫ
@@ -870,13 +878,25 @@ def build_smoke_effect(outcome, earned):
         f"{earned_str}"
     )
 
-def calculate_smoke_reward(p, happy_hour):
+# Пити-таймер гачи «Дунуть»: после SMOKE_PITY_THRESHOLD сухих тяг подряд
+# (нейтрал/минус) следующая гарантированно «выигрыш». Убивает фрустрацию серии
+# пустых тяг (80% исходов пусты) — честно, best-practice гача, не dark pattern
+# (реальный гарант, а не фейк-near-miss). Экономически мягко: гача остаётся нетто-
+# стоком, гарант лишь поднимает пол. Счётчик живёт в daily_progress (сброс/день).
+SMOKE_PITY_THRESHOLD = 6
+
+
+def calculate_smoke_reward(p, happy_hour, dry_count=0):
     """Возвращает (earned, outcome). Одна руч­ка — и число, и флейвор.
 
     Баланс смягчён: раньше 52% тяг отнимали −5 OAC («постоянное наказание»
     ослабляет дофаминовую петлю — выученная беспомощность). Теперь потерь
     вдвое меньше и они мягче (25% × −3), нейтралов больше (55%), а плюс чуть
-    вырос (2% джекпот + 18% выигрыш = 20%). Пик-момент (джекпот) сохранён."""
+    вырос (2% джекпот + 18% выигрыш = 20%). Пик-момент (джекпот) сохранён.
+
+    dry_count — число сухих тяг подряд ДО этой. Если с текущей их стало бы
+    SMOKE_PITY_THRESHOLD, форсим «выигрыш» (пити-гарант): серия пустых тяг не
+    может тянуться бесконечно."""
     r = random.random()
     if r < 0.02:
         earned, outcome = random.randint(80, 160), "jackpot"
@@ -886,6 +906,9 @@ def calculate_smoke_reward(p, happy_hour):
         earned, outcome = -3, "loss"
     else:
         earned, outcome = 0, "neutral"
+    # Пити-гарант: сухая тяга, добивающая серию до порога, превращается в выигрыш.
+    if outcome in ("loss", "neutral") and dry_count + 1 >= SMOKE_PITY_THRESHOLD:
+        earned, outcome = random.randint(15, 40), "win"
     if happy_hour and earned > 0:
         earned *= HAPPY_HOUR_MULTIPLIER
     return earned, outcome
@@ -1502,6 +1525,60 @@ async def safe_send_blunt_image(context, chat_id, rarity, caption, reply_markup)
             await safe_send_message(context, chat_id, "⚠️ Произошла ошибка при отправке изображения.", parse_mode=None)
         return False
 
+async def _persist_blunt_image(ctx, uid, blunt_id, file_id):
+    """Кэшируем сгенерированный Telegram file_id прямо на предмете инвентаря →
+    карточка рисуется ОДИН раз, дальше переиспользуется (без пере-рендера)."""
+    async def _set(p, conn):
+        for it in (p.inventory or []):
+            if it.get("id") == blunt_id:
+                it["image_file_id"] = file_id
+                return True
+        return False
+    try:
+        await ctx.repo.atomic_update(uid, _set)
+    except Exception:
+        logger.warning("Не удалось сохранить image_file_id для бланта %s", blunt_id)
+
+
+async def _send_blunt_card(context, chat_id, item, owner_name, caption, reply_markup,
+                           ctx=None, uid=None):
+    """Шлёт коллекционную карточку бланта фото-сообщением. True при успехе.
+
+    Порядок: (1) готовый кэш file_id → мгновенная отправка; (2) иначе рендерим
+    уникальную карточку (в executor, чтобы не блокировать loop), шлём, ловим
+    file_id и кэшируем на предмете. Любая осечка → False, вызывающий откатится
+    на текст (карточка — украшение, не критичный путь)."""
+    fid = item.get("image_file_id")
+    if fid:
+        try:
+            await _send_photo_with_retry(context, chat_id, fid, caption=caption, reply_markup=reply_markup)
+            return True
+        except Exception:
+            pass  # протух file_id — перегенерим ниже
+
+    if render_blunt_card is None:
+        return False
+    try:
+        png = await asyncio.get_event_loop().run_in_executor(
+            None, render_blunt_card, item, owner_name or "")
+    except Exception:
+        logger.exception("Рендер карточки бланта не удался")
+        return False
+    try:
+        msg = await _send_photo_with_retry(
+            context, chat_id, io.BytesIO(png), caption=caption, reply_markup=reply_markup)
+        new_fid = None
+        if msg and getattr(msg, "photo", None):
+            new_fid = msg.photo[-1].file_id
+        if new_fid and ctx and uid and item.get("id"):
+            item["image_file_id"] = new_fid
+            await _persist_blunt_image(ctx, uid, item.get("id"), new_fid)
+        return True
+    except Exception:
+        logger.exception("Отправка карточки бланта не удалась")
+        return False
+
+
 async def send_whisper_dm(update, context, text):
     if update.callback_query:
         chat_id = update.callback_query.message.chat.id
@@ -1700,7 +1777,7 @@ async def world_hub(update, context, ctx):
     # Плантация — idle-крючок «зайди собрать». Кнопка живая: показывает
     # созревший урожай (goal-gradient тянет вернуться) или зовёт посадить.
     plant_lvl = player.passive_level or 0
-    _pending, _h, _c = _plant_pending(plant_lvl, player.passive_collected, datetime.now())
+    _pending, _h, _c = _plant_pending_player(player, datetime.now())
     if plant_lvl <= 0:
         plant_label = "🪴 Плантация · посадить 🌱"
     elif _pending > 0:
@@ -2281,10 +2358,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Конфигурация (все правила в одном месте)
 @dataclass(frozen=True)
 class StreakConfig:
+    # Эскалирующая кривая с недельными пиками (peak-end + loss-aversion «серия
+    # растёт — не рви»). Раньше D1–D7 давали 10–50 OAC — НИЖЕ одного фарма
+    # (45–100): главный рычаг D1-ретеншна был эмоционально мёртв в самом важном
+    # окне формирования привычки. Кривая монотонна (каждый день ≥ вчера → возврат
+    # никогда не ощущается как нёрф), с пиками-скачками на D7 и D14. Инфляция
+    # ничтожна: даже D14 ниже дневного дохода активного игрока.
     base_rewards: Dict[int, int] = field(default_factory=lambda: {
-        1: 10, 2: 15, 3: 20, 4: 25, 5: 30, 6: 35, 7: 50,
-        8: 55, 9: 60, 10: 65, 11: 70, 12: 75, 13: 80, 14: 100
+        1: 50, 2: 80, 3: 120, 4: 160, 5: 200, 6: 250, 7: 500,
+        8: 530, 9: 570, 10: 620, 11: 690, 12: 780, 13: 880, 14: 1000
     })
+    # Плато после D14: сохранившим серию >2 недель не даём провалиться к жалким
+    # 100 (это карало бы самых лояльных — cliff после пика). Держим достойный
+    # устойчивый уровень ниже пикового приза D14.
+    plateau_reward: int = 400
     max_streak_display: int = 14
     hot_streak_threshold: int = 3
     hot_streak_multiplier: float = 1.1
@@ -2330,7 +2417,7 @@ class RewardResult(NamedTuple):
 # Расчёт награды (чистая функция)
 
 def _calculate_reward(streak: int, config: StreakConfig) -> RewardResult:
-    base = config.base_rewards.get(streak, 100)
+    base = config.base_rewards.get(streak, config.plateau_reward)
 
     title = config.title_rewards.get(streak)
 
@@ -2366,7 +2453,7 @@ def _build_next_day_preview(streak: int, config: StreakConfig) -> str:
     Чистая функция (детерминированная часть награды, без случайных бонусов).
     """
     next_streak = streak + 1
-    base = config.base_rewards.get(next_streak, 100)
+    base = config.base_rewards.get(next_streak, config.plateau_reward)
     if next_streak >= config.hot_streak_threshold:
         base = int(base * config.hot_streak_multiplier)
     next_title = config.title_rewards.get(next_streak)
@@ -3110,9 +3197,16 @@ async def handle_named_name(update, context):
         except Exception:
             pass
 
-        sent_img = await safe_send_blunt_image(
-            context, update.effective_chat.id, item["rarity"], caption=caption, reply_markup=kb
-        )
+        # Уникальная коллекционная карточка (рисуется из хэша бланта → у каждого
+        # своя). Кэшируется как file_id на предмете. Откат: старая per-rarity
+        # картинка, затем текст — путь блантов не может упасть из-за рендера.
+        sent_img = await _send_blunt_card(
+            context, update.effective_chat.id, item, player.username or "",
+            caption=caption, reply_markup=kb, ctx=ctx, uid=uid)
+        if not sent_img:
+            sent_img = await safe_send_blunt_image(
+                context, update.effective_chat.id, item["rarity"], caption=caption, reply_markup=kb
+            )
         if not sent_img:
             await update.message.reply_text(caption, reply_markup=kb, parse_mode='HTML')
 
@@ -3461,7 +3555,10 @@ async def do_smoke(update, context, ctx, player):
             return SmokeStatus.NO_BLUNTS, None
 
         save = (p.guild == "WHITE" and random.randint(1, 100) <= 20)
-        earned, outcome = calculate_smoke_reward(p, ctx.cache.get("happy_hour", False))
+        p.daily_progress = p.daily_progress or {}
+        _dry = p.daily_progress.get("smoke_dry", 0)
+        earned, outcome = calculate_smoke_reward(
+            p, ctx.cache.get("happy_hour", False), dry_count=_dry)
 
         old_count = p.smoke_count or 0
         new_count = old_count + 1
@@ -3471,8 +3568,12 @@ async def do_smoke(update, context, ctx, player):
             p.blunts -= 1
         p.smoke_count = new_count
         p.balance = (p.balance or 0) + earned + medal_bonus
-        p.daily_progress = p.daily_progress or {}
         p.daily_progress["smoke"] = True
+        # Пити-счётчик: растёт на сухих тягах, обнуляется на выигрыше/джекпоте.
+        if outcome in ("loss", "neutral"):
+            p.daily_progress["smoke_dry"] = _dry + 1
+        else:
+            p.daily_progress["smoke_dry"] = 0
         p.inhaled = 1
 
         if ctx.war_service:
@@ -3481,7 +3582,7 @@ async def do_smoke(update, context, ctx, player):
             except Exception:
                 logger.exception("War service error, proceeding without points")
 
-        return SmokeStatus.OK, (earned, outcome, save, medal_text, new_count, p.blunts, p.balance)
+        return SmokeStatus.OK, (earned, outcome, save, medal_text, new_count, p.blunts, p.balance, p.daily_progress["smoke_dry"])
 
     result = await ctx.repo.atomic_update(uid, _smoke)
     if result is None:
@@ -3500,14 +3601,23 @@ async def do_smoke(update, context, ctx, player):
         )
         return
 
-    earned, outcome, save, medal_text, new_count, bl_left, new_balance = data
+    earned, outcome, save, medal_text, new_count, bl_left, new_balance, dry = data
     effect = build_smoke_effect(outcome, earned)
+
+    # Пити-прогресс: сухая тяга перестаёт быть «ничем» — это шаг к гарантированному
+    # улову (anticipation + goal-gradient).
+    pity_line = ""
+    left = SMOKE_PITY_THRESHOLD - dry
+    if outcome in ("loss", "neutral") and left > 0:
+        filled = "🔥" * dry + "▫️" * left
+        pity_line = f"\n{filled} <i>ещё {left} до гарантированного улова</i>"
 
     text = (
         f"{effect}\n\n"
         f"{medal_text}"
         f"<b>💨 Дым:</b> {new_count}/{get_medal_target(new_count, SMOKE_MEDALS)}\n"
-        f"{get_medal_progress(new_count, SMOKE_MEDALS)}\n\n"
+        f"{get_medal_progress(new_count, SMOKE_MEDALS)}"
+        f"{pity_line}\n\n"
         f"<b>🍃 Блантов в свёртке:</b> <b>{bl_left}</b>"
     )
     if save:
@@ -3665,6 +3775,55 @@ def _plant_pending(level, last_collected, now):
     return (earned, hrs_used, capped)
 
 
+def _pet_cfg(player):
+    """Конфиг текущего питомца игрока или None. Единая точка сопоставления
+    Player.pet (хранит ИМЯ) ↔ PET_CONFIG (ключи по типу)."""
+    pet = player.pet
+    if not pet:
+        return None
+    return next((c for c in PET_CONFIG.values() if c.get("name") == pet), None)
+
+
+def _pet_bonus_pct(player, target: str) -> float:
+    """Эффективный бонус питомца к цели `target`, в процентах (data-driven).
+
+    Тип и величина эффекта берутся из PET_CONFIG (не из кода) → новый питомец
+    или иная цель = правка данных. Бонус масштабируется сытостью, но НЕ ниже пола
+    hunger_floor: заброшенный питомец выглядит голодным (эмоциональный крючок
+    «покорми»), но баф не обрывается в 0 — вернувшийся игрок всегда сохраняет
+    часть (никакого механического наказания за паузу). Возвращает 0.0, если
+    питомца нет или он не бустит эту цель.
+    """
+    cfg = _pet_cfg(player)
+    if not cfg or cfg.get("bonus_target") != target:
+        return 0.0
+    max_pct = cfg.get("bonus_max_pct", 0)
+    if max_pct <= 0:
+        return 0.0
+    floor_frac = cfg.get("hunger_floor", 0) / 100.0
+    hunger = player.pet_hunger if player.pet_hunger is not None else 100
+    frac = max(floor_frac, min(100, max(0, hunger)) / 100.0)
+    return max_pct * frac
+
+
+def _plant_pending_player(player, now):
+    """(earned, hours, capped) плантации ИГРОКА с учётом бонуса питомца.
+
+    Единая точка расчёта дохода: меню, экран плантации, сбор, апгрейд считают
+    одинаково → база и бонус никогда не разъезжаются. Питомец ускоряет
+    производство (бонус к earned), а не объём хранилища (кап-часы — по базовой
+    ставке в _plant_pending). Care-loop замыкается: кормишь → плантация даёт
+    больше → собираешь больше → апаешь быстрее.
+    """
+    earned, hrs, capped = _plant_pending(
+        player.passive_level or 0, _to_datetime(player.passive_collected), now)
+    if earned > 0:
+        bonus = _pet_bonus_pct(player, "plantation")
+        if bonus:
+            earned = int(earned * (1 + bonus / 100.0))
+    return (earned, hrs, capped)
+
+
 async def collect_callback(update, context):
     """Вход в Плантацию (эволюция старого «кустика»/collect)."""
     ctx = context.bot_data.get("ctx")
@@ -3695,7 +3854,7 @@ async def _show_plantation(update, context, ctx, player):
             [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
         ])
     else:
-        earned, _hrs, capped = _plant_pending(level, _to_datetime(player.passive_collected), now)
+        earned, _hrs, capped = _plant_pending_player(player, now)
         rate = _plant_rate(level)
         cap_total = rate * PLANT_CAP_HOURS
         fill = min(100, int(earned / cap_total * 100)) if cap_total else 0
@@ -3708,9 +3867,18 @@ async def _show_plantation(update, context, ctx, player):
         else:
             up_cost = None
             up_line = "⭐️ <b>Максимальный уровень!</b>"
+        # Строка питомца делает связь «забота → доход» видимой (peak-end): базовая
+        # ставка — интринзик уровня, бонус — вклад сытого питомца, отдельной строкой,
+        # чтобы математика апгрейда (по базовой ставке) не путалась.
+        _pet_pct = _pet_bonus_pct(player, "plantation")
+        pet_line = ""
+        if _pet_pct > 0:
+            _hunger = player.pet_hunger if player.pet_hunger is not None else 100
+            pet_line = f"🐾 <b>Питомец:</b> +{_pet_pct:.0f}% к сбору <i>(сытость {_hunger}%)</i>\n"
         text = (
             f"🪴 <b>ПЛАНТАЦИЯ · Уровень {level}</b>\n\n"
             f"⚡ Скорость: <b>{rate} OAC/час</b>\n"
+            f"{pet_line}"
             f"🌾 К сбору: <b>{earned} OAC</b>\n"
             f"{cap_line}\n\n"
             f"{up_line}"
@@ -3751,7 +3919,7 @@ async def plant_harvest_handler(update, context, ctx):
         level = p.passive_level or 0
         if level < 1:
             return ("no_plant",)
-        earned, _hrs, _capped = _plant_pending(level, _to_datetime(p.passive_collected), now)
+        earned, _hrs, _capped = _plant_pending_player(p, now)
         if happy:
             earned *= HAPPY_HOUR_MULTIPLIER
         if earned < 1:
@@ -3786,8 +3954,8 @@ async def plant_upgrade_handler(update, context, ctx):
         cost = _plant_upgrade_cost(level)
         if (p.balance or 0) < cost:
             return ("no_money", cost)
-        # Сначала собираем накопленное по старой ставке (честно), потом апаем
-        pending, _h, _c = _plant_pending(level, _to_datetime(p.passive_collected), now)
+        # Сначала собираем накопленное по старой ставке + бонусу питомца (честно), потом апаем
+        pending, _h, _c = _plant_pending_player(p, now)
         p.balance += pending
         p.balance -= cost
         p.passive_level = level + 1
@@ -5973,6 +6141,21 @@ async def pet_preview(update, context, ctx):
             mood = "😋 <i>Проголодался и поглядывает на миску…</i>"
         else:
             mood = "🥺 <i>Совсем голодный! Покорми — он скучал по тебе.</i>"
+        # Care-loop замыкается только когда забота ВИДНА как выгода: показываем,
+        # что даёт питомец сейчас и что даст сытым. Тогда кормёжка — не галка
+        # дейлика, а «верни/подними мой доход» (взаимность тамагочи + goal-gradient).
+        _pet_pct = _pet_bonus_pct(player, "plantation")
+        _cfg = _pet_cfg(player) or {}
+        _max_pct = _cfg.get("bonus_max_pct", 0)
+        bonus_block = ""
+        if _max_pct > 0:
+            if hunger >= 100:
+                bonus_block = (f"\n🪴 <b>Бонус плантации:</b> +{_pet_pct:.0f}% "
+                               f"<i>— досыта, максимум!</i>")
+            else:
+                bonus_block = (f"\n🪴 <b>Бонус плантации:</b> +{_pet_pct:.0f}% "
+                               f"<i>(сытым: +{_max_pct}%)</i>\n"
+                               f"🍖 <i>Покорми — подними бонус к пассивному доходу.</i>")
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("🍖 Покормить", callback_data="pet_feed")],
             [InlineKeyboardButton("🔙 Назад", callback_data="menu")],
@@ -5981,7 +6164,8 @@ async def pet_preview(update, context, ctx):
             update, context,
             f"🐾 <b>Твой питомец: {player.pet}{name_str}</b>\n\n"
             f"🍖 <b>Сытость:</b> {hbar} {hunger}/100\n"
-            f"{mood}",
+            f"{mood}"
+            f"{bonus_block}",
             reply_markup=kb)
     else:
         kb = InlineKeyboardMarkup([
@@ -6001,7 +6185,14 @@ async def pet_feed_handler(update, context, ctx):
     if not result or result.get("status") == "no_pet":
         await query.answer("Сначала заведи питомца!", show_alert=True)
         return
-    await query.answer("🐾 Питомец сыт и доволен!")
+    # Награда за заботу — в тот же момент, что и забота (замыкаем петлю видимо).
+    player = await ctx.repo.get_by_id(uid)
+    _cfg = _pet_cfg(player) or {}
+    _max_pct = _cfg.get("bonus_max_pct", 0)
+    if _max_pct > 0 and _cfg.get("bonus_target") == "plantation":
+        await query.answer(f"🐾 Сыт! Бонус плантации +{_max_pct}% на максимуме.")
+    else:
+        await query.answer("🐾 Питомец сыт и доволен!")
     await pet_preview(update, context)
 
 
@@ -6599,8 +6790,7 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
     # был виден только внутри «Мир › Плантация»; теперь всплывает на ГЛАВНЫЙ экран
     # ровно когда есть что собрать, и исчезает после сбора — как кнопка Ритуала,
     # без засорения экрана. Переполненное хранилище = loss-aversion (стоит зря).
-    _plant_earned, _ph, _pcapped = _plant_pending(
-        player.passive_level or 0, _to_datetime(player.passive_collected), now)
+    _plant_earned, _ph, _pcapped = _plant_pending_player(player, now)
     if _plant_earned > 0:
         _harvest_label = (f"⚠️ Урожай переполнен · собрать {_plant_earned} 🌾"
                           if _pcapped else f"🌾 Собрать урожай · {_plant_earned} OAC")
@@ -6614,6 +6804,20 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
         # чистый плюс: endowment («уже моё, растёт») + overnight-крючок возврата.
         keyboard.append([InlineKeyboardButton(
             "🌱 Посади Плантацию · растёт, пока тебя нет", callback_data="collect")])
+    elif 1 <= (player.passive_level or 0) < PLANT_MAX_LEVEL:
+        # Компаунд-движок наверх: у владельца плантации без готового урожая (сразу
+        # после сбора) слот висел ПУСТЫМ — единственный в игре растущий движок
+        # дохода был невидим на главном экране. Показываем аспирацию роста:
+        # текущая ставка → следующая за апгрейд + цена. Дофамин «смотрю, как мой
+        # доход растёт» + goal-gradient к следующему тиру. Чистая визуализация:
+        # экономика не тронута, кнопка ведёт в Плантацию, где апгрейд списывает
+        # OAC осознанным вторым тапом (без внезапной траты). Занят ровно тот слот,
+        # что пустовал → ни новой постоянной кнопки, ни дублей, ни лишнего текста.
+        _lvl = player.passive_level or 0
+        keyboard.append([InlineKeyboardButton(
+            f"🪴 Империя {_plant_rate(_lvl)}→{_plant_rate(_lvl + 1)}/ч · "
+            f"{_plant_upgrade_cost(_lvl)} OAC",
+            callback_data="collect")])
 
     # Навигация: 2 кнопки в ряд, чтобы длинные подписи не обрезались
     # (3-в-ряд не помещались: «Прогресс…», «Гильди…»).
@@ -6644,6 +6848,47 @@ async def menu_handler(update, context, ctx):
 
     text, kb = await build_main_menu(player, ctx, context)
     await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
+
+
+# Единицы вех для честной формулировки «ещё N <чего>» (goal-gradient конкретнее
+# абстрактного числа). Ключи — поля Player из ACHIEVEMENT_CONDITIONS.
+_MILESTONE_UNITS = {
+    "balance": "OAC", "farm_count": "фарм.", "craft_count": "крафт.",
+    "smoke_count": "затяжек", "ritual_count": "ритуал.", "repent_count": "исповед.",
+    "referral_count": "друзей", "login_streak": "дн. подряд", "lab_chests": "сундук.",
+    "lab_deaths": "смертей", "check_count": "проверок", "alchemy_count": "алхимии",
+    "passive_level": "ур. плантации",
+}
+
+
+def _nearest_milestone(player, awarded_ids):
+    """Ближайшая НЕвзятая веха-достижение по проценту прогресса (goal-gradient).
+
+    Плотно заполняет разреженный мид-гейм: между редкими рангами (5k→20k→50k)
+    всегда светит близкая конкретная цель из УЖЕ существующих ACHIEVEMENTS —
+    чистая визуализация, без новой экономики и контента. Data-driven: новые
+    достижения обогащают трекер сами. Берём максимум по %, поэтому всплывает
+    самое близкое (обычно активити-веха → разнообразие сверх балансового грайнда).
+    Возвращает (ach, current, target, pct) или None, если незакрытых счётных вех нет.
+    """
+    best = None
+    for ach in ACHIEVEMENTS:
+        ach_id = ach["id"]
+        if ach_id == "lunar_lord" or ach_id in awarded_ids:
+            continue
+        cond = ACHIEVEMENT_CONDITIONS.get(ach_id)
+        if not cond:
+            continue
+        field, target = cond
+        if target <= 0:
+            continue
+        current = getattr(player, field, 0) or 0
+        if current >= target:
+            continue  # вот-вот выдастся сама — это не «цель впереди»
+        pct = current / target * 100
+        if best is None or pct > best[3]:
+            best = (ach, current, target, pct)
+    return best
 
 
 # ── Прогресс-хаб (LVL 1) ──
@@ -6820,11 +7065,24 @@ async def progress_hub_handler(update, context, ctx):
 
         stats_text = "\n".join(stats_lines)
 
-        # ===== 5. ДОСТИЖЕНИЯ =====
+        # ===== 5. ДОСТИЖЕНИЯ + БЛИЖАЙШАЯ ВЕХА (плотный мид-гейм) =====
         async with ctx.db_pool.acquire() as conn:
-            awarded = await conn.fetchval("SELECT COUNT(*) FROM achievements_awarded WHERE user_id=$1", uid)
+            awarded_rows = await conn.fetch("SELECT ach_id FROM achievements_awarded WHERE user_id=$1", uid)
+        awarded_ids = {r["ach_id"] for r in awarded_rows}
         total_ach = len(ACHIEVEMENTS)
-        ach_line = f"🏆 Достижений: {awarded or 0} / {total_ach}"
+        ach_line = f"🏆 Достижений: {len(awarded_ids)} / {total_ach}"
+        # Между редкими рангами всегда должна светить близкая конкретная цель —
+        # иначе мид-гейм = плоский грайнд к далёкому числу. Мёртвый счётчик выше
+        # оживляем в живой goal-gradient к ближайшей невзятой вехе.
+        _ms = _nearest_milestone(player, awarded_ids)
+        if _ms:
+            _a, _cur, _tgt, _pct = _ms
+            _p = min(100, max(0, int(_pct)))
+            _mbar = "▓" * (_p // 10) + "░" * (10 - _p // 10)
+            _unit = _MILESTONE_UNITS.get(ACHIEVEMENT_CONDITIONS[_a["id"]][0], "")
+            _left = _tgt - _cur
+            ach_line += (f"\n🎯 <b>Ближайшая веха:</b> {_a['emoji']} {_a['name']}\n"
+                         f"{_mbar} {_p}% · ещё {_left} {_unit}".rstrip())
 
         # ===== СБОРКА =====
         text = (
@@ -7481,7 +7739,13 @@ async def blunt_details_handler(update, context, ctx, player):
          InlineKeyboardButton("🎁 Подарить", callback_data=f"gift_blunt_{blunt_id}")],
         [InlineKeyboardButton("🏆 К списку", callback_data="my_blunts")]
     ])
-    sent = await safe_send_blunt_image(context, query.message.chat.id, rarity, caption=text, reply_markup=kb)
+    # Уникальная карточка бланта (кэш file_id на предмете; старым блантам
+    # дорисуется при первом просмотре). Откат: per-rarity картинка, затем текст.
+    sent = await _send_blunt_card(context, query.message.chat.id, item,
+                                  player.username or "", caption=text, reply_markup=kb,
+                                  ctx=ctx, uid=uid)
+    if not sent:
+        sent = await safe_send_blunt_image(context, query.message.chat.id, rarity, caption=text, reply_markup=kb)
     if sent:
         try:
             await query.message.delete()
