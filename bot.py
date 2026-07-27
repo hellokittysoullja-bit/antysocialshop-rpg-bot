@@ -527,37 +527,93 @@ redis = None
 
 
 
+async def _register_nft(ctx, conn, blunt_id: str, user_id: int, rarity: str,
+                        rare_number: str, created_at: datetime) -> tuple[Optional[int], str]:
+    """Пишет блант в nft_registry, возвращает (serial, rare_number).
+
+    rare_number собирается из ОДНОЙ буквы редкости + 4 случайные цифры — всего
+    9000 слотов на редкость, и с ростом коллекции коллизии по дню рождения
+    неизбежны. Раньше UNIQUE-ограничение на rare_number существовало только на
+    бумаге (в таблицу никто не писал), поэтому коллизий никто не видел. Теперь,
+    когда реестр реально заполняется, коллизию нужно не поймать исключением,
+    а разрешить: перегенерировать номер и повторить вставку (до 5 попыток —
+    вероятность стольких подряд коллизий пренебрежимо мала).
+    """
+    # nft_registry.created_at — TIMESTAMP без TZ; asyncpg отказывается неявно
+    # конвертировать tz-aware datetime («can't subtract offset-naive and
+    # offset-aware datetimes»). Снимаем tzinfo — created_at уже приведён к UTC
+    # вызывающим кодом, поэтому значения остаются сравнимыми и честными.
+    naive_created_at = created_at.replace(tzinfo=None) if created_at.tzinfo else created_at
+
+    async def _insert(c, rn):
+        return await c.fetchrow(
+            "INSERT INTO nft_registry (blunt_id, created_by, rarity, rare_number, created_at) "
+            "VALUES ($1,$2,$3,$4,$5) ON CONFLICT (blunt_id) DO NOTHING RETURNING serial, rare_number",
+            blunt_id, user_id, rarity, rn, naive_created_at)
+
+    async def _run(c):
+        rn = rare_number
+        for _ in range(5):
+            try:
+                row = await _insert(c, rn)
+                if row:
+                    return row["serial"], row["rare_number"]
+                return None, rn  # blunt_id уже был в реестре (повторный вызов) — не наш случай, но не падаем
+            except asyncpg.exceptions.UniqueViolationError:
+                rn = f"{rarity[0].upper()}-{random.randint(1000, 9999)}"
+        logger.warning("Не удалось подобрать свободный rare_number для %s после 5 попыток", blunt_id)
+        return None, rn
+
+    if conn is not None:
+        return await _run(conn)
+    async with ctx.db_pool.acquire() as c:
+        return await _run(c)
+
+
 async def create_named_blunt(user_id: int, name: str, rarity: str = None, conn=None, ctx: AppContext = None, player: Player = None) -> dict:
     """Создаёт именной блант (использует репозиторий из ctx)."""
     if ctx is None:
         raise ValueError("AppContext is required")
-    
+
     if rarity not in ("common", "rare", "epic", "legendary"):
         r = random.random()
         if r < 0.02: rarity = "legendary"
         elif r < 0.15: rarity = "epic"
         elif r < 0.45: rarity = "rare"
         else: rarity = "common"
-    
+
     clean_name = str(name or "").strip()[:28] or "Безымянный"
     reaction = random.choice(FUNNY_REACTIONS)
     blunt_id = f"blunt_{user_id}_{int(datetime.now(timezone.utc).timestamp())}_{random.randint(1000,9999)}"
     hash_code = "0x" + hashlib.sha256((blunt_id + ":hash").encode()).hexdigest()[:16]
     rare_number = f"{rarity[0].upper()}-{random.randint(1000,9999)}"
-    
+    created_at = datetime.now(timezone.utc)
+
+    # Реестр — единственный источник, через который живёт /check (и, через
+    # check_count, достижение check_10 → «🌀 Лунный лорд»). Раньше сюда никто не
+    # писал: /check всегда отвечал «не найден», а высшая цель игры (закрыть ВСЕ
+    # достижения) была недостижима навсегда. Сбой реестра не должен рушить
+    # крафт — блант создаётся в любом случае, просто без серийника/непроверяемым.
+    serial = None
+    try:
+        serial, rare_number = await _register_nft(
+            ctx, conn, blunt_id, user_id, rarity, rare_number, created_at)
+    except Exception:
+        logger.warning("nft_registry: не удалось зарегистрировать %s", blunt_id)
+
     item = {
         "id": blunt_id, "type": "named", "name": clean_name, "rarity": rarity,
-        "serial": None, "rare_number": rare_number, "hash": hash_code,
-        "reaction": reaction, "created_at": datetime.now(timezone.utc).isoformat(),
-        "owner_history": [{"user_id": str(user_id), "since": datetime.now(timezone.utc).isoformat()}],
+        "serial": serial, "rare_number": rare_number, "hash": hash_code,
+        "reaction": reaction, "created_at": created_at.isoformat(),
+        "owner_history": [{"user_id": str(user_id), "since": created_at.isoformat()}],
     }
-    
+
     # Загружаем игрока только если не передан готовый
     if player is None:
         player = await ctx.repo.get_by_id(user_id)
     if not player or not player.exists:
         player = Player(user_id=user_id)
-    
+
     player.inventory = _json_safe_load(player.inventory, [])
     player.inventory.append(item)
     await ctx.repo.save(player, conn=conn)
@@ -1081,6 +1137,32 @@ async def _run_migrations(conn):
             value TEXT NOT NULL
         );
     """)
+
+    # ── Отложенные подарки: дарение тому, кого ещё нет в БД ──────────────
+    # Раньше дарение по @username работало «русской рулеткой»: колонка
+    # players.username пишется ОДИН раз при регистрации и никогда не
+    # обновляется, поэтому смена Telegram-ника ломала поиск НАВСЕГДА для уже
+    # существующего игрока, а получатель, вообще не запускавший бота, всегда
+    # получал «игрок не найден» — хотя у Telegram-бота физически нет способа
+    # узнать numeric user_id человека, который с ним не взаимодействовал.
+    # Решение: если получатель не находится СЕЙЧАС, блант не «пропадает» и не
+    # отклоняется — он ставится в очередь по нормализованному username (или по
+    # user_id, если даритель ввёл числовой ID) и забирается автоматически при
+    # первом же /start подходящего человека (см. _claim_pending_gifts).
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS pending_gifts (
+            id SERIAL PRIMARY KEY,
+            username_lower TEXT,
+            target_user_id BIGINT,
+            item JSONB NOT NULL,
+            from_user_id BIGINT NOT NULL,
+            created_at TIMESTAMP NOT NULL DEFAULT NOW()
+        );
+    """)
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pending_gifts_username ON pending_gifts(username_lower);")
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pending_gifts_target_id ON pending_gifts(target_user_id);")
     
 # Ну тип жто БД длЯЯЯ daily_progress
     await conn.execute("""
@@ -1175,6 +1257,57 @@ async def _run_migrations(conn):
     await conn.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS prestige BIGINT DEFAULT 0;")
     await conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_players_prestige ON players(prestige DESC);")
+
+    # ── Бэкфилл nft_registry: реестр начал реально заполняться (см.
+    # create_named_blunt/_register_nft), но уже созданные до этой правки
+    # именные бланты в него не попали — /check и достижение check_10 (а через
+    # него «🌀 Лунный лорд») были бы недостижимы для игроков, у которых
+    # коллекция уже собрана. Разбираем инвентарь каждого игрока и регистрируем
+    # то, чего в реестре ещё нет. Идемпотентно (ON CONFLICT DO NOTHING),
+    # безопасно перезапускать на каждом деплое — после первого прогона просто
+    # ничего не делает.
+    try:
+        rows = await conn.fetch(
+            "SELECT user_id, inventory FROM players WHERE inventory IS NOT NULL AND inventory != '[]'")
+        registered = 0
+        for row in rows:
+            inv = _json_safe_load(row["inventory"], [])
+            player_changed = False
+            for it in inv:
+                # Уже зарегистрирован (в т.ч. прошлым прогоном этой же миграции) —
+                # пропускаем без похода в БД, иначе каждый деплой заново
+                # перезаписывал бы JSON инвентаря всем игрокам без единой правки.
+                if it.get("type") != "named" or not it.get("id") or it.get("serial") is not None:
+                    continue
+                created_raw = it.get("created_at")
+                try:
+                    created_dt = datetime.fromisoformat(created_raw).replace(tzinfo=None) if created_raw else datetime.now()
+                except Exception:
+                    created_dt = datetime.now()
+                try:
+                    result = await conn.fetchrow(
+                        "INSERT INTO nft_registry (blunt_id, created_by, rarity, rare_number, created_at) "
+                        "VALUES ($1,$2,$3,$4,$5) ON CONFLICT (blunt_id) DO NOTHING RETURNING serial",
+                        it["id"], row["user_id"], it.get("rarity", "common"),
+                        it.get("rare_number") or f"{it.get('rarity','common')[0].upper()}-{random.randint(1000,9999)}",
+                        created_dt)
+                except asyncpg.exceptions.UniqueViolationError:
+                    # Историческая коллизия rare_number (UNIQUE ввели только сейчас,
+                    # раньше её никто не проверял) — этот старый дубль останется
+                    # непроверяемым через /check, сам предмет в инвентаре не трогаем.
+                    continue
+                if result:
+                    it["serial"] = result["serial"]
+                    player_changed = True
+                    registered += 1
+            if player_changed:
+                await conn.execute(
+                    "UPDATE players SET inventory = $1 WHERE user_id = $2",
+                    json.dumps(inv, separators=(',', ':'), default=str), row["user_id"])
+        if registered:
+            logger.info("nft_registry backfill: зарегистрировано %d существующих блантов", registered)
+    except Exception:
+        logger.exception("nft_registry backfill не удался — /check продолжит работать для новых блантов")
 
 # ===== ОПТИМИЗАЦИЯ ХРАНЕНИЯ (Render Free Tier) =====
     # JSONB поля — сжатие + хранение вне таблицы при размере > 2KB
@@ -2440,6 +2573,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         uid = user.id
         username = user.username or user.first_name or "Странник"
         player = await ctx.repo.get_by_id(uid)
+
         if not player or not player.exists:
             # Реферал применяется только к НОВЫМ игрокам (анти-фарм)
             creator_id = _resolve_referrer(context.args, uid)
@@ -2456,7 +2590,27 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                      inviter_name=inviter_name, shared_blunt=shared_blunt)
             if creator_id:
                 await _reward_referrer(ctx, context, creator_id)
+            # _create_new_player уже создал строку с АКТУАЛЬНЫМ username
+            # (это и есть `username` переменная выше) — отдельный рефреш здесь
+            # не нужен. Разбираем только очередь подарков.
+            await _claim_pending_gifts(ctx, uid, user.username or "", context)
         else:
+            # Синхронизируем колонку username с текущим Telegram-ником — она
+            # писалась ОДИН раз при регистрации и никогда не обновлялась,
+            # из-за чего смена @username делала игрока ненаходимым для дарения
+            # навсегда (см. _refresh_username). Тут же разбираем очередь
+            # подарков, ждавших этот user_id или этот username.
+            if user.username:
+                await _refresh_username(ctx, uid, user.username)
+                # ВАЖНО: обновляем и in-memory объект, не только колонку в БД.
+                # Ниже по этому же запросу build_main_menu → ensure_daily_progress
+                # может сделать свой save(player) поверх ЭТОГО объекта — без
+                # этой строки такой save() затирал бы username назад на старое
+                # значение из уже загруженного (устаревшего) снимка, и рефреш
+                # выше был бы отменён в ту же секунду, в которую произошёл.
+                player.username = user.username
+            await _claim_pending_gifts(ctx, uid, user.username or "", context)
+
             # Возврат после паузы: оживляем МЁРТВЫЙ welcome-back момент. Флаг
             # return_after_pause раньше только читался в build_main_menu, но нигде
             # не выставлялся — фича «🎁 Пока вас не было…» не срабатывала никогда.
@@ -3672,6 +3826,7 @@ async def gift_blunt_start(update, context, ctx, player):
         text=(
             "🎁 <b>ПОДАРИТЬ БЛАНТ</b>\n\n"
             "Введи <b>@username</b> или <b>числовой ID</b> игрока.\n"
+            "<i>Если его пока нет в игре — блант подождёт и придёт сам, когда он зайдёт.</i>\n"
             "Для отмены нажми кнопку ниже."
         ),
         parse_mode='HTML',
@@ -5863,10 +6018,24 @@ async def _mines_open_cell(update, context, state, redis_key, uid, ctx):
     # Проверяем победу (все 22 клетки открыты)
     if state["step"] == 22:
         state["status"] = "won"
-        win = int(state["bet"] * state["multiplier"])
-        # Начисляем выигрыш атомарно
+        bet = state["bet"]
+        win = int(bet * state["multiplier"])
+        # Начисляем выигрыш атомарно. total_earned учитывает НЕТТО-прибыль
+        # (win - bet), а не всю выплату — см. комментарий в _cash ниже (та же
+        # логика, тот же корень бага C10: без вычета ставки статус-ось «заработано
+        # за всё время» накачивалась почти на всю выплату при почти нулевом
+        # реальном доходе, и ранг Некромант обходился в разы дешевле честного пути).
         async def _win(p, conn):
             p.balance += win
+            # atomic_update само добавит +win к total_earned после возврата отсюда
+            # (см. repository.py: _gain = баланс-после − баланс-до). Отняв bet
+            # здесь заранее, получаем net-эффект (win − bet) — ровно ту прибыль,
+            # которую игрок реально получил, а не всю выплату, включая свою же
+            # ставку. Пол в 0 достаточен: ставка уже списана РАНЬШЕ (в отдельном
+            # atomic_update при старте партии) без изменения total_earned, поэтому
+            # слэк (total_earned − balance) на этот момент уже ≥ bet — просадки
+            # ниже баланса не будет, независимый пол в repository.save() не сработает.
+            p.total_earned = max(0, (p.total_earned or 0) - bet)
             return p.balance
         try:
             await ctx.repo.atomic_update(uid, _win)
@@ -5894,7 +6063,8 @@ async def _mines_cashout(update, context, state, redis_key, uid, ctx):
         await query.answer("Нужно открыть хотя бы одну клетку", show_alert=True)
         return
 
-    win = int(state["bet"] * state["multiplier"])
+    bet = state["bet"]
+    win = int(bet * state["multiplier"])
 
     # Партию закрываем ДО начисления. Раньше статус проставлял вызывающий
     # (_mines_cashout_wrapper) уже ПОСЛЕ выплаты — между проверкой «status ==
@@ -5906,6 +6076,9 @@ async def _mines_cashout(update, context, state, redis_key, uid, ctx):
 
     async def _cash(p, conn):
         p.balance += win
+        # См. подробный комментарий в _win (та же правка, та же причина C10):
+        # засчитываем в total_earned net-прибыль (win − bet), а не всю выплату.
+        p.total_earned = max(0, (p.total_earned or 0) - bet)
         return p.balance
     try:
         await ctx.repo.atomic_update(uid, _cash)
@@ -6062,7 +6235,17 @@ async def check_blunt(update, context):
         row = rows[0]
     blunt_id, creator_id, serial, rare_number = row["blunt_id"], row["created_by"], row["serial"], row["rare_number"]
     async with ctx.db_pool.acquire() as conn:
-        rows = await conn.fetch("SELECT user_id, inventory FROM players WHERE inventory LIKE $1", f"%{blunt_id}%")
+        # LIKE на JSONB-колонке — оператор, которого у jsonb вообще нет
+        # («operator does not exist: jsonb ~~ unknown»): запрос падал
+        # исключением при КАЖДОМ вызове (даже когда номер реально в реестре),
+        # и /check неизменно отвечал «внутренняя ошибка». jsonb_array_elements
+        # разворачивает массив инвентаря и ищет точное совпадение id — корректно
+        # и без риска ложных срабатываний от LIKE по подстроке.
+        rows = await conn.fetch(
+            "SELECT user_id, inventory FROM players "
+            "WHERE EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(inventory, '[]'::jsonb)) elem "
+            "WHERE elem->>'id' = $1)",
+            blunt_id)
         owner_id = None; item = None
         for user_row in rows:
             try:
@@ -6087,11 +6270,15 @@ async def check_blunt(update, context):
             details += f"   @{entry.get('user_id','?')} — {date_str}\n"
     await update.message.reply_text(details, parse_mode='HTML')
 
-    # Обновляем счётчик проверок через модель
-    player = await ctx.repo.get_by_id(update.effective_user.id)
-    if player:
-        player.check_count = (player.check_count or 0) + 1
-        await ctx.repo.save(player)
+    # Обновляем счётчик проверок атомарно (raw save() поверх снимка, который
+    # мог устареть за время сетевого похода в реестр, рисковал затереть
+    # конкурентные изменения того же игрока — тот же класс «потерянного
+    # апдейта», что уже пофикшен в других местах кодовой базы).
+    async def _inc_check(p, conn):
+        p.check_count = (p.check_count or 0) + 1
+        return p.check_count
+    await ctx.repo.atomic_update(update.effective_user.id, _inc_check)
+    await check_achievements(update.effective_user.id, context, ctx=ctx)
 
 # ============================================================
 # ЛАБИРИНТ ИСКАЖЕНИЯ — ИТОГОВАЯ СЕНЬОР-ВЕРСИЯ (ПОЛНАЯ ЗАМЕНА)
@@ -6640,13 +6827,161 @@ logger = logging.getLogger(__name__)
 # ФУНКЦИИ ДЛЯ ИМЕННЫХ БЛАНТОВ И ДАРЕНИЯ (ВОССТАНОВЛЕНЫ)
 # ============================================================
 
+_USERNAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{4,31}$")
+
+
+async def _refresh_username(ctx, uid: int, username: str) -> None:
+    """Точечно обновляет players.username, если Telegram-ник изменился.
+
+    Раньше эта колонка писалась ОДИН раз при регистрации (см.
+    _create_new_player) и больше никогда — Telegram позволяет менять
+    @username в любой момент, и после смены игрок становился ненаходимым по
+    текущему нику НАВСЕГДА. Это и есть главная причина «дарение — русская
+    рулетка»: даритель вводит настоящий, действующий @username, а бот ищет
+    его в колонке, где годами лежит старое значение.
+
+    Лёгкий point-update без блокировки строки (не через atomic_update):
+    поле никак не участвует в игровой логике начислений, конкурентная гонка
+    с ним не создаёт риска для баланса/инвентаря.
+    """
+    if not username:
+        return
+    try:
+        async with ctx.db_pool.acquire() as conn:
+            changed = await conn.fetchval(
+                "UPDATE players SET username=$1 WHERE user_id=$2 "
+                "AND username IS DISTINCT FROM $1 RETURNING TRUE",
+                username, uid)
+        if changed:
+            # Инвалидация короткоживущего кэша — иначе следующий get_by_id ещё
+            # до истечения TTL вернёт снимок со старым username.
+            if getattr(ctx, "redis", None):
+                try:
+                    await redis_breaker.call(ctx.redis.delete, f"player:{uid}")
+                except Exception:
+                    pass
+            elif getattr(ctx, "cache", None) is not None:
+                ctx.cache.pop(uid, None)
+    except Exception:
+        logger.warning("Не удалось обновить username для %d", uid)
+
+
+async def _transfer_named_item(ctx, from_uid: int, to_uid: int, blunt_id: str):
+    """Атомарно переносит предмет между ДВУМЯ существующими игроками.
+
+    Возвращает ("ok", item) / ("not_owned", None) / ("target_missing", None).
+    Обе стороны блокируются и сохраняются в ОДНОЙ транзакции (см.
+    PlayerRepository.atomic_pair_update) — без промежутка, в котором предмет
+    существовал бы у обоих или ни у кого.
+    """
+    async def _move(giver, receiver, conn):
+        if giver is None:
+            return ("giver_missing", None)
+        if receiver is None:
+            return ("target_missing", None)
+        item = next((it for it in (giver.inventory or [])
+                    if it.get("id") == blunt_id and it.get("type") == "named"), None)
+        if item is None:
+            return ("not_owned", None)
+        giver.inventory = [it for it in giver.inventory if it.get("id") != blunt_id]
+        item = dict(item)
+        item["owner_history"] = list(item.get("owner_history") or [])
+        item["owner_history"].append(
+            {"user_id": str(from_uid), "since": datetime.now(timezone.utc).isoformat()})
+        receiver.inventory = list(receiver.inventory or []) + [item]
+        return ("ok", item)
+
+    return await ctx.repo.atomic_pair_update(from_uid, to_uid, _move)
+
+
+async def _take_named_item(ctx, uid: int, blunt_id: str) -> Optional[dict]:
+    """Атомарно изымает предмет из инвентаря игрока и возвращает его (или
+    None, если его там уже нет). Нужна для постановки подарка в очередь:
+    получателя нет в БД прямо сейчас, но предмет обязан покинуть дарителя В
+    ТОТ ЖЕ момент, иначе он мог бы подарить его повторно, пока первый подарок
+    ждёт своего адресата — и тогда получилась бы копия у двоих."""
+    async def _take(p, conn):
+        item = next((it for it in (p.inventory or [])
+                    if it.get("id") == blunt_id and it.get("type") == "named"), None)
+        if item is None:
+            return None
+        p.inventory = [it for it in p.inventory if it.get("id") != blunt_id]
+        return dict(item)
+    return await ctx.repo.atomic_update(uid, _take)
+
+
+async def _queue_pending_gift(ctx, from_uid: int, item: dict,
+                              username_lower: str = None, target_user_id: int = None):
+    """Ставит подарок в очередь, когда получателя нет в БД прямо сейчас.
+
+    Забирается автоматически при первом же /start подходящего человека — см.
+    _claim_pending_gifts. Именно эта очередь и есть ответ на «даже не
+    игрокам»: Telegram Bot API не умеет резолвить произвольный @username в
+    numeric user_id для бота, с которым человек не взаимодействовал — узнать
+    его id физически невозможно ДО того, как он сам напишет боту. Единственный
+    честный вариант — сохранить подарок и отдать в момент, когда id станет
+    известен (при /start).
+    """
+    async with ctx.db_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO pending_gifts (username_lower, target_user_id, item, from_user_id) "
+            "VALUES ($1, $2, $3, $4)",
+            username_lower, target_user_id,
+            json.dumps(item, separators=(',', ':'), default=str), from_uid)
+
+
+async def _claim_pending_gifts(ctx, uid: int, username: str, context) -> None:
+    """Отдаёт все подарки, ждавшие этого user_id или этого username.
+
+    Вызывается на КАЖДОМ /start (новый игрок и вернувшийся) — это покрывает
+    не только «подарили тому, кто ещё не заходил», но и «подарили по СТАРОМУ
+    @username, а человек его сменил»: как только он снова напишет /start,
+    _refresh_username обновит колонку, а эта функция подчистит очередь под
+    его актуальным именем при том же заходе.
+    """
+    uname_l = (username or "").lower()
+    async with ctx.db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, item, from_user_id FROM pending_gifts "
+            "WHERE target_user_id = $1 OR (username_lower = $2 AND username_lower IS NOT NULL)",
+            uid, uname_l or None)
+        if not rows:
+            return
+        await conn.execute("DELETE FROM pending_gifts WHERE id = ANY($1::int[])", [r["id"] for r in rows])
+
+    items = [_json_safe_load(r["item"], {}) for r in rows]
+    items = [it for it in items if it]
+    if not items:
+        return
+
+    async def _apply(p, conn):
+        p.inventory = list(p.inventory or []) + items
+        return len(items)
+
+    try:
+        await ctx.repo.atomic_update(uid, _apply)
+    except Exception:
+        logger.exception("Не удалось выдать отложенные подарки игроку %d", uid)
+        return
+
+    names = ", ".join(f"«{it.get('name', '?')}»" for it in items)
+    try:
+        await safe_send_message(
+            context, uid,
+            f"🎁 <b>Пока тебя не было, тебе подарили: {names}!</b>\n"
+            f"Загляни в 💍 «Мои бланты», чтобы увидеть.",
+            parse_mode='HTML')
+    except Exception:
+        pass
+
+
 async def handle_gift_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ctx: AppContext = context.application.bot_data.get("ctx")
     if not ctx:
         return
-    target_username = update.message.text.strip().lstrip('@')
-    if not target_username:
-        await update.message.reply_text("❌ Укажите корректный @username.")
+    raw = update.message.text.strip().lstrip('@')
+    if not raw:
+        await update.message.reply_text("❌ Укажите @username или числовой ID.")
         return
 
     blunt_id = context.user_data.get('gifting_blunt_id')
@@ -6655,55 +6990,110 @@ async def handle_gift_username(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     uid = update.effective_user.id
+
+    # Сначала убеждаемся, что блант вообще ещё в инвентаре дарителя (дешёвая
+    # проверка ДО похода в _transfer_named_item — там она тоже есть, но раннее
+    # понятное сообщение лучше молчаливого отказа внутри транзакции).
     player = await ctx.repo.get_by_id(uid, with_inventory=True)
-    if not player:
+    if not player or not player.exists:
         await update.message.reply_text("Профиль не найден.")
         context.user_data.pop('gifting_blunt_id', None)
         return
-
-    # Находим блант в инвентаре
-    item = None
-    for it in player.inventory:
-        if it.get("id") == blunt_id:
-            item = it
-            break
-    if not item:
+    if not any(it.get("id") == blunt_id for it in (player.inventory or [])):
         await update.message.reply_text("❌ Блант уже не в вашем инвентаре.")
         context.user_data.pop('gifting_blunt_id', None)
         return
 
-    # Находим получателя по username
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("💍 Мои бланты", callback_data="my_blunts")],
+        [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+    ])
+
+    # ── Числовой ID: раньше промпт-текст ОБЕЩАЛ поддержку «@username или
+    # числовой ID», но код проверял только username — ввод чистого ID искал
+    # несуществующий username, равный этой цифровой строке, и ВСЕГДА отвечал
+    # «игрок не найден», даже если ID был настоящим активным игроком.
+    if raw.isdigit():
+        target_id = int(raw)
+        if target_id == uid:
+            await update.message.reply_text("❌ Нельзя подарить блант самому себе.")
+            return
+        target = await ctx.repo.get_by_id(target_id, with_inventory=False)
+        if target and target.exists:
+            status, item = await _transfer_named_item(ctx, uid, target_id, blunt_id)
+        else:
+            status, item = "target_missing", None
+        if status == "target_missing":
+            # Изымаем предмет АТОМАРНО — иначе блант оставался бы у дарителя
+            # одновременно с записью в очереди, и его можно было бы подарить
+            # ЕЩЁ раз, пока первый подарок ждёт адресата (копия у двоих).
+            taken = await _take_named_item(ctx, uid, blunt_id)
+            if taken is None:
+                await update.message.reply_text("❌ Блант уже не в вашем инвентаре.", reply_markup=kb)
+                context.user_data.pop('gifting_blunt_id', None)
+                return
+            await _queue_pending_gift(ctx, uid, taken, target_user_id=target_id)
+            await update.message.reply_text(
+                f"📮 Игрока с ID {target_id} пока нет в игре — блант «{taken.get('name')}» "
+                f"будет ждать его здесь и придёт автоматически, как только он зайдёт впервые.",
+                reply_markup=kb)
+        elif status == "not_owned":
+            await update.message.reply_text("❌ Блант уже не в вашем инвентаре.", reply_markup=kb)
+        elif status == "ok":
+            await update.message.reply_text(
+                f"✅ Блант «{item.get('name')}» подарен игроку ID {target_id}!", reply_markup=kb)
+        else:
+            await update.message.reply_text("❌ Не удалось передать блант. Попробуйте позже.", reply_markup=kb)
+        context.user_data.pop('gifting_blunt_id', None)
+        return
+
+    # ── Username: сначала пытаемся найти уже существующего игрока. players.
+    # username — снимок на момент /start, а не живое состояние (Telegram
+    # позволяет менять @username когда угодно, и колонка НИКОГДА не
+    # обновлялась) — поэтому даже реальный игрок иногда «не находился». Ветка
+    # ниже больше не считает промах окончательным отказом.
+    if not _USERNAME_RE.match(raw):
+        await update.message.reply_text(
+            "❌ Это не похоже на настоящий @username Telegram (5–32 символа, "
+            "буквы/цифры/подчёркивание, начинается с буквы). Проверьте и введите снова.")
+        return
+
     async with ctx.db_pool.acquire() as conn:
-        target = await conn.fetchrow("SELECT user_id FROM players WHERE LOWER(username) = LOWER($1)", target_username)
-    if not target:
-        await update.message.reply_text("❌ Игрок с таким username не найден.")
-        return
-    target_id = target["user_id"]
-    if target_id == uid:
-        await update.message.reply_text("❌ Нельзя подарить блант самому себе.")
+        target = await conn.fetchrow(
+            "SELECT user_id FROM players WHERE LOWER(username) = LOWER($1)", raw)
+
+    if target:
+        target_id = target["user_id"]
+        if target_id == uid:
+            await update.message.reply_text("❌ Нельзя подарить блант самому себе.")
+            return
+        status, item = await _transfer_named_item(ctx, uid, target_id, blunt_id)
+        if status == "not_owned":
+            await update.message.reply_text("❌ Блант уже не в вашем инвентаре.", reply_markup=kb)
+        elif status == "ok":
+            await update.message.reply_text(
+                f"✅ Блант «{item.get('name')}» подарен @{raw}!", reply_markup=kb)
+        else:
+            await update.message.reply_text("❌ Не удалось передать блант. Попробуйте позже.", reply_markup=kb)
+        context.user_data.pop('gifting_blunt_id', None)
         return
 
-    # Передаём блант
-    # 1. Удаляем у дарителя
-    player.inventory = [it for it in player.inventory if it.get("id") != blunt_id]
-    # 2. Добавляем получателю (с обновлением истории)
-    target_player = await ctx.repo.get_by_id(target_id, with_inventory=True)
-    if not target_player:
-        target_player = Player(user_id=target_id)
-    if not target_player.inventory:
-        target_player.inventory = []
-    item["owner_history"] = item.get("owner_history", [])
-    item["owner_history"].append({"user_id": uid, "since": datetime.now().isoformat()})
-    target_player.inventory.append(item)
-    await ctx.repo.save(player)
-    await ctx.repo.save(target_player)
-
+    # Не найден СЕЙЧАС — не отказ, а очередь. Работает и для настоящего
+    # игрока со сменившимся @username: как только он напишет /start под
+    # текущим ником, _claim_pending_gifts подхватит запись по этому же имени.
+    # Изымаем предмет атомарно (см. комментарий в ветке числового ID выше —
+    # та же причина: без изъятия блант можно было бы подарить дважды).
+    taken = await _take_named_item(ctx, uid, blunt_id)
+    if taken is None:
+        await update.message.reply_text("❌ Блант уже не в вашем инвентаре.", reply_markup=kb)
+        context.user_data.pop('gifting_blunt_id', None)
+        return
+    await _queue_pending_gift(ctx, uid, taken, username_lower=raw.lower())
     await update.message.reply_text(
-        f"✅ Блант «{item.get('name')}» подарен @{target_username}!",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("💍 Мои бланты", callback_data="my_blunts")],
-            [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
-        ]))
+        f"📮 @{raw} пока не найден в игре — блант «{taken.get('name')}» "
+        f"будет ждать его здесь и придёт автоматически, как только он зайдёт впервые "
+        f"(или если это его нынешний @username, но он давно не заходил — тоже сработает).",
+        reply_markup=kb)
     context.user_data.pop('gifting_blunt_id', None)
 
 # ============================================================
