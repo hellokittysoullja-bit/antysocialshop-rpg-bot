@@ -369,6 +369,9 @@ class AchievementService:
                 if m:
                     amount = int(m.group(1))
                     player.balance = (player.balance or 0) + amount
+                    # см. _award_achievement_rewards: прямой save() не проходит
+                    # через учёт дельты, начисляем статус явно
+                    player.total_earned = (player.total_earned or 0) + amount
             elif part.startswith("Титул "):
                 title = part.replace("Титул ", "").strip()
                 if title:
@@ -560,7 +563,13 @@ async def _award_achievement_rewards(user_id: int, player: Player, reward_text: 
             clean = part.replace(" ", "")
             m = re.search(r"\+(\d+)", clean)
             if m:
-                player.balance = (player.balance or 0) + int(m.group(1))
+                _amt = int(m.group(1))
+                player.balance = (player.balance or 0) + _amt
+                # Этот путь сохраняется прямым save(), минуя учёт дельты в
+                # atomic_update. Без явного начисления награды достижений
+                # (до ~19 900 OAC суммарно) не двигали бы ни ранг, ни топ, ни
+                # «Полярную звезду» у любого игрока, который уже что-то тратил.
+                player.total_earned = (player.total_earned or 0) + _amt
         elif part.startswith("Титул "):
             title = part.replace("Титул ", "").strip()
             if title:
@@ -6739,7 +6748,11 @@ async def progress_hub_handler(update, context, ctx):
             await query.answer("❌ Профиль не найден!", show_alert=True)
             return
 
-        balance = player.balance or 0
+        # Ранг и лестница — по заработанному за всё время (единая ось со всеми
+        # остальными экранами). Через `balance` этот экран пятился назад после
+        # каждой покупки и противоречил и профилю, и главному меню, и топу.
+        balance = player.total_earned or 0
+        wallet = player.balance or 0
         username = html_escape(player.username or str(uid))
 
         # ===== 1. РАНГ + ЛЕСТНИЦА ВОСХОЖДЕНИЯ (шапка «куда я расту») =====
@@ -6896,6 +6909,8 @@ async def progress_hub_handler(update, context, ctx):
 
         # ===== 4. СТАТИСТИКА =====
         stats_lines = []
+        # Обе оси рядом: по чему считается ранг и что реально можно потратить.
+        stats_lines.append(f"💎 Кошелёк: {wallet} OAC 🍬")
         stats_lines.append(f"🌿 Блантов скручено: {player.craft_count or 0}")
         stats_lines.append(f"💨 Выкурено: {player.smoke_count or 0}")
 
@@ -7737,6 +7752,8 @@ async def guild_join_handler(update, context, ctx):
         # отложившие фракцию теряли +50 — теперь честно один раз.
         if player.onboarding_step == 0 or was_guildless:
             player.balance += 50
+            # Путь сохраняется прямым save(), мимо учёта дельты в atomic_update.
+            player.total_earned = (player.total_earned or 0) + 50
         g_emoji = "🕯️" if guild == "BLACK" else "⚜️"
         g_name = "Тёмная" if guild == "BLACK" else "Светлая"
 
