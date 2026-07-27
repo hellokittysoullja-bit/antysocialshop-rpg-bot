@@ -1149,3 +1149,186 @@ def render_blunt_card(item: dict, owner_name: str = "") -> bytes:
     img.save(out, format="JPEG", quality=90, optimize=True, progressive=True)
     out.seek(0)
     return out.getvalue()
+
+
+# ── Витрина коллекции ───────────────────────────────────────────────
+# Коллекция существует только тогда, когда предметы видно ВМЕСТЕ. Пока экран
+# «Кодекс» был текстовым списком, уникальные силуэты не с чем было сравнить —
+# а новизна работает исключительно на сравнении. Отсюда витрина: один кадр,
+# где собрание видно целиком, и пустые слоты честно показывают, что место есть.
+#
+# Почему один кадр, а не альбом из настоящих карточек: полная карта стоит ~220 МБ
+# пикового RSS и ~2с, шесть карт — это шесть таких проходов и гарантированный OOM.
+# Витрина рисует упрощённые плитки за ОДИН проход при меньшем масштабе: тяжёлые
+# слои (фольга, лён, гильоше, тройной bloom) плитке не нужны — на 300px они
+# всё равно не читаются. Общее с картой — поза: силуэт плитки совпадает с
+# силуэтом настоящей карточки, иначе витрина врала бы о содержимом коллекции.
+
+_WALL_SCALE = 2
+_TILE_W, _TILE_H = 300, 400
+_WALL_COLS = 3
+_WALL_GAP, _WALL_MARGIN, _WALL_HEAD = 14, 18, 64
+
+
+def _wall_tile(tile, item, u):
+    """Одна плитка витрины: занятая (предмет) или пустая (слот под предмет)."""
+    W, H = tile.size
+    d = ImageDraw.Draw(tile)
+
+    if item is None:
+        # Пустой слот — не «дырка», а обещание. Приглушённый, пунктирный,
+        # без цвета редкости: он ничего не обещает конкретного, только место.
+        d.rectangle([0, 0, W - 1, H - 1], fill=(15, 13, 21))
+        dash, gap_ = int(u * 9), int(u * 7)
+        edge = _sc((92, 86, 112), 0.5)
+        for x in range(int(u * 6), W - int(u * 6), dash + gap_):
+            d.line([(x, int(u * 6)), (min(x + dash, W - int(u * 6)), int(u * 6))], fill=edge)
+            d.line([(x, H - int(u * 6)), (min(x + dash, W - int(u * 6)), H - int(u * 6))], fill=edge)
+        for y in range(int(u * 6), H - int(u * 6), dash + gap_):
+            d.line([(int(u * 6), y), (int(u * 6), min(y + dash, H - int(u * 6)))], fill=edge)
+            d.line([(W - int(u * 6), y), (W - int(u * 6), min(y + dash, H - int(u * 6)))], fill=edge)
+        f = _font("DejaVuSerif-Bold.ttf", int(46 * u))
+        q = "?"
+        qw = d.textlength(q, font=f)
+        d.text(((W - qw) / 2, H * 0.40), q, font=f, fill=(66, 62, 84))
+        f2 = _font("DejaVuSans.ttf", int(13 * u))
+        t = "место свободно"
+        tw = d.textlength(t, font=f2)
+        d.text(((W - tw) / 2, H * 0.60), t, font=f2, fill=(84, 79, 102))
+        return tile
+
+    rarity = item.get("rarity", "common")
+    pal = _RARITY.get(rarity, _RARITY["common"])
+    glow, frame, accent = pal["glow"], pal["frame"], pal["accent"]
+
+    seed_src = str(item.get("hash") or item.get("id") or "0")
+    hexs = re.sub(r"[^0-9a-fA-F]", "", seed_src)
+    seed = int(hexs, 16) if hexs else abs(hash(seed_src))
+    rng = random.Random(seed)
+    pose = _pose(rng, pal)      # та же поза, что и на полной карте
+
+    tile.paste(_radial_bg((W, H), _mix(_BG_CORE, glow, 0.10), _mix(_BG_EDGE, glow, 0.04)), (0, 0))
+    d = ImageDraw.Draw(tile)
+
+    # окно арта
+    ax0, ay0 = int(u * 12), int(u * 12)
+    ax1, ay1 = W - int(u * 12), int(H * 0.66)
+    Wa, Ha = ax1 - ax0, ay1 - ay0
+    art = Image.new("RGB", (Wa, Ha), _ART_BG)
+    art_r = Wa * 0.5
+
+    ex_, ey_ = Wa * pose["fx"], Ha * pose["fy"]
+    ang = pose["ang"]
+    ln = art_r * 1.5 * pose["len_k"]
+    ca, sa = math.cos(ang), math.sin(ang)
+    pad = art_r * 0.06
+    lim = [ln]
+    if ca > 1e-6:
+        lim.append((ex_ - pad) / ca)
+    elif ca < -1e-6:
+        lim.append((Wa - pad - ex_) / -ca)
+    if sa < -1e-6:
+        lim.append((Ha - pad - ey_) / -sa)
+    ln = max(art_r * 0.7, min(lim))
+
+    # тёплый ключ из уголька — плитка должна читаться как та же сцена
+    key = Image.new("RGB", (Wa, Ha), (0, 0, 0))
+    hr = art_r * 0.7
+    ImageDraw.Draw(key).ellipse([ex_ - hr, ey_ - hr, ex_ + hr, ey_ + hr],
+                                fill=_mix(glow, (255, 146, 60), 0.5))
+    art = ImageChops.screen(art, _dim(key.filter(ImageFilter.GaussianBlur(u * 16)), 0.55))
+
+    cxi = ex_ - (ln / 2) * ca
+    cyi = ey_ - (ln / 2) * sa
+    ad = ImageDraw.Draw(art)
+    tx, ty, tip_t = _relic(ad, cxi, cyi, ln, ang, rng, accent, u,
+                           lit=pose["lit"], pose=pose)
+    sm = Image.new("RGB", (Wa, Ha), (0, 0, 0))
+    _smoke(ImageDraw.Draw(sm), tx, ty, rng, accent, art_r * 0.3, art_r * 0.8, 2)
+    art = ImageChops.screen(art, _dim(sm.filter(ImageFilter.GaussianBlur(u * 3)), 0.7))
+    art = _ember(art, tx, ty, tip_t, ang, u)
+
+    tile.paste(art, (ax0, ay0))
+    d = ImageDraw.Draw(tile)
+    _metal_frame(d, ax0, ay0, ax1, ay1, pal["band"] * u * 0.42, frame, max(1, int(u)))
+
+    # имя
+    f = _font("DejaVuSerif-Bold.ttf", int(19 * u))
+    nm = _sanitize(item.get("name", "Безымянный"), 22)
+    txt = f"«{nm}»"
+    avail = W - int(u * 26)
+    size = int(19 * u)
+    while size > int(11 * u) and d.textlength(txt, font=f) > avail:
+        size = int(size * 0.92)
+        f = _font("DejaVuSerif-Bold.ttf", size)
+    if d.textlength(txt, font=f) > avail:
+        while nm and d.textlength(f"«{nm}…»", font=f) > avail:
+            nm = nm[:-1]
+        txt = f"«{nm}…»"
+    tw = d.textlength(txt, font=f)
+    d.text(((W - tw) / 2, H * 0.70), txt, font=f, fill=(234, 228, 240))
+
+    # метка редкости + пипсы — тир читается и без цвета
+    fl = _font("DejaVuSans-Bold.ttf", int(11 * u))
+    lw = _text_w(d, pal["label"], fl, u * 2.2)
+    _draw_tracked(d, ((W - lw) / 2, H * 0.805), pal["label"], fl, _sc(accent, 0.85), u * 2.2)
+    _pips(d, W / 2, H * 0.885, pal["pips"], 4, accent, frame, u)
+    _metal_frame(d, int(u * 3), int(u * 3), W - int(u * 3), H - int(u * 3),
+                 pal["band"] * u * 0.3, _sc(frame, 0.75), max(1, int(u)))
+    return tile
+
+
+def render_collection_wall(items, owner_name: str = "", slots: int = 6,
+                           owned_tiers: int = None) -> bytes:
+    """JPEG-витрина коллекции: сетка плиток + честно пустые слоты.
+
+    `items` — список предметов (лучшие идут первыми, порядок задаёт вызывающий).
+    Показываем не больше `slots`; недостающее добивается пустыми слотами, чтобы
+    неполнота коллекции была ВИДНА, а не подразумевалась.
+
+    `owned_tiers` считается по ВСЕЙ коллекции и передаётся снаружи: витрина
+    показывает лишь верхушку, и счёт по видимым плиткам занижал бы собранное
+    у игрока с большой коллекцией.
+    """
+    items = list(items or [])[:slots]
+    rows = (slots + _WALL_COLS - 1) // _WALL_COLS
+    u = float(_WALL_SCALE)
+    tw, th = int(_TILE_W * u), int(_TILE_H * u)
+    gap, mg, head = int(_WALL_GAP * u), int(_WALL_MARGIN * u), int(_WALL_HEAD * u)
+    W = _WALL_COLS * tw + (_WALL_COLS - 1) * gap + 2 * mg
+    H = rows * th + (rows - 1) * gap + 2 * mg + head
+
+    img = _radial_bg((W, H), (30, 25, 42), (8, 7, 12))
+    d = ImageDraw.Draw(img)
+
+    if owned_tiers is None:
+        owned_tiers = len({it.get("rarity") for it in items if it})
+    f = _font("DejaVuSans-Bold.ttf", int(21 * u))
+    title = "КОДЕКС ИСКАЖЕНИЯ"
+    tr = u * 4.0
+    twd = _text_w(d, title, f, tr)
+    _draw_tracked(d, ((W - twd) / 2, mg * 0.55), title, f, (214, 198, 168), tr)
+    f2 = _font("DejaVuSans.ttf", int(14 * u))
+    # Санитайзить ЦЕЛУЮ строку нельзя: _sanitize оставляет только то, что рисует
+    # DejaVu, и вырезает «/» вместе с «·» — счёт «4/4» молча превращался в «44».
+    # Чистим только пользовательский ник, служебный текст собираем после.
+    who = _sanitize(owner_name, 22) if owner_name else ""
+    sub = f"{who} · собрано редкостей {owned_tiers}/4" if who else f"собрано редкостей {owned_tiers}/4"
+    sw = d.textlength(sub, font=f2)
+    d.text(((W - sw) / 2, mg * 0.55 + int(26 * u)), sub, font=f2, fill=(150, 143, 168))
+
+    for i in range(slots):
+        r, c = divmod(i, _WALL_COLS)
+        x = mg + c * (tw + gap)
+        y = mg + head + r * (th + gap)
+        tile = Image.new("RGB", (tw, th), (12, 10, 17))
+        tile = _wall_tile(tile, items[i] if i < len(items) else None, u)
+        img.paste(tile, (x, y))
+
+    img = img.resize((W // _WALL_SCALE, H // _WALL_SCALE), Image.LANCZOS)
+    img = _apply_grain(img, random.Random(1), 4)
+    out = io.BytesIO()
+    out.name = "codex.jpg"
+    img.save(out, format="JPEG", quality=88, optimize=True, progressive=True)
+    out.seek(0)
+    return out.getvalue()

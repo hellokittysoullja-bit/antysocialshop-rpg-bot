@@ -175,6 +175,73 @@ def check_robust_to_bad_data():
     assert not bad, "Рендер падает на кривых данных (должен деградировать мягко):\n  " + "\n  ".join(bad)
 
 
+def check_collection_wall():
+    """Витрина: единственное место, где уникальность силуэтов вообще проявляется.
+
+    Пока «Кодекс» был текстовым списком, разные силуэты не с чем было сравнить —
+    а новизна работает только на сравнении. Витрина обязана: не падать на любых
+    данных (это украшение, а не критичный путь), оставаться лёгкой для Telegram,
+    честно показывать пустые слоты и — главное — рисовать плитки теми же позами,
+    что и полные карточки, иначе она врёт о содержимом коллекции.
+    """
+    bad = []
+    cases = [
+        ("пусто", []),
+        ("None в списке", [None]),
+        ("нет hash/rarity", [{"name": "В"}]),
+        ("эмодзи + длинное имя", [{"name": "🔥" * 5 + "Длинноеимя" * 6,
+                                   "rarity": "legendary", "hash": "zzz"}]),
+        ("переполнение слотов", [_mk(f"Б{i}", "epic", f"0x{i:04x}") for i in range(12)]),
+    ]
+    for label, items in cases:
+        try:
+            blob = blunt_art.render_collection_wall(items, "Странник", owned_tiers=2)
+            if not blob.startswith(JPEG_MAGIC):
+                bad.append(f"{label}: не JPEG")
+            if len(blob) > MAX_BYTES:
+                bad.append(f"{label}: слишком тяжёлая ({len(blob)}B)")
+        except Exception as e:
+            bad.append(f"{label}: упала ({e})")
+    assert not bad, "Витрина коллекции сломана:\n  " + "\n  ".join(bad)
+
+    # Детерминизм: одна и та же коллекция → та же витрина (иначе кэш file_id
+    # по составу страницы отдавал бы картинку, не соответствующую содержимому).
+    items = [_mk("Крик", "legendary", "0x1111"), _mk("Шёпот", "rare", "0x2222")]
+    a = blunt_art.render_collection_wall(items, "X", owned_tiers=2)
+    b = blunt_art.render_collection_wall(items, "X", owned_tiers=2)
+    assert a == b, "витрина недетерминирована — кэш по составу станет врать"
+
+    # Счёт собранного берётся снаружи: по видимым плиткам он занижал бы правду
+    # у игрока с коллекцией больше витрины.
+    one = blunt_art.render_collection_wall(items, "X", owned_tiers=1)
+    four = blunt_art.render_collection_wall(items, "X", owned_tiers=4)
+    assert one != four, "owned_tiers не влияет на витрину — счётчик собранного decorативен"
+
+
+def check_wall_is_cheaper_than_cards():
+    """Витрина обязана быть ДЕШЕВЛЕ, чем набор полных карточек.
+
+    Смысл витрины ровно в этом: показать шесть предметов, не заплатив за шесть
+    полных рендеров (~220 МБ пикового RSS каждый — верный OOM на малом
+    инстансе). Если однажды витрина догонит карточку по стоимости, её незачем
+    держать отдельно — тест поймает такой дрейф.
+    """
+    import time
+
+    items = [_mk(f"Б{i}", "epic", f"0x{i:04x}") for i in range(6)]
+    t0 = time.time()
+    blunt_art.render_collection_wall(items, "X", owned_tiers=3)
+    wall = time.time() - t0
+
+    t0 = time.time()
+    blunt_art.render_blunt_card(_mk("Один", "epic", "0xabcd"), "X")
+    card = time.time() - t0
+
+    assert wall < card, (
+        f"витрина из 6 плиток ({wall:.2f}с) не быстрее ОДНОЙ карточки ({card:.2f}с) — "
+        f"смысл отдельного лёгкого рендера потерян")
+
+
 def main():
     passed = []
     check_all_rarities_valid_image()
@@ -191,6 +258,10 @@ def main():
     passed.append("поза детерминирована по хэшу и не вырождена")
     check_robust_to_bad_data()
     passed.append("устойчивость к кривым данным (пустое/эмодзи/мусор)")
+    check_collection_wall()
+    passed.append("витрина коллекции: не падает, детерминирована, слоты честные")
+    check_wall_is_cheaper_than_cards()
+    passed.append("витрина из 6 плиток дешевле одной полной карточки")
     for name in passed:
         print(f"  OK  {name}")
     print(f"\nИнварианты карточки бланта пройдены: {len(passed)}/{len(passed)}")

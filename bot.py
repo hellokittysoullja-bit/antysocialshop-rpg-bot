@@ -25,6 +25,7 @@ from telegram.ext import ContextTypes
 from telegram.error import BadRequest, Forbidden, RetryAfter
 
 import redis.asyncio as aioredis
+import functools
 from functools import wraps
 
 try:
@@ -64,9 +65,11 @@ from enum import Enum, auto  # для SmokeStatus/CraftStatus ниже
 # Pillow не установлен или модуль сломан — карточки просто не рисуются, а весь
 # путь блантов остаётся текстовым (украшение, не критичный путь).
 try:
-    from blunt_art import render_blunt_card, ART_VERSION as BLUNT_ART_VERSION
+    from blunt_art import (render_blunt_card, render_collection_wall,
+                           ART_VERSION as BLUNT_ART_VERSION)
 except Exception:  # pragma: no cover
     render_blunt_card = None
+    render_collection_wall = None
     BLUNT_ART_VERSION = 0
 
 # ============================================================
@@ -4464,6 +4467,81 @@ def _build_codex_header(named):
     return "\n".join(lines)
 
 
+async def _send_collection_wall(update, context, ctx, uid, page_blunts, owner_name,
+                                owned_tiers, caption, reply_markup, page):
+    """Показывает страницу коллекции ВИТРИНОЙ (одно фото) вместо текстового списка.
+
+    Зачем вообще: уникальные силуэты карточек не с чем было сравнить — «Кодекс»
+    был текстовым списком, а новизна работает только на сравнении. Витрина —
+    первое место в игре, где собрание видно целиком.
+
+    Почему одно фото, а не альбом настоящих карточек: альбом Telegram не носит
+    инлайн-клавиатуру (кнопки «Детали/Подарить» пришлось бы уносить в отдельное
+    сообщение), а шесть полных карт стоили бы шесть проходов по ~220 МБ. Витрина
+    — один проход на ~51 МБ, и фото-сообщение клавиатуру носит.
+
+    Возврат False → вызывающий откатывается на прежний текстовый список: витрина
+    украшение, а не критичный путь.
+    """
+    if render_collection_wall is None:
+        return False
+
+    # Кэш по составу страницы: витрина зависит только от предметов на ней и от
+    # версии арта. Пересобирать её на каждое открытие незачем — коллекция меняется
+    # редко, а просмотры частые.
+    sig = hashlib.sha1(
+        ("|".join(f"{b.get('id')}:{b.get('rarity')}" for b in page_blunts)
+         + f"|{owned_tiers}|{BLUNT_ART_VERSION}").encode()).hexdigest()[:16]
+    cache_key = f"codex_wall:{uid}:{page}:{sig}"
+
+    fid = None
+    if ctx and getattr(ctx, "redis", None):
+        try:
+            cached = await ctx.redis.get(cache_key)
+            if cached:
+                fid = cached.decode() if isinstance(cached, bytes) else cached
+        except Exception:
+            pass
+
+    photo = fid
+    if photo is None:
+        sem = _get_blunt_render_sem()
+        if sem.locked() and len(getattr(sem, "_waiters", None) or ()) >= BLUNT_RENDER_MAX_QUEUE:
+            return False
+        try:
+            async with sem:
+                blob = await asyncio.get_event_loop().run_in_executor(
+                    None, functools.partial(
+                        render_collection_wall, list(page_blunts),
+                        owner_name or "", 6, owned_tiers))
+        except Exception:
+            logger.exception("Рендер витрины коллекции не удался")
+            return False
+        photo = io.BytesIO(blob)
+
+    try:
+        msg = await context.bot.send_photo(
+            chat_id=uid, photo=photo, caption=caption,
+            parse_mode='HTML', reply_markup=reply_markup)
+    except Exception:
+        logger.exception("Отправка витрины коллекции не удалась")
+        return False
+
+    if fid is None and msg and getattr(msg, "photo", None) and ctx and getattr(ctx, "redis", None):
+        try:
+            await ctx.redis.setex(cache_key, 7 * 24 * 3600, msg.photo[-1].file_id)
+        except Exception:
+            pass
+
+    # Старое сообщение убираем ПОСЛЕ успешной отправки: если что-то пойдёт не
+    # так, игрок останется с рабочим экраном, а не с пустым чатом.
+    try:
+        await update.callback_query.message.delete()
+    except Exception:
+        pass
+    return True
+
+
 @rate_limit(1)
 @game_handler
 async def my_blunts_callback(update, context, ctx, player, page=0):
@@ -4525,8 +4603,27 @@ async def my_blunts_callback(update, context, ctx, player, page=0):
     if nav_buttons:
         kb_rows.append(nav_buttons)
     kb_rows.append([InlineKeyboardButton("🔙 В профиль", callback_data="profile")])
+    kb = InlineKeyboardMarkup(kb_rows)
 
-    await edit_or_reply(update, context, text, reply_markup=InlineKeyboardMarkup(kb_rows))
+    # Витрина: подпись к фото ограничена 1024 символами, поэтому в неё идёт
+    # шапка Кодекса без построчного перечня — имена и редкости уже НАРИСОВАНЫ
+    # на самой витрине, дублировать их текстом незачем. Номера в подписи
+    # совпадают с порядком плиток слева направо, как и номера на кнопках.
+    owned_tiers = len({b.get("rarity") for b in named})
+    if page == 0:
+        cap = _build_codex_header(named)
+    else:
+        cap = f"<b>💎 ТВОИ ИМЕННЫЕ БЛАНТЫ ({len(named)} всего, стр. {page+1}/{total_pages})</b>\n"
+    cap += f"\n<i>Витрина: страница {page+1}/{total_pages}</i>"
+    if len(cap) > 1000:
+        cap = cap[:997] + "…"
+
+    if await _send_collection_wall(update, context, ctx, uid, page_blunts,
+                                   player.username or "Странник", owned_tiers,
+                                   cap, kb, page):
+        return
+
+    await edit_or_reply(update, context, text, reply_markup=kb)
 
 async def achievements_callback(update, context, page=0):
     ctx = context.bot_data.get("ctx")
