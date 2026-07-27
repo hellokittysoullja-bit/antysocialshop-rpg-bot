@@ -242,6 +242,59 @@ def check_wall_is_cheaper_than_cards():
         f"смысл отдельного лёгкого рендера потерян")
 
 
+def check_forms_are_a_real_set():
+    """Формы скрутки обязаны быть КОНЕЧНЫМ, РОВНЫМ и ЧЕСТНЫМ набором.
+
+    Это единственная в игре долгая коллекционная цель: набор из 4 редкостей
+    закрывается почти сразу (легендарка падает бесплатно за реферал, исповедь
+    или алхимию) и после 4/4 не зовёт никуда. Набор форм держится на трёх
+    свойствах, и каждое ломается по-своему:
+
+    * КОНЕЧНОСТЬ — «7 из 8» можно сказать только про перечислимый набор;
+    * РАВНОМЕРНОСТЬ — перекос превращает сбор последней формы в стену;
+    * СОВПАДЕНИЕ С КАРТИНКОЙ — имя формы обязано описывать тот силуэт, который
+      игрок видит, иначе набор описывает не те предметы, что лежат в коллекции.
+    """
+    import random as _random
+    from collections import Counter
+
+    catalog = blunt_art.all_forms()
+    ids = [f["id"] for f in catalog]
+    assert len(catalog) == blunt_art.FORMS_TOTAL, "каталог форм не равен заявленному размеру"
+    assert sorted(ids) == list(range(blunt_art.FORMS_TOTAL)), "id форм не сплошные 0..N-1"
+    assert len({f["name"] for f in catalog}) == blunt_art.FORMS_TOTAL, "имена форм повторяются"
+
+    # детерминизм: форма — паспорт предмета, она не может «переехать»
+    it = _mk("Крик", "epic", "0xabc123def456")
+    assert blunt_art.form_of(it) == blunt_art.form_of(it), "форма недетерминирована"
+
+    # форма не зависит от редкости: апгрейд тира не должен менять личность
+    a = blunt_art.form_of(_mk("X", "common", "0xdeadbeef1234"))
+    b = blunt_art.form_of(_mk("X", "legendary", "0xdeadbeef1234"))
+    assert a == b, "форма зависит от редкости — один блант менял бы форму вместе с тиром"
+
+    # равномерность: перекос делает последнюю форму стеной
+    c = Counter(blunt_art.form_of(_mk("n", "common", f"0x{i * 2654435761:016x}"))["id"]
+                for i in range(4000))
+    assert len(c) == blunt_art.FORMS_TOTAL, f"выпадают не все формы: {sorted(c)}"
+    lo, hi = min(c.values()), max(c.values())
+    assert hi / lo < 1.5, f"формы выпадают неравномерно ({lo}..{hi}) — набор станет гриндом"
+
+    # имя формы обязано совпадать с позой, которой нарисован силуэт
+    bad = []
+    for i in range(200):
+        item = _mk("n", "rare", f"0x{i * 7919:016x}")
+        seed = int(item["hash"][2:], 16)
+        pose = blunt_art._pose(_random.Random(seed), blunt_art._RARITY["rare"])
+        nm = blunt_art.form_of(item)["name"]
+        want_dir = blunt_art._FACING_NAMES[bool(pose["mirrored"])]
+        want_weave = blunt_art._WEAVE_NAMES[pose["seam_style"]]
+        if not nm.startswith(want_weave) or not nm.endswith(want_dir):
+            bad.append(f"{item['hash']}: имя «{nm}» ≠ поза ({want_weave}/{want_dir})")
+    assert not bad, ("имя формы расходится с нарисованным силуэтом:\n  "
+                     + "\n  ".join(bad[:5]))
+
+
 def main():
     passed = []
     check_all_rarities_valid_image()
@@ -262,6 +315,8 @@ def main():
     passed.append("витрина коллекции: не падает, детерминирована, слоты честные")
     check_wall_is_cheaper_than_cards()
     passed.append("витрина из 6 плиток дешевле одной полной карточки")
+    check_forms_are_a_real_set()
+    passed.append("формы скрутки: конечный ровный набор, совпадающий с силуэтом")
     for name in passed:
         print(f"  OK  {name}")
     print(f"\nИнварианты карточки бланта пройдены: {len(passed)}/{len(passed)}")

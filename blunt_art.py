@@ -1271,8 +1271,18 @@ def _wall_tile(tile, item, u):
     # метка редкости + пипсы — тир читается и без цвета
     fl = _font("DejaVuSans-Bold.ttf", int(11 * u))
     lw = _text_w(d, pal["label"], fl, u * 2.2)
-    _draw_tracked(d, ((W - lw) / 2, H * 0.805), pal["label"], fl, _sc(accent, 0.85), u * 2.2)
-    _pips(d, W / 2, H * 0.885, pal["pips"], 4, accent, frame, u)
+    _draw_tracked(d, ((W - lw) / 2, H * 0.795), pal["label"], fl, _sc(accent, 0.85), u * 2.2)
+    # Имя формы — набор нельзя собирать, не видя, что именно у тебя в руках.
+    # Берётся из той же позы, которой нарисован силуэт выше, поэтому подпись и
+    # картинка не могут разойтись.
+    weave = _WEAVE_NAMES.get(pose["seam_style"], "")
+    facing = _FACING_NAMES.get(bool(pose["mirrored"]), "")
+    if weave:
+        ff = _font("DejaVuSans.ttf", int(11 * u))
+        ft = f"{weave} {facing}"
+        fw = d.textlength(ft, font=ff)
+        d.text(((W - fw) / 2, H * 0.845), ft, font=ff, fill=(132, 126, 150))
+    _pips(d, W / 2, H * 0.905, pal["pips"], 4, accent, frame, u)
     _metal_frame(d, int(u * 3), int(u * 3), W - int(u * 3), H - int(u * 3),
                  pal["band"] * u * 0.3, _sc(frame, 0.75), max(1, int(u)))
     return tile
@@ -1332,3 +1342,54 @@ def render_collection_wall(items, owner_name: str = "", slots: int = 6,
     img.save(out, format="JPEG", quality=88, optimize=True, progressive=True)
     out.seek(0)
     return out.getvalue()
+
+
+# ── Формы скрутки: конечный перечислимый набор ──────────────────────
+# Коллекционирование живёт только там, где набор ИЗВЕСТЕН, КОНЕЧЕН и видно, чего
+# в нём не хватает. Набор из четырёх редкостей закрывается почти сразу и потом
+# не зовёт никуда, а бесконечная процедурная вариация силуэтов неперечислима —
+# «у меня 7 из 12» про неё сказать нельзя, и собирать её невозможно.
+#
+# Между этими крайностями уже лежал готовый набор, просто безымянный: поза даёт
+# 4 плетения × 2 направления = 8 дискретных форм, строго по 12.5% каждая.
+# Здесь они получают имена — и невидимая техническая деталь становится целью.
+# Ничего не добавлено в механику: форма выводится из того же хэша, что и
+# картинка, поэтому у КАЖДОГО уже выданного бланта форма есть с рождения и
+# никакой миграции не требуется.
+_WEAVE_NAMES = {
+    "rings": "Кольца", "spiral": "Спираль",
+    "braid": "Плетение", "banded": "Пояса",
+}
+# Направление скрутки — самый крупный различитель силуэта, его и называем.
+_FACING_NAMES = {False: "Восхода", True: "Заката"}
+
+FORMS_TOTAL = len(_WEAVE_NAMES) * len(_FACING_NAMES)
+
+
+def form_of(item) -> dict:
+    """Форма скрутки предмета: {id, name}. Детерминирована по тому же хэшу, что и арт.
+
+    Возвращает ровно то, что игрок ВИДИТ на карточке, — иначе набор описывал бы
+    не те предметы, что лежат в коллекции.
+    """
+    rarity = (item or {}).get("rarity", "common")
+    pal = _RARITY.get(rarity, _RARITY["common"])
+    seed_src = str((item or {}).get("hash") or (item or {}).get("id") or "0")
+    hexs = re.sub(r"[^0-9a-fA-F]", "", seed_src)
+    seed = int(hexs, 16) if hexs else abs(hash(seed_src))
+    pose = _pose(random.Random(seed), pal)
+    weave, facing = pose["seam_style"], bool(pose["mirrored"])
+    keys = sorted(_WEAVE_NAMES)
+    fid = keys.index(weave) * 2 + (1 if facing else 0)
+    return {"id": fid,
+            "name": f"{_WEAVE_NAMES[weave]} {_FACING_NAMES[facing]}"}
+
+
+def all_forms() -> list:
+    """Полный набор форм по порядку id — чтобы показать и недостающие."""
+    out = []
+    for i, weave in enumerate(sorted(_WEAVE_NAMES)):
+        for j, facing in enumerate((False, True)):
+            out.append({"id": i * 2 + j,
+                        "name": f"{_WEAVE_NAMES[weave]} {_FACING_NAMES[facing]}"})
+    return out

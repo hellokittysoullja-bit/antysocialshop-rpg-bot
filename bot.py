@@ -67,9 +67,11 @@ from enum import Enum, auto  # для SmokeStatus/CraftStatus ниже
 try:
     from blunt_art import (render_blunt_card, render_collection_wall,
                            ART_VERSION as BLUNT_ART_VERSION)
+    import blunt_art as blunt_forms
 except Exception:  # pragma: no cover
     render_blunt_card = None
     render_collection_wall = None
+    blunt_forms = None
     BLUNT_ART_VERSION = 0
 
 # ============================================================
@@ -4457,6 +4459,32 @@ def _build_codex_header(named):
             lines.append(f"{emoji} {label}: <b>{c}</b>")
         else:
             lines.append(f"🔒 <s>{label}</s>: <b>0</b> — ещё не в коллекции")
+    # ── Формы скрутки: второй набор, тот, что не закрывается за день ──
+    # Набор редкостей выше состоит из 4 слотов и закрывается почти сразу (одна
+    # легендарка падает бесплатно за реферал, исповедь или алхимию) — после
+    # 4/4 Зейгарник умолкает навсегда, и собирать становится нечего.
+    # Формы дают вторую, ДЛИННУЮ ось: 8 силуэтов по 12.5%, полный набор — около
+    # 22 блантов ожидания. Ничего не добавлено в механику: форма выведена из
+    # того же хэша, что и картинка, поэтому она уже есть у каждого выданного
+    # бланта, и это ровно то, что игрок видит на карточке.
+    if blunt_forms is not None:
+        try:
+            have = {blunt_forms.form_of(it)["id"] for it in named}
+            catalog = blunt_forms.all_forms()
+            lines.append("")
+            lines.append(f"<b>🌀 Формы скрутки: {len(have)}/{blunt_forms.FORMS_TOTAL}</b>")
+            missing = [f["name"] for f in catalog if f["id"] not in have]
+            if not missing:
+                lines.append("<i>Все формы Искажения покорены. Такое видели немногие.</i>")
+            else:
+                # Показываем ровно то, чего не хватает, а не «осталось N»: у
+                # названной нехватки есть образ, у числа — нет.
+                shown = ", ".join(missing[:3])
+                tail = f" и ещё {len(missing) - 3}" if len(missing) > 3 else ""
+                lines.append(f"<i>Не хватает: {shown}{tail}</i>")
+        except Exception:
+            logger.exception("Не удалось посчитать формы скрутки")
+
     # Аспирация: чего не хватает до вершины (Зейгарник — тянет закрыть пробел).
     if counts.get("legendary", 0) == 0:
         lines.append("\n✨ <i>Легендарного пока нет — 2% с крафта или 🎰 джекпот дыма. "
