@@ -585,16 +585,27 @@ def _sparkles(draw, cx, cy, rng, spread, accent, count, u, direction=None):
         draw.line([(x, y - s), (x, y + s)], fill=col, width=w)
 
 
-def _relic(draw, cx, cy, length, ang, rng, accent, u):
+def _relic(draw, cx, cy, length, ang, rng, accent, u, lit=1, pose=None):
     """Скрутка: стилизованный иконический силуэт, вылепленный светом.
 
     Тело рисуется ПОЛОСАМИ с ламбертовым спадом поперёк толщины — три плоских
     полигона давали флаг, а не цилиндр (внутренний диапазон 2.6:1 против 5.5:1
     у освещённого тела). Плюс контровой свет по верхней грани: самый дешёвый и
     самый сильный признак объёма.
+
+    `lit` (+1/−1) — с какой стороны локальной оси лежит освещённая грань. При
+    зеркальной позе (скрутка смотрит вверх-ВЛЕВО) локальная нормаль n<0
+    указывает уже вниз-влево, и без переворота знака блик уезжал бы на нижнюю
+    грань — свет стал бы бить снизу. Один источник на карте важнее позы, поэтому
+    зеркалим не свет, а адресацию граней.
+
+    `pose` — паспорт индивидуальности: рисунок обёртки и degree прогара. Это то,
+    что отличает ОДИН блант от другого в превью 120px, где цвет редкости уже
+    прочитан, а мелкая филигрань физически не видна.
     """
+    pose = pose or {}
     ca, sa = math.cos(ang), math.sin(ang)
-    t0 = length * rng.uniform(0.050, 0.060)
+    t0 = length * rng.uniform(0.050, 0.060) * pose.get("girth", 1.0)
     t1 = t0 * rng.uniform(0.62, 0.74)
     half = length / 2
 
@@ -606,18 +617,18 @@ def _relic(draw, cx, cy, length, ang, rng, accent, u):
     for j in range(N):
         n0 = -1.0 + 2.0 * j / N
         n1 = -1.0 + 2.0 * (j + 1) / N
-        n = (n0 + n1) / 2
-        sh = 0.22 + 0.98 * max(0.0, math.cos((n + 0.40) * 1.45)) ** 1.6
+        nl = ((n0 + n1) / 2) * lit               # нормаль в системе источника света
+        sh = 0.22 + 0.98 * max(0.0, math.cos((nl + 0.40) * 1.45)) ** 1.6
         col = list(_sc(_WRAP_MID, sh))
-        if abs(n + 0.40) < 0.10:                      # спекуляр — узкая полоса
+        if abs(nl + 0.40) < 0.10:                     # спекуляр — узкая полоса
             col = [min(255, col[k] + (58, 52, 40)[k]) for k in range(3)]
-        if n > 0.55:                                  # тёплый отскок от уголька
-            b = (n - 0.55) / 0.45
+        if nl > 0.55:                                 # тёплый отскок от уголька
+            b = (nl - 0.55) / 0.45
             col = [min(255, col[k] + int((34, 16, 5)[k] * b)) for k in range(3)]
         draw.polygon([P(-half, n0 * t0), P(half, n0 * t1),
                       P(half, n1 * t1), P(-half, n1 * t0)], fill=tuple(col))
 
-    # контровой свет по верхней грани: холодный у мундштука → горячий у уголька
+    # контровой свет по освещённой грани: холодный у мундштука → горячий у уголька
     NS = 18
     cool = _sc(accent, 0.5)
     for i in range(NS):
@@ -627,38 +638,101 @@ def _relic(draw, cx, cy, length, ang, rng, accent, u):
         tt1 = t0 + (t1 - t0) * a1
         mm = ((a0 + a1) / 2) ** 2.2
         c = _mix(cool, (214, 168, 118), mm)
-        draw.line([P(u0, -tt0 * 0.97), P(u1, -tt1 * 0.97)], fill=c, width=max(1, int(u * 1.3)))
-    # нижняя грань — глухая тень
-    draw.line([P(-half, t0 * 0.98), P(half, t1 * 0.98)], fill=(22, 16, 14),
+        draw.line([P(u0, -tt0 * 0.97 * lit), P(u1, -tt1 * 0.97 * lit)],
+                  fill=c, width=max(1, int(u * 1.3)))
+    # теневая грань — глухая тень
+    draw.line([P(-half, t0 * 0.98 * lit), P(half, t1 * 0.98 * lit)], fill=(22, 16, 14),
               width=max(1, int(u * 1.2)))
 
-    # швы обёртки: смесь с цветом бумаги, иначе на легендарке предмет
-    # обесцвечивается золотом в «бетонную плиту»
+    # ── Рисунок обёртки: один из четырёх «почерков скрутки» ──
+    # Швы — самая крупная фактура на теле предмета, единственная деталь скрутки,
+    # переживающая уменьшение до превью. Пока рисунок был один на всех, два
+    # разных бланта в коллекции читались как одна карточка с разным именем.
+    # Смесь с цветом бумаги обязательна: на легендарке чистое золото
+    # обесцвечивает предмет в «бетонную плиту».
     seam = _mix(accent, _WRAP_LIGHT, 0.5)
-    ns = rng.randint(5, 8)
-    for i in range(ns):
-        uu = -half * 0.72 + (length * 0.85) * (i / max(1, ns - 1))
+    style = pose.get("seam_style", "rings")
+    sw = max(1, int(u * 1.1))
+
+    def _seam_at(uu, skew, k=0.9, width=sw):
         tt = t0 + (t1 - t0) * ((uu + half) / length)
-        sk = tt * 0.55
-        draw.line([P(uu - sk, -tt * 0.9), P(uu + sk, tt * 0.9)],
-                  fill=_sc(seam, 0.8), width=max(1, int(u * 1.1)))
+        sk = tt * skew
+        draw.line([P(uu - sk, -tt * k), P(uu + sk, tt * k)], fill=_sc(seam, 0.8), width=width)
+
+    ns = rng.randint(5, 8)
+    span = length * 0.85
+    if style == "braid":
+        # плетение: встречные диагонали дают ромбическую сетку
+        for i in range(ns):
+            uu = -half * 0.72 + span * (i / max(1, ns - 1))
+            _seam_at(uu, 0.85)
+            _seam_at(uu, -0.85)
+    elif style == "spiral":
+        # спираль: один наклон, шаг чаще — «туго закрученная»
+        for i in range(ns + 2):
+            uu = -half * 0.72 + span * (i / max(1, ns + 1))
+            _seam_at(uu, 1.25)
+    elif style == "banded":
+        # редкие широкие пояса — «грубая, кустарная» скрутка
+        for i in range(max(2, ns - 3)):
+            uu = -half * 0.66 + span * 0.9 * (i / max(1, ns - 4))
+            _seam_at(uu, 0.18, k=1.0, width=max(2, int(u * 2.2)))
+    else:  # "rings" — исходный ровный шов
+        for i in range(ns):
+            uu = -half * 0.72 + span * (i / max(1, ns - 1))
+            _seam_at(uu, 0.55)
 
     bu = -half * rng.uniform(0.60, 0.76)
     draw.line([P(bu, -t0 * 0.98), P(bu, t0 * 0.98)], fill=seam, width=max(2, int(u * 2.0)))
 
-    # пепел: градиент вдоль оси + тлеющие трещины (не серый колпачок)
-    au = half * 0.86
-    NA = 4
-    for j in range(NA):
-        b0, b1 = j / NA, (j + 1) / NA
-        aa0 = au + (half - au) * b0
-        aa1 = au + (half - au) * b1
-        c = _mix((74, 62, 56), (34, 28, 26), b0)
-        draw.polygon([P(aa0, -t1 * 0.98), P(aa1, -t1 * 0.95),
-                      P(aa1, t1 * 0.95), P(aa0, t1 * 0.98)], fill=c)
-    for _ in range(rng.randint(2, 3)):
-        uu = rng.uniform(au, half * 0.99)
-        draw.line([P(uu, -t1 * 0.5), P(uu, t1 * 0.5)], fill=(206, 92, 30), width=max(1, int(u)))
+    # пепел: градиент вдоль оси + тлеющие трещины (не серый колпачок).
+    # Длина прогара — вторая ось индивидуальности и единственная, что несёт
+    # ЛОР: «едва зажжён» против «скурен почти до пальцев» — разные истории
+    # одного предмета, читаемые мгновенно и без единого слова.
+    au = half * pose.get("ash", 0.86)
+    # Пепел рисуется НАВСТРЕЧУ жару, а не от него: раньше градиент светлел у
+    # основания и темнел к самому угольку — то есть ровно там, где уголь обязан
+    # раскаляться. При коротком прогаре это скрывал bloom уголька; при длинном
+    # (а теперь он бывает длинным) сегмент читался плоской серой накладкой.
+    # Здесь холодный спёкшийся пепел у тела → раскалённый уголь у кончика, с
+    # осыпающейся кромкой: крошка сужается и рвётся, а не идёт ровной трубой.
+    # Пепел строится ПРОДОЛЬНЫМИ волокнами, а не поперечными ломтями. Ломти
+    # давали идеально прямую линию прогара — предмет выглядел как деталь с
+    # отпиленным концом. Бумага так не горит: линия огня рваная, и каждое
+    # волокно догорает на свою глубину. Разброс старта по волокнам — и есть
+    # тот самый рваный фронт.
+    #
+    # Тона держим ГОРЯЧИМИ с запасом: поверх скрутки ляжет холодный передний
+    # дым (screen), и всё, что здесь выглядит «в самый раз», после него уходит
+    # в синевато-серую плиту. Компенсируем на входе.
+    M = 9
+    _ash_cold, _ash_warm = (66, 57, 53), (196, 96, 40)
+    for mm in range(M):
+        v0 = -1.0 + 2.0 * mm / M
+        v1 = -1.0 + 2.0 * (mm + 1) / M
+        # каждое волокно догорело на свою глубину → фронт огня неровный
+        start = au + (half - au) * rng.uniform(-0.22, 0.20)
+        NA = 6
+        for j in range(NA):
+            b0, b1 = j / NA, (j + 1) / NA
+            aa0 = start + (half - start) * b0
+            aa1 = start + (half - start) * b1
+            heat = b0 ** 1.35                             # жар копится у кончика
+            c = list(_mix(_ash_cold, _ash_warm, heat))
+            d = rng.uniform(0.84, 1.14)                   # спёкшийся уголь неоднороден
+            c = [max(0, min(255, int(v * d))) for v in c]
+            # крошка осыпается: к кончику волокно тоньше
+            k0 = (0.99 - 0.14 * b0) * rng.uniform(0.94, 1.02)
+            k1 = (0.99 - 0.14 * b1) * rng.uniform(0.94, 1.02)
+            draw.polygon([P(aa0, v0 * t1 * k0), P(aa1, v0 * t1 * k1),
+                          P(aa1, v1 * t1 * k1), P(aa0, v1 * t1 * k0)], fill=tuple(c))
+    # тлеющие трещины — только в горячей половине, иначе «светится вся сигара»
+    for _ in range(rng.randint(3, 5)):
+        b = rng.uniform(0.45, 0.97)
+        uu = au + (half - au) * b
+        sp = t1 * rng.uniform(0.35, 0.72)
+        glow = _mix((214, 96, 32), (255, 190, 88), b)
+        draw.line([P(uu, -sp), P(uu, sp)], fill=glow, width=max(1, int(u)))
 
     return P(half, 0) + (t1,)
 
@@ -687,6 +761,56 @@ def _ember(art, ex, ey, tip_t, ang, u):
 
 # ── Сборка ──────────────────────────────────────────────────────────
 
+def _pose(rng, pal):
+    """Поза карты — то, что отличает ОДИН блант от другого на превью.
+
+    Коллекция существует только там, где два предмета различимы. Раньше вся
+    вариативность лежала в шуме: звёздное поле, завитки дыма, серийник. Всё это
+    исчезает при уменьшении до превью, и владелец десяти именных блантов видел
+    десять одинаковых карточек с разными подписями — новизны нет, а значит нет
+    и повода скрутить одиннадцатый.
+
+    Различимость обязана жить в СИЛУЭТЕ и КРУПНОЙ форме — единственном, что
+    переживает даунскейл: направление скрутки, наклон, длина, толщина, точка
+    уголька, прогар, рисунок обёртки, характер дыма, устройство фона.
+
+    Чего здесь намеренно НЕТ — цвета. Цвет остаётся носителем РЕДКОСТИ: если
+    его сделать ещё и носителем индивидуальности, тир перестанет читаться, а
+    редкость важнее личности. Поэтому личность кодируется только структурой.
+    """
+    mirrored = rng.random() < 0.5
+    if mirrored:
+        # скрутка смотрит вверх-ВЛЕВО: самый сильный различитель силуэта,
+        # видимый даже там, где не читается уже ничего
+        ang = math.radians(rng.uniform(-152, -134))
+        fx = rng.uniform(0.335, 0.395)
+        lit = -1
+    else:
+        ang = math.radians(rng.uniform(-46, -28))
+        fx = rng.uniform(0.605, 0.665)
+        lit = 1
+    return {
+        "mirrored": mirrored,
+        "ang": ang,
+        "lit": lit,
+        "fx": fx,
+        "fy": rng.uniform(0.295, 0.375),
+        # длина/толщина — множители ПОВЕРХ ступени редкости: тир сохраняет
+        # свой порядок величин, личность играет внутри него
+        "len_k": rng.uniform(0.90, 1.07),
+        "girth": rng.uniform(0.90, 1.12),
+        "ash": rng.uniform(0.66, 0.93),
+        "seam_style": rng.choice(("rings", "spiral", "braid", "banded")),
+        "ribbons": rng.randint(2, 4),
+        "smoke_k": rng.uniform(0.85, 1.20),
+        # фон: центр розетки и плотность поля — крупная структура заднего плана
+        "ros_x": rng.uniform(0.36, 0.58),
+        "ros_y": rng.uniform(0.36, 0.54),
+        "ros_k": rng.uniform(0.80, 1.02),
+        "star_k": rng.uniform(0.85, 1.15),
+    }
+
+
 def render_blunt_card(item: dict, owner_name: str = "") -> bytes:
     """JPEG-байты коллекционной карточки для бланта `item`. Детерминирован по hash."""
     rarity = item.get("rarity", "common")
@@ -697,6 +821,11 @@ def render_blunt_card(item: dict, owner_name: str = "") -> bytes:
     hexs = re.sub(r"[^0-9a-fA-F]", "", seed_src)
     seed = int(hexs, 16) if hexs else abs(hash(seed_src))
     rng = random.Random(seed)
+    # Поза тянется ПЕРВОЙ из потока: так индивидуальность карты определяется
+    # старшими битами хэша и не зависит от того, сколько случайных величин
+    # израсходует по пути тот или иной тир (иначе редкость незаметно смещала бы
+    # позу, и «личность» бланта менялась бы вместе с апгрейдом тира).
+    pose = _pose(rng, pal)
 
     W, H = _W * _SCALE, _H * _SCALE
     u = W / 640.0
@@ -721,12 +850,15 @@ def render_blunt_card(item: dict, owner_name: str = "") -> bytes:
     # Лёгкое расфокусирование фона — самый убедительный признак глубины.
     bg = Image.new("RGB", (Wa, Ha), (0, 0, 0))
     bd = ImageDraw.Draw(bg)
-    ros_cx, ros_cy = Wa * 0.46, Ha * 0.44      # смещена от уголька → мишень исчезает
-    _guilloche(bd, ros_cx, ros_cy, rng, _sc(frame, 0.42), art_r * 0.88, pal["rosette"], thin)
-    _guilloche(bd, ros_cx, ros_cy, rng, _sc(accent, 0.26), art_r * 0.56,
+    # розетка смещена от уголька → мишень исчезает; её центр индивидуален,
+    # поэтому «погода» заднего плана у каждой карты своя
+    ros_cx, ros_cy = Wa * pose["ros_x"], Ha * pose["ros_y"]
+    ros_r = art_r * pose["ros_k"]
+    _guilloche(bd, ros_cx, ros_cy, rng, _sc(frame, 0.42), ros_r * 0.88, pal["rosette"], thin)
+    _guilloche(bd, ros_cx, ros_cy, rng, _sc(accent, 0.26), ros_r * 0.56,
                max(1, pal["rosette"] - 2), thin)
-    _guilloche(bd, ros_cx, ros_cy, rng, _sc(frame, 0.85), art_r * 0.72, 1, thin)
-    for _ in range(pal["stars"]):
+    _guilloche(bd, ros_cx, ros_cy, rng, _sc(frame, 0.85), ros_r * 0.72, 1, thin)
+    for _ in range(int(pal["stars"] * pose["star_k"])):
         # кластеризация: равномерный uniform даёт шум, а не звёздное поле
         if rng.random() < 0.55:
             sx = min(Wa, max(0, rng.gauss(Wa * 0.5, Wa * 0.22)))
@@ -739,9 +871,27 @@ def render_blunt_card(item: dict, owner_name: str = "") -> bytes:
     art = ImageChops.screen(art, _dim(bg.filter(ImageFilter.GaussianBlur(u * 1.6)), 0.62))
 
     # ── композиция строится ОТ точки интереса ──
-    ember_x, ember_y = Wa * 0.635, Ha * 0.335          # верхнее правое пересечение третей
-    ang = math.radians(rng.uniform(-40, -32))           # настоящая диагональ
-    item_len = art_r * (1.62 if pal["burst"] else 1.45)
+    # Точка интереса, наклон и длина — из позы: пересечение третей остаётся
+    # пересечением третей (левое или правое), но КАКОЕ именно и под каким
+    # углом входит скрутка — паспорт конкретного бланта.
+    ember_x, ember_y = Wa * pose["fx"], Ha * pose["fy"]
+    ang = pose["ang"]
+    item_len = art_r * (1.62 if pal["burst"] else 1.45) * pose["len_k"]
+
+    # Удержание в кадре. Уголёк закреплён на пересечении третей — это якорь
+    # композиции, двигать его нельзя. Поэтому при неудачном сочетании наклона и
+    # длины укорачиваем ХВОСТ: обрезанный рамкой мундштук читается как брак
+    # печати, а не как приём, и рушит обещание «это напечатанный предмет».
+    _ca, _sa = math.cos(ang), math.sin(ang)
+    _pad = art_r * 0.06
+    _lim = [item_len]
+    if _ca > 1e-6:
+        _lim.append((ember_x - _pad) / _ca)
+    elif _ca < -1e-6:
+        _lim.append((Wa - _pad - ember_x) / -_ca)
+    if _sa < -1e-6:                       # скрутка всегда смотрит вверх → хвост вниз
+        _lim.append((Ha - _pad - ember_y) / -_sa)
+    item_len = max(art_r * 0.75, min(_lim))
     half = item_len / 2
     cx_item = ember_x - half * math.cos(ang)
     cy_item = ember_y - half * math.sin(ang)
@@ -783,7 +933,7 @@ def render_blunt_card(item: dict, owner_name: str = "") -> bytes:
     # дым ЗА предметом (перекрытие → дым обвивает, а не лежит сверху)
     sm_back = Image.new("RGB", (Wa, Ha), (0, 0, 0))
     _smoke(ImageDraw.Draw(sm_back), ember_x, ember_y, rng, accent,
-           art_r * 0.34, art_r * 0.95, 2)
+           art_r * 0.34 * pose["smoke_k"], art_r * 0.95, 2)
     art = ImageChops.screen(art, _dim(sm_back.filter(ImageFilter.GaussianBlur(u * 5)), 0.7))
 
     # контактная тень под предметом → отрыв от плоскости
@@ -801,11 +951,13 @@ def render_blunt_card(item: dict, owner_name: str = "") -> bytes:
 
     # предмет
     ad = ImageDraw.Draw(art)
-    ex, ey, tip_t = _relic(ad, cx_item, cy_item, item_len, ang, rng, accent, u)
+    ex, ey, tip_t = _relic(ad, cx_item, cy_item, item_len, ang, rng, accent, u,
+                           lit=pose["lit"], pose=pose)
 
     # дым ПЕРЕД предметом
     sm_fr = Image.new("RGB", (Wa, Ha), (0, 0, 0))
-    _smoke(ImageDraw.Draw(sm_fr), ex, ey, rng, accent, art_r * 0.36, art_r * 1.05, 3)
+    _smoke(ImageDraw.Draw(sm_fr), ex, ey, rng, accent,
+           art_r * 0.36 * pose["smoke_k"], art_r * 1.05, pose["ribbons"])
     smoke_blur = sm_fr.filter(ImageFilter.GaussianBlur(u * 4.5))
     art = ImageChops.screen(art, smoke_blur)
 
