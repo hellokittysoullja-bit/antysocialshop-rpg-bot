@@ -276,6 +276,42 @@ def test_pure(passed):
     assert "ЧАС УДАЧИ" in _happy_hour_banner(_Ctx({"happy_hour": True}), n)  # без end не падает
     passed.append("Час Удачи: баннер FOMO с отсчётом, fail-closed")
 
+    # --- Час Удачи переживает TTL кэша (жил 10 мин вместо заявленных 30) ---
+    # Флаг лежал только в ctx.cache — TTLCache(ttl=600) из main.py. Через 10
+    # минут он испарялся, «×2» тихо выключалось, а баннер продолжал обещать
+    # «Осталось 25м». Источник правды теперь — дедлайн на самом ctx.
+    from bot import happy_hour_active
+    from cachetools import TTLCache as _TTL
+    class _CtxE:
+        def __init__(s, end, cache=None):
+            s.happy_hour_end = end
+            s.cache = cache if cache is not None else {}
+    _n = datetime.now()
+    assert happy_hour_active(_CtxE(_n + timedelta(minutes=25)))       # идёт
+    assert not happy_hour_active(_CtxE(_n - timedelta(minutes=1)))    # вышел
+    assert not happy_hour_active(None)                                # fail-closed
+    # ключевой сценарий: кэш пуст (истёк ttl), но Час ещё не кончился
+    assert happy_hour_active(_CtxE(_n + timedelta(minutes=18), _TTL(maxsize=4, ttl=600)))
+    # старый контракт (объект только с .cache) продолжает работать
+    class _CtxOld:
+        def __init__(s, cache): s.cache = cache
+    assert happy_hour_active(_CtxOld({"happy_hour": True}))
+    assert not happy_hour_active(_CtxOld({"happy_hour": False}))
+    passed.append("Час Удачи переживает TTL кэша (30 мин, а не 10)")
+
+    # --- alchemy_count должен расти: от него зависит высший приз игры ---
+    # Счётчик не инкрементировался нигде → ачивки alchemy_15/alchemy_50
+    # недостижимы → «🌀 Лунный лорд» (закрыть ВСЕ достижения) заперт навсегда.
+    _ach_fields = {c[0] for c in ACHIEVEMENT_CONDITIONS.values()}
+    _bot_src = open(os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "bot.py"), encoding="utf-8").read()
+    _never = sorted(f for f in _ach_fields
+                    if f"p.{f} = " not in _bot_src and f"p.{f} +=" not in _bot_src
+                    and f"player.{f} = " not in _bot_src and f"player.{f} +=" not in _bot_src)
+    assert not _never, ("Поля, от которых зависят достижения, нигде не растут "
+                        "(ачивки недостижимы, а с ними и «Лунный лорд»): " + ", ".join(_never))
+    passed.append("Все поля-счётчики достижений реально инкрементируются в коде")
+
     # --- Персистентность: каждое поле Player пишется в БД (ловит «поле живёт
     #     только в кэше» — так терялись onboarding_step/pet_hunger/repent_count) ---
     from repository import PLAYER_COLUMNS

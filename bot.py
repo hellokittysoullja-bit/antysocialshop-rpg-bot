@@ -403,6 +403,9 @@ class AchievementService:
         
 class AppContext:
     def __init__(self, db_pool, redis_client, cache, settings, repo, war_service, pet_service, achievement_service):
+        # Дедлайн Часа Удачи живёт на самом контексте, а не в TTLCache(ttl=600):
+        # иначе 30-минутный Час умирал на 10-й минуте (см. happy_hour_active).
+        self.happy_hour_end = None
         self.db_pool = db_pool
         self.redis = redis_client
         self.cache = cache
@@ -2526,7 +2529,7 @@ def _calculate_farm_reward(player, context) -> tuple[int, bool, bool]:
     # Happy hour – удвоение. Флаг живёт в ctx.cache (как и во всех остальных
     # механиках); раньше фарм ошибочно читал его из bot_data → ×2 не срабатывал.
     _ctx = context.bot_data.get("ctx")
-    happy = bool(_ctx and _ctx.cache and _ctx.cache.get("happy_hour", False))
+    happy = happy_hour_active(_ctx)
     if happy:
         earned *= HAPPY_HOUR_MULTIPLIER
 
@@ -3519,7 +3522,7 @@ async def do_smoke(update, context, ctx, player):
             return SmokeStatus.NO_BLUNTS, None
 
         save = (p.guild == "WHITE" and random.randint(1, 100) <= 20)
-        earned, outcome = calculate_smoke_reward(p, ctx.cache.get("happy_hour", False))
+        earned, outcome = calculate_smoke_reward(p, happy_hour_active(ctx))
 
         old_count = p.smoke_count or 0
         new_count = old_count + 1
@@ -3620,7 +3623,7 @@ async def ritual_callback(update, context):
             return ("cooldown", hrs, rem // 60)
 
         reward = 150
-        if ctx.cache.get("happy_hour", False):
+        if happy_hour_active(ctx):
             reward *= HAPPY_HOUR_MULTIPLIER
         extra = 15 if random.random() < 0.1 else 0
 
@@ -3803,7 +3806,7 @@ async def plant_harvest_handler(update, context, ctx):
     query = update.callback_query
     uid = query.from_user.id
     now = datetime.now()
-    happy = bool(ctx.cache.get("happy_hour", False))
+    happy = happy_hour_active(ctx)
 
     async def _harvest(p, conn):
         level = p.passive_level or 0
@@ -4916,7 +4919,7 @@ async def _process_wheel(update, context, uid, player, cfg, ctx):
         near_miss = ptype != "jackpot" and r >= 0.90
         if ptype == "jackpot" and random.random() < 0.5:
             prize *= 2
-        if ctx.cache.get("happy_hour") and ptype in ("oac", "jackpot"):
+        if happy_hour_active(ctx) and ptype in ("oac", "jackpot"):
             prize *= HAPPY_HOUR_MULTIPLIER
 
         if ptype in ("oac", "jackpot"):
@@ -5344,6 +5347,10 @@ async def _process_alchemy_confirm(update, context, uid, player, cfg, ctx):
             return (AlchemyResult.NO_RESOURCES,)
         p.blunts -= cfg["alchemy"]["cost_blunts"]
         p.balance -= cfg["alchemy"]["cost_oac"]
+        # Счётчик не инкрементировался НИГДЕ: ачивки alchemy_15/alchemy_50 были
+        # недостижимы, а из-за них недостижим и «🌀 Лунный лорд» — приз за
+        # закрытие ВСЕХ достижений. Высшая цель игры была заперта навсегда.
+        p.alchemy_count = (p.alchemy_count or 0) + 1
         r = random.random()
         res = ""
         for prob, effect, value in cfg["alchemy"]["reactions"]:
@@ -6441,12 +6448,32 @@ async def debug_pet(update, context, ctx):
 # ───────────────────────────────────────────────
 # НОВАЯ ГЛАВНАЯ ПАНЕЛЬ (КАРТА 3, СОСТОЯНИЯ А–З)
 # ───────────────────────────────────────────────
+def happy_hour_active(ctx) -> bool:
+    """Активен ли Час Удачи.
+
+    Источник правды — дедлайн на самом ctx: он переживает TTLCache, у которого
+    ttl=600 c (main.py). Раньше флаг жил ТОЛЬКО в кэше и испарялся через 10
+    минут, хотя Час заявлен 30-минутным и выключается таском через 30 → две
+    трети времени «×2» молча не работало, а баннер продолжал обещать
+    «Осталось 25м — фарми и дуй прямо сейчас!». Кэш оставлен запасным каналом
+    (совместимость и тесты).
+    """
+    if ctx is None:
+        return False
+    end = getattr(ctx, "happy_hour_end", None)
+    if end is not None:
+        return datetime.now() < end
+    cache = getattr(ctx, "cache", None)
+    return bool(cache and cache.get("happy_hour", False))
+
+
 def _happy_hour_banner(ctx, now):
     """Живой баннер Часа Удачи с обратным отсчётом. Чистая, тестируемая.
     Показывается в момент входа → FOMO бьёт именно когда игрок уже в игре."""
-    if not (ctx and getattr(ctx, "cache", None) and ctx.cache.get("happy_hour")):
+    if not happy_hour_active(ctx):
         return ""
-    end = ctx.cache.get("happy_hour_end")
+    end = (getattr(ctx, "happy_hour_end", None)
+           or (getattr(ctx, "cache", None) or {}).get("happy_hour_end"))
     if end and now < end:
         mins = max(1, math.ceil((end - now).total_seconds() / 60))
         tail = f"Осталось {mins}м — фарми и дуй прямо сейчас!"
@@ -8020,8 +8047,10 @@ async def update_pulse(ctx: AppContext):
 async def happy_hour_trigger(ctx: AppContext):
     if not ctx:
         return
-    ctx.cache["happy_hour"] = True
-    ctx.cache["happy_hour_end"] = datetime.now() + timedelta(minutes=ctx.settings.happy_hour_duration_min)
+    _end = datetime.now() + timedelta(minutes=ctx.settings.happy_hour_duration_min)
+    ctx.happy_hour_end = _end          # авторитетный источник, без TTL
+    ctx.cache["happy_hour"] = True     # совместимость
+    ctx.cache["happy_hour_end"] = _end
     try:
         await _send_http_message(ctx, "@guild_antysocial",
             "🎉 <b>ЧАС УДАЧИ!</b> 🌠 Все действия приносят x2 OAC 🍬 (30 минут)!")
@@ -8033,6 +8062,7 @@ async def happy_hour_trigger(ctx: AppContext):
 
 async def _reset_happy_hour_after(ctx: AppContext, delay_seconds: int):
     await asyncio.sleep(delay_seconds)
+    ctx.happy_hour_end = None
     ctx.cache["happy_hour"] = False
     try:
         await _send_http_message(ctx, "@guild_antysocial", "⏳ Час Удачи завершён.")
