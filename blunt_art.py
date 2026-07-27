@@ -16,6 +16,9 @@
 * Редкость кодируется СТРУКТУРНО, а не только цветом (цвет — не единственный
   носитель смысла: ~8% мужчин не различают): число пипсов, плотность орнамента,
   двойная рамка, фольга, плотность звёздного поля.
+* Центральный арт — абстрактная реликвия: гранёные кристаллы в клубах
+  мистического дыма и искры. Ничего не изображается буквально — карта несёт
+  «мистику Искажения», а не предмет.
 * Материальность: радиальная виньетка + зерно плёнки + bloom-свечение +
   фольговый градиент. Плоская заливка читается как дёшево; свет и текстура —
   как дорого.
@@ -227,51 +230,102 @@ def _corner_ornaments(draw, w, h, m, rings, frame, accent):
                        (ax + sx * off, ay + sy * (off + ln))], fill=col, width=wgt)
 
 
-def _sigil(draw, cx, cy, rng, glow, accent, frame, radius):
-    """Гравированная эмблема-сигил. Семя — из хэша, поэтому уникальна на блант.
+def _crystal(draw, cx, cy, w, h, rng, glow, accent, frame, wgt):
+    """Гранёный кристалл: силуэт кварцевого клина + внутренние грани.
 
-    Слои: полупрозрачное ядро → концентрические кольца → лучи → звёздный
-    полигон → сияющие узлы. Многослойность = ощущение гравюры, а не вайрфрейма.
+    Грани — то, что отличает «кристалл» от «многоугольника»: свет должен
+    читаться как преломление внутри камня, а не как заливка фигуры.
     """
-    points = rng.randint(5, 9)
-    step = rng.choice([2, 3, 4])
-    rot = rng.uniform(0, math.pi)
-    wgt = max(2, int(radius / 55))
+    top = (cx, cy - h / 2)
+    bot = (cx, cy + h / 2)
+    sh_l, sh_r = (cx - w / 2, cy - h * 0.16), (cx + w / 2, cy - h * 0.16)
+    bs_l, bs_r = (cx - w * 0.42, cy + h * 0.22), (cx + w * 0.42, cy + h * 0.22)
+    body = [top, sh_r, bs_r, bot, bs_l, sh_l]
 
-    # ядро — приглушённая заливка, чтобы центр не «дырявился» и не выжигался
-    core_r = radius * 0.26
-    core_col = tuple(int(c * 0.55) for c in glow)
-    draw.ellipse([cx - core_r, cy - core_r, cx + core_r, cy + core_r], fill=core_col)
+    # тело — приглушённая заливка (яркая выжгла бы центр в белое пятно)
+    draw.polygon(body, fill=tuple(int(c * 0.5) for c in glow))
 
-    # концентрические кольца
-    for k in range(rng.randint(2, 4)):
-        rr = radius * (0.42 + 0.20 * k)
-        draw.ellipse([cx - rr, cy - rr, cx + rr, cy + rr],
-                     outline=frame, width=max(1, wgt // 2))
+    # блик по левой грани — источник света один, иначе камень «плоский»
+    draw.polygon([top, sh_l, (cx - w * 0.10, cy + h * 0.06)],
+                 fill=tuple(int(c * 0.85) for c in glow))
 
-    # радиальные лучи
-    rays = rng.randint(8, 16)
-    for i in range(rays):
-        a = 2 * math.pi * i / rays + rot
-        r0, r1 = radius * 0.16, radius * rng.uniform(0.72, 1.08)
-        col = accent if i % 2 == 0 else frame
-        draw.line([(cx + r0 * math.cos(a), cy + r0 * math.sin(a)),
-                   (cx + r1 * math.cos(a), cy + r1 * math.sin(a))],
-                  fill=col, width=max(1, wgt // 2))
+    # внутренние грани: свет ломается по рёбрам
+    draw.line([top, bs_l], fill=frame, width=max(1, wgt // 2))
+    draw.line([top, bs_r], fill=frame, width=max(1, wgt // 2))
+    draw.line([sh_l, sh_r], fill=frame, width=max(1, wgt // 2))
+    draw.line([top, bot], fill=tuple(int(c * 0.8) for c in accent), width=max(1, wgt // 2))
 
-    # звёздный полигон — «подпись» бланта
-    verts = [(cx + radius * math.cos(rot + 2 * math.pi * i / points),
-              cy + radius * math.sin(rot + 2 * math.pi * i / points))
-             for i in range(points)]
-    poly = [verts[(i * step) % points] for i in range(points)]
-    draw.line(poly + [poly[0]], fill=accent, width=wgt, joint="curve")
+    # рёбра силуэта
+    draw.line(body + [top], fill=accent, width=wgt, joint="curve")
 
-    # сияющие узлы на вершинах (компактные — крупные превращаются в белые кляксы)
-    for (vx, vy) in verts:
-        rr = max(2, radius // 34)
-        draw.ellipse([vx - rr * 1.7, vy - rr * 1.7, vx + rr * 1.7, vy + rr * 1.7],
-                     fill=tuple(int(c * 0.6) for c in glow))
-        draw.ellipse([vx - rr, vy - rr, vx + rr, vy + rr], fill=accent)
+
+def _smoke(draw, cx, cy, rng, glow, accent, spread, height, ribbons):
+    """Клубы дыма: восходящие ленты, вьющиеся по синусоиде. Уникальны по хэшу.
+
+    Рисуется ЧАСТЫМИ мелкими кружками и обязательно размывается вызывающим
+    кодом: без размытия и с крупным шагом лента читается как цепочка «сосисок»,
+    а не как дым. Мягкость здесь — не украшение, а условие правдоподобия.
+    """
+    for _ in range(ribbons):
+        x = cx + rng.uniform(-spread * 0.9, spread * 0.9)
+        y = cy + rng.uniform(-height * 0.08, height * 0.26)
+        amp = rng.uniform(spread * 0.18, spread * 0.50)
+        freq = rng.uniform(1.3, 3.0)
+        phase = rng.uniform(0, math.pi * 2)
+        rise = height * rng.uniform(0.60, 1.10)
+        r0 = spread * rng.uniform(0.030, 0.058)
+        steps = 130
+        for i in range(steps):
+            t = i / steps
+            px = x + math.sin(phase + t * freq * math.pi) * amp * t
+            py = y - rise * t
+            # лента расширяется и тает по мере подъёма — как настоящий дым
+            r = r0 * (0.5 + 1.9 * t)
+            fade = (1.0 - t) ** 1.4
+            base = accent if i % 26 == 0 else glow
+            col = tuple(int(c * (0.10 + 0.62 * fade)) for c in base)
+            draw.ellipse([px - r, py - r, px + r, py + r], fill=col)
+
+
+def _sparkles(draw, cx, cy, rng, spread, accent, glow, count, unit):
+    """Мистические искры-блики (четырёхлучевые), а не «чертёж» из линий."""
+    for _ in range(count):
+        a = rng.uniform(0, math.pi * 2)
+        d = spread * rng.uniform(0.32, 1.15)
+        x, y = cx + math.cos(a) * d, cy + math.sin(a) * d * 0.85
+        s = unit * rng.uniform(3.0, 9.0)
+        w = max(1, int(unit * 1.1))
+        col = accent if rng.random() < 0.6 else glow
+        draw.line([(x - s, y), (x + s, y)], fill=col, width=w)
+        draw.line([(x, y - s), (x, y + s)], fill=col, width=w)
+        rr = max(1, s * 0.17)
+        draw.ellipse([x - rr, y - rr, x + rr, y + rr], fill=accent)
+
+
+def _relic(draw, cx, cy, rng, glow, accent, frame, radius, unit):
+    """Кристаллы + искры. Дым рисуется отдельным слоем (ему нужно размытие).
+
+    Абстрактная реликвия, а не изображение предмета: дым и камень несут
+    «мистику Искажения», ничего не показывая буквально.
+    """
+    wgt = max(2, int(radius / 46))
+
+    # главный кристалл + 1–2 спутника (композиция, а не одинокая фигура)
+    main_h = radius * rng.uniform(1.05, 1.30)
+    main_w = main_h * rng.uniform(0.34, 0.46)
+    _crystal(draw, cx, cy, main_w, main_h, rng, glow, accent, frame, wgt)
+
+    for _ in range(rng.randint(1, 2)):
+        side = rng.choice([-1, 1])
+        sh = main_h * rng.uniform(0.36, 0.58)
+        sw = sh * rng.uniform(0.36, 0.50)
+        sx = cx + side * main_w * rng.uniform(0.9, 1.55)
+        sy = cy + radius * rng.uniform(0.14, 0.40)
+        _crystal(draw, sx, sy, sw, sh, rng, glow, accent, frame, max(1, wgt - 1))
+
+    # искры поверх — блеск камня
+    _sparkles(draw, cx, cy, rng, radius * 0.95, accent, glow,
+              count=rng.randint(7, 13), unit=unit)
 
 
 def _pips(draw, cx, y, count, total, accent, frame, unit):
@@ -327,9 +381,19 @@ def render_blunt_card(item: dict, owner_name: str = "") -> bytes:
     if foil is not None:
         img = ImageChops.screen(img, foil)
 
-    # ── сигил на отдельном слое + bloom ──
+    # ── дым: свой слой с сильным размытием ──
+    # Без размытия лента из кружков читается как цепочка «сосисок». Мягкий,
+    # приглушённый дым лежит ПОД кристаллами и создаёт воздух вокруг них.
+    smoke = Image.new("RGB", (W, H), (0, 0, 0))
+    _smoke(ImageDraw.Draw(smoke), gcx, gcy + int(W * 0.07), rng, glow, accent,
+           spread=W * 0.26, height=W * 0.46, ribbons=rng.randint(5, 8))
+    smoke = smoke.filter(ImageFilter.GaussianBlur(u * 4.5))
+    img = ImageChops.screen(img, smoke)
+
+    # ── реликвия (кристаллы + искры) на отдельном слое + bloom ──
     sig = Image.new("RGB", (W, H), (0, 0, 0))
-    _sigil(ImageDraw.Draw(sig), gcx, gcy, rng, glow, accent, frame, radius=int(W * 0.29))
+    _relic(ImageDraw.Draw(sig), gcx, gcy, rng, glow, accent, frame,
+           radius=int(W * 0.29), unit=u)
     img = ImageChops.screen(img, _dim(sig.filter(ImageFilter.GaussianBlur(u * 4)), 0.55))
     img = ImageChops.screen(img, sig)  # чёткий штрих поверх ореола
 
