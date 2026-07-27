@@ -21,7 +21,10 @@ except Exception as e:  # Pillow отсутствует — как и в про�
     print(f"  SKIP  blunt_art недоступен ({e}) — прод деградирует на текст")
     raise SystemExit(0)
 
-PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+JPEG_MAGIC = b"\xff\xd8\xff"
+# Карта уходит фото-сообщением в Telegram: держим её лёгкой, иначе отправка
+# тормозит, а зерно плёнки раздувает файл (на PNG было ~830 КБ).
+MAX_BYTES = 400_000
 
 
 def _mk(name, rarity, h):
@@ -29,15 +32,42 @@ def _mk(name, rarity, h):
             "rare_number": f"{rarity[0].upper()}-1234", "id": f"blunt_{h}"}
 
 
-def check_all_rarities_valid_png():
+def check_all_rarities_valid_image():
     bad = []
     for r in ("common", "rare", "epic", "legendary"):
-        png = blunt_art.render_blunt_card(_mk("Крик Бездны", r, "0xabc123def456"), "ghost")
-        if not png.startswith(PNG_MAGIC):
-            bad.append(f"{r}: не PNG")
-        if len(png) < 3000:
-            bad.append(f"{r}: подозрительно маленький PNG ({len(png)}B)")
+        blob = blunt_art.render_blunt_card(_mk("Крик Бездны", r, "0xabc123def456"), "ghost")
+        if not blob.startswith(JPEG_MAGIC):
+            bad.append(f"{r}: не JPEG")
+        if len(blob) < 3000:
+            bad.append(f"{r}: подозрительно маленькая картинка ({len(blob)}B)")
+        if len(blob) > MAX_BYTES:
+            bad.append(f"{r}: слишком тяжёлая ({len(blob)}B > {MAX_BYTES}) — Telegram будет тормозить")
     assert not bad, "Рендер карточки сломан:\n  " + "\n  ".join(bad)
+
+
+def check_rarity_hierarchy_not_color_only():
+    """Редкость обязана читаться СТРУКТУРНО, а не только цветом (~8% дальтоников).
+
+    Проверяем сам контракт данных: у более высокого тира строго больше делений
+    статуса (пипсов), а орнамент/фольга не убывают. Если кто-то в будущем
+    сведёт различие тиров к одному цвету — тест упадёт.
+    """
+    order = ("common", "rare", "epic", "legendary")
+    bad = []
+    prev = None
+    for r in order:
+        cfg = blunt_art._RARITY[r]
+        if prev is not None:
+            if cfg["pips"] <= prev["pips"]:
+                bad.append(f"{r}: пипсов не больше, чем у предыдущего тира")
+            if cfg["rings"] < prev["rings"]:
+                bad.append(f"{r}: орнамент беднее предыдущего тира")
+            if cfg["foil"] < prev["foil"]:
+                bad.append(f"{r}: фольга слабее предыдущего тира")
+            if cfg["stars"] <= prev["stars"]:
+                bad.append(f"{r}: звёздное поле не плотнее предыдущего тира")
+        prev = cfg
+    assert not bad, "Иерархия редкости держится только на цвете:\n  " + "\n  ".join(bad)
 
 
 def check_deterministic():
@@ -63,9 +93,9 @@ def check_robust_to_bad_data():
     ]
     for c in cases:
         try:
-            png = blunt_art.render_blunt_card(c, "")
-            if not png.startswith(PNG_MAGIC):
-                bad.append(f"{c}: не PNG")
+            blob = blunt_art.render_blunt_card(c, "")
+            if not blob.startswith(JPEG_MAGIC):
+                bad.append(f"{c}: не JPEG")
         except Exception as e:
             bad.append(f"{c}: упал ({e})")
     assert not bad, "Рендер падает на кривых данных (должен деградировать мягко):\n  " + "\n  ".join(bad)
@@ -73,8 +103,10 @@ def check_robust_to_bad_data():
 
 def main():
     passed = []
-    check_all_rarities_valid_png()
-    passed.append("все 4 редкости → валидный PNG")
+    check_all_rarities_valid_image()
+    passed.append("все 4 редкости → валидный JPEG нормального веса")
+    check_rarity_hierarchy_not_color_only()
+    passed.append("иерархия редкости структурная (пипсы/орнамент/фольга), не только цвет")
     check_deterministic()
     passed.append("детерминизм: один блант → та же карта")
     check_unique_by_hash()
