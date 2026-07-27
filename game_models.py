@@ -61,6 +61,10 @@ class Player(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     pet_hunger: int = 100
     daily_progress: dict = Field(default_factory=dict)
+    # Алтарь Вечности: эндгейм-сток. Растёт ТОЛЬКО добровольной жертвой из
+    # balance, никогда не убывает и не конвертируется назад — честный
+    # односторонний счётчик статуса, не фарм-петля (нечем эксплойтить).
+    prestige: int = 0
 
     # «Инвентарь не загружался» ≠ «инвентарь пуст». get_by_id(with_inventory=
     # False) отдаёт inventory=[] ради экономии, а save() писал этот пустой
