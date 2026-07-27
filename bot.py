@@ -843,6 +843,7 @@ def _quest_progress_counts(template, progress, guild, is_veteran, has_pet):
     conditions = {
         "guild_black": guild == "BLACK",
         "guild_white": guild == "WHITE",
+        "has_guild": bool(guild),
         "is_veteran_and_has_pet": is_veteran and has_pet,
     }
     tasks = [t for t in template.get("tasks", [])
@@ -2184,6 +2185,7 @@ def next_quest_step(player, exclude_key: str = None):
     conditions = {
         "guild_black": getattr(player, 'guild', None) == "BLACK",
         "guild_white": getattr(player, 'guild', None) == "WHITE",
+        "has_guild": bool(getattr(player, 'guild', None)),
         "is_veteran_and_has_pet": (has_rank(getattr(player, 'total_earned', 0) or 0, "Ветеран")
                                    and bool(getattr(player, 'pet', ''))),
     }
@@ -6538,6 +6540,7 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
         conditions = {
             "guild_black": guild == "BLACK",
             "guild_white": guild == "WHITE",
+            "has_guild": bool(guild),
             "is_veteran_and_has_pet": is_veteran and has_pet,
         }
         filtered_tasks = []
@@ -6621,7 +6624,10 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
         lines.append("🎁 <b>Пока вас не было: накопились задания и готова награда</b>")
         context.user_data["return_after_pause"] = False
 
-    if not guild and (player.login_streak or 0) == 3:
+    # Было `== 3`: нудж показывался РОВНО один день. Пропустил — и предложение
+    # вступить в гильдию не возвращалось никогда, хотя без гильдии закрыты
+    # Ритуал, Исповедь, Храм и Война.
+    if not guild and (player.login_streak or 0) >= 3:
         lines.append("🏰 Гильдии помогают расти быстрее — загляните")
 
     # Loss-aversion по серии входов: показываем, что можно потерять
@@ -6824,6 +6830,7 @@ async def progress_hub_handler(update, context, ctx):
         conditions = {
             "guild_black": player.guild == "BLACK",
             "guild_white": player.guild == "WHITE",
+            "has_guild": bool(player.guild),
             "is_veteran_and_has_pet": (has_rank(player.total_earned or 0, "Ветеран")
                                        and bool(player.pet)),
         }
@@ -7025,6 +7032,7 @@ async def daily_quest_hub(update, context, ctx):
     conditions = {
         "guild_black": guild == "BLACK",
         "guild_white": guild == "WHITE",
+        "has_guild": bool(guild),
         "is_veteran_and_has_pet": is_veteran and has_pet,
     }
     
@@ -7333,6 +7341,7 @@ async def claim_reward_handler(update, context, ctx):
     conditions = {
         "guild_black": guild == "BLACK",
         "guild_white": guild == "WHITE",
+        "has_guild": bool(guild),
         "is_veteran_and_has_pet": is_veteran and has_pet,
     }
     filtered_tasks = []

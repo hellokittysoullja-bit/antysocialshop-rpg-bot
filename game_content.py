@@ -226,7 +226,12 @@ QUEST_TEMPLATES = {
             # видела непроходимый Ритуал и не имела Исповеди (глава непроходима).
             {"label": "🕯️ Ритуал", "key": "ritual", "target": 3, "condition": "guild_black"},
             {"label": "⚜️ Исповедь", "key": "repent", "target": 3, "condition": "guild_white"},
-            {"label": "💎 Пожертвовать", "key": "donate", "target": 200},
+            # Храм — только для состоящих в гильдии (guild_shrine_callback
+            # отвечает «Ты не в гильдии»), а другого входа в пожертвование
+            # нет. Без условия отложивший фракцию застревал на Главе 2
+            # НАВСЕГДА: остальные шаги закрываются, а этот — никогда.
+            {"label": "💎 Пожертвовать", "key": "donate", "target": 200,
+             "condition": "has_guild"},
             {"label": "🏛️ Лабиринт", "key": "lab", "target": 1},
         ],
         "reward_oac": 0,
@@ -266,7 +271,8 @@ QUEST_TEMPLATES = {
         "tasks": [
             {"label": "⚔️ Тренировка", "key": "train", "target": 3},
             {"label": "💨 Дунуть", "key": "smoke", "target": 5},
-            {"label": "💎 Пожертвовать", "key": "donate", "target": 300},
+            {"label": "💎 Пожертвовать", "key": "donate", "target": 300,
+             "condition": "has_guild"},   # см. Главу 2: Храм требует гильдию
             {"label": "🏛️ Лабиринт", "key": "lab", "target": 1},
         ],
         "reward_oac": 250,
