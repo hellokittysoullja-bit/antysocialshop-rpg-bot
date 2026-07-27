@@ -42,7 +42,7 @@ from game_content import (
     WHISPERS, NEURO_STATUSES, FUNNY_REACTIONS, RANKS,
     ACHIEVEMENTS, ACHIEVEMENTS_DICT, ACHIEVEMENT_CONDITIONS, SMOKE_FLAVORS,
     QUEST_TEMPLATES, BLUNTS_PER_PAGE, BLUNT_IMAGES, LUCK_CONFIG, LABYRINTH_ROOMS,
-    SHOP_ITEMS, RANK_LORE,
+    SHOP_ITEMS, RANK_LORE, ALTAR_BASE_COST, ALTAR_TIERS,
 )
 # Слой моделей
 from game_models import Player
@@ -1165,6 +1165,11 @@ async def _run_migrations(conn):
     await conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_players_total_earned ON players(total_earned DESC);")
 
+    # ── prestige: Алтарь Вечности (эндгейм-сток, см. game_content.py) ──
+    await conn.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS prestige BIGINT DEFAULT 0;")
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_players_prestige ON players(prestige DESC);")
+
 # ===== ОПТИМИЗАЦИЯ ХРАНЕНИЯ (Render Free Tier) =====
     # JSONB поля — сжатие + хранение вне таблицы при размере > 2KB
     # Индекс под рейтинг (снимок лидерборда + топ-10). Ускоряет сортировку по
@@ -1836,6 +1841,13 @@ async def world_hub(update, context, ctx):
     kb_rows.append([InlineKeyboardButton("🎲 Удача ›", callback_data="luck")])
     kb_rows.append([InlineKeyboardButton("🏛️ Лабиринт ›", callback_data="lab_start")])
     kb_rows.append([InlineKeyboardButton("🛒 Магазин ›", callback_data="shop")])
+    # Алтарь Вечности — виден всем (интрига «что это»), но открыт только на
+    # вершине вертикали (Некромант / макс-плантация) — ровно где по аудиту
+    # начинается валютная пустота.
+    if _altar_gate_open(player):
+        kb_rows.append([InlineKeyboardButton("🕯️ Алтарь Вечности ›", callback_data="altar_hub")])
+    else:
+        kb_rows.append([InlineKeyboardButton("🕯️ Алтарь Вечности 🔒", callback_data="altar_hub")])
     kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="menu")])
 
     kb = InlineKeyboardMarkup(kb_rows)
@@ -3885,6 +3897,169 @@ def _plant_pending_player(player, now):
         if bonus:
             earned = int(earned * (1 + bonus / 100.0))
     return (earned, hrs, capped)
+
+
+# ============================================================
+# АЛТАРЬ ВЕЧНОСТИ — эндгейм-сток (см. game_content.py для мотивации)
+# ============================================================
+
+def _altar_level_cost(level: int) -> int:
+    """Цена ЭТОГО уровня (не кумулятивная). Квадратичная кривая → бесконечный
+    сток: каждый следующий уровень дороже, Алтарь никогда не «закрывается»."""
+    return ALTAR_BASE_COST * level * level
+
+
+def _altar_gate_open(player) -> bool:
+    """Алтарь открывается ровно там, где по аудиту начинается валютная пустота:
+    вершина ранговой вертикали ИЛИ максимум плантации. Раньше — сток встал бы
+    поперёк здоровых мид-гейм трат (апгрейды плантации, питомец)."""
+    return (has_rank(player.total_earned or 0, "Некромант")
+            or (player.passive_level or 0) >= PLANT_MAX_LEVEL)
+
+
+def _altar_level(prestige: int):
+    """(level, cost_to_next, into_current_level) — чистая функция.
+
+    prestige растёт ТОЛЬКО пожертвованием (см. _altar_invest), поэтому уровень
+    отсюда же считается детерминированно — нет отдельного счётчика «уровень»,
+    который мог бы разъехаться с реальным вложением."""
+    prestige = max(0, prestige or 0)
+    level, cum = 0, 0
+    while True:
+        cost = _altar_level_cost(level + 1)
+        if cum + cost > prestige:
+            return level, cost - (prestige - cum), prestige - cum
+        cum += cost
+        level += 1
+
+
+def _altar_tier(level: int):
+    """(титул, метка) по уровню — данные, не код: новый тир добавляется в
+    ALTAR_TIERS без правки логики."""
+    title, mark = ALTAR_TIERS[0][1], ALTAR_TIERS[0][2]
+    for threshold, t, m in ALTAR_TIERS:
+        if level >= threshold:
+            title, mark = t, m
+    return title, mark
+
+
+def _altar_locked_text() -> str:
+    return ("🔒 <b>Алтарь Вечности закрыт.</b>\n\n"
+            "Открывается на ранге 🪬 Некромант или на максимуме Плантации-империи "
+            "(ур.10) — ровно там, где вертикаль роста исчерпана, и OAC нужна новая, "
+            "бесконечная цель.")
+
+
+@rate_limit(1)
+@game_handler
+async def altar_hub(update, context, ctx, player):
+    """Алтарь Вечности: эндгейм-сток. Жертвуешь OAC → престиж растёт навсегда,
+    уровень/титул — вечная цель поверх исчерпанной вертикали рангов."""
+    query = update.callback_query
+
+    if not _altar_gate_open(player):
+        await query.answer()
+        await query.message.edit_text(
+            _altar_locked_text(), parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 В меню", callback_data="menu")]]))
+        return
+
+    balance = player.balance or 0
+    prestige = player.prestige or 0
+    level, cost_to_next, into_level = _altar_level(prestige)
+    title, mark = _altar_tier(level)
+    level_cost = _altar_level_cost(level + 1)
+    pct = int(into_level / level_cost * 100) if level_cost else 0
+    bar = "▓" * (pct // 10) + "░" * (10 - pct // 10)
+
+    async with ctx.db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT user_id, username, prestige FROM players "
+            "WHERE prestige > 0 ORDER BY prestige DESC LIMIT 10")
+        my_rank = await conn.fetchval(
+            "SELECT COUNT(*) + 1 FROM players WHERE prestige > $1", prestige
+        ) if prestige > 0 else None
+
+    lines = [
+        "<b>🕯️ АЛТАРЬ ВЕЧНОСТИ</b>",
+        "<i>Жертва невозвратна. Уровень — навсегда.</i>", "",
+        f"{title} · <b>уровень {level}</b>",
+        f"💠 Вложено всего: <b>{prestige} OAC</b>", "",
+    ]
+    if cost_to_next > 0:
+        lines.append(f"{bar} {pct}%  · до ур.{level + 1}: <b>{cost_to_next} OAC</b>")
+    lines.append("")
+
+    if rows:
+        lines.append("<b>🏆 Верные Алтарю:</b>")
+        for i, row in enumerate(rows, 1):
+            _lvl, _, _ = _altar_level(row["prestige"] or 0)
+            _title, _mark = _altar_tier(_lvl)
+            uname = html.escape(row["username"] or f"ID{row['user_id']}")
+            if _mark:
+                uname = f"{_mark}{uname}{_mark}"
+            marker = "➤ " if row["user_id"] == player.user_id else f"{i}. "
+            lines.append(f"{marker}<b>{uname}</b> — {row['prestige']} OAC")
+        if my_rank and my_rank > 10:
+            lines.append(f"<i>Твоя позиция: #{my_rank}</i>")
+        lines.append("")
+
+    lines.append(f"💰 В кошельке: <b>{balance} OAC</b>")
+    text = "\n".join(lines)
+
+    kb_rows = []
+    if balance >= 10:
+        half = balance // 2
+        kb_rows.append([InlineKeyboardButton(f"🕯️ Вложить половину · {half} OAC",
+                                              callback_data="altar_invest_half")])
+        kb_rows.append([InlineKeyboardButton(f"🔥 Вложить всё · {balance} OAC",
+                                             callback_data="altar_invest_all")])
+    kb_rows.append([InlineKeyboardButton("🔙 В меню", callback_data="menu")])
+
+    await query.answer()
+    await query.message.edit_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb_rows))
+
+
+@rate_limit(1)
+@game_handler
+async def altar_invest_handler(update, context, ctx, player):
+    """Жертва в Алтарь: balance → prestige, 1:1, безвозвратно.
+
+    Чистый односторонний сток — эксплойтить нечем (никакого обратного курса,
+    никакого дохода с престижа). Гейт проверяется здесь же (не только в UI):
+    прямой callback без пройденного гейта не должен работать."""
+    query = update.callback_query
+    uid = query.from_user.id
+    half = query.data == "altar_invest_half"
+
+    async def _invest(p, conn):
+        if not _altar_gate_open(p):
+            return ("locked",)
+        bal = p.balance or 0
+        amount = bal // 2 if half else bal
+        if amount < 10:
+            return ("too_small",)
+        p.balance -= amount
+        p.prestige = (p.prestige or 0) + amount
+        return ("ok", amount, p.prestige)
+
+    result = await ctx.repo.atomic_update(uid, _invest)
+    if result is None:
+        await query.answer("Профиль не найден.", show_alert=True)
+        return
+    status = result[0]
+    if status == "locked":
+        await query.answer("Алтарь ещё закрыт.", show_alert=True)
+        return
+    if status == "too_small":
+        await query.answer("Слишком мало OAC для жертвы.", show_alert=True)
+        return
+
+    _, amount, new_prestige = result
+    level, _cost, _into = _altar_level(new_prestige)
+    title, _mark = _altar_tier(level)
+    await query.answer(f"🔥 Вложено {amount} OAC. {title}, уровень {level}!", show_alert=True)
+    await altar_hub(update, context)
 
 
 async def collect_callback(update, context):
@@ -6940,6 +7115,16 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
             f"🪴 Империя {_plant_rate(_lvl)}→{_plant_rate(_lvl + 1)}/ч · "
             f"{_plant_upgrade_cost(_lvl)} OAC",
             callback_data="collect")])
+    elif (player.passive_level or 0) >= PLANT_MAX_LEVEL and _altar_gate_open(player):
+        # Плантация максимальна → её слот на главном экране освободился (ветка
+        # выше больше не матчится). Ровно в этот момент, по экономическому
+        # аудиту, вертикаль роста исчерпана и OAC копится впустую — Алтарь
+        # Вечности занимает этот же освободившийся слот следующей вечной целью.
+        _lvl, _cost_next, _into = _altar_level(player.prestige or 0)
+        _title, _ = _altar_tier(_lvl)
+        keyboard.append([InlineKeyboardButton(
+            f"🕯️ Алтарь: {_title} ур.{_lvl} · ещё {_cost_next} OAC",
+            callback_data="altar_hub")])
 
     # Навигация: 2 кнопки в ряд, чтобы длинные подписи не обрезались
     # (3-в-ряд не помещались: «Прогресс…», «Гильди…»).
@@ -8236,6 +8421,9 @@ CALLBACKS: Dict[str, Callable] = {
     "claim_reward": claim_reward_handler,
     "skip_onboarding": skip_onboarding_handler,
     "defer_faction": defer_faction_handler,
+    "altar_hub": altar_hub,
+    "altar_invest_half": altar_invest_handler,
+    "altar_invest_all": altar_invest_handler,
 }
 
 EXACT_HANDLERS: Dict[str, Callable] = {
