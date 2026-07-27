@@ -257,7 +257,10 @@ logging.basicConfig(level=logging.INFO, handlers=[handler])
 logger = logging.getLogger(__name__)
 
 # ── Хелперы ──
-def has_rank(balance: int, rank_name: str = "Ветеран") -> bool:
+def has_rank(earned: int, rank_name: str = "Ветеран") -> bool:
+    """Достигнут ли ранг. На вход — total_earned (заработано за всё время),
+    НЕ текущий баланс: иначе покупка отбирала бы уже открытый доступ."""
+    balance = earned
     thresholds = {
         "Ветеран": GAME_CONFIG["veteran_threshold"],
         "Призрак": GAME_CONFIG["phantom_threshold"],
@@ -374,6 +377,9 @@ class AchievementService:
                 if m:
                     amount = int(m.group(1))
                     player.balance = (player.balance or 0) + amount
+                    # см. _award_achievement_rewards: прямой save() не проходит
+                    # через учёт дельты, начисляем статус явно
+                    player.total_earned = (player.total_earned or 0) + amount
             elif part.startswith("Титул "):
                 title = part.replace("Титул ", "").strip()
                 if title:
@@ -405,6 +411,9 @@ class AchievementService:
         
 class AppContext:
     def __init__(self, db_pool, redis_client, cache, settings, repo, war_service, pet_service, achievement_service):
+        # Дедлайн Часа Удачи живёт на самом контексте, а не в TTLCache(ttl=600):
+        # иначе 30-минутный Час умирал на 10-й минуте (см. happy_hour_active).
+        self.happy_hour_end = None
         self.db_pool = db_pool
         self.redis = redis_client
         self.cache = cache
@@ -565,7 +574,13 @@ async def _award_achievement_rewards(user_id: int, player: Player, reward_text: 
             clean = part.replace(" ", "")
             m = re.search(r"\+(\d+)", clean)
             if m:
-                player.balance = (player.balance or 0) + int(m.group(1))
+                _amt = int(m.group(1))
+                player.balance = (player.balance or 0) + _amt
+                # Этот путь сохраняется прямым save(), минуя учёт дельты в
+                # atomic_update. Без явного начисления награды достижений
+                # (до ~19 900 OAC суммарно) не двигали бы ни ранг, ни топ, ни
+                # «Полярную звезду» у любого игрока, который уже что-то тратил.
+                player.total_earned = (player.total_earned or 0) + _amt
         elif part.startswith("Титул "):
             title = part.replace("Титул ", "").strip()
             if title:
@@ -708,7 +723,8 @@ async def check_achievements(user_id: int, context, ctx: AppContext = None) -> N
 def _build_ascension_card(rank_label, new_balance):
     """Карточка возвышения. Чистая функция → тестируется без БД.
 
-    rank_label = строка ранга из RANKS[i][0] (напр. '⚔️ Ветеран')."""
+    rank_label = строка ранга из RANKS[i][0] (напр. '⚔️ Ветеран').
+    new_balance = total_earned (заработано за всё время) — ось ранга."""
     emoji, _, name = rank_label.partition(" ")
     lore = RANK_LORE.get(rank_label, {})
     lines = [
@@ -722,7 +738,7 @@ def _build_ascension_card(rank_label, new_balance):
         lines.append(f"<i>{lore['line']}</i>")
     if lore.get("unlock"):
         lines.append(f"\n🔓 <b>Открыто:</b> {lore['unlock']}")
-    lines.append(f"\n💰 <b>Баланс:</b> {new_balance} OAC 🍬")
+    lines.append(f"\n💰 <b>Заработано за всё время:</b> {new_balance} OAC 🍬")
     # goal-gradient: показать следующую ступень и дистанцию до неё
     for e, th, nm in RANKS:
         if th > new_balance:
@@ -734,6 +750,8 @@ def _build_ascension_card(rank_label, new_balance):
 
 
 async def check_rank_up(context, user_id, username, old_balance, new_balance):
+    """Ранг-ап по ЗАРАБОТАННОМУ за всё время (old/new total_earned).
+    Величина только растёт → «понижения ранга» не существует by design."""
     old_idx = 0
     new_idx = 0
     for i, (_, threshold, _) in enumerate(RANKS):
@@ -771,6 +789,9 @@ async def check_rank_up(context, user_id, username, old_balance, new_balance):
 
 def compute_rank_info(balance: int):
     """Чистая функция: разбирает RANKS и возвращает данные о ранге.
+
+    ВАЖНО: на вход подаётся total_earned (заработано за всё время), а не
+    текущий кошелёк. Ранг — это память о пути, а не снимок кассы.
 
     Единый источник вычисления ранга (раньше этот блок был скопирован
     в build_main_menu и progress_hub_handler).
@@ -830,6 +851,7 @@ def _quest_progress_counts(template, progress, guild, is_veteran, has_pet):
     conditions = {
         "guild_black": guild == "BLACK",
         "guild_white": guild == "WHITE",
+        "has_guild": bool(guild),
         "is_veteran_and_has_pet": is_veteran and has_pet,
     }
     tasks = [t for t in template.get("tasks", [])
@@ -1128,6 +1150,21 @@ async def _run_migrations(conn):
     """)
     await conn.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS last_mines TIMESTAMP;")
 
+    # ── total_earned: разделение «кошелёк» и «статус» ──
+    # Ранг, топ, гейты и скидка Прилавка раньше читали balance — то есть трата
+    # молча ОТБИРАЛА ранг и привилегии (купил питомца за 3000 на пороге
+    # Ветерана 5000 → мгновенно перестал быть Ветераном и потерял алхимию).
+    # Теперь статус живёт на total_earned, который только растёт.
+    # Бэкфилл = текущий balance: ни один существующий игрок не теряет ранг
+    # при выкатке (у всех статус ровно тот, что был вчера), а дальше
+    # заработок копится честно.
+    await conn.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS total_earned BIGINT DEFAULT 0;")
+    await conn.execute(
+        "UPDATE players SET total_earned = balance "
+        "WHERE total_earned IS NULL OR total_earned < balance;")
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_players_total_earned ON players(total_earned DESC);")
+
 # ===== ОПТИМИЗАЦИЯ ХРАНЕНИЯ (Render Free Tier) =====
     # JSONB поля — сжатие + хранение вне таблицы при размере > 2KB
     # Индекс под рейтинг (снимок лидерборда + топ-10). Ускоряет сортировку по
@@ -1161,6 +1198,7 @@ async def create_tables(conn):
             user_id BIGINT PRIMARY KEY,
             username TEXT,
             balance INTEGER DEFAULT 0,
+            total_earned BIGINT DEFAULT 0,
             blunts INTEGER DEFAULT 0,
             guild TEXT DEFAULT NULL,
             last_farm TIMESTAMP,
@@ -1766,7 +1804,8 @@ async def world_hub(update, context, ctx):
         return
 
     balance = player.balance or 0
-    is_veteran = balance >= 5000
+    # Гейты контента — по заработанному за всё время, не по остатку в кошельке.
+    is_veteran = has_rank(player.total_earned or 0, "Ветеран")
     has_pet = bool(player.pet)
 
     kb_rows = []
@@ -1817,7 +1856,9 @@ async def destiny_hub(update, context, ctx):
         await query.answer("Профиль не найден", show_alert=True)
         return
 
-    balance = player.balance or 0
+    # Лестница ранга читается по заработанному за всё время: ступень, на
+    # которую ты однажды поднялся, не может отобраться покупкой.
+    balance = player.total_earned or 0
     _re, _rn, _ne, _nn, next_th, _pt = compute_rank_info(balance)
 
     # Лестница восхождения: пройденное ✅, следующее ➡️, заблокированное 🔒
@@ -1996,7 +2037,9 @@ def get_medal_progress(new_count, medals_list):
     return f"{bar} {progress}%\n{goal_str}"
 
 def get_rank_progress(balance):
-    """Возвращает прогресс ранга с жирным "Ранг:" и жирным прогресс-баром."""
+    """Возвращает прогресс ранга с жирным "Ранг:" и жирным прогресс-баром.
+
+    На вход — total_earned: шкала ранга не должна пятиться от трат."""
     if balance >= RANKS[-1][1]:
         emoji = RANKS[-1][0]
         name = emoji.split(' ',1)[1]
@@ -2085,6 +2128,9 @@ async def _create_new_player(update, context, uid, username, invited_by=None,
     async with ctx.db_pool.acquire() as conn:
         async with conn.transaction():
             player = Player(user_id=uid, username=username, balance=start_balance)
+            # Стартовый дар засчитывается и в «заработано за всё время» —
+            # иначе первая же трата уводила бы статус в минус относительно старта.
+            player.total_earned = start_balance
             player.invited_by = invited_by
             # Установка daily_progress ДО сохранения
             player.daily_progress = {
@@ -2216,7 +2262,9 @@ def next_quest_step(player, exclude_key: str = None):
     conditions = {
         "guild_black": getattr(player, 'guild', None) == "BLACK",
         "guild_white": getattr(player, 'guild', None) == "WHITE",
-        "is_veteran_and_has_pet": balance >= 5000 and bool(getattr(player, 'pet', '')),
+        "has_guild": bool(getattr(player, 'guild', None)),
+        "is_veteran_and_has_pet": (has_rank(getattr(player, 'total_earned', 0) or 0, "Ветеран")
+                                   and bool(getattr(player, 'pet', ''))),
     }
 
     next_step = None
@@ -2570,7 +2618,7 @@ def _calculate_farm_reward(player, context) -> tuple[int, bool, bool]:
     # Happy hour – удвоение. Флаг живёт в ctx.cache (как и во всех остальных
     # механиках); раньше фарм ошибочно читал его из bot_data → ×2 не срабатывал.
     _ctx = context.bot_data.get("ctx")
-    happy = bool(_ctx and _ctx.cache and _ctx.cache.get("happy_hour", False))
+    happy = happy_hour_active(_ctx)
     if happy:
         earned *= HAPPY_HOUR_MULTIPLIER
 
@@ -2590,7 +2638,7 @@ def _calculate_farm_reward(player, context) -> tuple[int, bool, bool]:
 
 def _format_farm_message(earned: int, crit: bool, happy: bool,
                          medal_text: str, new_count: int, target: int,
-                         new_balance: int) -> str:
+                         new_balance: int, new_earned: int = None) -> str:
     """Сообщение после фарма – чистая структура, как в крафте."""
     # Крит-эмодзи
     is_mega = crit and earned >= FARM_MAX * 10
@@ -2619,7 +2667,8 @@ def _format_farm_message(earned: int, crit: bool, happy: bool,
 
     # Прогресс-бары
     progress_bar_str = get_medal_progress(new_count, FARM_MEDALS)
-    rank_progress = get_rank_progress(new_balance)
+    # Шкала ранга — по заработанному за всё время, а не по кошельку.
+    rank_progress = get_rank_progress(new_balance if new_earned is None else new_earned)
 
     # Сборка сообщения
     msg = (
@@ -2653,6 +2702,7 @@ async def farm_callback_v2(update, context, ctx, player):
             return ("cooldown", remain)
 
         old_balance = p.balance
+        old_earned = p.total_earned or 0
         earned, crit, happy = _calculate_farm_reward(p, context)
 
         old_count = p.farm_count
@@ -2669,7 +2719,10 @@ async def farm_callback_v2(update, context, ctx, player):
         if ctx.war_service:
             await ctx.war_service.add_score_raw(uid, earned + medal_bonus, conn)
 
-        return ("ok", earned, crit, happy, medal_text, new_count, p.balance, old_balance)
+        # total_earned начислит atomic_update; здесь считаем то же значение,
+        # чтобы карточка и ранг-ап показали статус после этого фарма.
+        return ("ok", earned, crit, happy, medal_text, new_count, p.balance,
+                old_balance, old_earned, old_earned + earned + medal_bonus)
 
     result = await ctx.repo.atomic_update(uid, _farm)
     if result is None:
@@ -2696,7 +2749,7 @@ async def farm_callback_v2(update, context, ctx, player):
         balance = getattr(player, 'balance', 0) or 0
         guild = getattr(player, 'guild', None)
         has_pet = bool(getattr(player, 'pet', ''))
-        is_veteran = balance >= 5000
+        is_veteran = has_rank(getattr(player, 'total_earned', 0) or 0, "Ветеран")
     
         # Динамический прогресс-бар
         guild_emoji = "🕯️" if guild == "BLACK" else "⚜️" if guild == "WHITE" else "🏰"
@@ -2758,10 +2811,11 @@ async def farm_callback_v2(update, context, ctx, player):
         )
         return
 
-    earned, crit, happy, medal_text, new_count, new_balance, old_balance = data
+    earned, crit, happy, medal_text, new_count, new_balance, old_balance, old_earned, new_earned = data
 
     target = get_medal_target(new_count, FARM_MEDALS)
-    text = _format_farm_message(earned, crit, happy, medal_text, new_count, target, new_balance)
+    text = _format_farm_message(earned, crit, happy, medal_text, new_count, target,
+                                new_balance, new_earned)
 
     # Экран-результат несёт навигацию (единый живой экран). На кулдауне НЕ
     # показываем «фарм» — это тупик (тап вернёт тот же кулдаун). Вместо этого
@@ -2816,11 +2870,17 @@ async def farm_callback_v2(update, context, ctx, player):
         )
 
     asyncio.create_task(check_achievements(uid, context))
-    asyncio.create_task(check_rank_up(context, uid, uname, old_balance, new_balance))
+    asyncio.create_task(check_rank_up(context, uid, uname, old_earned, new_earned))
 
     if player.onboarding_step == 1:
-        player.onboarding_step = 2
-        await ctx.repo.save(player)
+        # Только это поле и только под транзакцией. Раньше здесь был
+        # save(player) устаревшего снимка (загружен @game_handler ДО
+        # atomic_update) — и он затирал ВСЕ колонки: награда за первый фарм,
+        # farm_count, last_farm и daily_progress откатывались к состоянию
+        # «до фарма». Игрок видел «+81 OAC», а в БД оставалось 800.
+        async def _advance_onboarding(p, conn):
+            p.onboarding_step = 2
+        await ctx.repo.atomic_update(uid, _advance_onboarding)
         await safe_send_message(
             context, uid,
             "<b>🎓 ОБУЧЕНИЕ [▓▓▓░] 3/3</b>\n\n"
@@ -2996,8 +3056,11 @@ async def handle_craft_normal_v2(update, context, ctx, player):
     
     # Онбординг
     if player.onboarding_step == 2:
-        player.onboarding_step = -1
-        await ctx.repo.save(player)
+        # См. фарм: save() устаревшего снимка стирал результат крафта
+        # (списание OAC, +1 блант, craft_count, медаль).
+        async def _finish_onboarding(p, conn):
+            p.onboarding_step = -1
+        await ctx.repo.atomic_update(uid, _finish_onboarding)
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("🎁 Забрать награду", callback_data="onboarding_reward")]
         ])
@@ -3558,7 +3621,7 @@ async def do_smoke(update, context, ctx, player):
         p.daily_progress = p.daily_progress or {}
         _dry = p.daily_progress.get("smoke_dry", 0)
         earned, outcome = calculate_smoke_reward(
-            p, ctx.cache.get("happy_hour", False), dry_count=_dry)
+            p, happy_hour_active(ctx), dry_count=_dry)
 
         old_count = p.smoke_count or 0
         new_count = old_count + 1
@@ -3672,7 +3735,7 @@ async def ritual_callback(update, context):
             return ("cooldown", hrs, rem // 60)
 
         reward = 150
-        if ctx.cache.get("happy_hour", False):
+        if happy_hour_active(ctx):
             reward *= HAPPY_HOUR_MULTIPLIER
         extra = 15 if random.random() < 0.1 else 0
 
@@ -3913,7 +3976,7 @@ async def plant_harvest_handler(update, context, ctx):
     query = update.callback_query
     uid = query.from_user.id
     now = datetime.now()
-    happy = bool(ctx.cache.get("happy_hour", False))
+    happy = happy_hour_active(ctx)
 
     async def _harvest(p, conn):
         level = p.passive_level or 0
@@ -3982,13 +4045,14 @@ async def profile_callback(update, context, ctx, player):
 
     # player гарантированно существует благодаря @game_handler
     bal = player.balance or 0
+    earned = player.total_earned or 0
     bl = player.blunts or 0
     guild = player.guild or ""
 
-    # Ранг
+    # Ранг — по заработанному за всё время, не по остатку в кошельке
     rank_emoji, rank_name = "🪓", "Рекрут"
     for emoji, threshold, _ in RANKS:
-        if bal >= threshold:
+        if earned >= threshold:
             rank_emoji = emoji
             rank_name = emoji_to_name(emoji)
 
@@ -4020,7 +4084,7 @@ async def profile_callback(update, context, ctx, player):
         badges.append("👁️")
     badge_str = ' '.join(badges) if badges else "—"
 
-    rank_progress = get_rank_progress(bal)
+    rank_progress = get_rank_progress(earned)
 
     pet_line = ""
     if player.pet:
@@ -4040,7 +4104,8 @@ async def profile_callback(update, context, ctx, player):
         f"👤 <b>{uname}</b>{guild_line}\n"
         f"🫧 Фон: {bg}\n\n"
         f"{rank_progress}\n\n"
-        f"💎 <b>OAC:</b> <b>{bal} OAC</b> 🍬\n"
+        f"💎 <b>Кошелёк:</b> <b>{bal} OAC</b> 🍬 <i>(тратится)</i>\n"
+        f"🏛️ <b>Заработано за всё время:</b> <b>{earned} OAC</b> — <i>твой ранг держится на этом числе, траты его не трогают</i>\n"
         f"🌿 <b>Блантов в свёртке:</b> <b>{bl}</b>\n"
         f"{bush_line}\n"
         f"🧬 <b>Титул:</b> {active_title}\n"
@@ -4318,8 +4383,12 @@ async def top_callback(update, context, ctx, player):
 
     # Прямой запрос топа
     async with ctx.db_pool.acquire() as conn:
+        # Топ — по ЗАРАБОТАННОМУ за всё время. По balance лидерборд поощрял
+        # скупость: любая покупка роняла тебя вниз, поэтому выгоднее было
+        # не играть, а копить. Теперь место в топе покупкой не отнять.
         rows = await conn.fetch(
-            "SELECT user_id, username, balance, guild FROM players ORDER BY balance DESC LIMIT 10"
+            "SELECT user_id, username, total_earned AS balance, guild FROM players "
+            "ORDER BY total_earned DESC LIMIT 10"
         )
     top = [dict(r) for r in rows]
 
@@ -4328,9 +4397,10 @@ async def top_callback(update, context, ctx, player):
         return
 
     first_balance = top[0]["balance"]
-    my_balance = player.balance or 0
+    my_balance = player.total_earned or 0
 
-    text = "<b>💎 ТОП-10 ИГРОКОВ 🏆</b>\n\n"
+    text = ("<b>💎 ТОП-10 ИГРОКОВ 🏆</b>\n"
+            "<i>По заработанному за всё время — траты место не отнимают.</i>\n\n")
     my_position = None
 
     for i, row in enumerate(top, 1):
@@ -4419,11 +4489,12 @@ async def top_callback(update, context, ctx, player):
         # Объединённый запрос для позиции вне топа
         async with ctx.db_pool.acquire() as conn:
             cnt_row = await conn.fetchrow(
-                "SELECT COUNT(*) as cnt FROM players WHERE balance > $1", my_balance
+                "SELECT COUNT(*) as cnt FROM players WHERE total_earned > $1", my_balance
             )
             pos = cnt_row["cnt"] + 1 if cnt_row else 1
             tenth_row = await conn.fetchrow(
-                "SELECT balance FROM players ORDER BY balance DESC LIMIT 1 OFFSET 9"
+                "SELECT total_earned AS balance FROM players "
+                "ORDER BY total_earned DESC LIMIT 1 OFFSET 9"
             )
             tenth_balance = tenth_row["balance"] if tenth_row else 0
 
@@ -4451,7 +4522,8 @@ async def top_scout_callback(update, context, ctx):
     # ctx гарантирован @cb, проверка не нужна
     async with ctx.db_pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT username, balance, guild FROM players ORDER BY balance DESC LIMIT 3"
+            "SELECT username, total_earned AS balance, guild FROM players "
+            "ORDER BY total_earned DESC LIMIT 3"
         )
     if not rows:
         await query.answer("Топ пуст.")
@@ -4835,7 +4907,8 @@ async def privilege_callback(update, context):
     if not player or not player.user_id:
         await msg.reply_text("Сначала активируйся: /start")
         return
-    bal = player.balance
+    # Ранг и «сила» — по заработанному за всё время, а не по остатку кошелька.
+    bal = player.total_earned or 0
     rank_emoji, rank_name = "🪓", "Рекрут"
     next_rank_name = "Ветеран"
     for emoji, threshold, _ in RANKS:
@@ -5016,7 +5089,7 @@ async def _process_wheel(update, context, uid, player, cfg, ctx):
         near_miss = ptype != "jackpot" and r >= 0.90
         if ptype == "jackpot" and random.random() < 0.5:
             prize *= 2
-        if ctx.cache.get("happy_hour") and ptype in ("oac", "jackpot"):
+        if happy_hour_active(ctx) and ptype in ("oac", "jackpot"):
             prize *= HAPPY_HOUR_MULTIPLIER
 
         if ptype in ("oac", "jackpot"):
@@ -5234,7 +5307,12 @@ async def _mines_show_field(update, context, state, redis_key, uid, ctx):
         lines.append("│ " + " │ ".join(row_cells) + " │")
     field_str = "┌───┬───┬───┬───┬───┐\n" + "\n├───┼───┼───┼───┼───┤\n".join(lines) + "\n└───┴───┴───┴───┴───┘"
 
-    win = int(bet * multiplier) if status == "playing" else 0
+    # Было: `int(bet * multiplier) if status == "playing" else 0` — то есть на
+    # экранах «ПОБЕДА» и «Ты забрал выигрыш» печаталось «Выигрыш: 0 OAC», хотя
+    # баланс начислялся верно. Пик механики обнулялся на витрине, а экран
+    # проигрыша при этом честно показывал «ты мог забрать N» — проигрыш звучал
+    # весомее победы. Ноль уместен только там, где ставка действительно сгорела.
+    win = 0 if status == "lost" else int(bet * multiplier)
 
     text = (
         f"💣 **МИНЫ**\n\n"
@@ -5407,7 +5485,7 @@ async def _mines_bet_wrapper(update, context):
 
 # ── Алхимия (начало) ────────────────────────────────────────
 async def _process_alchemy_start(update, context, player, cfg):
-    if not has_rank(player.balance, "Ветеран"):
+    if not has_rank(player.total_earned or 0, "Ветеран"):
         await _notify_user(update, context, f"❌ Доступно с ранга ⚔️ Ветеран ({GAME_CONFIG['veteran_threshold']} OAC 🍬)", show_alert=True)
         return
     text = (
@@ -5439,6 +5517,10 @@ async def _process_alchemy_confirm(update, context, uid, player, cfg, ctx):
             return (AlchemyResult.NO_RESOURCES,)
         p.blunts -= cfg["alchemy"]["cost_blunts"]
         p.balance -= cfg["alchemy"]["cost_oac"]
+        # Счётчик не инкрементировался НИГДЕ: ачивки alchemy_15/alchemy_50 были
+        # недостижимы, а из-за них недостижим и «🌀 Лунный лорд» — приз за
+        # закрытие ВСЕХ достижений. Высшая цель игры была заперта навсегда.
+        p.alchemy_count = (p.alchemy_count or 0) + 1
         r = random.random()
         res = ""
         for prob, effect, value in cfg["alchemy"]["reactions"]:
@@ -6263,8 +6345,12 @@ async def pet_locked_handler(update, context):
 # ============================================================
 # ── Прилавок: чистая логика (тестируется без БД) ────────────
 def _shop_discount_pct(balance):
-    """Скидка прилавка по достатку — ранг даёт ощутимую выгоду в лавке.
-    Потолок 15%, чтобы не разгонять инфляцию."""
+    """Скидка прилавка по РАНГУ (total_earned), а не по остатку в кошельке.
+    Потолок 15%, чтобы не разгонять инфляцию.
+
+    Раньше сюда шёл balance — и скидка исчезала ровно в момент покупки,
+    ради которой копили: потратил → упал ниже порога → в следующий раз
+    платишь дороже. Привилегия ранга не должна отбираться тратой."""
     b = balance or 0
     if b >= 50000:
         return 15
@@ -6295,9 +6381,10 @@ def _shop_time_left(now):
     return delta.seconds // 3600, (delta.seconds % 3600) // 60
 
 
-def _build_shop_view(balance, now):
+def _build_shop_view(balance, now, earned=None):
     """Собирает текст+клавиатуру прилавка. Чистая функция для тестов."""
-    disc = _shop_discount_pct(balance)
+    # Скидка — от ранга (total_earned); доступность товара — от кошелька.
+    disc = _shop_discount_pct(balance if earned is None else earned)
     today = _shop_today(now.toordinal())
     h, m = _shop_time_left(now)
     lines = ["<b>🏪 ЛАВКА ФАБРИКИ №9</b>", ""]
@@ -6337,7 +6424,8 @@ async def shop_callback(update, context, ctx):
     uid = update.effective_user.id
     player = await ctx.repo.get_by_id(uid)
     balance = (player.balance if player else 0) or 0
-    text, kb = _build_shop_view(balance, datetime.now())
+    earned = (player.total_earned if player else 0) or 0
+    text, kb = _build_shop_view(balance, datetime.now(), earned)
     await edit_or_reply(update, context, text, reply_markup=kb)
 
 
@@ -6363,7 +6451,8 @@ async def shop_buy_callback(update, context):
         # tenacity-retry, который завернул бы кастомный exception в RetryError
         # и вхолостую ретраил бы «нет денег». Статус-кортеж — принятый здесь
         # паттерн (см. do_smoke/craft).
-        price = _shop_price(item["price"], _shop_discount_pct(p.balance or 0))
+        # Та же ось, что и в витрине — иначе цена на экране разошлась бы с кассой.
+        price = _shop_price(item["price"], _shop_discount_pct(p.total_earned or 0))
         if (p.balance or 0) < price:
             return ("no_funds", price, None)
         p.balance = (p.balance or 0) - price
@@ -6381,7 +6470,8 @@ async def shop_buy_callback(update, context):
     await query.answer(f"✅ Куплено! −{price} OAC", show_alert=False)
     player = await ctx.repo.get_by_id(uid)
     balance = (player.balance if player else 0) or 0
-    text, kb = _build_shop_view(balance, now)
+    earned = (player.total_earned if player else 0) or 0
+    text, kb = _build_shop_view(balance, now, earned)
     banner = (f"✅ <b>{item['emoji']} {item['name']} — твоё!</b>\n"
               f"📦 Теперь у тебя: <b>{new_total}</b>\n\n")
     await query.message.edit_text(banner + text, reply_markup=kb, parse_mode='HTML')
@@ -6551,12 +6641,32 @@ async def debug_pet(update, context, ctx):
 # ───────────────────────────────────────────────
 # НОВАЯ ГЛАВНАЯ ПАНЕЛЬ (КАРТА 3, СОСТОЯНИЯ А–З)
 # ───────────────────────────────────────────────
+def happy_hour_active(ctx) -> bool:
+    """Активен ли Час Удачи.
+
+    Источник правды — дедлайн на самом ctx: он переживает TTLCache, у которого
+    ttl=600 c (main.py). Раньше флаг жил ТОЛЬКО в кэше и испарялся через 10
+    минут, хотя Час заявлен 30-минутным и выключается таском через 30 → две
+    трети времени «×2» молча не работало, а баннер продолжал обещать
+    «Осталось 25м — фарми и дуй прямо сейчас!». Кэш оставлен запасным каналом
+    (совместимость и тесты).
+    """
+    if ctx is None:
+        return False
+    end = getattr(ctx, "happy_hour_end", None)
+    if end is not None:
+        return datetime.now() < end
+    cache = getattr(ctx, "cache", None)
+    return bool(cache and cache.get("happy_hour", False))
+
+
 def _happy_hour_banner(ctx, now):
     """Живой баннер Часа Удачи с обратным отсчётом. Чистая, тестируемая.
     Показывается в момент входа → FOMO бьёт именно когда игрок уже в игре."""
-    if not (ctx and getattr(ctx, "cache", None) and ctx.cache.get("happy_hour")):
+    if not happy_hour_active(ctx):
         return ""
-    end = ctx.cache.get("happy_hour_end")
+    end = (getattr(ctx, "happy_hour_end", None)
+           or (getattr(ctx, "cache", None) or {}).get("happy_hour_end"))
     if end and now < end:
         mins = max(1, math.ceil((end - now).total_seconds() / 60))
         tail = f"Осталось {mins}м — фарми и дуй прямо сейчас!"
@@ -6568,6 +6678,11 @@ def _happy_hour_banner(ctx, now):
 
 def _north_star_line(balance: int) -> str:
     """«Полярная звезда» — ответ на «зачем я играю», в каждой сессии.
+
+    На вход — total_earned (заработано за всё время). Раньше сюда шёл кошелёк,
+    и трата откатывала цель назад: купил питомца — и «Полярная звезда» снова
+    зовёт к рангу, который ты уже взял. Цель, которая умеет пятиться, целью
+    быть перестаёт.
 
     Ядро проблемы драйва: игроку показывали ЦЕНУ ранга («осталось X OAC») —
     счётчик к уплате, а не мечту. Цена без награды = гринд. Здесь — цель
@@ -6601,7 +6716,10 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
     guild = player.guild
     balance = player.balance or 0
     has_pet = bool(player.pet)
-    is_veteran = balance >= 5000
+    # Статус (ранг, гейты, Полярная звезда) — по заработанному за всё время.
+    # balance остаётся кошельком: он тратится и на статус не влияет.
+    earned = player.total_earned or 0
+    is_veteran = has_rank(earned, "Ветеран")
 
     # ---- Автоматический сброс daily_progress ----
     progress = await ensure_daily_progress(player, ctx)
@@ -6613,6 +6731,7 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
         conditions = {
             "guild_black": guild == "BLACK",
             "guild_white": guild == "WHITE",
+            "has_guild": bool(guild),
             "is_veteran_and_has_pet": is_veteran and has_pet,
         }
         filtered_tasks = []
@@ -6644,7 +6763,7 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
         lines.append("")
 
         # Определение текущего и следующего ранга
-        rank_emoji, rank_name, next_rank_emoji, next_rank_name, next_threshold, _ = compute_rank_info(balance)
+        rank_emoji, rank_name, next_rank_emoji, next_rank_name, next_threshold, _ = compute_rank_info(earned)
 
         rank_display = f"{rank_emoji} {rank_name}" if rank_name else rank_emoji
 
@@ -6664,7 +6783,7 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
         lines.append("")  # отступ перед Полярной звездой
 
         # Полярная звезда: цель + НАГРАДА за неё + прогресс (не голая цена).
-        lines.append(_north_star_line(balance))
+        lines.append(_north_star_line(earned))
 
         lines.append("")  # отступ перед подсказкой
 
@@ -6689,14 +6808,17 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
         # Краткий режим: раньше показывал только whisper — цели «зачем я здесь»
         # не было НИ на одной кнопочной сессии (90% входов). Теперь Полярная
         # звезда присутствует всегда — постоянный ответ «к чему я иду».
-        lines = [f"<i>{whisper}</i>", "", _north_star_line(balance)]
+        lines = [f"<i>{whisper}</i>", "", _north_star_line(earned)]
 
     # Общие краткие сообщения (всегда) — новые фичи оставлены
     if context and context.user_data.get("return_after_pause"):
         lines.append("🎁 <b>Пока вас не было: накопились задания и готова награда</b>")
         context.user_data["return_after_pause"] = False
 
-    if not guild and (player.login_streak or 0) == 3:
+    # Было `== 3`: нудж показывался РОВНО один день. Пропустил — и предложение
+    # вступить в гильдию не возвращалось никогда, хотя без гильдии закрыты
+    # Ритуал, Исповедь, Храм и Война.
+    if not guild and (player.login_streak or 0) >= 3:
         lines.append("🏰 Гильдии помогают расти быстрее — загляните")
 
     # Loss-aversion по серии входов: показываем, что можно потерять
@@ -6853,7 +6975,7 @@ async def menu_handler(update, context, ctx):
 # Единицы вех для честной формулировки «ещё N <чего>» (goal-gradient конкретнее
 # абстрактного числа). Ключи — поля Player из ACHIEVEMENT_CONDITIONS.
 _MILESTONE_UNITS = {
-    "balance": "OAC", "farm_count": "фарм.", "craft_count": "крафт.",
+    "balance": "OAC", "total_earned": "OAC", "farm_count": "фарм.", "craft_count": "крафт.",
     "smoke_count": "затяжек", "ritual_count": "ритуал.", "repent_count": "исповед.",
     "referral_count": "друзей", "login_streak": "дн. подряд", "lab_chests": "сундук.",
     "lab_deaths": "смертей", "check_count": "проверок", "alchemy_count": "алхимии",
@@ -6904,7 +7026,11 @@ async def progress_hub_handler(update, context, ctx):
             await query.answer("❌ Профиль не найден!", show_alert=True)
             return
 
-        balance = player.balance or 0
+        # Ранг и лестница — по заработанному за всё время (единая ось со всеми
+        # остальными экранами). Через `balance` этот экран пятился назад после
+        # каждой покупки и противоречил и профилю, и главному меню, и топу.
+        balance = player.total_earned or 0
+        wallet = player.balance or 0
         username = html_escape(player.username or str(uid))
 
         # ===== 1. РАНГ + ЛЕСТНИЦА ВОСХОЖДЕНИЯ (шапка «куда я расту») =====
@@ -6949,7 +7075,9 @@ async def progress_hub_handler(update, context, ctx):
         conditions = {
             "guild_black": player.guild == "BLACK",
             "guild_white": player.guild == "WHITE",
-            "is_veteran_and_has_pet": (player.balance or 0) >= 5000 and bool(player.pet),
+            "has_guild": bool(player.guild),
+            "is_veteran_and_has_pet": (has_rank(player.total_earned or 0, "Ветеран")
+                                       and bool(player.pet)),
         }
         filtered_tasks = []
         for task in template["tasks"]:
@@ -6988,19 +7116,23 @@ async def progress_hub_handler(update, context, ctx):
             tasks_block = f"{tasks_header}" #\n{tasks_text}
 
         # ===== 3. СРАВНЕНИЕ С СОСЕДЯМИ =====
-        my_balance = player.balance or 0
+        # Соседи по рейтингу — по той же оси, что и сам рейтинг (total_earned).
+        my_balance = player.total_earned or 0
         async with ctx.db_pool.acquire() as conn:
             # ✅ добавлен user_id
             above_row = await conn.fetchrow(
-                "SELECT user_id, username, balance FROM players WHERE balance > $1 ORDER BY balance ASC LIMIT 1",
+                "SELECT user_id, username, total_earned AS balance FROM players "
+                "WHERE total_earned > $1 ORDER BY total_earned ASC LIMIT 1",
                 my_balance
             )
             below_row = await conn.fetchrow(
-                "SELECT user_id, username, balance FROM players WHERE balance < $1 ORDER BY balance DESC LIMIT 1",
+                "SELECT user_id, username, total_earned AS balance FROM players "
+                "WHERE total_earned < $1 ORDER BY total_earned DESC LIMIT 1",
                 my_balance
             )
             total_players = await conn.fetchval("SELECT COUNT(*) FROM players")
-            above_count = await conn.fetchval("SELECT COUNT(*) FROM players WHERE balance > $1", my_balance)
+            above_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM players WHERE total_earned > $1", my_balance)
 
         position = (above_count or 0) + 1
         in_top10 = position <= 10
@@ -7041,7 +7173,8 @@ async def progress_hub_handler(update, context, ctx):
             # Берём свежее соединение.
             async with ctx.db_pool.acquire() as conn2:
                 tenth_row = await conn2.fetchrow(
-                    "SELECT balance FROM players ORDER BY balance DESC LIMIT 1 OFFSET 9"
+                    "SELECT total_earned AS balance FROM players "
+                    "ORDER BY total_earned DESC LIMIT 1 OFFSET 9"
                 )
             if tenth_row:
                 tenth_balance = tenth_row["balance"]
@@ -7055,6 +7188,8 @@ async def progress_hub_handler(update, context, ctx):
 
         # ===== 4. СТАТИСТИКА =====
         stats_lines = []
+        # Обе оси рядом: по чему считается ранг и что реально можно потратить.
+        stats_lines.append(f"💎 Кошелёк: {wallet} OAC 🍬")
         stats_lines.append(f"🌿 Блантов скручено: {player.craft_count or 0}")
         stats_lines.append(f"💨 Выкурено: {player.smoke_count or 0}")
 
@@ -7149,12 +7284,13 @@ async def daily_quest_hub(update, context, ctx):
 
     guild = player.guild
     has_pet = bool(player.pet)
-    is_veteran = (player.balance or 0) >= 5000
+    is_veteran = has_rank(player.total_earned or 0, "Ветеран")
 
     # Проверка условий
     conditions = {
         "guild_black": guild == "BLACK",
         "guild_white": guild == "WHITE",
+        "has_guild": bool(guild),
         "is_veteran_and_has_pet": is_veteran and has_pet,
     }
     
@@ -7249,7 +7385,7 @@ async def handle_choice(update, context, ctx):
     # тап по нему выдавал награду выбора (250 OAC + титул + предмет) в обход задач.
     _done, _total = _quest_progress_counts(
         template, progress, player.guild,
-        (player.balance or 0) >= 5000, bool(player.pet))
+        has_rank(player.total_earned or 0, "Ветеран"), bool(player.pet))
     if _done < _total:
         await query.answer(
             f"Сначала заверши все шаги главы! ({_done}/{_total})", show_alert=True)
@@ -7459,10 +7595,11 @@ async def claim_reward_handler(update, context, ctx):
 # ---- Фильтруем задания по условиям (как в daily_quest_hub) ----
     guild = player.guild
     has_pet = bool(player.pet)
-    is_veteran = (player.balance or 0) >= 5000
+    is_veteran = has_rank(player.total_earned or 0, "Ветеран")
     conditions = {
         "guild_black": guild == "BLACK",
         "guild_white": guild == "WHITE",
+        "has_guild": bool(guild),
         "is_veteran_and_has_pet": is_veteran and has_pet,
     }
     filtered_tasks = []
@@ -7573,8 +7710,9 @@ async def all_features_handler(update, context, ctx):
     await query.answer()
     player = await ctx.repo.get_by_id(query.from_user.id)
     balance = (player.balance if player else 0) or 0
-    is_veteran = balance >= 5000
-    rank_emoji, rank_name, *_ = compute_rank_info(balance)
+    earned = (player.total_earned if player else 0) or 0
+    is_veteran = has_rank(earned, "Ветеран")
+    rank_emoji, rank_name, *_ = compute_rank_info(earned)
 
     text = (
         "🗺️ <b>ТВОЙ МИР</b>\n\n"
@@ -7914,6 +8052,8 @@ async def guild_join_handler(update, context, ctx):
         # отложившие фракцию теряли +50 — теперь честно один раз.
         if player.onboarding_step == 0 or was_guildless:
             player.balance += 50
+            # Путь сохраняется прямым save(), мимо учёта дельты в atomic_update.
+            player.total_earned = (player.total_earned or 0) + 50
         g_emoji = "🕯️" if guild == "BLACK" else "⚜️"
         g_name = "Тёмная" if guild == "BLACK" else "Светлая"
 
@@ -8180,8 +8320,10 @@ async def update_pulse(ctx: AppContext):
 async def happy_hour_trigger(ctx: AppContext):
     if not ctx:
         return
-    ctx.cache["happy_hour"] = True
-    ctx.cache["happy_hour_end"] = datetime.now() + timedelta(minutes=ctx.settings.happy_hour_duration_min)
+    _end = datetime.now() + timedelta(minutes=ctx.settings.happy_hour_duration_min)
+    ctx.happy_hour_end = _end          # авторитетный источник, без TTL
+    ctx.cache["happy_hour"] = True     # совместимость
+    ctx.cache["happy_hour_end"] = _end
     try:
         await _send_http_message(ctx, "@guild_antysocial",
             "🎉 <b>ЧАС УДАЧИ!</b> 🌠 Все действия приносят x2 OAC 🍬 (30 минут)!")
@@ -8193,6 +8335,7 @@ async def happy_hour_trigger(ctx: AppContext):
 
 async def _reset_happy_hour_after(ctx: AppContext, delay_seconds: int):
     await asyncio.sleep(delay_seconds)
+    ctx.happy_hour_end = None
     ctx.cache["happy_hour"] = False
     try:
         await _send_http_message(ctx, "@guild_antysocial", "⏳ Час Удачи завершён.")
@@ -8421,7 +8564,7 @@ async def reengagement_push(ctx: AppContext) -> None:
         async with ctx.db_pool.acquire() as conn:
             brows = await conn.fetch(
                 'SELECT user_id FROM players WHERE COALESCE("exists", TRUE) '
-                'ORDER BY balance DESC')
+                'ORDER BY total_earned DESC')
         for pos, br in enumerate(brows, 1):
             rank_map[br["user_id"]] = pos
     except Exception:

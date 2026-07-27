@@ -129,6 +129,89 @@ def check_achievement_rewards_parseable():
                      + "\n  ".join(bad))
 
 
+
+def check_war_actions_exist():
+    """Каждое WarAction.X, упомянутое в bot.py, обязано существовать и иметь цену.
+
+    Страж бага «тяга не приносит очков»: do_smoke вызывал WarAction.SMOKE,
+    которого в enum не было. AttributeError ловился общим `except Exception`
+    и уходил в лог — механика молча не работала месяцами, а второе по частоте
+    действие игры не давало гильдии ничего.
+    """
+    import re
+    from services import WarAction, WarConfig
+    src = open(os.path.join(ROOT, "bot.py"), encoding="utf-8").read()
+    used = set(re.findall(r"WarAction\.([A-Z_]+)", src))
+    # Членство в enum проверяем ДО WarConfig(): если действие пропало из enum,
+    # но осталось в таблице очков, конструктор упадёт первым и спрячет причину.
+    missing = sorted(n for n in used if not hasattr(WarAction, n))
+    assert not missing, ("bot.py ссылается на несуществующие WarAction: "
+                         + ", ".join(missing))
+    points = WarConfig().points
+    priceless = sorted(n for n in used if WarAction[n] not in points)
+    assert not priceless, ("У этих WarAction нет цены в WarConfig (add_score "
+                           "бросит UnknownWarActionError): " + ", ".join(priceless))
+
+
+
+def check_earnings_reach_status_ledger():
+    """Любое начисление OAC обязано попасть в total_earned.
+
+    Статус (ранг, топ, «Полярная звезда», гейты) живёт на total_earned.
+    Дельту автоматически ловит repository.atomic_update, но пути, которые
+    сохраняются прямым save(), проходят мимо — и награда двигала бы кошелёк,
+    не двигая ранг. Так тихо потерялись бы награды достижений (~19 900 OAC
+    суммарно) и бонус за выбор стороны у любого, кто уже что-то тратил.
+
+    Правило: если начисление баланса живёт ВНЕ замыкания, переданного в
+    atomic_update, рядом обязано быть явное начисление total_earned.
+    """
+    import ast
+    path = os.path.join(ROOT, "bot.py")
+    src = open(path, encoding="utf-8").read()
+    tree = ast.parse(src)
+    lines = src.splitlines()
+
+    atomic = set()
+    for n in ast.walk(tree):
+        if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                and n.func.attr == "atomic_update"):
+            for a in n.args:
+                if isinstance(a, ast.Name):
+                    atomic.add(a.id)
+
+    funcs = []
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            end = max(getattr(x, "lineno", n.lineno) for x in ast.walk(n))
+            funcs.append((n.name, n.lineno, end))
+
+    def owner(ln):
+        best = None
+        for name, s, e in funcs:
+            if s <= ln <= e and (best is None or s > best[1]):
+                best = (name, s, e)
+        return best[0] if best else "?"
+
+    bad = []
+    for i, line in enumerate(lines, 1):
+        s = line.strip()
+        if s.startswith("#"):
+            continue
+        credits = ".balance +=" in s or (".balance = " in s and "or 0) +" in s)
+        if not credits:
+            continue
+        if owner(i) in atomic:
+            continue                      # дельту поймает atomic_update
+        # Окно широкое: между начислением и учётом статуса часто стоит
+        # объяснительный комментарий.
+        window = "\n".join(lines[i - 1:i + 9])
+        if "total_earned" not in window:
+            bad.append(f"bot.py:{i} в {owner(i)}(): {s[:70]}")
+    assert not bad, ("Начисление OAC вне транзакции без учёта в total_earned "
+                     "(кошелёк вырастет, ранг — нет):\n  " + "\n  ".join(bad))
+
+
 def main():
     passed = []
     check_duplicate_dict_keys()
@@ -137,6 +220,10 @@ def main():
     passed.append("нет 'conn' вне своего async with (страж бага progress_hub)")
     check_achievement_rewards_parseable()
     passed.append("все награды достижений парсятся DSL (страж бага «Уникальный фон»)")
+    check_war_actions_exist()
+    passed.append("все WarAction из bot.py существуют и имеют цену (страж «тяга без очков»)")
+    check_earnings_reach_status_ledger()
+    passed.append("все начисления OAC доходят до total_earned (страж «ранг не растёт»)")
 
     for name in passed:
         print(f"  OK  {name}")

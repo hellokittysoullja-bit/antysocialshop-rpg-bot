@@ -136,7 +136,7 @@ ACHIEVEMENT_CONDITIONS = {
     "farm_1": ("farm_count", 1),
     "craft_1": ("craft_count", 1),
     "smoke_1": ("smoke_count", 1),
-    "balance_1000": ("balance", 1000),
+    "balance_1000": ("total_earned", 1000),
     "smoke_10": ("smoke_count", 10),
     "craft_15": ("craft_count", 15),
     "ritual_5": ("ritual_count", 5),
@@ -145,10 +145,10 @@ ACHIEVEMENT_CONDITIONS = {
     "lab_first": ("lab_chests", 1),
     "referral_1": ("referral_count", 1),
     "streak_7": ("login_streak", 7),
-    "balance_20000": ("balance", 20000),
+    "balance_20000": ("total_earned", 20000),
     "lab_chest_3": ("lab_chests", 3),
-    "rank_phantom": ("balance", 20000),
-    "balance_50000": ("balance", 50000),
+    "rank_phantom": ("total_earned", 20000),
+    "balance_50000": ("total_earned", 50000),
     "check_10": ("check_count", 10),
     "lab_death_5": ("lab_deaths", 5),
     "lab_chest_10": ("lab_chests", 10),
@@ -165,7 +165,7 @@ ACHIEVEMENT_CONDITIONS = {
     "streak_30": ("login_streak", 30),
     "alchemy_50": ("alchemy_count", 50),
     "plantation_5": ("passive_level", 5),
-    "balance_100000": ("balance", 100000),
+    "balance_100000": ("total_earned", 100000),
 }
 
 # Флейвор «дунуть» сгруппирован по ИСХОДУ, а не по независимому броску.
@@ -226,7 +226,12 @@ QUEST_TEMPLATES = {
             # видела непроходимый Ритуал и не имела Исповеди (глава непроходима).
             {"label": "🕯️ Ритуал", "key": "ritual", "target": 3, "condition": "guild_black"},
             {"label": "⚜️ Исповедь", "key": "repent", "target": 3, "condition": "guild_white"},
-            {"label": "💎 Пожертвовать", "key": "donate", "target": 200},
+            # Храм — только для состоящих в гильдии (guild_shrine_callback
+            # отвечает «Ты не в гильдии»), а другого входа в пожертвование
+            # нет. Без условия отложивший фракцию застревал на Главе 2
+            # НАВСЕГДА: остальные шаги закрываются, а этот — никогда.
+            {"label": "💎 Пожертвовать", "key": "donate", "target": 200,
+             "condition": "has_guild"},
             {"label": "🏛️ Лабиринт", "key": "lab", "target": 1},
         ],
         "reward_oac": 0,
@@ -266,7 +271,8 @@ QUEST_TEMPLATES = {
         "tasks": [
             {"label": "⚔️ Тренировка", "key": "train", "target": 3},
             {"label": "💨 Дунуть", "key": "smoke", "target": 5},
-            {"label": "💎 Пожертвовать", "key": "donate", "target": 300},
+            {"label": "💎 Пожертвовать", "key": "donate", "target": 300,
+             "condition": "has_guild"},   # см. Главу 2: Храм требует гильдию
             {"label": "🏛️ Лабиринт", "key": "lab", "target": 1},
         ],
         "reward_oac": 250,
