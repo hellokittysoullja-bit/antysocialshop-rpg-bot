@@ -64,9 +64,10 @@ from enum import Enum, auto  # для SmokeStatus/CraftStatus ниже
 # Pillow не установлен или модуль сломан — карточки просто не рисуются, а весь
 # путь блантов остаётся текстовым (украшение, не критичный путь).
 try:
-    from blunt_art import render_blunt_card
+    from blunt_art import render_blunt_card, ART_VERSION as BLUNT_ART_VERSION
 except Exception:  # pragma: no cover
     render_blunt_card = None
+    BLUNT_ART_VERSION = 0
 
 # ============================================================
 # ДЕКОРАТОРЫ
@@ -1568,13 +1569,47 @@ async def safe_send_blunt_image(context, chat_id, rarity, caption, reply_markup)
             await safe_send_message(context, chat_id, "⚠️ Произошла ошибка при отправке изображения.", parse_mode=None)
         return False
 
+# Потолок одновременных рендеров карточки. Рендер стоит ~220 МБ пикового RSS и
+# ~2с CPU, а уходил он в ДЕФОЛТНЫЙ executor — то есть до 8 воркеров на 4 ядрах,
+# без всякого ограничителя: восемь одновременных просмотров ≈ 1.8 ГБ и почти
+# гарантированный OOM на инстансе 512 МБ. Semaphore(150) в main.py от этого не
+# защищает — он пропускает 150 апдейтов, то есть усиливает, а не сдерживает.
+#
+# До сих пор от перегрузки случайно защищал кэш file_id (рендеров почти не было).
+# Как только появилась инвалидация по версии арта, эта защита исчезает: у всех
+# существующих игроков карты разом становятся холодными. Поэтому ограничитель —
+# не «на будущее», а обязательное условие самой инвалидации.
+# Дефолт 1, а не 2, по замеру: один рендер даёт ~220 МБ пика, база бота с
+# кэшами и пулом — ~180 МБ. Два параллельных (≈620 МБ) уже не влезают в
+# инстанс 512 МБ, ради которого ограничитель и вводится. На инстансе покрупнее
+# поднимается переменной окружения без правки кода.
+BLUNT_RENDER_CONCURRENCY = max(1, int(os.getenv("BLUNT_RENDER_CONCURRENCY", "1")))
+# Длина очереди, дальше которой ждать бессмысленно: игрок не будет смотреть на
+# «часики» 20 секунд. Сбрасываем нагрузку в текстовый путь — он уже есть и
+# корректен, просто никогда не был подключён к перегрузке.
+BLUNT_RENDER_MAX_QUEUE = 8
+_blunt_render_sem: Optional[asyncio.Semaphore] = None
+
+
+def _get_blunt_render_sem() -> asyncio.Semaphore:
+    """Семафор создаётся лениво: на момент импорта модуля event loop ещё нет."""
+    global _blunt_render_sem
+    if _blunt_render_sem is None:
+        _blunt_render_sem = asyncio.Semaphore(BLUNT_RENDER_CONCURRENCY)
+    return _blunt_render_sem
+
+
 async def _persist_blunt_image(ctx, uid, blunt_id, file_id):
     """Кэшируем сгенерированный Telegram file_id прямо на предмете инвентаря →
-    карточка рисуется ОДИН раз, дальше переиспользуется (без пере-рендера)."""
+    карточка рисуется ОДИН раз, дальше переиспользуется (без пере-рендера).
+
+    Вместе с file_id пишем версию визуала: без неё кэш становится вечным и
+    правки рендера не доходят до уже выданных предметов."""
     async def _set(p, conn):
         for it in (p.inventory or []):
             if it.get("id") == blunt_id:
                 it["image_file_id"] = file_id
+                it["art_version"] = BLUNT_ART_VERSION
                 return True
         return False
     try:
@@ -1591,8 +1626,11 @@ async def _send_blunt_card(context, chat_id, item, owner_name, caption, reply_ma
     уникальную карточку (в executor, чтобы не блокировать loop), шлём, ловим
     file_id и кэшируем на предмете. Любая осечка → False, вызывающий откатится
     на текст (карточка — украшение, не критичный путь)."""
+    # Кэш годен, только если он нарисован ТЕКУЩЕЙ версией визуала. Предметы,
+    # созданные до появления счётчика, версии не имеют → считаются устаревшими
+    # и перерисуются при первом показе.
     fid = item.get("image_file_id")
-    if fid:
+    if fid and item.get("art_version") == BLUNT_ART_VERSION:
         try:
             await _send_photo_with_retry(context, chat_id, fid, caption=caption, reply_markup=reply_markup)
             return True
@@ -1601,9 +1639,18 @@ async def _send_blunt_card(context, chat_id, item, owner_name, caption, reply_ma
 
     if render_blunt_card is None:
         return False
+
+    # Перегрузка: ждать в длинной очереди хуже, чем показать текстовый вариант
+    # сразу. Отказ здесь не теряет карточку — предмет перерисуется при следующем
+    # заходе, когда очередь рассосётся.
+    sem = _get_blunt_render_sem()
+    if sem.locked() and len(getattr(sem, "_waiters", None) or ()) >= BLUNT_RENDER_MAX_QUEUE:
+        logger.warning("Очередь рендера карточек переполнена — отдаём текстовый путь")
+        return False
     try:
-        png = await asyncio.get_event_loop().run_in_executor(
-            None, render_blunt_card, item, owner_name or "")
+        async with sem:
+            png = await asyncio.get_event_loop().run_in_executor(
+                None, render_blunt_card, item, owner_name or "")
     except Exception:
         logger.exception("Рендер карточки бланта не удался")
         return False
@@ -1615,6 +1662,7 @@ async def _send_blunt_card(context, chat_id, item, owner_name, caption, reply_ma
             new_fid = msg.photo[-1].file_id
         if new_fid and ctx and uid and item.get("id"):
             item["image_file_id"] = new_fid
+            item["art_version"] = BLUNT_ART_VERSION
             await _persist_blunt_image(ctx, uid, item.get("id"), new_fid)
         return True
     except Exception:
@@ -2109,7 +2157,14 @@ async def _handle_referral(update, context, uid, player):
         p.balance = (p.balance or 0) + 50
         p.referral_count = (p.referral_count or 0) + 1
         name = random.choice(["Крик Бездны","Пепел Короля","Шёпот Склепа"])
-        await create_named_blunt(creator_id, name, rarity="legendary", conn=conn)
+        # ctx обязателен: без него create_named_blunt сразу бросает ValueError
+        # («AppContext is required»), исключение выходит из atomic_update и
+        # откатывает ВСЮ транзакцию — реферер терял и легендарку, и +50 OAC, и
+        # титул, и связку с приглашённым. Награда за реферал не выдавалась ни разу.
+        # player=p передаём намеренно: предмет кладётся в того же игрока, которого
+        # atomic_update уже держит и сохранит, без повторной загрузки поверх.
+        await create_named_blunt(creator_id, name, rarity="legendary",
+                                 conn=conn, ctx=ctx, player=p)
         if "🩸" not in (p.titles or ""):
             p.titles = f"{p.titles or ''} 🩸".strip()
         # Связываем реферала с создателем
@@ -3194,25 +3249,31 @@ async def handle_named_name(update, context):
         item["name"] = meme_name
         item["original_name"] = original_name
 
-        # Локальная таблица (нигде больше не нужна)
+        # Шанс — РЕАЛЬНЫЙ, взят из того же места, что и ролл (см. create_named_blunt).
+        #
+        # Раньше здесь стояли выдуманные числа, поданные как факт о популяции:
+        # «Обнаружен у 3.5% игроков» при фактических 55%, легендарка — «0.17%»
+        # при реальных 2% (в 12 раз реже правды), а сумма всех четырёх давала
+        # 5.77%, что для доли игроков просто невозможно. Это ровно тот фейковый
+        # дефицит, который продукт себе запрещает: не гипербола лора, а
+        # конкретная цифра в формате статистики.
+        #
+        # Честный шанс не слабее выдуманного: 2% — это уже «1 из 50», редкость
+        # настоящая, её не нужно приукрашивать. А доверие к числам — то, на чём
+        # держится ценность ВСЕЙ коллекции: игрок, поймавший одну ложь, перестаёт
+        # верить и правдивым цифрам Кодекса. Формулировка сменена с «обнаружен у
+        # N% игроков» (утверждение о мире) на «шанс с крафта» (проверяемый факт
+        # о механике) — так же, как это уже честно сделано в _build_codex_header.
         rarity = item["rarity"]
-        
-        if rarity == "legendary":
-            label = "ЛЕГЕНДАРНЫЙ"
-            discovery = "0.17%"
-        elif rarity == "epic":
-            label = "ЭПИЧЕСКИЙ"
-            discovery = "0.7%"
-        elif rarity == "rare":
-            label = "РЕДКИЙ"
-            discovery = "1.4%"
-        else:
-            label = "ОБЫЧНЫЙ"
-            discovery = "3.5%"
+        label, odds = {
+            "legendary": ("ЛЕГЕНДАРНЫЙ", "2%"),
+            "epic":      ("ЭПИЧЕСКИЙ",   "13%"),
+            "rare":      ("РЕДКИЙ",      "30%"),
+        }.get(rarity, ("ОБЫЧНЫЙ", "55%"))
 
         # Фанфары по редкости — эмоциональный пик («ахнуть»), твой текст ниже не тронут
         fanfare = {
-            "legendary": "🎊✨🎊 <b>ЛЕГЕНДАРНЫЙ!!!</b> 🎊✨🎊\n<i>Такое рождается раз на тысячу. Ты уловил невозможное.</i>\n\n",
+            "legendary": "🎊✨🎊 <b>ЛЕГЕНДАРНЫЙ!!!</b> 🎊✨🎊\n<i>Один блант из пятидесяти. Ты уловил невозможное.</i>\n\n",
             "epic": "🟣✨ <b>ЭПИЧЕСКИЙ!</b> Искажение благосклонно к тебе.\n\n",
             "rare": "🔵 <b>РЕДКИЙ!</b> Достойный улов.\n\n",
         }.get(rarity, "")
@@ -3223,7 +3284,7 @@ async def handle_named_name(update, context):
             f"{color}<b><i>«{html.escape(meme_name)}»</i></b>\n"
             f"💎 Редкость: <b>{label} • #{item.get('rare_number', '?-????')}</b>\n"
             f"👑 Первый владелец: <b>{html.escape(player.username or 'игрок')}</b>\n"
-            f"🌎 Обнаружен у <b>{discovery}</b> игроков\n\n"
+            f"🎲 Шанс поймать такой: <b>{odds}</b> с крафта\n\n"
             f"🕯️ <i>{reaction}</i>\n\n"
             f"💬 Этот блант достоин того, чтобы его <b>увидели друзья. Действуй!</b>"
         )
@@ -5705,7 +5766,12 @@ async def _process_alchemy_confirm(update, context, uid, player, cfg, ctx):
                     res = f"<b>💠 {'Чистая' if value==1 else 'Мерцающая'} Пыльца!</b>\n\n+{value} Кристальной Пыли"
                 elif effect == "legendary":
                     name = random.choice(cfg["alchemy"]["legendary_names"])
-                    await create_named_blunt(uid, name, rarity="legendary", conn=conn)
+                    # Без ctx здесь падал ValueError внутри транзакции: главный
+                    # приз алхимии — «Философский Камень» — не выдавался никогда,
+                    # а откат съедал и списанные бланты, и счётчик попыток.
+                    # Соседний путь (5029) уже вызывает правильно — эта копия отстала.
+                    await create_named_blunt(uid, name, rarity="legendary",
+                                             conn=conn, ctx=ctx, player=p)
                     res = f"<b>🌟 Философский Камень!</b>\n\nЛегендарный блант «{name}»!"
                 else:
                     res = "<b>🌫️ Грязный Выхлоп...</b>\n\nБланты сгорели без следа."

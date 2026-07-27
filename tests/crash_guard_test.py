@@ -10,6 +10,7 @@
 """
 import ast
 import os
+import re
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -212,6 +213,95 @@ def check_earnings_reach_status_ledger():
                      "(кошелёк вырастет, ранг — нет):\n  " + "\n  ".join(bad))
 
 
+def check_named_blunt_calls_pass_ctx():
+    """`create_named_blunt` без ctx — гарантированный ValueError, съедающий транзакцию.
+
+    Функция первым же действием делает `if ctx is None: raise ValueError`. Все её
+    вызовы сидят внутри `atomic_update`, поэтому исключение не просто теряет
+    блант — оно откатывает ВСЮ транзакцию вокруг. Так молча не работали два
+    приза сразу: легендарка за реферал (реферер терял ещё и +50 OAC, титул и
+    связку с приглашённым) и «Философский Камень» — джекпот алхимии, у которого
+    откат съедал списанные бланты и попытку.
+
+    Обе копии выглядели правдоподобно и жили рядом с корректными вызовами —
+    глазами такое не ловится, поэтому проверка статическая.
+    """
+    path = os.path.join(ROOT, "bot.py")
+    src = open(path, encoding="utf-8").read()
+    tree = ast.parse(src)
+    bad = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        name = fn.id if isinstance(fn, ast.Name) else getattr(fn, "attr", None)
+        if name != "create_named_blunt":
+            continue
+        kwargs = {k.arg for k in node.keywords if k.arg}
+        # ctx может прийти и как **kwargs — такой вызов не считаем дефектным
+        has_splat = any(k.arg is None for k in node.keywords)
+        if "ctx" not in kwargs and not has_splat:
+            bad.append(f"bot.py:{node.lineno}")
+    assert not bad, (
+        "create_named_blunt вызывается без ctx → ValueError и откат транзакции "
+        "(приз не выдаётся, потраченное не возвращается):\n  " + "\n  ".join(bad))
+
+
+def check_advertised_odds_match_real_roll():
+    """Шанс, показанный игроку, обязан совпадать с шансом в коде.
+
+    Продукт запрещает фейковый дефицит. Нарушение уже жило в проде: экран крафта
+    сообщал «Обнаружен у 3.5% игроков» при фактических 55%, а легендарку объявлял
+    «0.17%» при реальных 2% — в 12 раз реже правды. Числа были захардкожены и
+    поданы как статистика, то есть как факт о мире.
+
+    Расхождение такого рода не ловится ни компилятором, ни ревью: обе части
+    выглядят правдоподобно и лежат в разных концах файла. Поэтому сверяем их
+    машинно — пороги ролла из create_named_blunt против таблицы, которую видит
+    игрок. Разъедутся при любой правке баланса → тест упадёт, и подкрутить
+    вероятность молча, забыв про текст, станет невозможно.
+    """
+    src = open(os.path.join(ROOT, "bot.py"), encoding="utf-8").read()
+
+    # пороги ролла: `if r < 0.02: rarity = "legendary"` и т.д.
+    thresholds = {}
+    for m in re.finditer(r"r\s*<\s*([0-9.]+)\s*:\s*rarity\s*=\s*[\"'](\w+)[\"']", src):
+        thresholds[m.group(2)] = float(m.group(1))
+    assert thresholds, "не найдены пороги ролла редкости в create_named_blunt"
+
+    # кумулятивные пороги → вероятность каждого тира
+    order = sorted(thresholds.items(), key=lambda kv: kv[1])
+    real, prev = {}, 0.0
+    for name, th in order:
+        real[name] = th - prev
+        prev = th
+    real["common"] = round(1.0 - prev, 10)
+
+    # то, что видит игрок: ("ЛЕГЕНДАРНЫЙ", "2%") и хвостовой common в .get(...)
+    shown = {r: int(p) for r, p in
+             re.findall(r"[\"'](\w+)[\"']:\s*\(\s*[\"'][^\"']+[\"']\s*,\s*[\"'](\d+)%[\"']\s*\)", src)}
+    m_common = re.search(r"\.get\(rarity,\s*\(\s*[\"'][^\"']+[\"']\s*,\s*[\"'](\d+)%[\"']\s*\)\)", src)
+    if m_common:
+        shown["common"] = int(m_common.group(1))
+    # Fail closed — намеренно. Если таблицу не удалось разобрать, значит экран
+    # крафта переписали в другой форме, и сверить показанное с реальным больше
+    # нечем. Молчаливый пропуск здесь означал бы, что запрет на фейковый дефицит
+    # снова держится на честном слове, — поэтому неразобранная форма считается
+    # провалом, а не «нечего проверять». Переписал экран → почини и эту сверку.
+    assert shown, (
+        "не удалось разобрать таблицу шансов на экране крафта: сверка с реальным "
+        "роллом невозможна. Если формат вывода менялся — обнови разбор здесь, "
+        "иначе запрет на фейковый дефицит перестаёт проверяться.")
+
+    bad = []
+    for tier, pct in shown.items():
+        expected = round(real.get(tier, -1) * 100)
+        if expected != pct:
+            bad.append(f"{tier}: игроку показано {pct}%, реальный шанс {expected}%")
+    assert not bad, ("Заявленный шанс расходится с реальным (фейковый дефицит):\n  "
+                     + "\n  ".join(bad))
+
+
 def main():
     passed = []
     check_duplicate_dict_keys()
@@ -224,6 +314,10 @@ def main():
     passed.append("все WarAction из bot.py существуют и имеют цену (страж «тяга без очков»)")
     check_earnings_reach_status_ledger()
     passed.append("все начисления OAC доходят до total_earned (страж «ранг не растёт»)")
+    check_named_blunt_calls_pass_ctx()
+    passed.append("create_named_blunt везде получает ctx (страж «приз не выдался, транзакция откатилась»)")
+    check_advertised_odds_match_real_roll()
+    passed.append("показанный шанс равен реальному роллу (страж фейкового дефицита)")
 
     for name in passed:
         print(f"  OK  {name}")
