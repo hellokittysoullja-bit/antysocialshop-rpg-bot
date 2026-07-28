@@ -922,17 +922,23 @@ def _quest_progress_counts(template, progress, guild, is_veteran, has_pet):
     return (done, len(tasks))
 
 
-def _plural_steps(n: int) -> str:
-    """Русское склонение слова «шаг» для числа n."""
+def _plural_ru(n: int, one: str, few: str, many: str) -> str:
+    """Русское склонение существительного по трём формам (1 форма / 2-4 / 5-20).
+    one="шаг", few="шага", many="шагов" — вызывающий передаёт свою тройку."""
     n = abs(n) % 100
     if 11 <= n <= 14:
-        return "шагов"
+        return many
     d = n % 10
     if d == 1:
-        return "шаг"
+        return one
     if 2 <= d <= 4:
-        return "шага"
-    return "шагов"
+        return few
+    return many
+
+
+def _plural_steps(n: int) -> str:
+    """Русское склонение слова «шаг» для числа n."""
+    return _plural_ru(n, "шаг", "шага", "шагов")
 
 
 
@@ -2207,8 +2213,26 @@ def get_medal_target(count, medals_list):
             return th
     return medals_list[-1][0]  # максимум
 
-def get_medal_progress(new_count, medals_list):
-    """Возвращает строку с прогресс-баром и названиями медалей (жирными)."""
+def get_medal_progress(new_count, medals_list, just_leveled=False):
+    """Возвращает строку с прогресс-баром и названиями медалей (жирными).
+
+    just_leveled=True — медаль взята ЭТИМ ЖЕ действием (medal_text от
+    get_medal_text_and_reward непустой). Раньше в этот момент бар мгновенно
+    показывал «0%» прогресса к СЛЕДУЮЩЕЙ медали — в одном сообщении с «🎉 Твой
+    ранг повышен!» стояла визуально пустая шкала: пик гасился в ту же секунду,
+    в которую случался. Здесь вместо этого — залитый бар только что взятой
+    медали (как рангап в большинстве AAA-прогрессий: сначала долив до 100%,
+    чистый старт следующего тира — только на следующем действии).
+    """
+    if just_leveled:
+        just_medal = medals_list[0][1]
+        for th, name, _ in medals_list:
+            if new_count >= th:
+                just_medal = name
+            else:
+                break
+        return f"{'▓' * 10} 100%\n<b>{just_medal}</b> — получено! 🎉"
+
     cur_medal = medals_list[0][1]
     cur_th = medals_list[0][0]
     next_th = medals_list[1][0] if len(medals_list) > 1 else None
@@ -2374,7 +2398,7 @@ async def _create_new_player(update, context, uid, username, invited_by=None,
         "над обоими мирами.</i>\n\n"
         f"{ref_bonus_line}"
         f"🎁 <b>Смотритель дарует тебе</b> <code>{start_balance}</code> 🍬 <b>и твой первый именной блант!</b>\n\n"
-        "<b>🎓 ОБУЧЕНИЕ [▓░░░] 1/3</b>\n\n"
+        "<b>🎓 ОБУЧЕНИЕ [▓░░] 1/3</b>\n\n"
         "⚔️ <b>ВЫБЕРИ ФРАКЦИЮ — ПОЛУЧИ +50 OAC СРАЗУ!</b>\n\n"
         "🕯️ <b>Тёмная Гильдия</b>\n"
         "• Особое умение: Ритуал 🔮\n"
@@ -2421,7 +2445,11 @@ async def defer_faction_handler(update, context):
     ])
     try:
         await query.message.edit_text(
-            "<b>🎓 ОБУЧЕНИЕ [▓░░░] 1/3</b>\n\n"
+            # 2/3, а не 1/3 — тот же самый следующий шаг («иди фарми»), что и
+            # в guild_join_handler после прямого выбора фракции, там он тоже
+            # 2/3. Раньше два пути к ОДНОМУ И ТОМУ ЖЕ действию показывали
+            # разный номер шага — расходящийся счётчик для идентичного экрана.
+            "<b>🎓 ОБУЧЕНИЕ [▓▓░] 2/3</b>\n\n"
             "<b>🍬 Твой первый шаг — фарм!</b>\n"
             "Нажми кнопку ниже и получи первые <b>OAC</b> — прямо сейчас.\n\n"
             "<i>💡 OAC — главная валюта. Сторону Гильдии выберешь позже, "
@@ -2561,6 +2589,10 @@ async def _reward_referrer(ctx, context, creator_id):
             parse_mode='HTML')
     except Exception:
         pass
+    # referral_count растёт именно тут — «referral_1»/«referral_5» раньше
+    # ждали случайного следующего фарма/крафта РЕФЕРЕРА вместо срабатывания
+    # в момент, когда он реально видит «пришёл новый Странник».
+    await check_achievements(creator_id, context, ctx=ctx)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2723,6 +2755,38 @@ def _calculate_reward(streak: int, config: StreakConfig) -> RewardResult:
 # Формирование сообщения с улучшенным прогресс-баром (пункт 7)
 # ---------------------------------------------------------------------------
 
+# Плато (streak > max_streak_display=14) раньше показывало АБСОЛЮТНО
+# одинаковый заголовок/текст/бар «14/14» на день 15 и на день 365 подряд —
+# самый преданный игрок в игре годами смотрел на статичный экран (нарушение
+# S9 «content half-life» / D8 «escalation»: контент не может стареть быстрее
+# пользователя). Суммы OAC (plateau_reward) НЕ трогаем — это экономика,
+# не голос; меняется только то, что видит глаз.
+VETERAN_MILESTONES: Dict[int, Tuple[str, str]] = {
+    21: ("👑 ТРИ НЕДЕЛИ ВЕРНОСТИ 👑", "Ты не пропустил ни дня три недели подряд."),
+    30: ("🌌 МЕСЯЦ БЕЗ ИЗМЕНЫ 🌌", "Целый месяц Искажение видело тебя каждый день."),
+    50: ("⚜️ ПОЛУСОТНЯ ⚜️", "50 дней подряд. Немногие доходят до этой цифры."),
+    100: ("💯 СОТНЯ 💯", "100 дней. Ты — легенда Гильдии, и это не метафора."),
+    200: ("🩸 ДВЕСТИ ДНЕЙ 🩸", "200 дней верности. Искажение помнит таких, как ты."),
+    365: ("🔥 ГОД С ИСКАЖЕНИЕМ 🔥", "Целый год. Ты был здесь каждый божий день."),
+    500: ("🪬 ПОЛУТЫСЯЧЕЛЕТИЕ 🪬", "500 дней. История Гильдии будет о тебе."),
+    1000: ("👑 ТЫСЯЧА ДНЕЙ 👑", "1000 дней. Таких, как ты, можно сосчитать на пальцах."),
+}
+
+VETERAN_FLAVORS = (
+    "Пламя серии не гаснет — и не погаснет, пока ты здесь.",
+    "Искажение узнаёт твои шаги издалека.",
+    "Ты давно перестал быть новичком. Гильдия помнит это.",
+    "Каждый новый день серии — кирпич в стене легенды.",
+    "Другие приходят и уходят. Ты — остаёшься.",
+)
+
+
+def _next_veteran_milestone(streak: int) -> Optional[int]:
+    """Ближайшая именная веха ПОСЛЕ текущего дня, или None, если дальше нет."""
+    upcoming = [d for d in VETERAN_MILESTONES if d > streak]
+    return min(upcoming) if upcoming else None
+
+
 def _build_next_day_preview(streak: int, config: StreakConfig) -> str:
     """Предпросмотр завтрашней награды — крючок предвкушения + loss-aversion.
 
@@ -2735,6 +2799,10 @@ def _build_next_day_preview(streak: int, config: StreakConfig) -> str:
         base = int(base * config.hot_streak_multiplier)
     next_title = config.title_rewards.get(next_streak)
 
+    if next_streak in VETERAN_MILESTONES:
+        milestone_title, _ = VETERAN_MILESTONES[next_streak]
+        return (f"\n\n🎁 <b>Завтра (День {next_streak}):</b> +{base} OAC "
+                f"— {milestone_title}!\n<i>Особый день. Не пропусти 🔥</i>")
     if next_title:
         return (f"\n\n🎁 <b>Завтра (День {next_streak}):</b> +{base} OAC "
                 f"<b>и титул {next_title}!</b>\n<i>Вернись и не разорви серию 🔥</i>")
@@ -2743,8 +2811,23 @@ def _build_next_day_preview(streak: int, config: StreakConfig) -> str:
 
 
 def _build_daily_message(streak: int, reward: RewardResult, config: StreakConfig) -> str:
-    # Стиль заголовка
-    if streak >= 8:
+    # Стиль заголовка. Именная веха > обычное плато > обычный «стрик 8+» >
+    # «стрик 3+» > первые дни — порядок важен: вехи (21, 30, 100…) — подмножество
+    # обычного плато (>14), должны проверяться первыми.
+    if streak in VETERAN_MILESTONES:
+        milestone_title, milestone_desc = VETERAN_MILESTONES[streak]
+        title = f"<b>{milestone_title}</b>"
+        filled_char, empty_char = "🔮", "⬛️"
+        desc = milestone_desc
+    elif streak > config.max_streak_display:
+        # Плато: экономика не растёт дальше (см. plateau_reward — так и
+        # задумано), но текст обязан жить — иначе день 15 и день 365
+        # выглядят как один и тот же скриншот. Ротация по streak — без
+        # состояния, детерминированная, но хотя бы не одна и та же строка вечно.
+        title = "<b>🔮 ХРУСТАЛЬНЫЙ ШАР ВЕРНОСТИ 🔮</b>"
+        filled_char, empty_char = "🔮", "⬛️"
+        desc = VETERAN_FLAVORS[streak % len(VETERAN_FLAVORS)]
+    elif streak >= 8:
         title = "<b>🔮 ХРУСТАЛЬНЫЙ ШАР ВЕРНОСТИ 🔮</b>"
         filled_char, empty_char = "🔮", "⬛️"
         desc = "Твоя преданность вознаграждена…"
@@ -2908,7 +2991,7 @@ def _format_farm_message(earned: int, crit: bool, happy: bool,
         banner = ""
 
     # Прогресс-бары
-    progress_bar_str = get_medal_progress(new_count, FARM_MEDALS)
+    progress_bar_str = get_medal_progress(new_count, FARM_MEDALS, just_leveled=bool(medal_text))
     # Шкала ранга — по заработанному за всё время, а не по кошельку.
     rank_progress = get_rank_progress(new_balance if new_earned is None else new_earned)
 
@@ -2997,17 +3080,27 @@ async def farm_callback_v2(update, context, ctx, player):
         has_pet = bool(getattr(player, 'pet', ''))
         is_veteran = has_rank(getattr(player, 'total_earned', 0) or 0, "Ветеран")
     
-        # Динамический прогресс-бар
-        guild_emoji = "🕯️" if guild == "BLACK" else "⚜️" if guild == "WHITE" else "🏰"
-        actions_emojis = {
-            "farm": "🍬",
-            "craft": "🌿",
-            "smoke": "💨",
-            "guild_action": guild_emoji,
+        # Мини-прогресс строим из РЕАЛЬНОГО текущего квеста — тот же фильтр
+        # условий, что у daily_quest_hub/next_quest_step. Раньше здесь стоял
+        # хардкод из 4 фиксированных иконок (farm/craft/smoke/guild_action),
+        # совпадавший только с главой 1: в главе 2 «Фармить» вообще не задача,
+        # а «Пожертвовать»/«Лабиринт» не показывались никогда — два экрана
+        # «прогресса дня» рисовали два разных набора задач на один день.
+        quest_id = progress.get("quest_id", "chapter1")
+        template = QUEST_TEMPLATES.get(quest_id, QUEST_TEMPLATES["chapter1"])
+        conditions = {
+            "guild_black": guild == "BLACK",
+            "guild_white": guild == "WHITE",
+            "has_guild": bool(guild),
+            "is_veteran_and_has_pet": is_veteran and has_pet,
         }
-        if is_veteran and has_pet:
-            actions_emojis["pet"] = "🐾"
-    
+        actions_emojis = {}
+        for task in template.get("tasks", []):
+            cond = task.get("condition")
+            if cond and not conditions.get(cond, False):
+                continue
+            actions_emojis[task["key"]] = task["label"].split(" ", 1)[0]
+
         total = len(actions_emojis)
         done = sum(1 for k in actions_emojis if progress.get(k))
     
@@ -3129,7 +3222,7 @@ async def farm_callback_v2(update, context, ctx, player):
         await ctx.repo.atomic_update(uid, _advance_onboarding)
         await safe_send_message(
             context, uid,
-            "<b>🎓 ОБУЧЕНИЕ [▓▓▓░] 3/3</b>\n\n"
+            "<b>🎓 ОБУЧЕНИЕ [▓▓▓] 3/3</b>\n\n"
             "<b>🌿 Отлично! Теперь создадим твой первый блант.</b>\n"
             "Нажми кнопку ниже, чтобы <b>сразу создать обычный блант</b>.\n\n"
             "<i>💡 Бланты нужны, чтобы активировать случайный эффект.</i>\n"
@@ -3194,7 +3287,7 @@ def _build_craft_keyboard(m_essence: int) -> InlineKeyboardMarkup:
 def _format_normal_craft_message(medal_text: str, new_count: int, target: int,
                                  blunts: int, new_balance: int) -> str:
     """Сообщение после обычного крафта."""
-    progress_bar_str = get_medal_progress(new_count, CRAFT_MEDALS)
+    progress_bar_str = get_medal_progress(new_count, CRAFT_MEDALS, just_leveled=bool(medal_text))
     return (
         f"<b>🌿 БЛАНТ СКРУЧЕН!</b>\n\n"
         f"💎 Потрачено: <b>15 OAC 🍬</b>\n"
@@ -3312,7 +3405,7 @@ async def handle_craft_normal_v2(update, context, ctx, player):
         ])
         await safe_send_message(
             context, uid,
-            "<b>🎓 Обучение [▓▓▓▓] (шаг 3 из 3)</b>\n\n🎉 Поздравляю! Ты освоил основы.</b>\n\nНажми кнопку ниже, чтобы получить бонус за обучение!",
+            "<b>🎓 Обучение [▓▓▓] (шаг 3 из 3)</b>\n\n🎉 Поздравляю! Ты освоил основы.</b>\n\nНажми кнопку ниже, чтобы получить бонус за обучение!",
             reply_markup=kb
         )
 
@@ -3950,7 +4043,7 @@ async def do_smoke(update, context, ctx, player):
         f"{effect}\n\n"
         f"{medal_text}"
         f"<b>💨 Дым:</b> {new_count}/{get_medal_target(new_count, SMOKE_MEDALS)}\n"
-        f"{get_medal_progress(new_count, SMOKE_MEDALS)}"
+        f"{get_medal_progress(new_count, SMOKE_MEDALS, just_leveled=bool(medal_text))}"
         f"{pity_line}\n\n"
         f"<b>🍃 Блантов в свёртке:</b> <b>{bl_left}</b>"
     )
@@ -4047,7 +4140,7 @@ async def ritual_callback(update, context):
 
     reward, extra, medal_text, new_count, new_balance = data
     target = get_medal_target(new_count, RITUAL_MEDALS)
-    progress_bar_str = get_medal_progress(new_count, RITUAL_MEDALS)
+    progress_bar_str = get_medal_progress(new_count, RITUAL_MEDALS, just_leveled=bool(medal_text))
 
     text = (
         f"<b>🕯️ РИТУАЛ ЗАВЕРШЁН 🎉</b>\n\n"
@@ -4524,6 +4617,9 @@ async def plant_upgrade_handler(update, context, ctx):
     result = await ctx.repo.atomic_update(uid, _upgrade)
     if result and result[0] == "ok":
         await query.answer(f"⬆️ Плантация улучшена до ур.{result[1]}!")
+        # passive_level растёт именно тут — «plantation_5» раньше ждал
+        # следующего фарма/крафта вместо срабатывания в момент самого апгрейда.
+        await check_achievements(uid, context, ctx=ctx)
     elif result and result[0] == "no_money":
         await query.answer(f"Недостаточно OAC. Нужно {result[1]}.", show_alert=True)
     elif result and result[0] == "max":
@@ -4944,6 +5040,15 @@ async def achievements_callback(update, context, page=0):
         await query.answer("Профиль не найден.", show_alert=True)
         return
 
+    # Самоисцеление экрана: раньше он ТОЛЬКО читал таблицу achievements_awarded,
+    # а награждение идёт фоновой задачей после конкретных действий (farm/craft/
+    # smoke/ritual/repent/lab_win — не всех, см. ниже). Игрок мог открыть
+    # «Достижения» и увидеть 🔒 (заперто) РЯДОМ с прогресс-баром на 100% для
+    # уже выполненного условия — самопротиворечащий экран, который читается
+    # как «игра сломана», а не «подожди чуть-чуть». Пересчёт перед показом
+    # закрывает разрыв независимо от того, какое действие его вызвало.
+    await check_achievements(uid, context, ctx=ctx)
+
     async with ctx.db_pool.acquire() as conn:
         awarded = await conn.fetch("SELECT ach_id FROM achievements_awarded WHERE user_id = $1", uid)
     awarded_ids = {r["ach_id"] for r in awarded}
@@ -5201,7 +5306,9 @@ async def guild_info_callback(update, context):
         members = cnt.get(guild_name, 0)
 
         text += f"{guild_emoji} <b>{guild_label} Гильдия</b>\n"
-        text += f"👥 <b>{members} странников</b>\n"
+        # Раньше «1 странников» — заметная грамматическая царапина в первый же
+        # момент, где игрок видит масштаб гильдии (соц-доказательство).
+        text += f"👥 <b>{members} {_plural_ru(members, 'странник', 'странника', 'странников')}</b>\n"
 
         # Цветные эмодзи для каждой гильдии
         if guild_name == "BLACK":
@@ -5312,11 +5419,16 @@ async def guild_war_callback(update, context):
         scores = await conn.fetch("SELECT guild, total_score FROM guild_weekly")
         black_score = next((r["total_score"] for r in scores if r["guild"] == "BLACK"), 0)
         white_score = next((r["total_score"] for r in scores if r["guild"] == "WHITE"), 0)
+        # AND donated > 0 — раньше без этого условия свежая гильдия без единого
+        # донатера всё равно выводила 3 случайных строки «Герои Тьмы... — 0»:
+        # honesty-нарушение (B3 Real social proof) — «герой» ничего не сделал.
         top_black = await conn.fetch(
-            "SELECT username, donated FROM players WHERE guild='BLACK' ORDER BY donated DESC LIMIT 3"
+            "SELECT username, donated FROM players WHERE guild='BLACK' AND donated > 0 "
+            "ORDER BY donated DESC LIMIT 3"
         )
         top_white = await conn.fetch(
-            "SELECT username, donated FROM players WHERE guild='WHITE' ORDER BY donated DESC LIMIT 3"
+            "SELECT username, donated FROM players WHERE guild='WHITE' AND donated > 0 "
+            "ORDER BY donated DESC LIMIT 3"
         )
 
     total = max(black_score + white_score, 1)
@@ -5341,10 +5453,16 @@ async def guild_war_callback(update, context):
         text += "🕯️ <b>Герои Тьмы:</b>\n"
         for i, row in enumerate(top_black, 1):
             text += f"  {i}. {html.escape(row['username'])} — {row['donated']}\n"
+    else:
+        # Пустой список честнее прежних «героев с нулём»: зовёт стать первым
+        # (FOMO первопроходца), а не изображает несуществующий рекорд.
+        text += "🕯️ <i>Герои Тьмы ещё не появились — стань первым.</i>\n"
     if top_white:
         text += "⚜️ <b>Герои Света:</b>\n"
         for i, row in enumerate(top_white, 1):
             text += f"  {i}. {html.escape(row['username'])} — {row['donated']}\n"
+    else:
+        text += "⚜️ <i>Герои Света ещё не появились — стань первым.</i>\n"
 
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔙 Назад", callback_data="guild_info")]
@@ -5412,7 +5530,7 @@ async def repent_callback(update, context, ctx):
 
         # === ДОБАВЛЕНО: Прогресс-бар (пункт 4) ===
         target = get_medal_target(new_count, REPENT_MEDALS)
-        progress_bar_str = get_medal_progress(new_count, REPENT_MEDALS)
+        progress_bar_str = get_medal_progress(new_count, REPENT_MEDALS, just_leveled=bool(medal_text))
 
         # === ДОБАВЛЕНО: Красивый текст с цитатой (пункт 9) ===
         full_text = (
@@ -6216,6 +6334,10 @@ async def _process_alchemy_confirm(update, context, uid, player, cfg, ctx):
 
     await edit_or_reply(update, context, data[0],
                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]))
+    # alchemy_count растёт именно тут — «alchemy_15»/«alchemy_50» (и через них
+    # «Лунный лорд») раньше ждали случайного следующего фарма/крафта вместо
+    # срабатывания в момент самой алхимии — самого дорогого веторан-ритуала.
+    await check_achievements(uid, context, ctx=ctx)
 
 # /check
 async def check_blunt(update, context):
@@ -6779,6 +6901,11 @@ async def show_lab_death(update, context):
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 К Лабиринту", callback_data="lab_start")],
                                [InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
     await edit_or_reply(update, context, text, reply_markup=kb, parse_mode='HTML')
+    # lab_deaths растёт именно здесь, но эту ветку раньше никто не проверял на
+    # достижения — «lab_death_5» (и заодно «Лунный лорд» через него) ждал
+    # случайного следующего фарма/крафта, а не срабатывал в момент самой
+    # 5-й смерти, где дофаминовая пара «действие → награда» ощутима сильнее всего.
+    await check_achievements(uid, context, ctx=ctx)
 
 async def welcome_new_member(update, context):
     for member in update.message.new_chat_members:
@@ -7694,6 +7821,13 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
             hint = "<b>💡 Попробуй 🌿 Крафт, чтобы создать свой первый Блант!</b>"
         elif len(named) <= 1 and balance >= GAME_CONFIG["named_blunt_cost"]:
             hint = "<b>💡 Готов к большему? Создай свой первый 💍 Именной блант! (50 OAC)</b>"
+        elif _altar_gate_open(player):
+            # Раньше эндгейм-игрок (Некромант, макс-плантация) навечно видел ТУ
+            # ЖЕ подсказку «исследуй алхимию и корми питомца», что и свежий
+            # ветеран — хотя вертикаль роста для него уже сместилась в Алтарь
+            # Вечности. Подсказка обязана двигаться вместе с прогрессом, а не
+            # застывать на первом же плато (D8 escalation).
+            hint = "💡 Загляни в <b>🕯️ Алтарь Вечности</b> — вершина роста открыта именно для тебя."
         elif is_veteran:
             hint = "💡 Исследуй <b>🔮 Алхимию</b> и корми своего 🐾 <b>питомца!</b>"
         else:
@@ -8994,7 +9128,7 @@ async def guild_join_handler(update, context, ctx):
             await safe_send_message(
                 context, uid,
                 f"🏰 <b>Ты в {g_name} Гильдии!</b> Сейчас в ней <b>{online}</b> странников.\n\n"
-                "<b>🎓 ОБУЧЕНИЕ [▓▓░░] 2/3</b>\n\n"
+                "<b>🎓 ОБУЧЕНИЕ [▓▓░] 2/3</b>\n\n"
                 "<b>🍬 Твой первый шаг — фарм!</b>\n"
                 "Нажми кнопку ниже, чтобы получить <b>OAC</b>.\n\n"
                 "<i>💡 OAC — главная валюта. Трать её на крафт, питомцев и свитки.</i>",

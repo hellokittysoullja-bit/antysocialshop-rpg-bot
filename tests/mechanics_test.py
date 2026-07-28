@@ -501,6 +501,8 @@ async def test_services(passed):
     class _RefCtx:
         def __init__(self, repo):
             self.repo = repo
+            self.redis = None
+            self.db_pool = repo.db_pool
 
     before = await repo.get_by_id(REF_UID)
     await _reward_referrer(_RefCtx(repo), _RefContext(), REF_UID)
