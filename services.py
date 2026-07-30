@@ -147,16 +147,19 @@ class GuildWarService:
         if points == 0:
             return
 
-        if self.redis:
-            week_start = (datetime.now().date() - timedelta(days=datetime.now().weekday())).isoformat()
-            idemp_key = f"war_score:{user_id}:{action.value}:{week_start}"
-            success = await self.redis.setnx(idemp_key, 1)
-            if success:
-                await self.redis.expire(idemp_key, 60 * 60 * 24 * 7)
-            else:
-                self.logger.debug("Duplicate war score blocked: %s", idemp_key)
-                return
-
+        # ВАЖНО: здесь стоял идемпотентный SETNX с ключом
+        # war_score:{user}:{action}:{week_start}. Ключ не различал СОБЫТИЯ —
+        # только игрока, тип действия и неделю, — поэтому первое же начисление
+        # блокировало все последующие: игрок получал за крафт 10 очков ОДИН РАЗ
+        # за неделю, сколько бы он ни крафтил. То же для тяги, алхимии и
+        # лабиринта. Вся таблица очков WarConfig фактически не работала, и итог
+        # Войны решал только add_score_raw (фарм/плантация/колесо), который
+        # через эту защиту не проходит.
+        #
+        # Настоящей защиты от дублей здесь быть и не может: у события нет
+        # идентификатора. Дубли апдейтов уже отсекаются выше по стеку
+        # (idempotent_cache в main.py + processed_update в game_handler), а
+        # ретраи _add_score_retry срабатывают только на обрывах соединения.
         await self._add_score_retry(user_id, points, action, conn)
 
     async def add_score_raw(self, user_id: int, points: int, conn=None) -> None:

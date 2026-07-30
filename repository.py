@@ -205,6 +205,54 @@ class PlayerRepository:
                 logger.info("Атомарное обновление для игрока %d успешно завершено", user_id)
                 return result
 
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=5))
+    async def atomic_pair_update(self, user_id_a: int, user_id_b: int, update_func):
+        """Атомарно блокирует ДВУХ игроков в ОДНОЙ транзакции и передаёт их
+        update_func(player_a, player_b, conn) для правки обоих сразу.
+
+        Единственный способ безопасно передать предмет от одного игрока
+        другому: раньше дарение читало обоих игроков через get_by_id (может
+        отдать снимок из Redis-кэша с TTL 10с) и делало ДВА независимых save()
+        — ни блокировки, ни общей транзакции. Крах между двумя save()
+        удваивал или терял предмет; конкурентное действие любого из двоих
+        (фарм, крафт — что угодно) в эти секунды откатывалось перезаписью
+        устаревшего снимка. Здесь оба игрока блокируются SELECT…FOR UPDATE в
+        ОДНОЙ транзакции, правки и оба save() — тоже в ней; крах откатывает
+        всё, конкурентное чтение других запросов просто ждёт лока.
+
+        Блокировка берётся в порядке возрастания user_id — детерминированно
+        для ЛЮБОЙ пары, что исключает deadlock при встречных подарках A→B и
+        B→A, идущих одновременно.
+        """
+        if not user_id_a or user_id_a <= 0 or not user_id_b or user_id_b <= 0:
+            raise ValueError("Некорректный user_id при парном атомарном обновлении")
+
+        lo, hi = sorted((user_id_a, user_id_b))
+        async with self.db_pool.acquire() as conn:
+            async with conn.transaction():
+                columns = PLAYER_COLUMNS
+                cols_sql = ", ".join(f'"{c}"' for c in columns)
+                loaded = {}
+                for uid in (lo, hi):
+                    row = await conn.fetchrow(
+                        f"SELECT {cols_sql} FROM players WHERE user_id = $1 FOR UPDATE", uid)
+                    if not row:
+                        loaded[uid] = None
+                        continue
+                    p = dict(row)
+                    p["inventory"] = _json_safe_load(p.get("inventory"), [])
+                    p["profile_skins"] = _json_safe_load(p.get("profile_skins"), {})
+                    p["pending_transfer"] = _json_safe_load(p.get("pending_transfer"), None)
+                    p["daily_progress"] = _json_safe_load(p.get("daily_progress"), {})
+                    loaded[uid] = Player(**p)
+
+                player_a, player_b = loaded[user_id_a], loaded[user_id_b]
+                result = await update_func(player_a, player_b, conn)
+                for p in (player_a, player_b):
+                    if p is not None:
+                        await self.save(p, conn=conn)
+                return result
+
     async def _cache_put(self, user_id: int, player: Player):
         """Сохраняет игрока в Redis или in‑memory кэш."""
         try:
