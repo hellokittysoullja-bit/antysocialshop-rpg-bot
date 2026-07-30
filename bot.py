@@ -280,6 +280,25 @@ from urllib.parse import quote
 def build_share_url(share_text: str) -> str:
     return f"https://t.me/share/url?text={quote(share_text, safe='')}"
 
+
+async def _win_share_button(context, uid: int, win_line: str) -> InlineKeyboardButton:
+    """Кнопка «Поделиться» на пике позитивной эмоции — общая для трёх редких
+    моментов: возвышение ранга, джекпот «Дунуть», рекорд Лабиринта.
+
+    Все три уже транслировались в @guild_antysocial (соц-доказательство для
+    ЧУЖИХ), но ДОСТИГШИЙ игрок не получал способа поделиться СВОЕЙ победой ни
+    с кем за пределами официального чата. Peak-end rule + идентити-элевация:
+    именно в момент личного триумфа склонность поделиться выше всего за всю
+    сессию — просить в этот момент дешевле, чем в холодном профиле.
+
+    win_line — уже готовая строка о конкретной победе (без ссылки); ссылка и
+    приглашение приклеиваются здесь одинаково для всех трёх мест.
+    """
+    bot_username = (await context.bot.get_me()).username
+    ref_link = f"https://t.me/{bot_username}?start=ref_{uid}"
+    share_text = f"{win_line}\n\n🎁 Заходи по ссылке — +100 OAC на старт:\n{ref_link}"
+    return InlineKeyboardButton("📤 Поделиться победой", url=build_share_url(share_text))
+
 # ── Исключения ──────────────────────────────────────────────
         
 class AchievementService:
@@ -825,17 +844,29 @@ async def check_rank_up(context, user_id, username, old_balance, new_balance):
         return
     rank_label = RANKS[new_idx][0]
     ctx = context.bot_data.get("ctx")
+    # Единственный личный триумф в игре, у которого не было ВООБЩЕ ни одной
+    # кнопки — карточка приходила и молча повисала. Пик идентити-элевации:
+    # именно здесь просьба поделиться дешевле всего за всю сессию.
+    ascension_kb = None
+    try:
+        share_btn = await _win_share_button(
+            context, user_id, f"⚡ Я достиг ранга {rank_label} в Antysocialshop!")
+        ascension_kb = InlineKeyboardMarkup([[share_btn]])
+    except Exception:
+        pass
     try:
         # мини-предвкушение: вспышка перед раскрытием ранга
         msg = await context.bot.send_message(
             chat_id=user_id, text="🌑 <i>Что-то меняется в тебе…</i>", parse_mode='HTML')
         await asyncio.sleep(1.1)
-        await msg.edit_text(_build_ascension_card(rank_label, new_balance), parse_mode='HTML')
+        await msg.edit_text(_build_ascension_card(rank_label, new_balance),
+                            parse_mode='HTML', reply_markup=ascension_kb)
     except Exception:
         try:
             await context.bot.send_message(
                 chat_id=user_id,
-                text=_build_ascension_card(rank_label, new_balance), parse_mode='HTML')
+                text=_build_ascension_card(rank_label, new_balance),
+                parse_mode='HTML', reply_markup=ascension_kb)
         except Exception:
             pass
     # аспирационные ранги — анонс в гильдию (социальное доказательство + FOMO)
@@ -4073,11 +4104,11 @@ async def do_smoke(update, context, ctx, player):
     if save:
         text += "\n⚜️ <i>Светлая Гильдия сохранила твой Блант!</i>"
 
-    kb = InlineKeyboardMarkup([
+    kb_rows = [
         [InlineKeyboardButton("💨 Дунуть ещё", callback_data="do_smoke") if bl_left >= 1
          else InlineKeyboardButton("🌿 Крафтить ещё", callback_data="craft")],
         [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
-    ])
+    ]
     # Suspense-ревил ТОЛЬКО на джекпоте (2%): предвкушение поднимает дофаминовый
     # пик именно там, где он редкий и ценный (dopamine живёт на фазе ожидания).
     # Обычные тяги (98%) не тормозим ни на миллисекунду — никакого минуса на
@@ -4091,6 +4122,15 @@ async def do_smoke(update, context, ctx, player):
                 await asyncio.sleep(0.6)
         except Exception:
             pass
+        # Джекпот транслировался в гильд-чат анонимно («кто-то из наших»), но
+        # сам игрок не мог поделиться СВОЕЙ победой ни с кем за пределами
+        # официального чата — тот же пробел, что и у ранг-апа.
+        try:
+            kb_rows.insert(0, [await _win_share_button(
+                context, uid, f"🎰 Я сорвал ДЖЕКПОТ +{earned} OAC в Antysocialshop!")])
+        except Exception:
+            pass
+    kb = InlineKeyboardMarkup(kb_rows)
     await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
 
     asyncio.create_task(check_achievements(uid, context))
@@ -6890,8 +6930,19 @@ async def show_lab_final(update, context):
         f"<b>💠 Кристальная Пыль: 1</b>\n"
         f"<b>🏆 Глубина увеличена! (Этаж {depth})</b>"
     )
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 К Лабиринту", callback_data="lab_start")],
-                               [InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
+    kb_rows = [[InlineKeyboardButton("🔙 К Лабиринту", callback_data="lab_start")],
+               [InlineKeyboardButton("🏰 В меню", callback_data="menu")]]
+    # Только на РЕКОРДЕ (не на каждом прохождении): та же логика, что у
+    # джекпота и ранг-апа — гильд-чат уже видел анонимный анонс, самому
+    # игроку поделиться было нечем.
+    if new_record:
+        try:
+            kb_rows.insert(0, [await _win_share_button(
+                context, uid,
+                f"🏛️ Я вынес рекордные {total_oac} OAC из Лабиринта Antysocialshop!")])
+        except Exception:
+            pass
+    kb = InlineKeyboardMarkup(kb_rows)
     await edit_or_reply(update, context, text, reply_markup=kb, parse_mode='HTML')
     await check_achievements(uid, context)
 
