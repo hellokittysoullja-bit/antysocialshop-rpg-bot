@@ -9263,13 +9263,24 @@ async def invite_friend_handler(update, context, ctx, player):
                 if best else "")
     intro = ("🕯️⚜️ Я играю в Antysocialshop — RPG про гильдии, крафт легендарных "
             "блантов и войну миров.\n\n")
-    outro = f"🎁 Заходи по ссылке — сразу +100 OAC на старт:\n{ref_link}"
+    outro = (f"🎁 Заходи по ссылке — сразу +100 OAC на старт:\n{ref_link}\n\n"
+            f"👥 Или добавь бота в свой чат — джекпоты и легендарки друзей "
+            f"видны всем сами, без ссылок.")
 
     caption = intro + best_line.format(name=html.escape((best or {}).get("name", "?"))) + outro
     plain = intro + best_line.format(name=(best or {}).get("name", "?")) + outro
+    # Пересланная ссылка бьёт по ОДНОМУ конкретному другу и стоит социальной
+    # цены (просьба, «не спамлю ли я»). Добавление бота в СВОЙ чат — другой канал:
+    # никого не просишь; дальше КАЖДЫЙ джекпот, легендарный крафт и итог войны
+    # (см. _safe_send_guild_message) виден всей компании сам, без единого
+    # действия с чьей-либо стороны. Обработчики бота уже не завязаны на тип
+    # чата (game_handler резолвит игрока по нажавшему, а не по чату) — это не
+    # новая функция, а недостающая ссылка на уже работающую возможность.
+    group_url = f"https://t.me/{bot_username}?startgroup=community"
 
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("📤 Отправить ссылку другу", url=build_share_url(plain))],
+        [InlineKeyboardButton("👥 Добавить бота в свой чат", url=group_url)],
         [InlineKeyboardButton("🔙 Назад", callback_data="profile")],
     ])
 
