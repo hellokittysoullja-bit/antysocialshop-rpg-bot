@@ -213,6 +213,106 @@ def check_earnings_reach_status_ledger():
                      "(кошелёк вырастет, ранг — нет):\n  " + "\n  ".join(bad))
 
 
+def check_no_calls_to_undefined_names():
+    """Вызов имени, которого нигде нет в модуле, — гарантированный NameError.
+
+    Ровно это молчало 20 дней: `_send_http_message` вызывалась в 4 местах
+    (джекпот, ранг-ап, итоги войны, Час Удачи) и не была определена НИГДЕ —
+    ни как функция, ни как импорт. try/except вокруг каждого вызова глотал
+    исключение молча, поэтому ни разработка, ни прод-логи не подняли тревогу:
+    весь публичный социальный слой игры не работал, а выглядело всё исправным.
+
+    Проверка — over-approximation: «определено» значит «есть как def функции/
+    класса, импорт, module-level присваивание, ИЛИ используется как параметр/
+    локальная переменная где угодно в файле». Это специально мягче честного
+    scope-анализа — чтобы не поднимать шум на легальных локальных именах,
+    ценой пропуска экзотических случаев. Ловит именно этот класс бага: имя,
+    которого в файле нет вообще ни в какой роли.
+    """
+    import builtins as _builtins
+
+    bad = []
+    for mod in MODULES:
+        path = os.path.join(ROOT, mod)
+        src = open(path, encoding="utf-8").read()
+        tree = ast.parse(src)
+
+        defined = set(dir(_builtins))
+        called = []  # (lineno, name)
+
+        # Исключение — УЗКОЕ НАМЕРЕННО: только буквальный `except NameError`,
+        # идиом «вызови, если функция вообще существует» (см. repository.py:
+        # invalidate_menu_cache — зарезервированный хук на будущее).
+        #
+        # `except Exception` / голый `except:` НЕ исключаем, хотя они тоже
+        # технически глотают NameError, — потому что ЭТО и есть форма, в которой
+        # настоящий баг прятался 20 дней (_send_http_message падала внутри
+        # `except Exception` в happy_hour_trigger и _safe_send_guild_message, и
+        # ни разу не всплыла). Если разрешить широкий except гасить проверку,
+        # страж перестаёт ловить ровно тот баг, ради которого написан.
+        guarded_call_ids = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Try):
+                continue
+            catches_name_error = any(
+                (isinstance(h.type, ast.Name) and h.type.id == "NameError")
+                or (isinstance(h.type, ast.Tuple) and any(
+                    isinstance(e, ast.Name) and e.id == "NameError" for e in h.type.elts))
+                for h in node.handlers
+            )
+            if catches_name_error:
+                for n in node.body:
+                    for c in ast.walk(n):
+                        if isinstance(c, ast.Call):
+                            guarded_call_ids.add(id(c))
+
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                defined.add(node.name)
+            elif isinstance(node, ast.Assign):
+                for t in node.targets:
+                    if isinstance(t, ast.Name):
+                        defined.add(t.id)
+            elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)):
+                t = node.target
+                if isinstance(t, ast.Name):
+                    defined.add(t.id)
+            elif isinstance(node, ast.Import):
+                for a in node.names:
+                    defined.add((a.asname or a.name).split(".")[0])
+            elif isinstance(node, ast.ImportFrom):
+                for a in node.names:
+                    defined.add(a.asname or a.name)
+            elif isinstance(node, ast.arg):
+                defined.add(node.arg)
+            elif isinstance(node, (ast.For, ast.comprehension)):
+                target = node.target if isinstance(node, ast.For) else node.target
+                for n in ast.walk(target):
+                    if isinstance(n, ast.Name):
+                        defined.add(n.id)
+            elif isinstance(node, ast.withitem) and node.optional_vars:
+                for n in ast.walk(node.optional_vars):
+                    if isinstance(n, ast.Name):
+                        defined.add(n.id)
+            elif isinstance(node, ast.ExceptHandler) and node.name:
+                defined.add(node.name)
+            elif isinstance(node, ast.Global) or isinstance(node, ast.Nonlocal):
+                defined.update(node.names)
+            elif isinstance(node, ast.Lambda):
+                for a in node.args.args + node.args.posonlyargs + node.args.kwonlyargs:
+                    defined.add(a.arg)
+            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                if id(node) not in guarded_call_ids:
+                    called.append((node.lineno, node.func.id))
+
+        for lineno, name in called:
+            if name not in defined:
+                bad.append(f"{mod}:{lineno}: вызов неопределённого имени `{name}`")
+
+    assert not bad, ("Вызов имени, которого нет в файле, — гарантированный "
+                     "NameError в рантайме:\n  " + "\n  ".join(bad))
+
+
 def check_named_blunt_calls_pass_ctx():
     """`create_named_blunt` без ctx — гарантированный ValueError, съедающий транзакцию.
 
@@ -304,6 +404,8 @@ def check_advertised_odds_match_real_roll():
 
 def main():
     passed = []
+    check_no_calls_to_undefined_names()
+    passed.append("нет вызовов неопределённых имён (страж «_send_http_message 20 дней молчала»)")
     check_duplicate_dict_keys()
     passed.append("нет дублей ключей в словарях (страж бага «мёртвая Удача»)")
     check_conn_used_after_async_with()

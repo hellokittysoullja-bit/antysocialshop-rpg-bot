@@ -220,6 +220,16 @@ def test_pure(passed):
     assert _resolve_referrer([], 999) is None
     passed.append("_resolve_referrer: парсинг создателя из ссылки")
 
+    # --- ref_<uid>: постоянная персональная ссылка (invite_friend_handler) ---
+    # До неё пригласить можно было ТОЛЬКО через одноразовую blunt-ссылку сразу
+    # после крафта (50 OAC) — ref_ не гейтится ничем и живёт в профиле постоянно.
+    assert _resolve_referrer(["ref_12345"], 999) == 12345
+    assert _resolve_referrer(["ref_999"], 999) is None                # сам себя
+    assert _resolve_referrer(["ref_"], 999) is None                   # пусто после префикса
+    assert _resolve_referrer(["ref_abc"], 999) is None                # не число
+    assert _resolve_referrer(["ref_-5"], 999) is None                 # минус не digit → None
+    passed.append("_resolve_referrer: постоянная ref_ ссылка (профиль)")
+
     # --- Плантация: ставка / стоимость апгрейда / накопление с лимитом ---
     assert (_plant_rate(1), _plant_rate(5)) == (25, 125)
     assert (_plant_upgrade_cost(1), _plant_upgrade_cost(2)) == (600, 1350)

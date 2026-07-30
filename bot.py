@@ -1522,7 +1522,9 @@ async def _reset_and_notify_broken_id(rarity: str, context):
     except Exception as ex:
         logger.error("Ошибка очистки file_id в БД: %s", ex)
     if settings.admin_id:
-        await _safe_send_message(
+        # _safe_send_message (с подчёркиванием) нигде не существовал — админ
+        # никогда не узнавал о протухшем file_id картинки бланта.
+        await safe_send_message(
             context, settings.admin_id,
             f"⚠️ Изображение для {rarity} недействительно. Обновите: /setbluntpic {rarity}"
         )
@@ -2370,15 +2372,28 @@ def next_quest_step(player, exclude_key: str = None):
 
 
 def _resolve_referrer(args, uid):
-    """Из реф-ссылки blunt_... достаёт creator_id. Чистая функция, без БД.
+    """Из реф-ссылки достаёт creator_id. Чистая функция, без БД.
 
-    Создатель зашит в самом blunt_id (blunt_{creator}_{ts}_{rand}), поэтому
-    скан таблицы не нужен — это O(1) и масштабируется. start-параметр =
-    "blunt_" + blunt_id. Возвращает creator_id (int) или None.
+    Два формата:
+    * "ref_{uid}" — постоянная персональная ссылка, доступна с профиля с первой
+      минуты в игре, ничем не гейтится. Основной путь: до неё раньше просто не
+      было ссылки, которую можно дать другу, не потратив 50 OAC на крафт.
+    * "blunt_{creator}_{ts}_{rand}" — прежний формат, привязан к конкретному
+      предмету (создатель зашит в самом blunt_id) — держим ради уже разошедшихся
+      по чатам старых ссылок и для тёплого «блант, что привёл тебя сюда».
+
+    Оба — O(1), без скана таблицы. Возвращает creator_id (int) или None.
     """
-    if not args or not str(args[0]).startswith("blunt_"):
+    if not args:
         return None
-    blunt_id = str(args[0])[len("blunt_"):]     # снимаем ведущий префикс
+    raw = str(args[0])
+    if raw.startswith("ref_"):
+        tail = raw[len("ref_"):]
+        creator_id = int(tail) if tail.isdigit() else None
+        return creator_id if creator_id and creator_id != uid else None
+    if not raw.startswith("blunt_"):
+        return None
+    blunt_id = raw[len("blunt_"):]     # снимаем ведущий префикс
     parts = blunt_id.split("_")
     if len(parts) < 2 or not parts[1].isdigit():
         return None
@@ -3300,12 +3315,20 @@ async def handle_named_name(update, context):
         # Прежний ?start=b_<short_code> не работал — short_code нигде не сохранялся.
         ref_link = f"https://t.me/{bot_username}?start=blunt_{blunt_id}"
         
+        # "NFT" убран: слово сегодня триггерит «развод», а не «интересно», и
+        # роняет CTR по ссылке у большинства аудиторий. Ведём с игры и с себя
+        # (identity/social currency), а не с предмета как товара — тот же сдвиг,
+        # что и в invite_friend_handler.
+        #
+        # Без HTML-тегов: share_text уходит прямиком в URL (build_share_url →
+        # t.me/share/url?text=...), Telegram НЕ парсит здесь HTML — <b> показался
+        # бы другу буквальными угловыми скобками, а не жирным текстом.
         share_text = (
-            f"{color} ИМЯ NFT Бланта: «{html.escape(meme_name)}»\n"
-            f"💎 Редкость: {label} • #{item.get('rare_number', '?-????')}\n"
-            f"👑 Первый владелец: {html.escape(player.username or 'игрок')}\n\n"
-            f"💬 Реакция: {reaction}\n"
-            f"🎁 ЗАБРАТЬ СЕБЕ ТАКОЙ ЖЕ:\n"
+            f"🕯️⚜️ Я играю в Antysocialshop — RPG про гильдии и войну миров.\n"
+            f"Только что скрутил {color} «{meme_name}» — {label.lower()}, "
+            f"#{item.get('rare_number', '?-????')}.\n\n"
+            f"💬 {reaction}\n\n"
+            f"🎁 Заходи по ссылке — +100 OAC на старт:\n"
             f"{ref_link}"
         )
 
@@ -3496,7 +3519,11 @@ async def cancel_named(update, context):
             await context.bot.delete_message(chat_id=query.message.chat.id, message_id=msg_id)
         except Exception:
             pass
-    await craft_callback(update, context)
+    # craft_callback (без _v2) нигде не существовал — отмена ввода имени
+    # крашилась NameError вместо возврата в меню крафта. craft_callback_v2 уже
+    # обёрнута @game_handler и зарегистрирована в диспетчере как "craft":
+    # вызов с (update, context) — тот же контракт, что и у любой другой кнопки.
+    await craft_callback_v2(update, context)
     
 @rate_limit(1)
 @game_handler
@@ -4379,6 +4406,11 @@ async def profile_callback(update, context, ctx, player):
     # Кодекс блантов — приоритетная, полноширинная (это про статус/коллекцию).
     if len(named) > 2:
         kb_rows.append([InlineKeyboardButton(f"💍 Все именные бланты ({len(named)})", callback_data="my_blunts")])
+    # Приглашение — единственное постоянное место в игре, где такая ссылка вообще
+    # есть. Раньше она существовала одноразово и только сразу после крафта
+    # именного бланта (50 OAC) — уйти с того экрана, и позвать следующего друга
+    # было нечем. Полноширинная: это единственный канал органического роста.
+    kb_rows.append([InlineKeyboardButton("🔗 Пригласить друга (+100 OAC ему)", callback_data="invite_friend")])
     # Утилитарные — парой в ряд: короче вертикаль, удобнее большому пальцу.
     kb_rows.append([
         InlineKeyboardButton("📖 Правила мира", callback_data="rules"),
@@ -5023,6 +5055,11 @@ async def guild_info_callback(update, context):
         text += "<i>🔮 Ты пока не в Гильдии. Выбери Светлую или Темную Гильдию!</i>\n"
         kb_rows.append([InlineKeyboardButton("🕯️ Вступить в Тёмную", callback_data="guild_join_BLACK"),
                         InlineKeyboardButton("⚜️ Вступить в Светлую", callback_data="guild_join_WHITE")])
+    # Публичный чат Гильдии уже получает джекпоты, легендарные крафты и итоги
+    # войны (см. _safe_send_guild_message) — но нигде в игре на него не было
+    # ссылки. Тематически это самое естественное место: экран и так про
+    # Гильдии, а чат буквально называется "Гильдия Antysocial".
+    kb_rows.append([InlineKeyboardButton("💬 Публичный чат Гильдии", url="https://t.me/guild_antysocial")])
     kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="menu")])
     kb = InlineKeyboardMarkup(kb_rows)
 
@@ -8506,6 +8543,68 @@ async def cancel_gift_handler(update, context):
     await query.answer()
     context.user_data.pop("gifting_blunt_id", None)
     await profile_callback(update, context)
+
+
+@rate_limit(2)
+@game_handler
+async def invite_friend_handler(update, context, ctx, player):
+    """Постоянная персональная ссылка-приглашение — доступна с первой минуты.
+
+    До этого экрана ссылку на игру можно было дать другу РОВНО в одном месте —
+    сразу после крафта именного бланта (50 OAC), и то она была одноразовой,
+    привязанной к конкретному предмету. Уйти с того экрана — и ссылки для
+    следующего друга больше нет нигде в игре. Здесь она не гейтится ничем и
+    живёт постоянно в профиле.
+
+    Картинка — рендер собственного бланта игрока (если есть), а не голый текст:
+    `t.me/share/url` физически не умеет прикреплять изображение к ссылке, но
+    ПЕРЕСЛАННОЕ фото-сообщение — умеет. Отправляем фото с подписью и просим
+    переслать: то, чем реально хочется поделиться, а не ссылка сама по себе.
+    """
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+
+    bot_username = (await context.bot.get_me()).username
+    ref_link = f"https://t.me/{bot_username}?start=ref_{uid}"
+
+    named = [it for it in (player.inventory or []) if it.get("type") == "named"]
+    rarity_order = {"legendary": 0, "epic": 1, "rare": 2, "common": 3}
+    named.sort(key=lambda x: rarity_order.get(x.get("rarity"), 3))
+    best = named[0] if named else None
+
+    # Не "NFT" и не "забери такой же": ведёт с того, ЧТО за игра и КТО зовёт —
+    # identity/social currency сильнее, чем предмет как товар (см. share_blunt_
+    # handler ниже — тот же сдвиг применён и там).
+    #
+    # Две версии текста, не одна: caption идёт в фото с parse_mode='HTML' (имя
+    # бланта обязано быть html.escape — предотвращает HTML-инъекцию из имени,
+    # которое вводил игрок), а plain уходит в build_share_url БЕЗ HTML-парсинга
+    # (Telegram не парсит HTML в t.me/share/url — экранированные сущности вроде
+    # &amp; показались бы другу буквально, если использовать ту же строку).
+    best_rarity_emoji = {"legendary": "🟡", "epic": "🟣", "rare": "🔵"}.get(
+        (best or {}).get("rarity"), "🟢")
+    best_line = (f"Вот один из моих — «{{name}}» {best_rarity_emoji}, поймал сам.\n\n"
+                if best else "")
+    intro = ("🕯️⚜️ Я играю в Antysocialshop — RPG про гильдии, крафт легендарных "
+            "блантов и войну миров.\n\n")
+    outro = f"🎁 Заходи по ссылке — сразу +100 OAC на старт:\n{ref_link}"
+
+    caption = intro + best_line.format(name=html.escape((best or {}).get("name", "?"))) + outro
+    plain = intro + best_line.format(name=(best or {}).get("name", "?")) + outro
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📤 Отправить ссылку другу", url=build_share_url(plain))],
+        [InlineKeyboardButton("🔙 Назад", callback_data="profile")],
+    ])
+
+    sent = False
+    if best:
+        sent = await _send_blunt_card(
+            context, query.message.chat.id, best, player.username or "",
+            caption, kb, ctx=ctx, uid=uid)
+    if not sent:
+        await edit_or_reply(update, context, caption, reply_markup=kb)
     
 # ========== ЕДИНЫЙ РЕЕСТР КОМАНД ДЛЯ / И ТЕКСТА ==========
 TEXT_COMMAND_HANDLERS = {
@@ -8579,6 +8678,7 @@ CALLBACKS: Dict[str, Callable] = {
     "craft_named": handle_craft_named,
     "cancel_named": cancel_named,
     "do_smoke": do_smoke,
+    "invite_friend": invite_friend_handler,
     "use_dust": handle_use_dust,
     "top_scout": top_scout_callback,
     "achievements": achievements_callback,
@@ -8848,10 +8948,55 @@ async def weekly_guild_rating(ctx: AppContext):
             except Exception:
                 pass
 
-async def _safe_send_guild_message(ctx: AppContext, text: str):
+# Хардкод, а не context.bot.get_me(): фоновые джобы (джекпот, ранг-ап, итоги
+# войны) держат только ctx, без объекта bota. Тот же уровень допущения, что и у
+# "@guild_antysocial" — литерал ниже по файлу в десятке мест.
+BOT_USERNAME = "antysocialshop_bot"
+
+
+def _guild_cta_keyboard() -> dict:
+    """Кнопка входа в бота под публичным анонсом.
+
+    URL, а не callback_data: callback требует существующего апдейта в чате бота,
+    и человек, который просто листает публичный @guild_antysocial и никогда не
+    жал /start, с callback-кнопкой ничего сделать не может. URL-кнопка открывает
+    ЛС с ботом одним тапом и сама прокатывает онбординг — единственный вид кнопки,
+    который работает для постороннего, а не только для существующего игрока.
+    """
+    return {"inline_keyboard": [[
+        {"text": "🎮 Играть", "url": f"https://t.me/{BOT_USERNAME}?start=guild_chat"}
+    ]]}
+
+
+async def _send_http_message(ctx: AppContext, chat_id, text: str, reply_markup: dict = None) -> None:
+    """Прямой HTTP-вызов Telegram API, в обход PTB Application.
+
+    Раньше вызывалась в 4 местах и не была определена НИГДЕ в кодовой базе —
+    каждый вызов падал NameError, тихо проглоченным окружающим try/except.
+    Появилась 10 июля (c571e91), к 30 июля не работала 20 дней: за это время
+    молчали ВСЕ публичные трансляции — джекпоты, легендарные крафты, возвышения
+    ранга, рекорды Лабиринта, итоги войны гильдий, начало/конец Часа Удачи.
+    Ровно тот контент, что делает публичный чат витриной, а не пустой комнатой.
+    """
+    token = ctx.settings.bot_token
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.post(url, json=payload)
+        if resp.status_code != 200:
+            raise RuntimeError(f"Telegram API {resp.status_code}: {resp.text}")
+
+
+async def _safe_send_guild_message(ctx: AppContext, text: str, with_cta: bool = True):
+    """with_cta=True вешает кнопку «Играть» под анонсом — по умолчанию, потому что
+    каждый вызывающий здесь (джекпот/ранг/война/лабиринт) это ровно тот пиковый
+    момент, ради которого посторонний в канале захочет зайти и попробовать сам."""
+    kb = _guild_cta_keyboard() if with_cta else None
     for attempt in range(3):
         try:
-            await _send_http_message(ctx, "@guild_antysocial", text)
+            await _send_http_message(ctx, "@guild_antysocial", text, reply_markup=kb)
             return
         except Exception as e:
             logger.warning("Ошибка отправки в чат гильдии (попытка %d): %s", attempt+1, e)
