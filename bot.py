@@ -1098,6 +1098,25 @@ async def _run_migrations(conn):
         END $$;
     """)
 
+    # Добавление created_at в players — момента регистрации не было ВООБЩЕ
+    # ни в одной колонке, поэтому «новых игроков за неделю» посчитать было
+    # нечем. DEFAULT now() честен только для игроков, которых заведёт эта
+    # миграция и всё, что после нее; УЖЕ существующие игроки на момент
+    # применения получат now() как created_at — не настоящую дату регистрации.
+    # /growth_stats учитывает это и предупреждает, если похоже, что это первая
+    # неделя после деплоя (см. комментарий в growth_stats_command).
+    await conn.execute("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='players' AND column_name='created_at'
+            ) THEN
+                ALTER TABLE players ADD COLUMN created_at TIMESTAMPTZ DEFAULT now();
+            END IF;
+        END $$;
+    """)
+
     # ===== Новые миграции для сервиса войны =====
     # 1. Таблица состояния войны
     await conn.execute("""
@@ -7734,6 +7753,64 @@ async def broadcast(update, context, ctx):
     
     await update.message.reply_text(f"✅ Разослано {success} из {len(users)} игроков")
 
+
+@cb
+async def growth_stats_command(update, context, ctx):
+    """/growth — единственный способ узнать, работает ли хоть один из
+    каналов роста, собранных за сегодня (постоянная ссылка, установка бота
+    в чужой чат, шеринг на пике эмоции, шеринг коллекции), вместо того
+    чтобы гадать. Все числа — из уже существующих полей, без новой телеметрии:
+    invited_by различает «пришёл по ссылке» от «пришёл сам/через видимость
+    бота в группе», referral_count — кто реально приводит людей.
+    """
+    if update.effective_user.id != ctx.settings.admin_id:
+        await update.message.reply_text("🔒 Только для администратора.")
+        return
+
+    async with ctx.db_pool.acquire() as conn:
+        total = await conn.fetchval(
+            'SELECT COUNT(*) FROM players WHERE COALESCE("exists", TRUE)')
+        new_week = await conn.fetchval(
+            "SELECT COUNT(*) FROM players WHERE created_at >= now() - interval '7 days'")
+        new_week_referred = await conn.fetchval(
+            "SELECT COUNT(*) FROM players WHERE created_at >= now() - interval '7 days' "
+            "AND invited_by IS NOT NULL")
+        dau = await conn.fetchval(
+            "SELECT COUNT(*) FROM players WHERE last_login_date = CURRENT_DATE")
+        top = await conn.fetch(
+            "SELECT username, referral_count FROM players "
+            "WHERE referral_count > 0 ORDER BY referral_count DESC LIMIT 10")
+
+    lines = [
+        "<b>📊 РОСТ ЗА НЕДЕЛЮ</b>",
+        "",
+        f"👥 Всего игроков: <b>{total}</b>",
+        f"🆕 Новых за 7 дней: <b>{new_week}</b> (по приглашению: <b>{new_week_referred}</b>)",
+        f"🟢 Активны сегодня: <b>{dau}</b>",
+    ]
+
+    # created_at появился только этой миграцией: если бОльшая часть ВСЕХ
+    # игроков попадает в «новые за 7 дней», это не всплеск роста, а старые
+    # игроки, которым миграция проставила now() задним числом. Числа станут
+    # честными сами собой через неделю после деплоя — предупреждаем, а не
+    # молчим, иначе первый прогон читается как ложный успех.
+    if total > 0 and new_week >= total * 0.5:
+        lines.append(
+            "\n⚠️ <i>Похоже, это первая неделя после добавления created_at — "
+            "старым игрокам дата регистрации проставлена задним числом "
+            "(миграция), число «новых» временно завышено. Станет честным "
+            "через 7 дней.</i>")
+
+    if top:
+        lines.append("\n<b>🏆 Топ по приглашениям:</b>")
+        for i, row in enumerate(top, 1):
+            uname = row["username"] or "без ника"
+            lines.append(f"{i}. @{uname} — {row['referral_count']}")
+    else:
+        lines.append("\n<i>Пока ни одного успешного приглашения.</i>")
+
+    await update.message.reply_text("\n".join(lines), parse_mode='HTML')
+
 # ============================================================
 # ГЛОБАЛЬНЫЙ ОБРАБОТЧИК ОШИБОК
 # ============================================================
@@ -9393,6 +9470,7 @@ TEXT_COMMAND_HANDLERS = {
     "debugpet": debug_pet,
     "checkbluntpics": check_blunt_pics,
     "broadcast": broadcast,
+    "growth": growth_stats_command,
     # Текстовые сокращения (без слеша)
     "старт": start,
     "меню": start,
