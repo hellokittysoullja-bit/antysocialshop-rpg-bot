@@ -5002,6 +5002,7 @@ async def my_blunts_callback(update, context, ctx, player, page=0):
     rarity_order = {"legendary": 0, "epic": 1, "rare": 2, "common": 3}
     named.sort(key=lambda x: (rarity_order.get(x.get("rarity") or "common", 3),
                                x.get("serial") or 999999))
+    owned_tiers = len({b.get("rarity") for b in named})
 
     if not named:
         await edit_or_reply(update, context,
@@ -5049,6 +5050,22 @@ async def my_blunts_callback(update, context, ctx, player, page=0):
         nav_buttons.append(InlineKeyboardButton("▶️ Далее", callback_data=f"blunts_page_{page+1}"))
     if nav_buttons:
         kb_rows.append(nav_buttons)
+
+    # Витрина — самый визуально сильный артефакт в игре: у КАЖДОГО бланта
+    # свой силуэт (см. blunt_art._pose), у коллекции — набор форм и редкостей.
+    # До этой правки её физически некому было показать: экран Кодекса не имел
+    # НИ ОДНОГО пути наружу, хотя это единственное место, где новизна карточек
+    # вообще видна рядом друг с другом (сравнение — обязательное условие для
+    # того, чтобы «уникальный силуэт» вообще читался как отличие).
+    if blunt_forms is not None:
+        try:
+            forms_owned = len({blunt_forms.form_of(it)["id"] for it in named})
+            win_line = (f"🎴 Моя коллекция в Antysocialshop: {len(named)} именных "
+                       f"блантов, {owned_tiers}/4 редкостей, {forms_owned}/8 форм собрано!")
+            kb_rows.append([await _win_share_button(context, uid, win_line)])
+        except Exception:
+            logger.exception("Не удалось построить кнопку шеринга коллекции")
+
     kb_rows.append([InlineKeyboardButton("🔙 В профиль", callback_data="profile")])
     kb = InlineKeyboardMarkup(kb_rows)
 
@@ -5056,7 +5073,6 @@ async def my_blunts_callback(update, context, ctx, player, page=0):
     # шапка Кодекса без построчного перечня — имена и редкости уже НАРИСОВАНЫ
     # на самой витрине, дублировать их текстом незачем. Номера в подписи
     # совпадают с порядком плиток слева направо, как и номера на кнопках.
-    owned_tiers = len({b.get("rarity") for b in named})
     if page == 0:
         cap = _build_codex_header(named)
     else:
@@ -9288,7 +9304,15 @@ async def invite_friend_handler(update, context, ctx, player):
     переслать: то, чем реально хочется поделиться, а не ссылка сама по себе.
     """
     query = update.callback_query
-    await query.answer()
+    # Своя награда за реферал (+50 OAC + легендарка, см. _reward_referrer) была
+    # НЕВИДИМА ровно в момент решения «жать ли эту кнопку» — текст ниже говорил
+    # только о бонусе ДРУГУ. Показываем её всплывающим алертом, а не строкой в
+    # тексте: алерт гарантированно приватен и не попадёт в сообщение, которое
+    # можно переслать другу — self-serving формулировка в адресованном другу
+    # тексте выглядела бы транзакционно и била бы по конверсии на его стороне.
+    await query.answer(
+        "🎁 За каждого друга, который зайдёт по ссылке: +50 OAC и легендарный блант — тебе!",
+        show_alert=True)
     uid = query.from_user.id
 
     bot_username = (await context.bot.get_me()).username
