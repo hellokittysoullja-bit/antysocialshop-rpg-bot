@@ -216,6 +216,15 @@ async def on_startup(app: Application):
                 await redis_client.sadd("processed_updates", "__placeholder__")
                 await redis_client.expire("processed_updates", 86400 * 7)
 
+                # Метка живого старта процесса — единственный способ ответить на
+                # вопрос «процесс вообще стабильно работает или постоянно
+                # рестартует», не заглядывая в логи Render. Перезаписывается на
+                # КАЖДОМ старте: если /growth показывает «запущен 2 минуты назад»
+                # снова и снова при проверках с разницей в часы — это прямое
+                # доказательство цикла рестартов, а не единичного деплоя.
+                await redis_client.set(
+                    "process_started_at", datetime.now(timezone.utc).isoformat())
+
             except Exception as e:
                 logger.warning(f"Redis недоступен: {e}")
                 redis_client = None  # без Redis продолжим

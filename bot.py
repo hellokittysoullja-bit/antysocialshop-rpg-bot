@@ -7829,6 +7829,27 @@ async def growth_stats_command(update, context, ctx):
     else:
         lines.append("\n<i>Пока ни одного успешного приглашения.</i>")
 
+    # Возраст ТЕКУЩЕГО процесса — без этого «джобы не запускались» неотличимо
+    # на глаз от «был один безобидный деплой минуту назад». Ключ перезаписывается
+    # на КАЖДОМ старте процесса (main.py on_startup), без TTL — если при
+    # проверках с разницей в часы это число снова и снова маленькое, процесс
+    # реально рестартует в цикле, а не просто недавно передеплоен один раз.
+    proc_age = None
+    if ctx.redis:
+        try:
+            raw = await ctx.redis.get("process_started_at")
+            if raw:
+                started = datetime.fromisoformat(raw.decode() if isinstance(raw, bytes) else raw)
+                proc_age = datetime.now(timezone.utc) - started
+        except Exception:
+            proc_age = None
+    if proc_age is not None:
+        mins = int(proc_age.total_seconds() / 60)
+        age_str = f"{mins}м" if mins < 60 else f"{mins // 60}ч {mins % 60}м"
+        lines.append(f"\n🕐 Процесс запущен: <b>{age_str} назад</b>")
+    else:
+        lines.append("\n🕐 Процесс запущен: <i>неизвестно (Redis недоступен)</i>")
+
     # Здоровье пуш-джоб — раньше единственным способом узнать, работает ли
     # reengagement_push, было руками рыться в логах Render и не уметь отличить
     # «был один безобидный деплой» от «джоба вообще не доживает до конца
