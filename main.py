@@ -42,6 +42,7 @@ from bot import (
     happy_hour_trigger,
     weekly_guild_rating,
     reengagement_push,
+    winback_push,
     _safe_send_guild_message,
     BLUNT_IMAGES,
 )
@@ -156,8 +157,22 @@ async def background_jobs(ctx: AppContext):
                 logger.exception("reengagement_push error")
             await asyncio.sleep(1800)   # каждые 30 минут (guard в Redis ограничивает до ~1/сут)
 
+    @resilient_task
+    async def job_winback():
+        # reengagement_push видит только дрейф 2ч-3дня — окно [3д, 30д) не
+        # получает вообще ничего ни от одного механизма игры. Раз в неделю,
+        # не чаще: это редкая единственная попытка напомнить о себе, а не
+        # ещё один частый пуш поверх уже существующего.
+        await asyncio.sleep(600)   # старт позже reengagement, чтобы не толкаться при деплое
+        while True:
+            try:
+                await winback_push(ctx)
+            except Exception:
+                logger.exception("winback_push error")
+            await asyncio.sleep(7 * 86400)
+
     for coro in (job_keep_db_alive, job_update_pulse, job_echo_of_distortion,
-                 job_happy_hour, job_weekly_guild_rating, job_reengagement):
+                 job_happy_hour, job_weekly_guild_rating, job_reengagement, job_winback):
         t = asyncio.create_task(coro())
         background_tasks.add(t)
         t.add_done_callback(background_tasks.discard)

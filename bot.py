@@ -7818,6 +7818,33 @@ async def growth_stats_command(update, context, ctx):
     else:
         lines.append("\n<i>Пока ни одного успешного приглашения.</i>")
 
+    # Здоровье пуш-джоб — раньше единственным способом узнать, работает ли
+    # reengagement_push, было руками рыться в логах Render и не уметь отличить
+    # «был один безобидный деплой» от «джоба вообще не доживает до конца
+    # цикла». Ключ в Redis живёт дольше цикла джобы (см. _record_job_health) —
+    # если он есть, джоба успешно завершилась внутри своего окна; если нет,
+    # с последнего успешного прогона реально прошло аномально много времени.
+    lines.append("\n<b>⚙️ Здоровье пуш-джоб:</b>")
+    for job, label in (("reengagement", "Возврат (2ч-3д дрейфа)"),
+                       ("winback", "Винбэк (3-30д дрейфа)")):
+        raw = None
+        if ctx.redis:
+            try:
+                raw = await ctx.redis.get(f"job_health:{job}")
+            except Exception:
+                raw = None
+        if not raw:
+            lines.append(f"🔴 {label}: <i>нет свежих запусков</i>")
+            continue
+        try:
+            ts_str, sent_str, cand_str = (raw.decode() if isinstance(raw, bytes) else raw).split("|")
+            ts = datetime.fromisoformat(ts_str)
+            ago_min = int((datetime.now(timezone.utc) - ts).total_seconds() / 60)
+            ago = f"{ago_min}м назад" if ago_min < 60 else f"{ago_min // 60}ч назад"
+            lines.append(f"🟢 {label}: {ago}, отправлено {sent_str} из {cand_str}")
+        except Exception:
+            lines.append(f"🟡 {label}: <i>есть отметка, не смог разобрать</i>")
+
     await update.message.reply_text("\n".join(lines), parse_mode='HTML')
 
 # ============================================================
@@ -9989,6 +10016,116 @@ async def reengagement_push(ctx: AppContext) -> None:
             await asyncio.sleep(0.05)  # мягкий rate-limit к Telegram API
 
     logger.info("reengagement: sent %d pushes to %d candidates", sent, len(rows))
+    await _record_job_health(ctx, "reengagement", sent, len(rows))
+
+
+async def _record_job_health(ctx: AppContext, job: str, sent: int, candidates: int,
+                             ttl_seconds: int = 3 * 3600) -> None:
+    """Отметка «джоба реально дожила до конца» — читается в /growth.
+
+    Единственный способ, которым админ узнавал, работает ли пуш-возврат, —
+    рыться в логах Render вручную. Один живой лог "отменена" (задача убита при
+    рестарте процесса) неотличим на глаз от "джоба вообще никогда не
+    доживает до конца цикла" — оба выглядят одинаково тревожно, а разница
+    между "был один безобидный деплой" и "джоба в принципе не работает"
+    решает, чинить ли инфраструктуру или писать новый код. Redis-ключ с TTL
+    чуть больше цикла джобы: если он протух — значит с прошлого успешного
+    прогона реально прошло аномально много времени, а не "просто не смотрели".
+
+    ttl_seconds ОБЯЗАН превышать интервал самой джобы, иначе ключ протухает
+    между двумя честными успешными прогонами, и /growth врёт о простое ровно
+    той джобе, что на самом деле работает штатно, — дефолт 3ч рассчитан на
+    30-минутный цикл reengagement, у winback (раз в неделю) свой, больше.
+    """
+    if not ctx or not ctx.redis:
+        return
+    try:
+        payload = f"{datetime.now(timezone.utc).isoformat()}|{sent}|{candidates}"
+        await ctx.redis.setex(f"job_health:{job}", ttl_seconds, payload)
+    except Exception:
+        pass
+
+
+def _winback_text(days_gone: int, balance: int) -> str:
+    """Текст для игрока, пропавшего 3-30 дней назад — окно, куда
+    reengagement_push никогда не заглядывает (его верхняя граница — 3 дня).
+
+    Другой тон, не «грядка созрела»: для того, кто пропал так надолго, кулдаун
+    фарма и серия входов уже ничего не значат — это фальшивый повод. Работает
+    endowment («твоё никуда не делось») + честная новизна (реальные фичи этой
+    сессии — уникальные карточки, витрина, формы), а не выдуманное давление.
+    """
+    return (
+        f"🕯️ <b>Давно не виделись</b> — с последнего фарма прошло {days_gone} дн.\n\n"
+        f"Твой блант, <b>{balance} OAC</b> и место в Гильдии никуда не делись — "
+        f"всё ждёт тебя ровно там, где ты оставил.\n\n"
+        f"За это время в игре кое-что изменилось: у именных блантов теперь у "
+        f"КАЖДОГО свой уникальный облик, появилась витрина коллекции и наборы "
+        f"форм для сборки. Загляни — посмотри, что нового."
+    )
+
+
+async def winback_push(ctx: AppContext) -> None:
+    """Возврат для тех, кого reengagement_push структурно не видит.
+
+    reengagement_push целится в дрейф 2ч-3дня — сознательно узкое окно, чтобы
+    не спамить. Следствие: пропавший больше трёх дней назад не получает ВООБЩЕ
+    НИЧЕГО ни от одного механизма игры — окно [3д, 30д) закрыто целиком.
+    30 дней — верхняя граница намеренно: дальше шанс раздражить/схватить
+    блок растёт быстрее, чем шанс вернуть, и это уже другая, более осторожная
+    задача, не совместимая с еженедельной автоматической рассылкой.
+
+    Guard на 30 дней (не 20ч, как у reengagement): каждому — максимум одно
+    сообщение в месяц, не чаще. Это не частый пуш, это редкая, единственная
+    попытка напомнить о себе.
+    """
+    if not ctx or not ctx.db_pool or not ctx.redis:
+        return
+
+    now = datetime.now()
+    window_start = now - timedelta(days=30)
+    window_end = now - timedelta(days=3)
+
+    try:
+        async with ctx.db_pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT user_id, last_farm, balance FROM players "
+                "WHERE last_farm IS NOT NULL AND last_farm BETWEEN $1 AND $2",
+                window_start, window_end,
+            )
+    except Exception as e:
+        logger.error(f"winback query error: {e}")
+        return
+
+    token = ctx.settings.bot_token
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    sent = 0
+    async with httpx.AsyncClient(timeout=10) as client:
+        for row in rows:
+            uid = row["user_id"]
+            guard_key = f"winback:{uid}"
+            try:
+                if await ctx.redis.get(guard_key):
+                    continue
+            except Exception:
+                continue  # Redis-сбой → пропускаем (не рискуем повторной отправкой)
+
+            days_gone = (now - row["last_farm"]).days
+            text = _winback_text(days_gone, row["balance"] or 0)
+
+            try:
+                r = await client.post(url, json={"chat_id": uid, "text": text, "parse_mode": "HTML"})
+                if r.status_code == 200:
+                    sent += 1
+                    await ctx.redis.setex(guard_key, 30 * 24 * 3600, "1")
+                # 403/прочее — молча пропускаем, как и в reengagement_push
+            except Exception:
+                pass
+            await asyncio.sleep(0.05)
+
+    logger.info("winback: sent %d pushes to %d candidates", sent, len(rows))
+    await _record_job_health(ctx, "winback", sent, len(rows), ttl_seconds=9 * 24 * 3600)
+
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
