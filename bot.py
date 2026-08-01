@@ -7777,16 +7777,25 @@ async def growth_stats_command(update, context, ctx):
             "AND invited_by IS NOT NULL")
         dau = await conn.fetchval(
             "SELECT COUNT(*) FROM players WHERE last_login_date = CURRENT_DATE")
+        # «Всего игроков» — это ряды в таблице, а не люди, которые играли.
+        # Отдельно от acquisition-вопроса: тот, кто ни разу не нажал фарм, не
+        # тронут ни одним каналом роста и ни одной механикой удержания — он
+        # не «дремлющая аудитория», а шум в счётчике. Без этого числа «155
+        # всего» читается как обещание вовлечённости, которого нет.
+        never_farmed = await conn.fetchval(
+            "SELECT COUNT(*) FROM players WHERE COALESCE(farm_count, 0) = 0")
         top = await conn.fetch(
             "SELECT username, referral_count FROM players "
             "WHERE referral_count > 0 ORDER BY referral_count DESC LIMIT 10")
 
+    never_pct = round(never_farmed / total * 100) if total else 0
     lines = [
         "<b>📊 РОСТ ЗА НЕДЕЛЮ</b>",
         "",
         f"👥 Всего игроков: <b>{total}</b>",
         f"🆕 Новых за 7 дней: <b>{new_week}</b> (по приглашению: <b>{new_week_referred}</b>)",
         f"🟢 Активны сегодня: <b>{dau}</b>",
+        f"🔴 Ни разу не фармили: <b>{never_farmed} ({never_pct}%)</b>",
     ]
 
     # created_at появился только этой миграцией: если бОльшая часть ВСЕХ
