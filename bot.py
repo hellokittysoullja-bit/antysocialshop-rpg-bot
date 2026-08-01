@@ -7775,8 +7775,19 @@ async def growth_stats_command(update, context, ctx):
         new_week_referred = await conn.fetchval(
             "SELECT COUNT(*) FROM players WHERE created_at >= now() - interval '7 days' "
             "AND invited_by IS NOT NULL")
+        # last_login_date обновляется РОВНО в одном месте (process_daily_login),
+        # а тот вызывается ТОЛЬКО из /start (bot.py:2721). Кнопки — фарм, крафт,
+        # что угодно — идут через button_handler напрямую в свои обработчики,
+        # МИМО /start целиком. Игрок, который просто тапает «Фармить» на старом
+        # сообщении меню (обычное поведение — сообщение с кнопками не исчезает
+        # из чата), реально играет, но эта дата не сдвигается. Старый запрос
+        # считал «кто сегодня набрал /start», а не «кто сегодня играл» — заведомо
+        # заниженное число. last_farm — самое частое реальное действие в игре
+        # (фарм — первый шаг обучения, доступный без кулдауна первые 5 раз),
+        # добавлен как второй сигнал активности.
         dau = await conn.fetchval(
-            "SELECT COUNT(*) FROM players WHERE last_login_date = CURRENT_DATE")
+            "SELECT COUNT(*) FROM players WHERE last_login_date = CURRENT_DATE "
+            "OR last_farm >= CURRENT_DATE")
         # «Всего игроков» — это ряды в таблице, а не люди, которые играли.
         # Отдельно от acquisition-вопроса: тот, кто ни разу не нажал фарм, не
         # тронут ни одним каналом роста и ни одной механикой удержания — он
@@ -7794,7 +7805,7 @@ async def growth_stats_command(update, context, ctx):
         "",
         f"👥 Всего игроков: <b>{total}</b>",
         f"🆕 Новых за 7 дней: <b>{new_week}</b> (по приглашению: <b>{new_week_referred}</b>)",
-        f"🟢 Активны сегодня: <b>{dau}</b>",
+        f"🟢 Активны сегодня (открыли /start или фармили): <b>{dau}</b>",
         f"🔴 Ни разу не фармили: <b>{never_farmed} ({never_pct}%)</b>",
     ]
 
