@@ -1177,6 +1177,26 @@ async def _run_migrations(conn):
             candidates INTEGER DEFAULT 0
         )
     """)
+    # blocked/failed отдельно от sent: "отправлено 0 из 9" раньше не отличало
+    # «все заблокировали бота» (ожидаемо, чинить нечего) от «все упали с
+    # реальной ошибкой» (баг) — обе причины выглядели одинаково в /growth.
+    await conn.execute("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='job_health' AND column_name='blocked'
+            ) THEN
+                ALTER TABLE job_health ADD COLUMN blocked INTEGER DEFAULT 0;
+            END IF;
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='job_health' AND column_name='failed'
+            ) THEN
+                ALTER TABLE job_health ADD COLUMN failed INTEGER DEFAULT 0;
+            END IF;
+        END $$;
+    """)
 
     # ===== Новые миграции для сервиса войны =====
     # 1. Таблица состояния войны
@@ -7896,7 +7916,8 @@ async def growth_stats_command(update, context, ctx):
     health_rows = {}
     try:
         async with ctx.db_pool.acquire() as conn:
-            hrows = await conn.fetch("SELECT job, last_run, sent, candidates FROM job_health")
+            hrows = await conn.fetch(
+                "SELECT job, last_run, sent, candidates, blocked, failed FROM job_health")
         health_rows = {r["job"]: r for r in hrows}
     except Exception:
         health_rows = {}
@@ -7936,8 +7957,20 @@ async def growth_stats_command(update, context, ctx):
             lines.append(f"🔴 {label}: <i>последний запуск {_fmt_age(age)} назад — устарело</i>")
             continue
         try:
+            extra = ""
+            # Раньше "отправлено 0 из 9" не отличало «все заблокировали бота»
+            # (ожидаемо) от «реальная ошибка отправки» (баг) — теперь видно.
+            blocked_n = row["blocked"] or 0
+            failed_n = row["failed"] or 0
+            if blocked_n or failed_n:
+                parts = []
+                if blocked_n:
+                    parts.append(f"заблокировали: {blocked_n}")
+                if failed_n:
+                    parts.append(f"ошибок: {failed_n}")
+                extra = f" ({', '.join(parts)})"
             lines.append(f"🟢 {label}: {_fmt_age(age)} назад, "
-                         f"отправлено {row['sent']} из {row['candidates']}")
+                         f"отправлено {row['sent']} из {row['candidates']}{extra}")
         except Exception:
             lines.append(f"🟡 {label}: <i>есть отметка, не смог разобрать</i>")
 
@@ -10074,6 +10107,9 @@ async def reengagement_push(ctx: AppContext) -> None:
     token = ctx.settings.bot_token
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     sent = 0
+    blocked = 0   # 403 — игрок заблокировал бота, ожидаемо, чинить нечего
+    failed = 0    # всё остальное — реальная причина «отправлено 0»
+    first_failure_logged = False
     async with httpx.AsyncClient(timeout=10) as client:
         for row in rows:
             uid = row["user_id"]
@@ -10118,16 +10154,28 @@ async def reengagement_push(ctx: AppContext) -> None:
                     async with ctx.db_pool.acquire() as conn:
                         await conn.execute(
                             "UPDATE players SET last_reengagement_sent=now() WHERE user_id=$1", uid)
-                # 403/прочее — молча пропускаем
-            except Exception:
-                pass
+                elif r.status_code == 403:
+                    blocked += 1
+                else:
+                    failed += 1
+                    if not first_failure_logged:
+                        first_failure_logged = True
+                        logger.error("reengagement: sendMessage %d для uid=%s: %s",
+                                     r.status_code, uid, r.text[:300])
+            except Exception as e:
+                failed += 1
+                if not first_failure_logged:
+                    first_failure_logged = True
+                    logger.error("reengagement: исключение при отправке uid=%s: %s", uid, e)
             await asyncio.sleep(0.05)  # мягкий rate-limit к Telegram API
 
-    logger.info("reengagement: sent %d pushes to %d candidates", sent, len(rows))
-    await _record_job_health(ctx, "reengagement", sent, len(rows))
+    logger.info("reengagement: sent %d pushes to %d candidates (blocked=%d, failed=%d)",
+                sent, len(rows), blocked, failed)
+    await _record_job_health(ctx, "reengagement", sent, len(rows), blocked, failed)
 
 
-async def _record_job_health(ctx: AppContext, job: str, sent: int, candidates: int) -> None:
+async def _record_job_health(ctx: AppContext, job: str, sent: int, candidates: int,
+                              blocked: int = 0, failed: int = 0) -> None:
     """Отметка «джоба реально дожила до конца» — читается в /growth.
 
     Единственный способ, которым админ узнавал, работает ли пуш-возврат, —
@@ -10150,10 +10198,11 @@ async def _record_job_health(ctx: AppContext, job: str, sent: int, candidates: i
     try:
         async with ctx.db_pool.acquire() as conn:
             await conn.execute(
-                "INSERT INTO job_health (job, last_run, sent, candidates) "
-                "VALUES ($1, now(), $2, $3) "
-                "ON CONFLICT (job) DO UPDATE SET last_run=now(), sent=$2, candidates=$3",
-                job, sent, candidates)
+                "INSERT INTO job_health (job, last_run, sent, candidates, blocked, failed) "
+                "VALUES ($1, now(), $2, $3, $4, $5) "
+                "ON CONFLICT (job) DO UPDATE SET last_run=now(), sent=$2, candidates=$3, "
+                "blocked=$4, failed=$5",
+                job, sent, candidates, blocked, failed)
     except Exception:
         pass
 
@@ -10217,6 +10266,9 @@ async def winback_push(ctx: AppContext) -> None:
     token = ctx.settings.bot_token
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     sent = 0
+    blocked = 0
+    failed = 0
+    first_failure_logged = False
     async with httpx.AsyncClient(timeout=10) as client:
         for row in rows:
             uid = row["user_id"]
@@ -10230,13 +10282,24 @@ async def winback_push(ctx: AppContext) -> None:
                     async with ctx.db_pool.acquire() as conn:
                         await conn.execute(
                             "UPDATE players SET last_winback_sent=now() WHERE user_id=$1", uid)
-                # 403/прочее — молча пропускаем, как и в reengagement_push
-            except Exception:
-                pass
+                elif r.status_code == 403:
+                    blocked += 1
+                else:
+                    failed += 1
+                    if not first_failure_logged:
+                        first_failure_logged = True
+                        logger.error("winback: sendMessage %d для uid=%s: %s",
+                                     r.status_code, uid, r.text[:300])
+            except Exception as e:
+                failed += 1
+                if not first_failure_logged:
+                    first_failure_logged = True
+                    logger.error("winback: исключение при отправке uid=%s: %s", uid, e)
             await asyncio.sleep(0.05)
 
-    logger.info("winback: sent %d pushes to %d candidates", sent, len(rows))
-    await _record_job_health(ctx, "winback", sent, len(rows))
+    logger.info("winback: sent %d pushes to %d candidates (blocked=%d, failed=%d)",
+                sent, len(rows), blocked, failed)
+    await _record_job_health(ctx, "winback", sent, len(rows), blocked, failed)
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
