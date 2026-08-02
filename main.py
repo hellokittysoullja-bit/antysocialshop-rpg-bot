@@ -402,7 +402,22 @@ async def main_async():
         app.router.add_post(settings.webhook_path, handle_webhook)
         app.router.add_get("/healthz", healthcheck)
 
-        webhook_url = f"{settings.render_url}{settings.webhook_path}"
+        # .rstrip("/") — не косметика. RENDER_URL со слэшем на конце (частая
+        # опечатка при ручном вводе в Render Dashboard) даёт //webhook: Telegram
+        # принимает такой URL (200 OK на setWebhook — валиден синтаксически) и
+        # шлёт апдейты именно на него, а aiohttp-роут зарегистрирован на ровно
+        # "/webhook" и не совпадает → каждый апдейт молча получает 404. Никакого
+        # исключения нигде не происходит — бот выглядит живым (деплой зелёный,
+        # /healthz отвечает 200), просто никогда не видит ни одного сообщения.
+        # Обнаружено на живом инциденте: RENDER_URL с "/" на конце → 100%
+        # игроков молчат, а логи выглядят полностью штатными.
+        if not settings.render_url or not settings.render_url.startswith("http"):
+            logger.critical(
+                "RENDER_URL не задан или не похож на URL (%r) — вебхук "
+                "не будет работать. Нужен полный адрес вида "
+                "https://<имя-сервиса>.onrender.com, без пути и без "
+                "слэша на конце.", settings.render_url)
+        webhook_url = f"{settings.render_url.rstrip('/')}{settings.webhook_path}"
         logger.info(f"🌐 Устанавливаю вебхук: {webhook_url}")
         await tg_app.bot.set_webhook(
             url=webhook_url,

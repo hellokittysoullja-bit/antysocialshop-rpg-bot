@@ -36,7 +36,13 @@ class Settings(BaseSettings):
 
     @property
     def webhook_url(self) -> str:
-        return f"{self.render_url}{self.webhook_path}"
+        # .rstrip("/"): RENDER_URL со слэшем на конце даёт //webhook —
+        # Telegram принимает такой URL синтаксически, а реальный aiohttp-роут
+        # зарегистрирован на "/webhook" и не совпадает → 404 на каждый
+        # апдейт молча, без единого исключения в логах. См. main.py, где
+        # webhook_url строится тем же способом (эта property сейчас нигде
+        # не используется, но обязана давать тот же честный результат).
+        return f"{self.render_url.rstrip('/')}{self.webhook_path}"
 
 
 settings = Settings()

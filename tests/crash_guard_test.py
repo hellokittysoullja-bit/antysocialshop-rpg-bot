@@ -213,6 +213,38 @@ def check_earnings_reach_status_ledger():
                      "(кошелёк вырастет, ранг — нет):\n  " + "\n  ".join(bad))
 
 
+def check_webhook_url_no_double_slash():
+    """RENDER_URL со слэшем на конце не должен ломать вебхук.
+
+    Реальный инцидент: RENDER_URL был задан как «https://…onrender.com/»
+    (с завершающим слэшем — частая опечатка при ручном вводе в Render
+    Dashboard). webhook_url строился конкатенацией без нормализации →
+    «…onrender.com//webhook». Telegram принял такой URL на setWebhook (200
+    OK — синтаксически валиден), но aiohttp-роут зарегистрирован ровно на
+    «/webhook» и с ним не совпадал → КАЖДЫЙ входящий апдейт получал 404,
+    молча, без единого исключения где-либо. Деплой выглядел полностью
+    штатным (webhook «успешно» установлен, /healthz отвечает 200), бот не
+    отвечал НИКОМУ. Тот же класс бага, что уже дважды кусал этот проект: код
+    технически не падает, поэтому ничего не сигналит, что он не работает.
+
+    Требует TOKEN/DATABASE_URL_AIVEN в окружении — только для того, чтобы
+    Settings() из config.py вообще создался (pydantic валидирует поля при
+    инициализации); реальные БД/Redis не открываются.
+    """
+    os.environ.setdefault("TOKEN", "123:DUMMY")
+    os.environ.setdefault("DATABASE_URL_AIVEN", "postgresql://u:p@127.0.0.1:5432/db")
+    sys.path.insert(0, ROOT)
+    import config as _config
+
+    for trailing in ("https://example.onrender.com/", "https://example.onrender.com"):
+        s = _config.Settings(TOKEN="123:DUMMY",
+                             DATABASE_URL_AIVEN="postgresql://u:p@127.0.0.1:5432/db",
+                             RENDER_URL=trailing)
+        assert s.webhook_url == "https://example.onrender.com/webhook", (
+            f"RENDER_URL={trailing!r} дал webhook_url={s.webhook_url!r} — "
+            f"лишний слэш ломает совпадение с зарегистрированным aiohttp-роутом")
+
+
 def check_no_calls_to_undefined_names():
     """Вызов имени, которого нигде нет в модуле, — гарантированный NameError.
 
@@ -404,6 +436,8 @@ def check_advertised_odds_match_real_roll():
 
 def main():
     passed = []
+    check_webhook_url_no_double_slash()
+    passed.append("RENDER_URL со слэшем на конце не ломает вебхук (страж «бот молчал всем»)")
     check_no_calls_to_undefined_names()
     passed.append("нет вызовов неопределённых имён (страж «_send_http_message 20 дней молчала»)")
     check_duplicate_dict_keys()
