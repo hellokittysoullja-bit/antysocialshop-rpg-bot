@@ -539,20 +539,34 @@ async def test_services(passed):
         await conn.execute("DELETE FROM players WHERE user_id=$1", PLANT_UID)
     passed.append("Плантация: round-trip полей + расчёт урожая на БД")
 
-    # --- Мины работают и без Redis (in-memory фолбэк) — «Рискнуть» не молчит ---
+    # --- Мины: состояние в Postgres (players.mines_state), не в Redis ---
+    # Redis подтверждённо был недоступен в проде несколько дней подряд — при
+    # старом «Redis, если есть, иначе ctx.cache» партия переживала рестарт
+    # процесса ТОЛЬКО пока Redis реально работал; без него (и без Redis
+    # вообще) ctx.cache тоже in-memory и стирается при любом деплое так же.
+    # БД переживает рестарт процесса всегда — тест сверяет именно это, а не
+    # «работает ли фолбэк», которого больше нет по конструкции.
     from bot import _mines_state_get, _mines_state_set
     from types import SimpleNamespace
+    MINES_UID = 999005
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM players WHERE user_id=$1", MINES_UID)
+    await repo.save(Player(user_id=MINES_UID, username="Miner", exists=True))
+    ctx_db = SimpleNamespace(db_pool=pool)
     st = {"field": [[0] * 5 for _ in range(5)], "mines": [[0, 1]], "bet": 50, "step": 0, "status": "playing"}
-    ctx_nr = SimpleNamespace(redis=None, cache=TTLCache(maxsize=20, ttl=600))
-    assert await _mines_state_get(ctx_nr, 777) is None            # пусто → None (а не крах)
-    await _mines_state_set(ctx_nr, 777, st)
-    assert await _mines_state_get(ctx_nr, 777) == st              # round-trip без Redis
-    ctx_r = SimpleNamespace(redis=redis_client, cache=TTLCache(maxsize=20, ttl=600))
-    await redis_client.delete("mines_game:778")
-    await _mines_state_set(ctx_r, 778, st)
-    assert await _mines_state_get(ctx_r, 778) == st              # round-trip с Redis
-    await redis_client.delete("mines_game:778")
-    passed.append("Мины: состояние round-trip с Redis и без (in-memory фолбэк)")
+    assert await _mines_state_get(ctx_db, MINES_UID) is None      # пусто → None (а не крах)
+    await _mines_state_set(ctx_db, MINES_UID, st)
+    assert await _mines_state_get(ctx_db, MINES_UID) == st        # round-trip через БД
+    # 1-часовой TTL сохранён поведенчески (был Redis SETEX 3600): партия
+    # старше часа читается как брошенная, а не восстанавливается.
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE players SET mines_state_updated_at = now() - interval '2 hours' "
+            "WHERE user_id=$1", MINES_UID)
+    assert await _mines_state_get(ctx_db, MINES_UID) is None, "партия старше часа должна читаться как брошенная"
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM players WHERE user_id=$1", MINES_UID)
+    passed.append("Мины: состояние в Postgres, round-trip + часовой TTL брошенной партии")
 
     # --- Награда за ПЕРВЫЙ фарм не должна стираться онбордингом ---
     # Был потерянный апдейт: хендлер держит снимок игрока, загруженный ДО

@@ -49,6 +49,12 @@ class Player(BaseModel):
     m_essence: int = 0
     lab_chests: int = 0
     lab_deaths: int = 0
+    # Личный рекорд забега (peak-end триумф) — раньше жил в Redis-ключе
+    # lab_best:{uid} без миграций; при недоступном Redis (был недоступен в
+    # проде несколько дней подряд) строка рекорда просто не показывалась.
+    # Поле на игроке пишется в ТОЙ ЖЕ транзакции, что баланс и награда за
+    # забег, — не отдельным round-trip после, как было с Redis.
+    lab_best_oac: int = 0
     alchemy_count: int = 0
     last_lab_attempt: Optional[datetime] = None
     donated: int = 0

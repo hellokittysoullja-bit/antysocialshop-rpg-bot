@@ -11,6 +11,7 @@ import sys
 import types
 import asyncio
 import logging
+from datetime import datetime, timezone, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -166,6 +167,47 @@ class FakeRepo:
         return r
 
 
+class FakeMinesPool:
+    """Мини-БД в памяти только под players.mines_state/mines_state_updated_at.
+
+    _mines_state_get/_mines_state_set после переноса с Redis (Redis
+    подтверждённо был недоступен в проде несколько дней подряд — «Мины»
+    молчали ВСЕГДА, а не деградировали) делают настоящий SQL round-trip
+    через ctx.db_pool. FakePool отдаёт фиксированные rows/value и не умеет
+    «запомнить, что записали» — здесь маленький честный key-value поверх
+    двух SQL-форм, которые реально шлёт код, без общего SQL-движка.
+    """
+    def __init__(self):
+        self._store = {}   # uid -> (state_json, updated_at)
+
+    def acquire(self, *a, **k):
+        store = self._store
+
+        class _Conn:
+            async def execute(self, sql, *args):
+                if "mines_state" in sql and "UPDATE" in sql:
+                    state_json, uid = args
+                    store[uid] = (state_json, datetime.now(timezone.utc))
+
+            async def fetchrow(self, sql, *args):
+                if "mines_state" not in sql:
+                    return None
+                uid = args[0]
+                if uid not in store:
+                    return None
+                state_json, updated_at = store[uid]
+                return {"mines_state": state_json, "mines_state_updated_at": updated_at}
+
+        class _CM:
+            async def __aenter__(self):
+                return _Conn()
+
+            async def __aexit__(self, *exc):
+                return False
+
+        return _CM()
+
+
 class FakeWar:
     def __init__(self):
         self.scores = []
@@ -209,8 +251,13 @@ async def test_lab_entry_survives_redis():
     await bot.lab_enter_confirm(u, c)      # раньше: AttributeError на модульном redis=None
     check(c.user_data.get("lab_room") == 1,
           "вход в Лабиринт при подключённом Redis доходит до первой комнаты")
-    check(ctx.redis.store.get("lab_state:1") is not None,
-          "снапшот забега пишется в ctx.redis, а не в модульный None")
+    # Снапшот забега в ctx.redis.set(f"lab_state:{uid}", ...) удалён целиком:
+    # писался и НИКОГДА не читался обратно ни на восстановление после
+    # рестарта, ни где-либо ещё — мёртвая страховка, которая ничего не
+    # страховала. Проверяем, что она не вернулась случайно при правках рядом.
+    check(not ctx.redis.store,
+          "вход в Лабиринт больше не пишет мёртвый снапшот в Redis — "
+          "состояние только в context.user_data")
 
 
 # ── 2. Лабиринт: забег конечен (нет бесконечного фарма OAC) ──────────
@@ -248,7 +295,7 @@ async def test_lab_run_is_bounded():
 # ── 3. Мины: кэшаут платит один раз и не сжигает партию впустую ──────
 async def test_mines_cashout():
     p = Player(user_id=1, exists=True, balance=0, total_earned=0)
-    ctx = make_ctx(p, redis=FakeRedis())
+    ctx = make_ctx(p, redis=FakeRedis(), pool=FakeMinesPool())
     state = {"field": [[0] * 5 for _ in range(5)], "mines": [[0, 0]], "bet": 100,
              "step": 3, "multiplier": 1.27, "status": "playing", "created_at": 0}
     await bot._mines_state_set(ctx, 1, state)
@@ -263,7 +310,7 @@ async def test_mines_cashout():
 
     # Кэшаут без единой открытой клетки не должен убивать партию.
     p2 = Player(user_id=2, exists=True, balance=0, total_earned=0)
-    ctx2 = make_ctx(p2, redis=FakeRedis())
+    ctx2 = make_ctx(p2, redis=FakeRedis(), pool=FakeMinesPool())
     st = {"field": [[0] * 5 for _ in range(5)], "mines": [[0, 0]], "bet": 100,
           "step": 0, "multiplier": 1.0, "status": "playing", "created_at": 0}
     await bot._mines_state_set(ctx2, 2, st)
@@ -273,10 +320,15 @@ async def test_mines_cashout():
           "«Забрать» с нулём открытых клеток не сжигает партию — она продолжается")
 
 
-# ── 3b. Мины переживают сериализацию состояния в Redis ───────────────
+# ── 3b. Мины переживают сериализацию состояния (JSONB в Postgres) ────
+# Redis подтверждённо был недоступен в проде несколько дней подряд — «Мины»
+# при старом «Redis, если есть, иначе in-memory кэш» без Redis теряли партию
+# на любом рестарте процесса точно так же, как без всякого фолбэка. Состояние
+# перенесено на players.mines_state (Postgres) — тест теперь бьёт по этому
+# пути напрямую, не по Redis, который код с сегодняшнего дня не трогает.
 async def test_mines_survive_redis_roundtrip():
     p = Player(user_id=3, exists=True, balance=1000, total_earned=1000)
-    ctx = make_ctx(p, redis=FakeRedis())
+    ctx = make_ctx(p, redis=FakeRedis(), pool=FakeMinesPool())
     c = FakeContext(ctx)
 
     await bot._mines_start_game(FakeUpdate("mines_bet_100", uid=3), c, 3, 100, ctx)
@@ -288,13 +340,14 @@ async def test_mines_survive_redis_roundtrip():
 
     # Ищем заведомо безопасную клетку и открываем её — раньше здесь падал
     # TypeError: unhashable type 'list', и «Мины» были неиграбельны с Redis.
+    # Тот же контракт JSON→кортежи обязан держаться и на Postgres-хранилище.
     mines = bot._mines_positions(state)
     safe = next((r, col) for r in range(5) for col in range(5) if (r, col) not in mines)
     u = FakeUpdate(f"mines_open_{safe[0]}_{safe[1]}", uid=3)
     await bot._mines_open_cell_wrapper(u, c)
     after = await bot._mines_state_get(ctx, 3)
     check(after["step"] == 1 and after["status"] == "playing",
-          "клетка открывается при подключённом Redis (шаг засчитан)")
+          "клетка открывается корректно (шаг засчитан)")
 
 
 # ── 4. Гильдия: кнопка не создаёт профиль в обход /start ─────────────

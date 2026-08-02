@@ -199,6 +199,25 @@ async def on_startup(app: Application):
             await create_tables(conn)
             await _run_migrations(conn)
 
+            # Метка живого старта процесса — единственный способ ответить на
+            # вопрос «процесс вообще стабильно работает или постоянно
+            # рестартует», не заглядывая в логи Render. Перезаписывается на
+            # КАЖДОМ старте: если /growth показывает «запущен 2 минуты назад»
+            # снова и снова при проверках с разницей в часы — это прямое
+            # доказательство цикла рестартов, а не единичного деплоя.
+            #
+            # В Postgres, не в Redis: раньше жила ТОЛЬКО при подключённом
+            # Redis — то есть ровно там, где диагностика нужнее всего (Redis
+            # недоступен), она сама была недоступна и говорила «неизвестно»
+            # вместо ответа. Таблица job_health есть всегда, раз есть db_pool.
+            try:
+                await conn.execute(
+                    "INSERT INTO job_health (job, last_run, sent, candidates) "
+                    "VALUES ('process_start', now(), 0, 0) "
+                    "ON CONFLICT (job) DO UPDATE SET last_run=now()")
+            except Exception:
+                logger.exception("Не удалось записать метку старта процесса")
+
         # ================== Redis ==================
         redis_client = None
         if settings.redis_url:
@@ -215,15 +234,6 @@ async def on_startup(app: Application):
                 # Инициализируем множество для обработанных update_id
                 await redis_client.sadd("processed_updates", "__placeholder__")
                 await redis_client.expire("processed_updates", 86400 * 7)
-
-                # Метка живого старта процесса — единственный способ ответить на
-                # вопрос «процесс вообще стабильно работает или постоянно
-                # рестартует», не заглядывая в логи Render. Перезаписывается на
-                # КАЖДОМ старте: если /growth показывает «запущен 2 минуты назад»
-                # снова и снова при проверках с разницей в часы — это прямое
-                # доказательство цикла рестартов, а не единичного деплоя.
-                await redis_client.set(
-                    "process_started_at", datetime.now(timezone.utc).isoformat())
 
             except Exception as e:
                 logger.warning(f"Redis недоступен: {e}")

@@ -1117,6 +1117,67 @@ async def _run_migrations(conn):
         END $$;
     """)
 
+    # ===== Redis перестаёт быть обязательным: переносим то немногое, что без
+    # него ЛОМАЛОСЬ (а не просто дорожало), в Postgres =====
+    #
+    # Аудит всех 38 мест, где код трогал ctx.redis, показал: почти везде уже
+    # был честный фолбэк («Приложение по дизайну работает и без Redis» —
+    # комментарий из самого кода). Не деградировали, а НЕ РАБОТАЛИ ВООБЩЕ
+    # только пять вещей — их и переносим. Остальное (кэш ачивок, счётчиков
+    # гильдий, юзернейма, рейт-лимиты, витрина коллекции) как было — Redis для
+    # них остаётся опциональным ускорителем, трогать незачем.
+    await conn.execute("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='players' AND column_name='last_reengagement_sent'
+            ) THEN
+                ALTER TABLE players ADD COLUMN last_reengagement_sent TIMESTAMPTZ DEFAULT NULL;
+            END IF;
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='players' AND column_name='last_winback_sent'
+            ) THEN
+                ALTER TABLE players ADD COLUMN last_winback_sent TIMESTAMPTZ DEFAULT NULL;
+            END IF;
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='players' AND column_name='last_known_rank'
+            ) THEN
+                ALTER TABLE players ADD COLUMN last_known_rank INTEGER DEFAULT NULL;
+            END IF;
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='players' AND column_name='mines_state'
+            ) THEN
+                ALTER TABLE players ADD COLUMN mines_state JSONB DEFAULT NULL;
+            END IF;
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='players' AND column_name='mines_state_updated_at'
+            ) THEN
+                ALTER TABLE players ADD COLUMN mines_state_updated_at TIMESTAMPTZ DEFAULT NULL;
+            END IF;
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='players' AND column_name='lab_best_oac'
+            ) THEN
+                ALTER TABLE players ADD COLUMN lab_best_oac INTEGER DEFAULT 0;
+            END IF;
+        END $$;
+    """)
+    # Диагностика /growth (здоровье джоб, возраст процесса) — раньше жила в
+    # Redis-ключах без TTL/с TTL, здесь один маленький стол на все метки сразу.
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS job_health (
+            job TEXT PRIMARY KEY,
+            last_run TIMESTAMPTZ NOT NULL,
+            sent INTEGER DEFAULT 0,
+            candidates INTEGER DEFAULT 0
+        )
+    """)
+
     # ===== Новые миграции для сервиса войны =====
     # 1. Таблица состояния войны
     await conn.execute("""
@@ -5985,18 +6046,29 @@ def _calc_multiplier(step: int) -> float:
 
 # Основная функция – замена _process_mines
 async def _mines_state_get(ctx, uid):
-    """Состояние игры «Мины»: Redis, если он есть, иначе in-memory кэш.
+    """Состояние игры «Мины»: Postgres (players.mines_state), не Redis/кэш.
 
-    Приложение по дизайну работает и без Redis (main.py: «без Redis продолжим»),
-    но мины дёргали ctx.redis напрямую → при отсутствующем/упавшем Redis
-    ctx.redis был None и кнопка «Рискнуть» молча падала на None.get(). Фолбэк
-    на ctx.cache (TTL ~10мин, партии хватает) чинит мины без Redis."""
-    key = f"mines_game:{uid}"
-    if getattr(ctx, "redis", None):
-        raw = await ctx.redis.get(key)
-        return json.loads(raw) if raw else None
-    val = ctx.cache.get(key)
-    return json.loads(val) if isinstance(val, (str, bytes)) else val
+    Redis подтверждённо был недоступен в проде несколько дней подряд —
+    прежний фолбэк «Redis, если он есть, иначе ctx.cache (TTL ~10мин)» на
+    практике означал, что партия переживала рестарт процесса ТОЛЬКО пока
+    Redis реально работал; без него ctx.cache (тоже in-memory) стирался при
+    каждом деплое так же, как стёрлась бы и без всякого фолбэка. БД переживает
+    рестарт процесса всегда, а не «если повезло с инфраструктурой».
+
+    1-часовой TTL сохранён поведенчески (был Redis SETEX 3600): партия
+    старше часа читается как брошенная и не возвращается.
+    """
+    if not ctx or not ctx.db_pool:
+        return None
+    async with ctx.db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT mines_state, mines_state_updated_at FROM players WHERE user_id=$1", uid)
+    if not row or not row["mines_state"]:
+        return None
+    updated = row["mines_state_updated_at"]
+    if not updated or (datetime.now(timezone.utc) - updated) > timedelta(hours=1):
+        return None
+    return _json_safe_load(row["mines_state"], None)
 
 
 def _mines_positions(state) -> set:
@@ -6012,11 +6084,12 @@ def _mines_positions(state) -> set:
 
 
 async def _mines_state_set(ctx, uid, state):
-    key = f"mines_game:{uid}"
-    if getattr(ctx, "redis", None):
-        await ctx.redis.setex(key, 3600, json.dumps(state))
-    else:
-        ctx.cache[key] = state
+    if not ctx or not ctx.db_pool:
+        return
+    async with ctx.db_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE players SET mines_state=$1, mines_state_updated_at=now() WHERE user_id=$2",
+            json.dumps(state, default=str), uid)
 
 
 async def _process_mines(update, context, uid, player, cfg, ctx):
@@ -6588,22 +6661,10 @@ async def lab_enter_confirm(update, context):
     context.user_data["lab_focused_attack"] = False
     context.user_data["lab_curse_rooms"] = 0
 
-    if ctx.redis:
-        state = {k: context.user_data[k] for k in (
-            "lab_room","lab_hp","lab_max_hp","lab_focus","lab_rewards",
-            "lab_depth","lab_total_rooms","lab_attack_bonus",
-            "lab_focused_attack","lab_curse_rooms"
-        )}
-        # ctx.redis, а не модульный `redis` (он равен None с строки 526): любой
-        # вход в Лабиринт при подключённом Redis падал здесь AttributeError'ом
-        # уже ПОСЛЕ того, как _mark_lab списал попытку — 12-часовой кулдаун
-        # сгорал, комната не показывалась, весь контент-столп был недоступен.
-        try:
-            await ctx.redis.setex(f"lab_state:{uid}", 3600, json.dumps(state, default=str))
-        except Exception:
-            # Снапшот забега — страховка, а не критичный путь: рантайм читает
-            # состояние из context.user_data. Сбой Redis не должен рушить вход.
-            logger.warning("Не удалось сохранить снапшот лабиринта для %d", uid)
+    # Снапшот забега в Redis отсюда убран: писался в lab_state:{uid} и
+    # НИГДЕ НИКОГДА не читался обратно — ни на восстановление после рестарта,
+    # ни где-либо ещё. Мёртвая страховка, которая ничего не страхует; рантайм
+    # и так читает состояние только из context.user_data.
 
     room = random.choice(LABYRINTH_ROOMS)
     context.user_data["lab_current_room"] = room
@@ -6920,27 +6981,26 @@ async def show_lab_final(update, context):
         # Военный счёт
         await ctx.war_service.add_score(uid, WarAction.LAB_WIN, conn)
 
-    await ctx.repo.atomic_update(uid, _lab_win)
+        # Рекорд забега (peak-end триумф): личный лучший банк за один заход.
+        # Раньше жил в Redis-ключе lab_best:{uid} отдельным round-trip'ом
+        # ПОСЛЕ этой транзакции — при недоступном Redis (был недоступен в
+        # проде несколько дней подряд) строка рекорда просто не показывалась.
+        # Здесь — поле на самом игроке, в ТОЙ ЖЕ транзакции: рекорд не может
+        # разъехаться с балансом даже при гонке двух одновременных забегов.
+        prev = p.lab_best_oac or 0
+        record_line = ""
+        new_record = False
+        if total_oac > prev:
+            p.lab_best_oac = total_oac
+            record_line = "\n🏆 <b>НОВЫЙ РЕКОРД ЗАБЕГА!</b>"
+            new_record = prev > 0  # первый-в-жизни рекорд не броадкастим (нет базы для «побил»)
+        elif prev:
+            record_line = f"\n📈 <i>Твой рекорд: {prev} OAC</i>"
+        return record_line, new_record
+
+    record_line, new_record = await ctx.repo.atomic_update(uid, _lab_win)
 
     total_rooms = context.user_data.get("lab_total_rooms", 0)
-
-    # Рекорд забега (peak-end триумф): личный лучший банк за один заход. Хранится
-    # в Redis — без миграций; если Redis нет, строка рекорда просто опускается.
-    record_line = ""
-    new_record = False
-    try:
-        if ctx.redis:
-            best_key = f"lab_best:{uid}"
-            prev = await ctx.redis.get(best_key)
-            prev = int(prev) if prev else 0
-            if total_oac > prev:
-                await ctx.redis.set(best_key, total_oac)
-                record_line = "\n🏆 <b>НОВЫЙ РЕКОРД ЗАБЕГА!</b>"
-                new_record = prev > 0  # первый-в-жизни рекорд не броадкастим (нет базы для «побил»)
-            elif prev:
-                record_line = f"\n📈 <i>Твой рекорд: {prev} OAC</i>"
-    except Exception:
-        pass
 
     # очистка состояний
     for key in ("lab_hp", "lab_focus", "lab_room", "lab_total_rooms", "lab_rewards"):
@@ -7829,63 +7889,55 @@ async def growth_stats_command(update, context, ctx):
     else:
         lines.append("\n<i>Пока ни одного успешного приглашения.</i>")
 
-    # Возраст ТЕКУЩЕГО процесса — без этого «джобы не запускались» неотличимо
-    # на глаз от «был один безобидный деплой минуту назад». Ключ перезаписывается
-    # на КАЖДОМ старте процесса (main.py on_startup), без TTL — если при
-    # проверках с разницей в часы это число снова и снова маленькое, процесс
-    # реально рестартует в цикле, а не просто недавно передеплоен один раз.
-    proc_age = None
-    if ctx.redis:
-        try:
-            raw = await ctx.redis.get("process_started_at")
-            if raw:
-                started = datetime.fromisoformat(raw.decode() if isinstance(raw, bytes) else raw)
-                proc_age = datetime.now(timezone.utc) - started
-        except Exception:
-            proc_age = None
-    if proc_age is not None:
-        mins = int(proc_age.total_seconds() / 60)
-        age_str = f"{mins}м" if mins < 60 else f"{mins // 60}ч {mins % 60}м"
-        lines.append(f"\n🕐 Процесс запущен: <b>{age_str} назад</b>")
-    else:
-        # «REDIS_URL не задан» и «задан, но подключение падает» — два разных
-        # фикса на стороне Render (переменная окружения vs сам сервис Redis),
-        # и без этого различия «Redis недоступен» одинаково выглядит в обоих
-        # случаях — админ не может понять, что именно проверять.
-        if getattr(ctx.settings, "redis_url", ""):
-            lines.append(
-                "\n🕐 Процесс запущен: <i>неизвестно — REDIS_URL задан, но "
-                "подключение не удалось при старте (см. лог "
-                "«Redis недоступен: ...» — там точная причина)</i>")
-        else:
-            lines.append(
-                "\n🕐 Процесс запущен: <i>неизвестно — переменная REDIS_URL "
-                "не задана вообще в окружении Render</i>")
+    # Здоровье процесса и джоб — теперь из Postgres (таблица job_health), не
+    # Redis. Раньше эта диагностика жила ТОЛЬКО при подключённом Redis — то
+    # есть ровно там, где она нужнее всего (Redis недоступен), она сама
+    # молчала и говорила «неизвестно» вместо ответа. db_pool есть всегда.
+    health_rows = {}
+    try:
+        async with ctx.db_pool.acquire() as conn:
+            hrows = await conn.fetch("SELECT job, last_run, sent, candidates FROM job_health")
+        health_rows = {r["job"]: r for r in hrows}
+    except Exception:
+        health_rows = {}
 
-    # Здоровье пуш-джоб — раньше единственным способом узнать, работает ли
+    def _fmt_age(delta: timedelta) -> str:
+        mins = int(delta.total_seconds() / 60)
+        if mins < 60:
+            return f"{mins}м"
+        hours = mins // 60
+        if hours < 48:
+            return f"{hours}ч {mins % 60}м"
+        return f"{hours // 24}д {hours % 24}ч"
+
+    proc_row = health_rows.get("process_start")
+    if proc_row:
+        age = _fmt_age(datetime.now(timezone.utc) - proc_row["last_run"])
+        lines.append(f"\n🕐 Процесс запущен: <b>{age} назад</b>")
+    else:
+        lines.append("\n🕐 Процесс запущен: <i>нет записи в job_health — "
+                     "процесс ни разу не проходил on_startup после этой миграции</i>")
+
+    # Здоровье пуш-джоб. Раньше единственным способом узнать, работает ли
     # reengagement_push, было руками рыться в логах Render и не уметь отличить
     # «был один безобидный деплой» от «джоба вообще не доживает до конца
-    # цикла». Ключ в Redis живёт дольше цикла джобы (см. _record_job_health) —
-    # если он есть, джоба успешно завершилась внутри своего окна; если нет,
-    # с последнего успешного прогона реально прошло аномально много времени.
+    # цикла». Staleness теперь считает читающая сторона (max_age ниже), а не
+    # TTL записи — можно честно сказать «был 5 дней назад», а не просто
+    # «нет данных», неотличимо от «не было вообще ни разу».
     lines.append("\n<b>⚙️ Здоровье пуш-джоб:</b>")
-    for job, label in (("reengagement", "Возврат (2ч-3д дрейфа)"),
-                       ("winback", "Винбэк (3-30д дрейфа)")):
-        raw = None
-        if ctx.redis:
-            try:
-                raw = await ctx.redis.get(f"job_health:{job}")
-            except Exception:
-                raw = None
-        if not raw:
+    for job, label, max_age in (("reengagement", "Возврат (2ч-3д дрейфа)", timedelta(hours=3)),
+                                ("winback", "Винбэк (3-30д дрейфа)", timedelta(days=9))):
+        row = health_rows.get(job)
+        if not row:
             lines.append(f"🔴 {label}: <i>нет свежих запусков</i>")
             continue
+        age = datetime.now(timezone.utc) - row["last_run"]
+        if age > max_age:
+            lines.append(f"🔴 {label}: <i>последний запуск {_fmt_age(age)} назад — устарело</i>")
+            continue
         try:
-            ts_str, sent_str, cand_str = (raw.decode() if isinstance(raw, bytes) else raw).split("|")
-            ts = datetime.fromisoformat(ts_str)
-            ago_min = int((datetime.now(timezone.utc) - ts).total_seconds() / 60)
-            ago = f"{ago_min}м назад" if ago_min < 60 else f"{ago_min // 60}ч назад"
-            lines.append(f"🟢 {label}: {ago}, отправлено {sent_str} из {cand_str}")
+            lines.append(f"🟢 {label}: {_fmt_age(age)} назад, "
+                         f"отправлено {row['sent']} из {row['candidates']}")
         except Exception:
             lines.append(f"🟡 {label}: <i>есть отметка, не смог разобрать</i>")
 
@@ -9974,12 +10026,17 @@ async def reengagement_push(ctx: AppContext) -> None:
 
     Отбирает тех, кто недавно играл, но сейчас неактивен несколько часов, и у
     кого есть повод вернуться. АНТИ-СПАМ:
-      • без Redis — не шлём вообще (fail-closed, иначе риск спама);
-      • не чаще ~1 раза в 20 ч на игрока (guard в Redis);
+      • guard и снимок ранга — в Postgres (players.last_reengagement_sent,
+        last_known_rank), не в Redis: Redis подтверждённо был недоступен в
+        проде несколько дней подряд, и джоба всё это время работала в режиме
+        fail-closed «не шлём вообще» — не деградация, а полное отключение
+        фичи молча. БД есть всегда, раз есть db_pool;
+      • не чаще ~1 раза в 20 ч на игрока (last_reengagement_sent в WHERE —
+        фильтруется в самом запросе, не построчной проверкой после выборки);
       • окно активности 2 ч … 3 дня (не трогаем активных и давно ушедших);
       • 403 (заблокировал бота) — молча пропускаем.
     """
-    if not ctx or not ctx.db_pool or not ctx.redis:
+    if not ctx or not ctx.db_pool:
         return
 
     now = datetime.now()
@@ -9991,7 +10048,8 @@ async def reengagement_push(ctx: AppContext) -> None:
         async with ctx.db_pool.acquire() as conn:
             rows = await conn.fetch(
                 "SELECT user_id, last_farm, login_streak, last_login_date, "
-                "passive_level, passive_collected "
+                "passive_level, passive_collected, last_known_rank, "
+                "last_reengagement_sent "
                 "FROM players "
                 "WHERE last_farm IS NOT NULL AND last_farm BETWEEN $1 AND $2",
                 active_window, drift_min,
@@ -10001,7 +10059,7 @@ async def reengagement_push(ctx: AppContext) -> None:
         return
 
     # Снимок рангов по балансу (один запрос, дешёв с индексом) для детекции
-    # обгона: сравниваем текущий ранг с сохранённым в Redis прошлым.
+    # обгона: сравниваем текущий ранг с сохранённым прошлым (last_known_rank).
     rank_map = {}
     try:
         async with ctx.db_pool.acquire() as conn:
@@ -10020,25 +10078,29 @@ async def reengagement_push(ctx: AppContext) -> None:
         for row in rows:
             uid = row["user_id"]
 
-            # Ранг: детекция обгона + всегда обновляем сохранённый ранг.
+            # Ранг: детекция обгона + всегда обновляем сохранённый ранг —
+            # ДЛЯ ВСЕХ кандидатов окна, даже тех, кто ниже сейчас пропустит
+            # отправку по guard'у (та же семантика, что была с Redis: ранг
+            # свежий к моменту, когда guard у игрока истечёт).
             rival_drop = None
             cur_rank = rank_map.get(uid)
             if cur_rank:
+                prev_rank = row["last_known_rank"]
+                if prev_rank and cur_rank > prev_rank and cur_rank <= 20:
+                    rival_drop = (prev_rank, cur_rank)
                 try:
-                    prev_v = await ctx.redis.get(f"rank:{uid}")
-                    prev_rank = int(prev_v) if prev_v else None
-                    if prev_rank and cur_rank > prev_rank and cur_rank <= 20:
-                        rival_drop = (prev_rank, cur_rank)
-                    await ctx.redis.setex(f"rank:{uid}", 7 * 24 * 3600, str(cur_rank))
+                    async with ctx.db_pool.acquire() as conn:
+                        await conn.execute(
+                            "UPDATE players SET last_known_rank=$1 WHERE user_id=$2",
+                            cur_rank, uid)
                 except Exception:
                     pass
 
-            guard_key = f"reengage:{uid}"
-            try:
-                if await ctx.redis.get(guard_key):
-                    continue
-            except Exception:
-                continue  # Redis-сбой → пропускаем (не рискуем спамом)
+            # Guard: не чаще раза в 20ч на игрока. TIMESTAMPTZ у asyncpg всегда
+            # приходит tz-aware (UTC) — сравнение с aware now() без доп. возни.
+            last_sent = row["last_reengagement_sent"]
+            if last_sent and (datetime.now(timezone.utc) - last_sent) < timedelta(hours=20):
+                continue
 
             text = _reengagement_text(
                 row["last_farm"], row["login_streak"],
@@ -10053,7 +10115,9 @@ async def reengagement_push(ctx: AppContext) -> None:
                 r = await client.post(url, json={"chat_id": uid, "text": text, "parse_mode": "HTML"})
                 if r.status_code == 200:
                     sent += 1
-                    await ctx.redis.setex(guard_key, 20 * 3600, "1")
+                    async with ctx.db_pool.acquire() as conn:
+                        await conn.execute(
+                            "UPDATE players SET last_reengagement_sent=now() WHERE user_id=$1", uid)
                 # 403/прочее — молча пропускаем
             except Exception:
                 pass
@@ -10063,8 +10127,7 @@ async def reengagement_push(ctx: AppContext) -> None:
     await _record_job_health(ctx, "reengagement", sent, len(rows))
 
 
-async def _record_job_health(ctx: AppContext, job: str, sent: int, candidates: int,
-                             ttl_seconds: int = 3 * 3600) -> None:
+async def _record_job_health(ctx: AppContext, job: str, sent: int, candidates: int) -> None:
     """Отметка «джоба реально дожила до конца» — читается в /growth.
 
     Единственный способ, которым админ узнавал, работает ли пуш-возврат, —
@@ -10072,20 +10135,25 @@ async def _record_job_health(ctx: AppContext, job: str, sent: int, candidates: i
     рестарте процесса) неотличим на глаз от "джоба вообще никогда не
     доживает до конца цикла" — оба выглядят одинаково тревожно, а разница
     между "был один безобидный деплой" и "джоба в принципе не работает"
-    решает, чинить ли инфраструктуру или писать новый код. Redis-ключ с TTL
-    чуть больше цикла джобы: если он протух — значит с прошлого успешного
-    прогона реально прошло аномально много времени, а не "просто не смотрели".
+    решает, чинить ли инфраструктуру или писать новый код.
 
-    ttl_seconds ОБЯЗАН превышать интервал самой джобы, иначе ключ протухает
-    между двумя честными успешными прогонами, и /growth врёт о простое ровно
-    той джобе, что на самом деле работает штатно, — дефолт 3ч рассчитан на
-    30-минутный цикл reengagement, у winback (раз в неделю) свой, больше.
+    Раньше жило в Redis-ключе с TTL — при отсутствующем Redis (а он
+    подтверждённо был недоступен в проде несколько дней подряд) /growth не
+    просто «не мог обновить метрику», а ВРАЛ «джоба не работает» про джобу,
+    которая на самом деле работала штатно. Один стол в Postgres: staleness
+    считает читающая сторона (/growth), а не TTL записи — своя граница
+    свежести для каждой джобы, без риска протухнуть между двумя честными
+    прогонами.
     """
-    if not ctx or not ctx.redis:
+    if not ctx or not ctx.db_pool:
         return
     try:
-        payload = f"{datetime.now(timezone.utc).isoformat()}|{sent}|{candidates}"
-        await ctx.redis.setex(f"job_health:{job}", ttl_seconds, payload)
+        async with ctx.db_pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO job_health (job, last_run, sent, candidates) "
+                "VALUES ($1, now(), $2, $3) "
+                "ON CONFLICT (job) DO UPDATE SET last_run=now(), sent=$2, candidates=$3",
+                job, sent, candidates)
     except Exception:
         pass
 
@@ -10121,21 +10189,26 @@ async def winback_push(ctx: AppContext) -> None:
 
     Guard на 30 дней (не 20ч, как у reengagement): каждому — максимум одно
     сообщение в месяц, не чаще. Это не частый пуш, это редкая, единственная
-    попытка напомнить о себе.
+    попытка напомнить о себе. Guard — players.last_winback_sent, отфильтрован
+    прямо в SQL: та же причина, что у reengagement_push (см. её докстринг) —
+    Redis подтверждённо был недоступен в проде, и «fail-closed без Redis»
+    означало «джоба ничего не делает молча», а не «делает чуть хуже».
     """
-    if not ctx or not ctx.db_pool or not ctx.redis:
+    if not ctx or not ctx.db_pool:
         return
 
     now = datetime.now()
     window_start = now - timedelta(days=30)
     window_end = now - timedelta(days=3)
+    guard_before = datetime.now(timezone.utc) - timedelta(days=30)
 
     try:
         async with ctx.db_pool.acquire() as conn:
             rows = await conn.fetch(
                 "SELECT user_id, last_farm, balance FROM players "
-                "WHERE last_farm IS NOT NULL AND last_farm BETWEEN $1 AND $2",
-                window_start, window_end,
+                "WHERE last_farm IS NOT NULL AND last_farm BETWEEN $1 AND $2 "
+                "AND (last_winback_sent IS NULL OR last_winback_sent < $3)",
+                window_start, window_end, guard_before,
             )
     except Exception as e:
         logger.error(f"winback query error: {e}")
@@ -10147,13 +10220,6 @@ async def winback_push(ctx: AppContext) -> None:
     async with httpx.AsyncClient(timeout=10) as client:
         for row in rows:
             uid = row["user_id"]
-            guard_key = f"winback:{uid}"
-            try:
-                if await ctx.redis.get(guard_key):
-                    continue
-            except Exception:
-                continue  # Redis-сбой → пропускаем (не рискуем повторной отправкой)
-
             days_gone = (now - row["last_farm"]).days
             text = _winback_text(days_gone, row["balance"] or 0)
 
@@ -10161,14 +10227,16 @@ async def winback_push(ctx: AppContext) -> None:
                 r = await client.post(url, json={"chat_id": uid, "text": text, "parse_mode": "HTML"})
                 if r.status_code == 200:
                     sent += 1
-                    await ctx.redis.setex(guard_key, 30 * 24 * 3600, "1")
+                    async with ctx.db_pool.acquire() as conn:
+                        await conn.execute(
+                            "UPDATE players SET last_winback_sent=now() WHERE user_id=$1", uid)
                 # 403/прочее — молча пропускаем, как и в reengagement_push
             except Exception:
                 pass
             await asyncio.sleep(0.05)
 
     logger.info("winback: sent %d pushes to %d candidates", sent, len(rows))
-    await _record_job_health(ctx, "winback", sent, len(rows), ttl_seconds=9 * 24 * 3600)
+    await _record_job_health(ctx, "winback", sent, len(rows))
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
