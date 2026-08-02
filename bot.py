@@ -10015,6 +10015,21 @@ async def keep_db_alive(ctx: AppContext):
         logger.error(f"keep_db_alive failed: {e}")
 
 
+def _is_dead_chat_error(status_code: int, body: str) -> bool:
+    """Telegram по-разному сигналит «этому человеку больше нельзя написать»:
+    403 — заблокировал бота; 400 с «chat not found» — удалил аккаунт или чат
+    иначе перестал существовать. Оба случая — не наша ошибка и нечего чинить,
+    просто мёртвый адресат; раньше второй случай считался как «failed»
+    (реальный баг) наравне с настоящими сбоями — вводило в заблуждение при
+    диагностике по /growth (см. инцидент: 8 «ошибок» в winback оказались
+    все до одной именно этим, ни одной настоящей ошибкой не было)."""
+    if status_code == 403:
+        return True
+    if status_code == 400 and "chat not found" in (body or "").lower():
+        return True
+    return False
+
+
 def _reengagement_text(last_farm, login_streak, last_login_date, now, farm_cooldown,
                        passive_level=0, passive_collected=None, rival_drop=None):
     """Выбирает текст пуш-возврата (или None, если повода нет). Чистая функция.
@@ -10154,7 +10169,7 @@ async def reengagement_push(ctx: AppContext) -> None:
                     async with ctx.db_pool.acquire() as conn:
                         await conn.execute(
                             "UPDATE players SET last_reengagement_sent=now() WHERE user_id=$1", uid)
-                elif r.status_code == 403:
+                elif _is_dead_chat_error(r.status_code, r.text):
                     blocked += 1
                 else:
                     failed += 1
@@ -10282,7 +10297,7 @@ async def winback_push(ctx: AppContext) -> None:
                     async with ctx.db_pool.acquire() as conn:
                         await conn.execute(
                             "UPDATE players SET last_winback_sent=now() WHERE user_id=$1", uid)
-                elif r.status_code == 403:
+                elif _is_dead_chat_error(r.status_code, r.text):
                     blocked += 1
                 else:
                     failed += 1
