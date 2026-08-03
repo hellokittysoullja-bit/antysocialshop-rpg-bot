@@ -100,6 +100,28 @@ def rate_limit(seconds: int = 2):
     return decorator
     
     
+def _is_expected_telegram_noise(e: Exception) -> bool:
+    """Отличает «код сломан, чинить админу» от «Telegram так себя ведёт,
+    когда бот активно используется» — ни то, ни другое не баг, оба
+    ожидаемы и не требуют вмешательства человека:
+
+    * RetryAfter (flood control) — Telegram лимитирует частоту сообщений В
+      ОДИН чат. Пока бот жил только в личках, один чат = один активный
+      игрок, лимит почти недостижим. С тех пор как групповой канал роста
+      заработал, много игроков жмут кнопки в ОДНОМ групповом чате —
+      совокупная частота ответов бота в этот чат легко превышает лимит.
+      Это перегрузка конкретного чата в моменте, а не поломка кода.
+    * Forbidden (bot can't initiate conversation / bot was blocked) —
+      получатель недостижим, тот же класс, что blocked/dead-chat в
+      пуш-джобах (см. _is_dead_chat_error) — нечего чинить в коде.
+
+    Раньше оба класса шли в админа как «🚨 Ошибка в X» неотличимо от
+    настоящего бага — на активном групповом чате это залп из десятков
+    одинаковых алертов ни о чём вместо сигнала о реальной проблеме.
+    """
+    return isinstance(e, (RetryAfter, Forbidden))
+
+
 def game_handler(func):
     """Абсолютный декоратор: гарантированная идемпотентность, атомарный контекст, умная загрузка игрока."""
     import inspect
@@ -168,15 +190,30 @@ def game_handler(func):
         except asyncio.CancelledError:
             raise   # не глушим, чтобы корректно работала отмена задач
         except Exception as e:
-            logger.error(f"Unhandled error in {func.__name__}:", exc_info=True)
+            noisy = _is_expected_telegram_noise(e)
+            if noisy:
+                logger.warning(f"Ожидаемый шум Telegram в {func.__name__}: {e}")
+            else:
+                logger.error(f"Unhandled error in {func.__name__}:", exc_info=True)
             # Сохраняем уникальную логику из старого error_handler
             if 'awaiting_named_blunt' in context.user_data:
                 context.user_data['awaiting_named_blunt'] = False
-            if update.callback_query:
-                await update.callback_query.answer("⚠️ Внутренняя ошибка. Админ уже в курсе.", show_alert=True)
-            elif update.effective_message:
-                await update.effective_message.reply_text("⚠️ Что-то пошло не так. Попробуйте позже.")
-            if settings.admin_id:
+            user_text = ("⏳ Слишком много запросов в этом чате — попробуй через "
+                        "пару секунд." if isinstance(e, RetryAfter) else
+                        "⚠️ Внутренняя ошибка. Админ уже в курсе." if not noisy else
+                        "⚠️ Не получилось. Попробуй ещё раз.")
+            # query.answer()/reply_text() сами способны бросить исключение
+            # (например, "Query is too old" — сообщение о живом callback_query
+            # само устарело, пока мы ждали ретраев RetryAfter выше) — обёрнуты,
+            # чтобы отчёт об ошибке не порождал вторую необработанную ошибку.
+            try:
+                if update.callback_query:
+                    await update.callback_query.answer(user_text, show_alert=True)
+                elif update.effective_message:
+                    await update.effective_message.reply_text("⚠️ Что-то пошло не так. Попробуйте позже.")
+            except Exception:
+                pass
+            if settings.admin_id and not noisy:
                 try:
                     err_msg = f"🚨 <b>Ошибка в {func.__name__}</b>\n<code>{html.escape(str(e))}</code>"
                     await context.bot.send_message(chat_id=settings.admin_id, text=err_msg, parse_mode='HTML')
@@ -237,9 +274,21 @@ def _create_wrapper(func, show_alert_on_error):
         except asyncio.CancelledError:
             raise   # Пробрасываем, не глушим отмену
         except Exception as e:
-            logger.error(f"Callback error in {func.__name__}: {e}", exc_info=True)
+            # RetryAfter/Forbidden — ожидаемый шум перегруженного чата или
+            # недостижимого адресата, не баг; см. _is_expected_telegram_noise
+            # (тот же принцип, что в game_handler). query.answer() ниже сам
+            # способен бросить "Query is too old" (callback_query устарел,
+            # пока func() ждал ретраев выше) — обёрнут, чтобы отчёт об ошибке
+            # не порождал вторую необработанную ошибку до global_error_handler.
+            if _is_expected_telegram_noise(e):
+                logger.warning(f"Ожидаемый шум Telegram в {func.__name__}: {e}")
+            else:
+                logger.error(f"Callback error in {func.__name__}: {e}", exc_info=True)
             if query and show_alert_on_error:
-                await query.answer(f"❌ Ошибка: {e}", show_alert=True)
+                try:
+                    await query.answer(f"❌ Ошибка: {e}", show_alert=True)
+                except Exception:
+                    pass
     return wrapper
 
 # НАСТРОЙКИ через пидантик
@@ -8685,10 +8734,21 @@ async def progress_hub_handler(update, context, ctx):
         await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
 
     except Exception as e:
-        logger.exception("Ошибка в progress_hub_handler")
-        await query.answer("⚠️ Внутренняя ошибка. Попробуйте позже.", show_alert=True)
-        # Уведомление админу
-        if ctx.settings.admin_id:
+        # RetryAfter/Forbidden — ожидаемый шум (перегрузка чата, недостижимый
+        # адресат), не баг; см. _is_expected_telegram_noise и тот же фикс в
+        # game_handler. Не роняем это на админа как «🚨 Ошибка».
+        noisy = _is_expected_telegram_noise(e)
+        if noisy:
+            logger.warning(f"Ожидаемый шум Telegram в progress_hub_handler: {e}")
+        else:
+            logger.exception("Ошибка в progress_hub_handler")
+        try:
+            await query.answer("⏳ Слишком много запросов — попробуй через пару секунд." if
+                               isinstance(e, RetryAfter) else "⚠️ Внутренняя ошибка. Попробуйте позже.",
+                               show_alert=True)
+        except Exception:
+            pass
+        if ctx.settings.admin_id and not noisy:
             try:
                 await context.bot.send_message(
                     chat_id=ctx.settings.admin_id,

@@ -502,6 +502,45 @@ async def test_bot_added_to_chat_announces():
           "добавление ЧУЖОГО бота по-прежнему не порождает анонса от нас")
 
 
+# ── 12. RetryAfter/Forbidden — ожидаемый шум, не «🚨 Ошибка» админу ──
+async def test_flood_control_is_not_admin_noise():
+    """С тех пор как групповой канал роста заработал, много игроков жмут
+    кнопки в ОДНОМ групповом чате — совокупная частота ответов бота легко
+    превышает лимит Telegram на чат (RetryAfter/flood control), а часть
+    адресатов недостижима (Forbidden). Раньше ОБА класса шли админу как
+    «🚨 Ошибка в X», неотличимо от настоящего бага — на активном групповом
+    чате это залп из десятков одинаковых алертов ни о чём. Проверяем:
+    RetryAfter/Forbidden НЕ алармят админа и дают пользователю дружелюбный
+    текст, а обычное исключение по-прежнему алармит (шум отфильтрован
+    точечно, не весь error-reporting отключён)."""
+    from telegram.error import RetryAfter
+
+    @bot.game_handler
+    async def _boom_flood(update, context):
+        raise RetryAfter(27)
+
+    @bot.game_handler
+    async def _boom_real(update, context):
+        raise ValueError("настоящий баг")
+
+    old_admin_id = bot.settings.admin_id
+    bot.settings.admin_id = 999999999
+    try:
+        fctx1 = FakeContext(None)
+        upd1 = FakeUpdate("x", uid=42)
+        await _boom_flood(upd1, fctx1)
+        check(not fctx1.bot.sent, f"RetryAfter не должен алармить админа: {fctx1.bot.sent}")
+        check(upd1.callback_query.answers and "секунд" in (upd1.callback_query.answers[-1] or ""),
+              "пользователь при RetryAfter видит дружелюбный текст, не «внутренняя ошибка»")
+
+        fctx2 = FakeContext(None)
+        upd2 = FakeUpdate("x", uid=43)
+        await _boom_real(upd2, fctx2)
+        check(bool(fctx2.bot.sent), "обычное исключение по-прежнему алармит админа (шум отфильтрован точечно)")
+    finally:
+        bot.settings.admin_id = old_admin_id
+
+
 # ── 10. Внутренние вызовы @cb-хендлеров без лишнего ctx ──────────────
 async def test_no_double_ctx_callsites():
     import re
@@ -525,7 +564,7 @@ async def main():
                test_altar_rerenders, test_cancel_named,
                test_war_score_per_action, test_temple_bonus_applies,
                test_named_blunt_name_persisted, test_bot_added_to_chat_announces,
-               test_no_double_ctx_callsites):
+               test_flood_control_is_not_admin_noise, test_no_double_ctx_callsites):
         print(f"\n{fn.__name__}:")
         await fn()
     total = PASSED + len(FAILED)
