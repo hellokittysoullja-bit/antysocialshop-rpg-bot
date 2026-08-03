@@ -9646,7 +9646,11 @@ async def blunt_details_handler(update, context, ctx, player):
         except Exception:
             pass
     else:
-        await query.message.edit_text(text=text, reply_markup=kb, parse_mode='HTML')
+        # edit_or_reply, не query.message.edit_text напрямую: если оба пути
+        # отправки фото отказали (редкий двойной сбой), query.message — всё
+        # ещё витрина (фото), голый edit_text упал бы тем же "There is no
+        # text in the message to edit", что и в share_blunt_handler.
+        await edit_or_reply(update, context, text, reply_markup=kb, parse_mode='HTML')
 
 @rate_limit(1)
 @game_handler
@@ -9698,7 +9702,13 @@ async def share_blunt_handler(update, context, ctx, player):
         [InlineKeyboardButton("🔙 Назад", callback_data="my_blunts")],
     ])
     await query.answer()
-    await query.message.edit_text(
+    # edit_or_reply, не query.message.edit_text напрямую: кнопка "🔗" реально
+    # нажимается из витрины «Мои бланты» — та теперь фото-сообщение (см.
+    # edit_or_send_photo), у него caption, а не text. Голый edit_text падал
+    # BadRequest "There is no text in the message to edit", необработанным
+    # долетая до админа как "🚨 Ошибка в share_blunt_handler".
+    await edit_or_reply(
+        update, context,
         share_text + "\n\n<i>👆 Отправь другу — когда он войдёт по ссылке, "
         "<b>вы оба получите бонус!</b></i>",
         reply_markup=share_kb, parse_mode='HTML'

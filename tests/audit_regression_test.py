@@ -605,6 +605,65 @@ async def test_menu_handler_recovers_from_non_text_message():
     check(bool(fctx.bot.sent), "«🏰 В меню» из фото-сообщения отвечает (новым сообщением), а не молчит")
 
 
+# ── 13b. share_blunt_handler/blunt_details_handler: та же болезнь витрины ──
+async def test_share_blunt_handler_recovers_from_photo_message():
+    """Пользователь: «🚨 Ошибка в share_blunt_handler — There is no text in
+    the message to edit». Кнопка «🔗 Поделиться» реально нажимается из
+    витрины «Мои бланты» — та теперь фото-сообщение (см. edit_or_send_photo),
+    у него caption, а не text. share_blunt_handler звал
+    query.message.edit_text(...) НАПРЯМУЮ, без фолбэка — падал BadRequest,
+    необработанным долетая до админа на каждое такое нажатие."""
+    from telegram.error import BadRequest as _BadRequest
+
+    class _PhotoMsg(FakeMsg):
+        def __init__(self):
+            super().__init__()
+            self.text = None
+            self.photo = [types.SimpleNamespace(file_id="witrina")]
+
+        async def edit_text(self, text, **kw):
+            raise _BadRequest("There is no text in the message to edit")
+
+    inv = [{"id": "blunt_1", "type": "named", "name": "Тест", "rarity": "rare",
+           "rare_number": "R-0001", "hash": "0xdead", "reaction": "..."}]
+    p = Player(user_id=1, exists=True, balance=100, total_earned=100, inventory=inv)
+    ctx = make_ctx(p)
+
+    upd = FakeUpdate("share_blunt_blunt_1", uid=1)
+    upd.callback_query.message = _PhotoMsg()
+    upd.effective_message = upd.callback_query.message
+    fctx = FakeContext(ctx)
+
+    await bot.share_blunt_handler(upd, fctx)
+    # Проверяем содержимое, не просто "что-то отправлено": game_handler
+    # теперь и сам умеет слать дублирующее сообщение при НЕОЖИДАННОЙ ошибке
+    # (см. фикс #8) — простое "было хоть одно сообщение" совпало бы и со
+    # старым сломанным кодом (краш → общий "⚠️ Что-то пошло не так" от
+    # обёртки), не различая «хендлер реально показал экран шеринга» от
+    # «упал, обёртка спасла общим текстом». Ищем настоящий текст экрана.
+    check(any("Отправь другу" in (t or "") for t in fctx.bot.sent),
+          f"share_blunt_handler реально показывает экран шеринга из фото-витрины, "
+          f"а не проваливается в общий crash-фолбэк: {fctx.bot.sent}")
+
+
+async def test_blunt_details_fallback_uses_edit_or_reply():
+    """blunt_details_handler: если оба пути отправки фото-карточки отказали
+    (редкий двойной сбой), query.message — всё ещё витрина (фото). Раньше
+    фолбэк звал голый query.message.edit_text(...) — та же болезнь, что и в
+    share_blunt_handler, просто в более редкой ветке (не проверено
+    поведенчески — требует форсировать двойной сбой рендера; проверяем
+    статически, что фолбэк идёт через edit_or_reply)."""
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "bot.py"), encoding="utf-8").read()
+    start = src.index("async def blunt_details_handler(")
+    end = src.index("\n@rate_limit(1)\n@game_handler\nasync def share_blunt_handler(", start)
+    body = src[start:end]
+    check("edit_or_reply" in body,
+          "фолбэк blunt_details_handler (оба пути фото отказали) обязан идти через edit_or_reply")
+    check("await query.message.edit_text(text=text" not in body,
+          "blunt_details_handler больше не зовёт голый query.message.edit_text напрямую")
+
+
 # ── 14. profile_callback: редактирует из текста, чистит за собой из фото ──
 async def test_profile_edits_from_text_deletes_from_photo():
     """Пользователь: заход в «Мои бланты» из профиля работает, но «назад» —
@@ -1001,6 +1060,8 @@ async def main():
                test_named_blunt_name_persisted, test_bot_added_to_chat_announces,
                test_flood_control_is_not_admin_noise,
                test_menu_handler_recovers_from_non_text_message,
+               test_share_blunt_handler_recovers_from_photo_message,
+               test_blunt_details_fallback_uses_edit_or_reply,
                test_profile_edits_from_text_deletes_from_photo,
                test_profile_avatar_edits_media_in_place,
                test_edit_or_reply_cleans_up_own_message_not_user_command,
