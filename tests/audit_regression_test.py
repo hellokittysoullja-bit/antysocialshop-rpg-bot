@@ -688,6 +688,58 @@ async def test_profile_avatar_edits_media_in_place():
           "старое фото-сообщение НЕ удаляется — оно отредактировано на месте, не заменено")
 
 
+# ── 16. edit_or_reply чистит за собой — общий хелпер, 33 вызова по игре ──
+async def test_edit_or_reply_cleans_up_own_message_not_user_command():
+    """edit_or_reply — универсальный примитив «покажи этот экран», 33 вызова
+    по всей игре. Раньше при неудачном редактировании (например, пришли из
+    фото-сообщения — у него caption, а не text, editMessageText не
+    применим) слал новое сообщение, но НИКОГДА не убирал старое — единый
+    живой экран копил мусор из мёртвых предыдущих экранов на КАЖДОМ таком
+    переходе по всей игре, не только в профиле (см. skins_menu_handler:
+    «🎨 Кастомизация» прямо из фото-профиля била в ровно этот же баг).
+    Исправлено один раз в общем хелпере — чинит сразу все вызовы.
+
+    Разница по источнику: своё сообщение (пришли из нажатия кнопки) можно
+    чистить за собой; сообщение ИГРОКА (пришли из команды вроде /rules) —
+    нельзя, удалять чужой ввод без спроса неожиданно для игрока и не
+    всегда разрешено правами бота в группе."""
+    from telegram.error import BadRequest as _BadRequest
+
+    class _PhotoMsg(FakeMsg):
+        def __init__(self):
+            super().__init__()
+            self.text = None
+            self.deleted = False
+
+        async def edit_text(self, text, **kw):
+            raise _BadRequest("There is no text in the message to edit")
+
+        async def delete(self):
+            self.deleted = True
+
+    # Случай 1: пришли из CALLBACK (своё сообщение) — фолбэк убирает старое.
+    upd1 = FakeUpdate("x", uid=1)
+    upd1.callback_query.message = _PhotoMsg()
+    upd1.effective_message = upd1.callback_query.message
+    fctx1 = FakeContext(None)
+    await bot.edit_or_reply(upd1, fctx1, "новый текст")
+    check(bool(fctx1.bot.sent), "фолбэк отправляет новое сообщение")
+    check(upd1.callback_query.message.deleted,
+          "своё сообщение (из callback) убирается при фолбэке — не копится мусор")
+
+    # Случай 2: пришли из КОМАНДЫ игрока (update.message) — фолбэк НЕ трогает
+    # чужой ввод, даже если формально не мог его отредактировать.
+    upd2 = FakeUpdate("x", uid=1)
+    upd2.callback_query = None
+    upd2.message = _PhotoMsg()
+    upd2.effective_message = upd2.message
+    fctx2 = FakeContext(None)
+    await bot.edit_or_reply(upd2, fctx2, "новый текст")
+    check(bool(fctx2.bot.sent), "фолбэк отправляет новое сообщение и из команды тоже")
+    check(not upd2.message.deleted,
+          "сообщение ИГРОКА (команда, не callback) не удаляется — трогать чужой ввод нельзя")
+
+
 # ── 10. Внутренние вызовы @cb-хендлеров без лишнего ctx ──────────────
 async def test_no_double_ctx_callsites():
     import re
@@ -715,6 +767,7 @@ async def main():
                test_menu_handler_recovers_from_non_text_message,
                test_profile_edits_from_text_deletes_from_photo,
                test_profile_avatar_edits_media_in_place,
+               test_edit_or_reply_cleans_up_own_message_not_user_command,
                test_no_double_ctx_callsites):
         print(f"\n{fn.__name__}:")
         await fn()

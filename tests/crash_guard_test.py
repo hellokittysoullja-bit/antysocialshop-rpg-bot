@@ -343,6 +343,44 @@ def check_profile_navigation_stays_in_invoking_chat():
         "(update.effective_chat.id), не в личку игрока")
 
 
+def check_edit_or_reply_cleans_up_dangling_messages():
+    """edit_or_reply — общий примитив «покажи этот экран», 33 вызова по
+    игре. Раньше при неудачном редактировании слал новое сообщение, но
+    никогда не убирал старое — единый живой экран копил мусор из мёртвых
+    предыдущих экранов на КАЖДОМ таком переходе, не только в профиле
+    (skins_menu_handler из фото-профиля бил в тот же баг). Проверяем
+    статически: сам хелпер убирает своё сообщение при фолбэке, а
+    skins_menu_handler и invite_friend_handler (прямые соседи профиля,
+    оба реально ловили этот баг) идут безопасным путём — не голым
+    edit_text/_send_blunt_card без уборки."""
+    src = open(os.path.join(ROOT, "bot.py"), encoding="utf-8").read()
+
+    reply_start = src.index("async def edit_or_reply(")
+    reply_end = src.index("\nasync def edit_or_send_photo(", reply_start)
+    reply_body = src[reply_start:reply_end]
+    assert "message.delete()" in reply_body, (
+        "edit_or_reply должна убирать своё сообщение при фолбэке на новое — "
+        "иначе на каждый нередактируемый переход по всей игре копится мусор")
+    assert "is_own_message" in reply_body, (
+        "edit_or_reply обязана отличать своё сообщение (можно убрать) от "
+        "сообщения игрока, пришедшего из команды (трогать нельзя)")
+
+    skins_start = src.index("async def skins_menu_handler(")
+    skins_end = src.index("\n@cb\nasync def choose_title_handler(", skins_start)
+    skins_body = src[skins_start:skins_end]
+    assert "edit_or_reply" in skins_body, (
+        "skins_menu_handler должна идти через edit_or_reply — прямой сосед "
+        "профиля (кнопка «🎨 Кастомизация»), голый edit_text без уборки "
+        "оставляет мусор при заходе из фото-профиля")
+
+    invite_start = src.index("async def invite_friend_handler(")
+    invite_end = src.index("\n# ========== ЕДИНЫЙ РЕЕСТР КОМАНД", invite_start)
+    invite_body = src[invite_start:invite_end]
+    assert "query.message.delete()" in invite_body, (
+        "invite_friend_handler шлёт карточку бланта НОВЫМ сообщением — "
+        "обязана убирать предыдущий экран профиля за собой")
+
+
 def check_no_calls_to_undefined_names():
     """Вызов имени, которого нигде нет в модуле, — гарантированный NameError.
 
@@ -540,6 +578,8 @@ def main():
     passed.append("онбординг-сообщения отвечают в чат нажатия, не в ЛС (страж «Forbidden: can't initiate conversation»)")
     check_profile_navigation_stays_in_invoking_chat()
     passed.append("навигация из профиля не плодит фото-спам и не открывается в чужом чате")
+    check_edit_or_reply_cleans_up_dangling_messages()
+    passed.append("edit_or_reply убирает мёртвые экраны, соседи профиля не плодят мусор")
     check_no_calls_to_undefined_names()
     passed.append("нет вызовов неопределённых имён (страж «_send_http_message 20 дней молчала»)")
     check_duplicate_dict_keys()

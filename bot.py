@@ -2325,27 +2325,40 @@ async def safe_edit(message, text, **kwargs):
 
 async def edit_or_reply(update, context, text, reply_markup=None, parse_mode='HTML', disable_web_page_preview=True):
     chat_id = update.effective_chat.id
+    # Своё сообщение (бот сам его отправил раньше) можно чистить за собой,
+    # если редактировать не вышло. Сообщение игрока (пришли из команды типа
+    # /rules, а не из нажатия кнопки) — трогать нельзя: удалять чужой ввод
+    # без спроса неожиданно для игрока, да и у бота не всегда есть на это
+    # права в группе.
+    is_own_message = bool(update.callback_query)
     message = update.callback_query.message if update.callback_query else update.message
     try:
         if message and message.text:
             await safe_edit(message, text, reply_markup=reply_markup,
                             parse_mode=parse_mode, disable_web_page_preview=disable_web_page_preview)
-        else:
-            raise BadRequest("no text to edit")
+            return
+        raise BadRequest("no text to edit")
     except (BadRequest, Forbidden) as e:
-        err_msg = str(e).lower()
-        if "message is not modified" in err_msg:
+        if "message is not modified" in str(e).lower():
             return
         logger.warning("edit_or_reply fallback to safe_send: %s", e, extra={"chat_id": chat_id})
-        try:
-            await safe_send(context, chat_id, text, reply_markup=reply_markup,
-                            parse_mode=parse_mode, disable_web_page_preview=disable_web_page_preview)
-        except Exception as send_error:
-            logger.error("safe_send also failed: %s", send_error, exc_info=True)
-    except Exception as e:
+    except Exception:
         logger.exception("Unexpected error in edit_or_reply")
+
+    # Фолбэк: редактировать не вышло (не текст — фото/устарело/недоступно) —
+    # шлём новое и убираем старое СВОЁ сообщение, тот же принцип, что и в
+    # edit_or_send_photo: единый живой экран не должен копить мусор из
+    # мёртвых предыдущих экранов только потому, что конкретно ЭТОТ переход
+    # нельзя было отредактировать на месте.
+    try:
+        await safe_send(context, chat_id, text, reply_markup=reply_markup,
+                        parse_mode=parse_mode, disable_web_page_preview=disable_web_page_preview)
+    except Exception as send_error:
+        logger.error("safe_send also failed: %s", send_error, exc_info=True)
+        return
+    if is_own_message and message:
         try:
-            await safe_send(context, chat_id, text)
+            await message.delete()
         except Exception:
             pass
 
@@ -9323,18 +9336,17 @@ async def bush_preview_handler(update, context):
 
 @cb
 async def skins_menu_handler(update, context, ctx):
-    query = update.callback_query
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("💬 Выбрать титул", callback_data="choose_title")],
         [InlineKeyboardButton("🖼️ Выбрать фон", callback_data="choose_bg")],
         [InlineKeyboardButton("🔙 Назад", callback_data="profile")]
     ])
-    try:
-        await query.message.edit_text("<b>🎨 СКИНЫ</b>\n\nВыбери, что хочешь изменить.", reply_markup=kb, parse_mode='HTML')
-    except BadRequest as e:
-        if "message is not modified" in str(e).lower():
-            return
-        await query.message.reply_text("<b>🎨 СКИНЫ</b>\n\nВыбери, что хочешь изменить.", reply_markup=kb, parse_mode='HTML')
+    # edit_or_reply, не ручной try/except: reachable прямо из профиля
+    # («🎨 Кастомизация») — с аватаркой это фото-сообщение, редактировать
+    # его в текст нельзя. Старый фолбэк слал новое, но не убирал старое —
+    # тот же класс мусора, что чинили в profile_callback/_send_collection_wall.
+    await edit_or_reply(update, context, "<b>🎨 СКИНЫ</b>\n\nВыбери, что хочешь изменить.",
+                        reply_markup=kb, parse_mode='HTML')
 
 @cb
 async def choose_title_handler(update, context, ctx):
@@ -9798,6 +9810,15 @@ async def invite_friend_handler(update, context, ctx, player):
         sent = await _send_blunt_card(
             context, query.message.chat.id, best, player.username or "",
             caption, kb, ctx=ctx, uid=uid)
+        if sent:
+            # _send_blunt_card всегда шлёт НОВОЕ сообщение (уникальная карточка,
+            # не переиспользуемая через editMessageMedia) — убираем прежний
+            # экран профиля за собой, тем же принципом, что и edit_or_reply:
+            # единый живой экран не копит мусор из мёртвых предыдущих экранов.
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
     if not sent:
         await edit_or_reply(update, context, caption, reply_markup=kb)
     
