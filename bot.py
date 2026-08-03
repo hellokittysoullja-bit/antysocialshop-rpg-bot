@@ -20,7 +20,7 @@ from tenacity import (
 )
 from pydantic import BaseModel, ConfigDict, Field
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 from telegram.ext import ContextTypes
 from telegram.error import BadRequest, Forbidden, RetryAfter
 
@@ -2348,6 +2348,54 @@ async def edit_or_reply(update, context, text, reply_markup=None, parse_mode='HT
             await safe_send(context, chat_id, text)
         except Exception:
             pass
+
+
+async def edit_or_send_photo(update, context, photo, caption, reply_markup=None, parse_mode='HTML'):
+    """Фото-аналог edit_or_reply. Если текущее сообщение УЖЕ фото —
+    редактирует его на месте через editMessageMedia (меняет и картинку, и
+    подпись одним вызовом — Telegram покажет «изменено», ни одного нового
+    сообщения). Это единственный способ добиться «того же самого
+    сообщения» в паре экранов, которые оба несут реальное фото (аватарка
+    профиля ↔ витрина коллекции) — editMessageText для такого не подходит,
+    у фото-сообщения caption, а не text.
+
+    Если текущее сообщение текстовое — Telegram НЕ даёт превратить текст в
+    фото ни одним методом API, это не ограничение реализации. Тогда шлём
+    новое фото-сообщение и убираем старое (не оставляем мусор из мёртвых
+    экранов) — тот же принцип, что и в edit_or_reply для обратного случая.
+
+    Возвращает итоговое Message (для кэширования file_id) или None.
+    """
+    query = update.callback_query
+    message = query.message if query else None
+    chat_id = update.effective_chat.id
+
+    if message and getattr(message, "photo", None):
+        try:
+            return await context.bot.edit_message_media(
+                chat_id=chat_id, message_id=message.message_id,
+                media=InputMediaPhoto(photo, caption=caption, parse_mode=parse_mode),
+                reply_markup=reply_markup)
+        except (BadRequest, Forbidden) as e:
+            if "message is not modified" in str(e).lower():
+                return message
+            logger.warning("edit_or_send_photo: editMessageMedia не удался, фолбэк на новое: %s", e)
+        except Exception as e:
+            logger.warning("edit_or_send_photo: editMessageMedia не удался, фолбэк на новое: %s", e)
+
+    try:
+        msg = await context.bot.send_photo(chat_id=chat_id, photo=photo, caption=caption,
+                                           reply_markup=reply_markup, parse_mode=parse_mode)
+    except Exception:
+        logger.exception("edit_or_send_photo: не удалось отправить фото")
+        return None
+    if message:
+        try:
+            await message.delete()
+        except Exception:
+            pass
+    return msg
+
 
 async def animate_progress_bar(update, context, title="", duration=0.6, steps=4, in_place=False):
     """
@@ -4972,25 +5020,33 @@ async def profile_callback(update, context, ctx, player):
     kb_rows.append([InlineKeyboardButton("🏰 В меню", callback_data="menu")])
     kb = InlineKeyboardMarkup(kb_rows)
 
-    # Раньше профиль с аватаркой Telegram отправлялся ФОТО-сообщением (caption
-    # вместо text). Telegram не даёт отредактировать фото-сообщение в текстовое
-    # — любая последующая навигация из профиля (меню, кодекс блантов, гильдия…)
-    # не могла отредактировать экран на месте и либо молча падала
-    # (menu_handler звал edit_text без фолбэка — кнопка «В меню» просто не
-    # отвечала), либо плодила новое сообщение при каждом тапе («вечный спам»
-    # вместо единого живого экрана, как везде в игре). Аватарка — декоративная
-    # мелочь, не стоила слома всей последующей навигации.
+    # Раньше профиль с аватаркой ВСЕГДА уходил фото-сообщением, и любая
+    # последующая навигация (меню, правила…) либо молча падала (menu_handler
+    # звал edit_text без фолбэка), либо плодила новое сообщение на каждый тап
+    # — Telegram не даёт отредактировать фото-сообщение в текстовое. Профиль
+    # без аватарки решал это, убирая фото совсем — но тогда терялась и
+    # обратная возможность: пара экранов, у которых ОБА реально фото (эта
+    # аватарка ↔ витрина «Мои бланты»), могла бы редактироваться на месте
+    # через editMessageMedia (Telegram честно показывает «изменено», ни
+    # одного нового сообщения) — ровно то, что видно в полированных ботах.
     #
-    # Профиль теперь сам текстовый, поэтому заход из ДРУГОГО текстового экрана
-    # (меню, достижения…) редактируется на месте — тот самый «единый живой
-    # экран», без нового сообщения. Заход из НЕтекстового (витрина «Мои
-    # бланты» — реальное фото, а не декор, единственное настоящее исключение)
-    # отредактировать в текст физически нельзя — посылаем новое и убираем
-    # старое, тем же приёмом, каким _send_collection_wall убирает профиль при
-    # переходе в обратную сторону: единый живой экран остаётся единым в ОБЕ
-    # стороны, просто для этой одной пары экранов ценой «новое вместо edit»,
-    # а не «висящий мусор из старых экранов».
-    if msg and getattr(msg, "text", None):
+    # Поэтому: есть аватарка — профиль ВСЕГДА фото, и переход профиль↔витрина
+    # в обе стороны — настоящий edit одного и того же сообщения. Нет
+    # аватарки — профилю нечем стать фото, он текстовый, как раньше (без
+    # регресса: переход из/в текстовые экраны по-прежнему редактируется на
+    # месте через edit_or_reply, просто в паре с витриной будет «новое +
+    # уборка старого», см. edit_or_send_photo).
+    avatar_id = None
+    try:
+        photos = await context.bot.get_user_profile_photos(uid, limit=1)
+        if photos.photos:
+            avatar_id = photos.photos[0][0].file_id
+    except Exception:
+        pass
+
+    if avatar_id:
+        await edit_or_send_photo(update, context, avatar_id, text, reply_markup=kb, parse_mode='HTML')
+    elif msg and getattr(msg, "text", None):
         await edit_or_reply(update, context, text, reply_markup=kb, parse_mode='HTML')
     else:
         await msg.reply_text(text, reply_markup=kb, parse_mode='HTML')
@@ -5140,29 +5196,24 @@ async def _send_collection_wall(update, context, ctx, uid, page_blunts, owner_na
             return False
         photo = io.BytesIO(blob)
 
-    try:
-        # update.effective_chat.id, не uid — та же группа хендлеров, что и
-        # ЛС-баг в онбординге: витрина открывалась в личке игрока вместо
-        # чата, откуда пришло нажатие «Все именные бланты» (в т.ч. группового).
-        msg = await context.bot.send_photo(
-            chat_id=update.effective_chat.id, photo=photo, caption=caption,
-            parse_mode='HTML', reply_markup=reply_markup)
-    except Exception:
-        logger.exception("Отправка витрины коллекции не удалась")
+    # edit_or_send_photo: если пришли из ДРУГОГО фото-сообщения (аватарка
+    # профиля — теперь тоже фото, см. profile_callback; либо другая страница
+    # этой же витрины при листании) — редактирует ТО ЖЕ сообщение через
+    # editMessageMedia, без нового сообщения. Если пришли из текста (у
+    # игрока нет аватарки) — Telegram не даёт превратить текст в фото ни
+    # одним методом API; тогда новое фото-сообщение + уборка старого, чтобы
+    # не копился мусор из мёртвых экранов (update.effective_chat.id, не uid —
+    # витрина открывается в чате нажатия, а не в личке игрока).
+    msg = await edit_or_send_photo(update, context, photo, caption,
+                                   reply_markup=reply_markup, parse_mode='HTML')
+    if msg is None:
         return False
 
-    if fid is None and msg and getattr(msg, "photo", None) and ctx and getattr(ctx, "redis", None):
+    if fid is None and getattr(msg, "photo", None) and ctx and getattr(ctx, "redis", None):
         try:
             await ctx.redis.setex(cache_key, 7 * 24 * 3600, msg.photo[-1].file_id)
         except Exception:
             pass
-
-    # Старое сообщение убираем ПОСЛЕ успешной отправки: если что-то пойдёт не
-    # так, игрок останется с рабочим экраном, а не с пустым чатом.
-    try:
-        await update.callback_query.message.delete()
-    except Exception:
-        pass
     return True
 
 

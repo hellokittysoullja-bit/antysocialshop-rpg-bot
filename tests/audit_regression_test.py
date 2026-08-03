@@ -87,6 +87,8 @@ class FakeUpdate:
 class FakeBot:
     def __init__(self):
         self.sent = []
+        self.photos_sent = []
+        self.media_edits = []
 
     async def send_message(self, chat_id=None, text=None, **kw):
         self.sent.append(text)
@@ -95,8 +97,23 @@ class FakeBot:
     async def edit_message_text(self, **kw):
         return FakeMsg()
 
+    async def send_photo(self, chat_id=None, photo=None, **kw):
+        self.photos_sent.append((chat_id, kw.get("caption")))
+        m = FakeMsg()
+        m.photo = [types.SimpleNamespace(file_id="new_photo_file_id")]
+        return m
+
+    async def edit_message_media(self, chat_id=None, message_id=None, media=None, **kw):
+        self.media_edits.append((chat_id, message_id, getattr(media, "caption", None)))
+        m = FakeMsg()
+        m.photo = [types.SimpleNamespace(file_id="edited_photo_file_id")]
+        return m
+
     async def get_me(self):
         return types.SimpleNamespace(username="testbot")
+
+    async def get_user_profile_photos(self, uid, limit=1):
+        return types.SimpleNamespace(photos=[])
 
 
 class FakeContext:
@@ -626,6 +643,51 @@ async def test_profile_edits_from_text_deletes_from_photo():
           "старое фото-сообщение убирается — не остаётся мусором рядом с новым профилем")
 
 
+# ── 15. Профиль с аватаркой ↔ витрина: настоящий edit одного сообщения ──
+async def test_profile_avatar_edits_media_in_place():
+    """Пользователь настаивал: у других ботов заход в профиль (фото) →
+    витрина (фото) → назад в профиль (фото) — одно и то же сообщение,
+    Telegram показывает «изменено», ни одного нового. Это физически
+    возможно ИМЕННО для пары экранов, у которых ОБА — реальное фото
+    (аватарка ↔ витрина коллекции): editMessageMedia меняет и картинку, и
+    подпись одним вызовом. Проверяем: если у игрока есть аватарка И текущее
+    сообщение уже фото (например, витрина) — profile_callback редактирует
+    его через edit_message_media, а НЕ шлёт новое + не удаляет старое."""
+    p = Player(user_id=1, exists=True, balance=100, total_earned=100)
+    ctx = make_ctx(p)
+
+    class _PhotoScreenMsg(FakeMsg):
+        """Имитирует УЖЕ фото-сообщение (например, витрину «Мои бланты»)."""
+        def __init__(self):
+            super().__init__()
+            self.text = None
+            self.photo = [types.SimpleNamespace(file_id="witrina_file_id")]
+            self.message_id = 777
+            self.deleted = False
+
+        async def delete(self):
+            self.deleted = True
+
+    async def _has_avatar(uid, limit=1):
+        return types.SimpleNamespace(
+            photos=[[types.SimpleNamespace(file_id="avatar_file_id")]])
+
+    upd = FakeUpdate("profile", uid=1)
+    upd.callback_query.message = _PhotoScreenMsg()
+    upd.effective_message = upd.callback_query.message
+    fctx = FakeContext(ctx)
+    fctx.bot.get_user_profile_photos = _has_avatar
+
+    await bot.profile_callback(upd, fctx)
+
+    check(len(fctx.bot.media_edits) == 1,
+          "профиль с аватаркой, пришли из фото — редактирует то же сообщение через editMessageMedia")
+    check(not fctx.bot.photos_sent,
+          "не шлёт новое фото-сообщение, когда editMessageMedia применим")
+    check(not upd.callback_query.message.deleted,
+          "старое фото-сообщение НЕ удаляется — оно отредактировано на месте, не заменено")
+
+
 # ── 10. Внутренние вызовы @cb-хендлеров без лишнего ctx ──────────────
 async def test_no_double_ctx_callsites():
     import re
@@ -652,6 +714,7 @@ async def main():
                test_flood_control_is_not_admin_noise,
                test_menu_handler_recovers_from_non_text_message,
                test_profile_edits_from_text_deletes_from_photo,
+               test_profile_avatar_edits_media_in_place,
                test_no_double_ctx_callsites):
         print(f"\n{fn.__name__}:")
         await fn()

@@ -293,9 +293,9 @@ def check_onboarding_messages_reply_in_invoking_chat():
 
 def check_profile_navigation_stays_in_invoking_chat():
     """Три жалобы пользователя на один и тот же корень: профиль с аватаркой
-    Telegram уходил ФОТО-сообщением (send_photo), а фото нельзя
-    отредактировать в текст — вся навигация ИЗ профиля либо ломалась, либо
-    открывалась не в том чате:
+    Telegram уходил ФОТО-сообщением (голый context.bot.send_photo), а фото
+    нельзя отредактировать в текст — вся навигация ИЗ профиля либо
+    ломалась, либо открывалась не в том чате:
       1) «Все именные бланты» открывались в ЛС игрока, а не в чате нажатия
          (группа) — _send_collection_wall слала send_photo(chat_id=uid).
       2) любая кнопка из профиля вечно плодила новое сообщение вместо
@@ -303,27 +303,44 @@ def check_profile_navigation_stays_in_invoking_chat():
       3) «🏰 В меню» вообще не отвечала — menu_handler звал edit_text без
          фолбэка, падал на фото-сообщении молча.
 
-    Проверяем статически: profile_callback больше не шлёт аватарку
-    send_photo(...), а _send_collection_wall шлёт витрину в чат нажатия
-    (update.effective_chat.id), не в личку конкретного uid.
+    Дальше выяснилось: раз оба экрана (аватарка профиля и витрина «Мои
+    бланты») — РЕАЛЬНОЕ фото, переход между ними можно редактировать на
+    месте через editMessageMedia (то самое «изменено» у полированных
+    ботов), а не слать новое каждый раз — см. edit_or_send_photo. Профиль
+    и витрина обязаны идти через этот безопасный хелпер, а не звать голый
+    context.bot.send_photo(...) напрямую (тот регресс вернул бы все три
+    жалобы разом — неправильный чат, спам, молчащую кнопку).
     """
     src = open(os.path.join(ROOT, "bot.py"), encoding="utf-8").read()
 
     profile_start = src.index("async def profile_callback(update, context, ctx, player):")
     profile_end = src.index("async def _send_collection_wall(", profile_start)
     profile_body = src[profile_start:profile_end]
-    assert "send_photo" not in profile_body, (
-        "profile_callback снова шлёт аватарку фото-сообщением — вернёт баг "
-        "«вечный спам новых сообщений + молчащая кнопка В меню»")
+    assert "context.bot.send_photo" not in profile_body, (
+        "profile_callback снова шлёт аватарку голым context.bot.send_photo — "
+        "вернёт баг «вечный спам новых сообщений + молчащая кнопка В меню»")
+    assert "edit_or_send_photo" in profile_body, (
+        "profile_callback должна отправлять аватарку через edit_or_send_photo "
+        "(редактирует на месте, если пришли из фото-экрана вроде витрины)")
 
     wall_start = src.index("async def _send_collection_wall(")
     wall_end = src.index("\nasync def achievements_callback(", wall_start)
     wall_body = src[wall_start:wall_end]
-    assert "chat_id=uid, photo=photo" not in wall_body, (
-        "_send_collection_wall снова шлёт витрину в ЛС игрока (chat_id=uid) "
-        "вместо чата, откуда пришло нажатие «Все именные бланты»")
-    assert "chat_id=update.effective_chat.id, photo=photo" in wall_body, (
-        "_send_collection_wall должна слать витрину в update.effective_chat.id")
+    assert "context.bot.send_photo" not in wall_body, (
+        "_send_collection_wall снова шлёт витрину голым context.bot.send_photo "
+        "— теряет и правильный чат нажатия, и редактирование на месте")
+    assert "edit_or_send_photo" in wall_body, (
+        "_send_collection_wall должна отправлять витрину через edit_or_send_photo")
+
+    helper_start = src.index("async def edit_or_send_photo(")
+    helper_end = src.index("\nasync def animate_progress_bar(", helper_start)
+    helper_body = src[helper_start:helper_end]
+    assert "chat_id=uid" not in helper_body, (
+        "edit_or_send_photo не должна слать фото в ЛС конкретного uid — "
+        "только в update.effective_chat.id (чат нажатия)")
+    assert "update.effective_chat.id" in helper_body, (
+        "edit_or_send_photo должна слать/редактировать фото в чат нажатия "
+        "(update.effective_chat.id), не в личку игрока")
 
 
 def check_no_calls_to_undefined_names():
