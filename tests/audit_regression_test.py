@@ -740,6 +740,53 @@ async def test_edit_or_reply_cleans_up_own_message_not_user_command():
           "сообщение ИГРОКА (команда, не callback) не удаляется — трогать чужой ввод нельзя")
 
 
+# ── 17. edit_or_send_photo не гоняет два editMessageMedia на одно сообщение ──
+async def test_edit_or_send_photo_debounces_concurrent_edits():
+    """Рендер+отправка фото ощутимо дольше правки текста — быстрый двойной
+    тап (листание витрины «Далее»/«Далее») успевает запустить ВТОРОЙ
+    editMessageMedia на то же message_id, пока первый ещё не долетел:
+    гонка двух правок одного сообщения, непредсказуемый порядок применения.
+    Проверяем: пока первый вызов «в полёте» (искусственная задержка имитирует
+    медленный рендер), второй по ТОМУ ЖЕ сообщению не порождает второй
+    реальный вызов Telegram — тихо игнорируется вместо гонки."""
+    class _SlowBot(FakeBot):
+        def __init__(self):
+            super().__init__()
+            self.media_edit_calls = 0
+
+        async def edit_message_media(self, chat_id=None, message_id=None, media=None, **kw):
+            self.media_edit_calls += 1
+            await asyncio.sleep(0.05)   # имитация медленного рендера/отправки
+            return await super().edit_message_media(chat_id=chat_id, message_id=message_id,
+                                                     media=media, **kw)
+
+    class _PhotoMsg(FakeMsg):
+        def __init__(self):
+            super().__init__()
+            self.photo = [types.SimpleNamespace(file_id="orig")]
+            self.message_id = 555
+
+    upd = FakeUpdate("x", uid=1)
+    upd.callback_query.message = _PhotoMsg()
+    upd.effective_message = upd.callback_query.message
+    fctx = FakeContext(None)
+    fctx.bot = _SlowBot()
+
+    t1 = asyncio.create_task(bot.edit_or_send_photo(upd, fctx, "photo1", "caption1"))
+    await asyncio.sleep(0.01)   # даём первому дойти до edit_message_media и взять лок
+    t2 = asyncio.create_task(bot.edit_or_send_photo(upd, fctx, "photo2", "caption2"))
+    await asyncio.gather(t1, t2)
+
+    check(fctx.bot.media_edit_calls == 1,
+          "второй тап по тому же сообщению, пока первый ещё в полёте, не запускает второй editMessageMedia")
+
+    # Лок обязан снова открыться после завершения — следующий (не гоночный)
+    # вызов должен пройти нормально.
+    await bot.edit_or_send_photo(upd, fctx, "photo3", "caption3")
+    check(fctx.bot.media_edit_calls == 2,
+          "лок отпускается после завершения — следующий, не гоночный вызов проходит")
+
+
 # ── 10. Внутренние вызовы @cb-хендлеров без лишнего ctx ──────────────
 async def test_no_double_ctx_callsites():
     import re
@@ -768,6 +815,7 @@ async def main():
                test_profile_edits_from_text_deletes_from_photo,
                test_profile_avatar_edits_media_in_place,
                test_edit_or_reply_cleans_up_own_message_not_user_command,
+               test_edit_or_send_photo_debounces_concurrent_edits,
                test_no_double_ctx_callsites):
         print(f"\n{fn.__name__}:")
         await fn()

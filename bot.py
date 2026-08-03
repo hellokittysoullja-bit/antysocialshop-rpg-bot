@@ -2384,6 +2384,20 @@ async def edit_or_send_photo(update, context, photo, caption, reply_markup=None,
     chat_id = update.effective_chat.id
 
     if message and getattr(message, "photo", None):
+        # Рендер+отправка фото ощутимо дольше правки текста — быстрый
+        # двойной тап (листание витрины «Далее»/«Далее») легко успевает
+        # запустить ВТОРОЙ editMessageMedia на то же message_id, пока первый
+        # ещё не долетел: гонка двух правок одного сообщения, непредсказуемый
+        # порядок применения. Обычный rate_limit(N сек) на хендлере не
+        # спасает — рендер иногда дольше окна лимита. Лок по конкретному
+        # сообщению (не по игроку/функции) — держит ровно то время, что
+        # реально идёт запрос, а не фиксированную догадку в секундах;
+        # повторный тап по ТОМУ ЖЕ сообщению, пока первый ещё в полёте,
+        # тихо игнорируется вместо гонки.
+        lock_key = f"photo_edit_inflight:{chat_id}:{message.message_id}"
+        if context.user_data.get(lock_key):
+            return message
+        context.user_data[lock_key] = True
         try:
             return await context.bot.edit_message_media(
                 chat_id=chat_id, message_id=message.message_id,
@@ -2395,6 +2409,8 @@ async def edit_or_send_photo(update, context, photo, caption, reply_markup=None,
             logger.warning("edit_or_send_photo: editMessageMedia не удался, фолбэк на новое: %s", e)
         except Exception as e:
             logger.warning("edit_or_send_photo: editMessageMedia не удался, фолбэк на новое: %s", e)
+        finally:
+            context.user_data.pop(lock_key, None)
 
     try:
         msg = await context.bot.send_photo(chat_id=chat_id, photo=photo, caption=caption,
