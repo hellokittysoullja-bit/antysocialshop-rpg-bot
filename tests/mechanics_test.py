@@ -31,7 +31,7 @@ from bot import (
     _calc_multiplier, _generate_mines_field, get_medal_target,
     get_rank_progress, _get_craft_stats, FARM_MEDALS,
     _build_next_day_preview, _build_daily_message, _reengagement_text, reengagement_push,
-    winback_push, activation_push,
+    winback_push, activation_push, _create_new_player,
     _farm_on_cooldown, _quest_progress_counts, _plural_steps, QUEST_TEMPLATES,
     _resolve_referrer, _reward_referrer,
     _plant_rate, _plant_upgrade_cost, _plant_pending,
@@ -673,6 +673,57 @@ async def test_services(passed):
     assert restored.inventory == _inv, f"инвентарь стёрт: {restored.inventory}"
     passed.append("Частичная загрузка не стирает инвентарь (стартовый блант цел)")
 
+    # --- Первое сообщение новичку: сразу фарм, без стены лора и выбора фракции ---
+    # Раньше первое сообщение требовало выбрать фракцию (или явно отложить)
+    # ДО единой награды — 2 тапа и 2 экрана текста до первого дофамина.
+    # На холодном трафике это и есть точка потери большинства. Теперь первое
+    # сообщение сразу ведёт в фарм, а onboarding_step стартует с 1 (не с 0).
+    NEW_UID = 999007
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM players WHERE user_id=$1", NEW_UID)
+
+    class _NoNetBot2:
+        async def send_message(self, *a, **k):
+            raise RuntimeError("no network in test")
+
+    class _NewCtx:
+        def __init__(self, repo):
+            self.repo = repo
+            self.db_pool = repo.db_pool
+
+    class _NewMsg:
+        def __init__(self):
+            self.sent = []
+        async def reply_text(self, text, reply_markup=None, **kw):
+            self.sent.append((text, reply_markup))
+
+    class _NewUpdate:
+        def __init__(self):
+            self.effective_message = _NewMsg()
+
+    class _NewContext:
+        def __init__(self, ctx):
+            self.bot = _NoNetBot2()
+            self.bot_data = {"ctx": ctx}
+            self.user_data = {}
+
+    new_ctx = _NewCtx(repo)
+    upd = _NewUpdate()
+    await _create_new_player(upd, _NewContext(new_ctx), NEW_UID, "newbie2")
+
+    created = await repo.get_by_id(NEW_UID)
+    assert created.onboarding_step == 1, (
+        f"новый игрок должен стартовать сразу с шага 1 (фарм), а не 0: {created.onboarding_step}")
+    assert len(upd.effective_message.sent) == 1, "должно уйти ровно одно приветственное сообщение"
+    text, kb = upd.effective_message.sent[0]
+    assert "ФРАКЦИЮ" not in text and "1/3" not in text, (
+        "первое сообщение больше не требует выбора фракции до первого действия")
+    cb_data = [btn.callback_data for row in kb.inline_keyboard for btn in row]
+    assert cb_data == ["farm"], (
+        f"первая (и единственная) кнопка новичка — сразу фарм, без выбора фракции: {cb_data}")
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM players WHERE user_id=$1", NEW_UID)
+    passed.append("Приветствие новичка: сразу фарм (без стены лора и выбора фракции до первого действия)")
 
     async with pool.acquire() as conn:
         await conn.execute("DELETE FROM players WHERE user_id=$1", TEST_UID)

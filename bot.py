@@ -2513,6 +2513,11 @@ async def _create_new_player(update, context, uid, username, invited_by=None,
                 "quest_id": "chapter1",
                 "reward_claimed": False
             }
+            # Онбординг стартует сразу с шага 1 (фарм), не с шага 0 (выбор
+            # фракции) — см. причину ниже, у welcome_text. defer_faction_handler
+            # раньше делал этот же переход 0→1 как опциональный «отложить»;
+            # теперь это дефолт, а не побочная дверь.
+            player.onboarding_step = 1
             await ctx.repo.save(player, conn=conn)
             await create_named_blunt(uid, new_name, ctx=ctx, conn=conn)
 
@@ -2527,42 +2532,36 @@ async def _create_new_player(update, context, uid, username, invited_by=None,
             blunt_line = (f"💍 Блант, что привёл тебя сюда: {c} "
                           f"<b>«{html.escape(shared_blunt['name'])}»</b>\n")
         ref_bonus_line = (
-            f"🤝 <b>{friend} позвал тебя в Гильдию</b> — он уже здесь.\n"
+            f"🤝 <b>{friend} позвал тебя в Гильдию</b> — он уже здесь. "
+            f"За это тебе <b>+100 OAC</b> сверху.\n"
             f"{blunt_line}"
-            f"🎁 <b>Дар за приход: +100 OAC 🍬</b> и твой первый именной блант — уже в свёртке!\n\n"
         )
     else:
         ref_bonus_line = ""
+    # Раньше первое сообщение новичку было стеной из лора + требованием
+    # выбрать фракцию ДО единого реального действия в игре — 2 тапа и 2
+    # экрана текста до первой награды (выбор/отложить → «2/3, жми фарм» →
+    # фарм). На холодном трафике (не личное приглашение друга, а человек
+    # из чата) это и есть точка, где терялось больше половины: слишком
+    # много решения и чтения до первого дофамина. Экономика выбора
+    # фракции (+50 OAC) не теряется — она просто больше не блокирует
+    # первый тап, доступна в любой момент через кнопку «🏰 Гильдия» в меню
+    # (см. guild_join_handler: награда даётся один раз, независимо от
+    # момента выбора).
     welcome_text = (
-        "<b>🎉 Добро пожаловать в Гильдию Antysocialshop!</b>\n"
-        "<i>Здесь курят бланты, поклоняются древним богам и воюют за OAC.</i>\n\n"
-        "🩸 <b>Твой путь:</b> <i>от нищего 🪓 Рекрута до 🪬 Некроманта Искажения — "
-        "скрути легендарные бланты, вырасти империю-плантацию и приведи гильдию к власти "
-        "над обоими мирами.</i>\n\n"
+        "<b>🎉 Добро пожаловать в Antysocialshop!</b>\n\n"
         f"{ref_bonus_line}"
-        f"🎁 <b>Смотритель дарует тебе</b> <code>{start_balance}</code> 🍬 <b>и твой первый именной блант!</b>\n\n"
-        "<b>🎓 ОБУЧЕНИЕ [▓░░] 1/3</b>\n\n"
-        "⚔️ <b>ВЫБЕРИ ФРАКЦИЮ — ПОЛУЧИ +50 OAC СРАЗУ!</b>\n\n"
-        "🕯️ <b>Тёмная Гильдия</b>\n"
-        "• Особое умение: Ритуал 🔮\n"
-        "• Стабильность и тёмная магия\n\n"
-        "⚜️ <b>Светлая Гильдия</b>\n"
-        "• Особое умение: Исповедь 🪽\n"
-        "• Азарт и благосклонность удачи\n\n"
-        "👉 <i>Твой выбор определит твои возможности.</i>"
+        f"🎁 Тебе подарили <code>{start_balance}</code> 🍬 OAC и первый именной блант.\n\n"
+        "👉 <b>Жми — собери первый урожай прямо сейчас:</b>"
     )
-    
-    guild_kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🕯️ Тёмная Гильдия (+50 🍬)", callback_data="guild_join_BLACK"),
-         InlineKeyboardButton("⚜️ Светлая Гильдия (+50 🍬)", callback_data="guild_join_WHITE")],
-        # Крючок перед коммитом: дать сначала попробовать петлю (дофамин от
-        # фарма), выбор стороны — позже, когда он осмыслен. +50 не теряется.
-        [InlineKeyboardButton("🍬 Позже — сначала играть →", callback_data="defer_faction")],
+
+    farm_kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🍬 Собрать первый урожай", callback_data="farm")],
     ])
 
     await update.effective_message.reply_text(
         welcome_text,
-        reply_markup=guild_kb,
+        reply_markup=farm_kb,
         parse_mode='HTML'
     )
 
