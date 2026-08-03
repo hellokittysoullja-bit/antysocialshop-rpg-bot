@@ -442,6 +442,66 @@ async def test_named_blunt_name_persisted():
           "исходный ввод игрока сохраняется рядом (его показывают в деталях)")
 
 
+# ── 11. Добавление бота в чат — больше не немой момент ───────────────
+async def test_bot_added_to_chat_announces():
+    """welcome_new_member раньше пропускал ЛЮБОГО бота в new_chat_members
+    (`if member.is_bot: continue`), включая случай, когда новый участник —
+    это МЫ САМИ. Итог: человек добавляет бота в чат, полный живых людей
+    (ровно то, что предлагает кнопка «Добавить бота в свой чат»
+    в invite_friend_handler) — и ровно ничего не происходит, ни одного
+    сообщения. Теперь: добавление СЕБЯ — анонс с CTA-ссылкой на ЛС;
+    добавление ЧУЖОГО бота — по-прежнему тишина (не наше дело болтать
+    про чужих ботов)."""
+    class FakeMember:
+        def __init__(self, uid, is_bot, username="human"):
+            self.id = uid
+            self.is_bot = is_bot
+            self.username = username
+            self.first_name = "Human"
+
+    class FakeGroupMsg:
+        def __init__(self, members):
+            self.new_chat_members = members
+            self.chat = types.SimpleNamespace(id=-100777)
+            self.edits = []
+
+        async def reply_text(self, text, **kw):
+            self.edits.append((text, kw))
+            return self
+
+    class FakeGroupUpdate:
+        def __init__(self, members):
+            self.message = FakeGroupMsg(members)
+            self.effective_message = self.message
+
+    OUR_BOT_ID = 999999
+
+    async def fake_get_me():
+        return types.SimpleNamespace(username="testbot", id=OUR_BOT_ID)
+
+    # Случай 1: нас самих добавили в чат, полный живых людей.
+    fctx = FakeContext(None)
+    fctx.bot.get_me = fake_get_me
+    upd = FakeGroupUpdate([FakeMember(OUR_BOT_ID, True, "testbot")])
+    await bot.welcome_new_member(upd, fctx)
+    check(len(upd.message.edits) == 1,
+          "добавление бота в чат больше не немое — приходит ровно одно сообщение")
+    if upd.message.edits:
+        text, kw = upd.message.edits[0]
+        kb = kw.get("reply_markup")
+        url = kb.inline_keyboard[0][0].url if kb else None
+        check(bool(url) and "?start=" in url,
+              "анонс несёт url-кнопку с диплинком в ЛС (не callback — игрока в БД ещё нет)")
+
+    # Случай 2: в чат добавили ЧУЖОГО бота — не наше дело, молчим как раньше.
+    fctx2 = FakeContext(None)
+    fctx2.bot.get_me = fake_get_me
+    upd2 = FakeGroupUpdate([FakeMember(555555, True, "someotherbot")])
+    await bot.welcome_new_member(upd2, fctx2)
+    check(len(upd2.message.edits) == 0,
+          "добавление ЧУЖОГО бота по-прежнему не порождает анонса от нас")
+
+
 # ── 10. Внутренние вызовы @cb-хендлеров без лишнего ctx ──────────────
 async def test_no_double_ctx_callsites():
     import re
@@ -464,7 +524,8 @@ async def main():
                test_guild_join_requires_start,
                test_altar_rerenders, test_cancel_named,
                test_war_score_per_action, test_temple_bonus_applies,
-               test_named_blunt_name_persisted, test_no_double_ctx_callsites):
+               test_named_blunt_name_persisted, test_bot_added_to_chat_announces,
+               test_no_double_ctx_callsites):
         print(f"\n{fn.__name__}:")
         await fn()
     total = PASSED + len(FAILED)

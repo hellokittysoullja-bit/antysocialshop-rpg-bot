@@ -7106,9 +7106,46 @@ async def show_lab_death(update, context):
     # 5-й смерти, где дофаминовая пара «действие → награда» ощутима сильнее всего.
     await check_achievements(uid, context, ctx=ctx)
 
+async def _announce_bot_added_to_chat(update, context, bot_username):
+    """Бот сам стал new_chat_member — это и есть момент канала роста
+    «добавь бота в свой чат» (см. кнопку в invite_friend_handler).
+
+    До этой правки этот момент был АБСОЛЮТНО немым: цикл в welcome_new_member
+    явно пропускал ботов (`if member.is_bot: continue`), включая случай, когда
+    новый бот — это МЫ САМИ. Итог: человек добавляет бота в чат, полный живых
+    людей — и ровно ничего не происходит, ни одного сообщения, ни одной
+    кнопки. Тем, кто уже в чате, физически нечего нажать, чтобы узнать, что
+    бот вообще появился. Кнопка «Начать играть» — url-ссылка на ЛС с ботом
+    (не callback_data): у людей в чате ещё нет игрока в БД, а обычная кнопка
+    с callback потребовала бы сначала /start в личке и упёрлась бы в «профиль
+    не найден» — диплинк сразу открывает ЛС и создаёт игрока одним тапом.
+    """
+    start_url = f"https://t.me/{bot_username}?start=1"
+    text = (
+        "<b>🕯️⚜️ Гильдия Antysocialshop теперь здесь!</b>\n\n"
+        "RPG про крафт легендарных блантов, войну гильдий и охоту за лутом. "
+        "Джекпоты и легендарные крафты участников этого чата будут видны "
+        "здесь сами — без единой ссылки.\n\n"
+        "👉 Жми и получи свой первый именной блант бесплатно:"
+    )
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🍬 Начать играть", url=start_url)]])
+    try:
+        await update.effective_message.reply_text(text, reply_markup=kb, parse_mode='HTML')
+    except Exception:
+        logger.exception("не удалось анонсировать добавление бота в чат")
+
+
 async def welcome_new_member(update, context):
+    try:
+        me = await context.bot.get_me()
+        bot_id, bot_username = me.id, me.username
+    except Exception:
+        bot_id, bot_username = None, BOT_USERNAME
     for member in update.message.new_chat_members:
-        if member.is_bot: continue
+        if member.is_bot:
+            if member.id == bot_id:
+                await _announce_bot_added_to_chat(update, context, bot_username)
+            continue
         username = member.username or member.first_name
         ctx = context.bot_data.get("ctx")
         online = 0
