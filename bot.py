@@ -4972,24 +4972,15 @@ async def profile_callback(update, context, ctx, player):
     kb_rows.append([InlineKeyboardButton("🏰 В меню", callback_data="menu")])
     kb = InlineKeyboardMarkup(kb_rows)
 
-    photo_id = None
-    try:
-        photos = await context.bot.get_user_profile_photos(uid, limit=1)
-        if photos.photos:
-            photo_id = photos.photos[0][0].file_id
-    except Exception:
-        pass
-
-    if photo_id:
-        await context.bot.send_photo(
-            chat_id=msg.chat.id,
-            photo=photo_id,
-            caption=text,
-            reply_markup=kb,
-            parse_mode='HTML'
-        )
-    else:
-        await msg.reply_text(text, reply_markup=kb, parse_mode='HTML')
+    # Раньше профиль с аватаркой Telegram отправлялся ФОТО-сообщением (caption
+    # вместо text). Telegram не даёт отредактировать фото-сообщение в текстовое
+    # — любая последующая навигация из профиля (меню, кодекс блантов, гильдия…)
+    # не могла отредактировать экран на месте и либо молча падала
+    # (menu_handler звал edit_text без фолбэка — кнопка «В меню» просто не
+    # отвечала), либо плодила новое сообщение при каждом тапе («вечный спам»
+    # вместо единого живого экрана, как везде в игре). Аватарка — декоративная
+    # мелочь, не стоила слома всей последующей навигации.
+    await msg.reply_text(text, reply_markup=kb, parse_mode='HTML')
 
 # Все мои бланты
 # Порядок и мета редкостей — единый источник для Кодекса.
@@ -5133,8 +5124,11 @@ async def _send_collection_wall(update, context, ctx, uid, page_blunts, owner_na
         photo = io.BytesIO(blob)
 
     try:
+        # update.effective_chat.id, не uid — та же группа хендлеров, что и
+        # ЛС-баг в онбординге: витрина открывалась в личке игрока вместо
+        # чата, откуда пришло нажатие «Все именные бланты» (в т.ч. группового).
         msg = await context.bot.send_photo(
-            chat_id=uid, photo=photo, caption=caption,
+            chat_id=update.effective_chat.id, photo=photo, caption=caption,
             parse_mode='HTML', reply_markup=reply_markup)
     except Exception:
         logger.exception("Отправка витрины коллекции не удалась")
@@ -8455,7 +8449,11 @@ async def menu_handler(update, context, ctx):
         return
 
     text, kb = await build_main_menu(player, ctx, context)
-    await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
+    # edit_or_reply, не query.message.edit_text напрямую: последнее падает
+    # BadRequest без единого фолбэка, если нажатие пришло из фото-сообщения
+    # (нет текста для edit) — кнопка «🏰 В меню» просто ничего не делала,
+    # без ошибки и без ответа игроку.
+    await edit_or_reply(update, context, text, reply_markup=kb, parse_mode='HTML')
 
 
 # Единицы вех для честной формулировки «ещё N <чего>» (goal-gradient конкретнее

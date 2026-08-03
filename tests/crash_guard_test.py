@@ -291,6 +291,41 @@ def check_onboarding_messages_reply_in_invoking_chat():
             f"can't initiate conversation' для тех, кто нажал из группы")
 
 
+def check_profile_navigation_stays_in_invoking_chat():
+    """Три жалобы пользователя на один и тот же корень: профиль с аватаркой
+    Telegram уходил ФОТО-сообщением (send_photo), а фото нельзя
+    отредактировать в текст — вся навигация ИЗ профиля либо ломалась, либо
+    открывалась не в том чате:
+      1) «Все именные бланты» открывались в ЛС игрока, а не в чате нажатия
+         (группа) — _send_collection_wall слала send_photo(chat_id=uid).
+      2) любая кнопка из профиля вечно плодила новое сообщение вместо
+         редактирования — фото нельзя отредактировать в текст.
+      3) «🏰 В меню» вообще не отвечала — menu_handler звал edit_text без
+         фолбэка, падал на фото-сообщении молча.
+
+    Проверяем статически: profile_callback больше не шлёт аватарку
+    send_photo(...), а _send_collection_wall шлёт витрину в чат нажатия
+    (update.effective_chat.id), не в личку конкретного uid.
+    """
+    src = open(os.path.join(ROOT, "bot.py"), encoding="utf-8").read()
+
+    profile_start = src.index("async def profile_callback(update, context, ctx, player):")
+    profile_end = src.index("async def _send_collection_wall(", profile_start)
+    profile_body = src[profile_start:profile_end]
+    assert "send_photo" not in profile_body, (
+        "profile_callback снова шлёт аватарку фото-сообщением — вернёт баг "
+        "«вечный спам новых сообщений + молчащая кнопка В меню»")
+
+    wall_start = src.index("async def _send_collection_wall(")
+    wall_end = src.index("\nasync def achievements_callback(", wall_start)
+    wall_body = src[wall_start:wall_end]
+    assert "chat_id=uid, photo=photo" not in wall_body, (
+        "_send_collection_wall снова шлёт витрину в ЛС игрока (chat_id=uid) "
+        "вместо чата, откуда пришло нажатие «Все именные бланты»")
+    assert "chat_id=update.effective_chat.id, photo=photo" in wall_body, (
+        "_send_collection_wall должна слать витрину в update.effective_chat.id")
+
+
 def check_no_calls_to_undefined_names():
     """Вызов имени, которого нигде нет в модуле, — гарантированный NameError.
 
@@ -486,6 +521,8 @@ def main():
     passed.append("RENDER_URL со слэшем на конце не ломает вебхук (страж «бот молчал всем»)")
     check_onboarding_messages_reply_in_invoking_chat()
     passed.append("онбординг-сообщения отвечают в чат нажатия, не в ЛС (страж «Forbidden: can't initiate conversation»)")
+    check_profile_navigation_stays_in_invoking_chat()
+    passed.append("навигация из профиля не плодит фото-спам и не открывается в чужом чате")
     check_no_calls_to_undefined_names()
     passed.append("нет вызовов неопределённых имён (страж «_send_http_message 20 дней молчала»)")
     check_duplicate_dict_keys()

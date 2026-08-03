@@ -541,6 +541,42 @@ async def test_flood_control_is_not_admin_noise():
         bot.settings.admin_id = old_admin_id
 
 
+# ── 13. Навигация из профиля: «В меню» отвечает даже из фото-сообщения ──
+async def test_menu_handler_recovers_from_non_text_message():
+    """Раньше профиль с аватаркой Telegram уходил ФОТО-сообщением, и
+    menu_handler звал query.message.edit_text(...) напрямую, без фолбэка —
+    Telegram не даёт отредактировать фото-сообщение в текстовое (нет
+    text на входе), edit_text падал BadRequest, и кнопка «🏰 В меню»
+    просто ничего не делала: ни ответа, ни ошибки, полная тишина для
+    игрока. Профиль теперь всегда текстовый (см. profile_callback), но
+    menu_handler остаётся хрупким для ЛЮБОГО другого фото-экрана с такой
+    кнопкой — проверяем сам menu_handler: он обязан ответить (отредактировать
+    или прислать новое), даже если нажатие пришло из сообщения без текста."""
+    from telegram.error import BadRequest as _BadRequest
+
+    class _PhotoMsg(FakeMsg):
+        def __init__(self):
+            super().__init__()
+            self.text = None   # фото-сообщение: нет текста для edit_text
+
+        async def edit_text(self, text, **kw):
+            raise _BadRequest("There is no text in the message to edit")
+
+    MENU_UID = 999008
+    today = datetime.now().date().isoformat()
+    p = Player(user_id=MENU_UID, username="menutest", balance=100, exists=True,
+              daily_progress={"reset_date": today, "quest_id": "chapter1", "reward_claimed": True})
+    ctx = make_ctx(p)
+
+    upd = FakeUpdate("menu", uid=MENU_UID)
+    upd.callback_query.message = _PhotoMsg()
+    upd.effective_message = upd.callback_query.message
+    fctx = FakeContext(ctx)
+
+    await bot.menu_handler(upd, fctx)
+    check(bool(fctx.bot.sent), "«🏰 В меню» из фото-сообщения отвечает (новым сообщением), а не молчит")
+
+
 # ── 10. Внутренние вызовы @cb-хендлеров без лишнего ctx ──────────────
 async def test_no_double_ctx_callsites():
     import re
@@ -564,7 +600,9 @@ async def main():
                test_altar_rerenders, test_cancel_named,
                test_war_score_per_action, test_temple_bonus_applies,
                test_named_blunt_name_persisted, test_bot_added_to_chat_announces,
-               test_flood_control_is_not_admin_noise, test_no_double_ctx_callsites):
+               test_flood_control_is_not_admin_noise,
+               test_menu_handler_recovers_from_non_text_message,
+               test_no_double_ctx_callsites):
         print(f"\n{fn.__name__}:")
         await fn()
     total = PASSED + len(FAILED)
