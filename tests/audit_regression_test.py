@@ -556,6 +556,15 @@ async def test_flood_control_is_not_admin_noise():
         upd2 = FakeUpdate("x", uid=43)
         await _boom_real(upd2, fctx2)
         check(bool(fctx2.bot.sent), "обычное исключение по-прежнему алармит админа (шум отфильтрован точечно)")
+        # CallbackQuery в PTB имеет __slots__ — нельзя пометить объект как «уже
+        # отвечен». Если хендлер сам успел ответить на callback_query ДО
+        # падения (обычная практика), повторный answer() из этой ветки может
+        # тихо потеряться — игрок не увидит вообще никакого сигнала о сбое.
+        # Дублируем предупреждение сообщением в чат — канал, не зависящий от
+        # состояния уже отвеченного callback_query.
+        check(len(fctx2.bot.sent) >= 2,
+              f"на настоящую ошибку игрок получает и алерт, и сообщение в чат "
+              f"(не только опору на ephemeral alert): {fctx2.bot.sent}")
     finally:
         bot.settings.admin_id = old_admin_id
 
@@ -847,6 +856,104 @@ async def test_help_covers_mechanics_missing_from_rules():
     check("help" in cb_data, "с экрана «Правила» есть кнопка на полную справку («help» среди callback_data)")
 
 
+# ── 20. build_share_url ОБЯЗАН нести url= — иначе шер ведёт в никуда ──
+async def test_build_share_url_requires_url_param():
+    """Пользователь: любая кнопка «Поделиться»/«Отправить другу» открывала
+    просто браузер и всё — ни с одним другом поделиться было нельзя.
+    Причина: t.me/share/url без параметра url= не открывает нативный пикер
+    выбора получателя вообще, резолвится в мёртвую страницу. Ссылка была
+    зашита ТОЛЬКО внутри text= — выглядело как рабочий шеринг, по факту ни
+    одна кнопка «Поделиться» в игре не работала с самого своего появления:
+    единственный настоящий вирусный канал был сломан насквозь."""
+    url = bot.build_share_url("https://t.me/testbot?start=ref_1", "текст сообщения")
+    check(url.startswith("https://t.me/share/url?url="),
+          f"url= обязателен и идёт первым параметром: {url!r}")
+    check("start%3Dref_1" in url, f"реферальная ссылка реально попадает в url=: {url!r}")
+    check("text=" in url, f"текст сообщения тоже передаётся отдельным параметром: {url!r}")
+
+    # Без текста — url= всё равно должен присутствовать (не выродиться в
+    # пустой t.me/share/url без единого параметра).
+    url2 = bot.build_share_url("https://t.me/testbot?start=ref_2")
+    check(url2.startswith("https://t.me/share/url?url="), f"url= обязателен даже без текста: {url2!r}")
+    check("text=" not in url2, "пустой text не добавляет мусорный параметр")
+
+
+async def test_share_buttons_pass_url_param():
+    """Статически проверяет все реальные места, где строится кнопка
+    «Поделиться»/«Отправить другу»: build_share_url обязан получать ДВА
+    аргумента (первый — реальная ссылка, ref_link), не один голый текст.
+    Ровно один аргумент — это тот самый регресс, который сломал шеринг
+    везде в игре разом."""
+    import re as _re
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "bot.py"), encoding="utf-8").read()
+    calls = _re.findall(r"build_share_url\(([^)]*)\)", src)
+    check(len(calls) >= 4, f"ожидали минимум 4 места, вызывающих build_share_url: нашли {len(calls)}")
+    bad = [c for c in calls if "," not in c]
+    check(not bad, f"build_share_url вызван БЕЗ ref_link отдельным аргументом (сломанный шеринг): {bad}")
+
+
+# ── 21. query.answer() гасит спиннер загрузки — 3 подтверждённых пробела ──
+async def test_query_answer_called_in_profile_craft_smoke():
+    """profile_callback/craft_callback_v2/smoke_callback раньше НИ РАЗУ не
+    звали query.answer() — кнопка визуально «висит» с крутящимся
+    индикатором загрузки Telegram, хотя нажатие уже обработано."""
+    p = Player(user_id=1, exists=True, balance=100, total_earned=100)
+    ctx = make_ctx(p)
+
+    upd = FakeUpdate("profile", uid=1)
+    fctx = FakeContext(ctx)
+    await bot.profile_callback(upd, fctx)
+    check(len(upd.callback_query.answers) >= 1, "profile_callback гасит спиннер (query.answer вызван)")
+
+    upd2 = FakeUpdate("craft", uid=1)
+    fctx2 = FakeContext(ctx)
+    await bot.craft_callback_v2(upd2, fctx2)
+    check(len(upd2.callback_query.answers) >= 1, "craft_callback_v2 гасит спиннер (query.answer вызван)")
+
+    p2 = Player(user_id=2, exists=True, balance=100, total_earned=100, blunts=0)
+    ctx2 = make_ctx(p2)
+    upd3 = FakeUpdate("smoke", uid=2)
+    fctx3 = FakeContext(ctx2)
+    await bot.smoke_callback(upd3, fctx3)
+    check(len(upd3.callback_query.answers) >= 1,
+          "smoke_callback (пустой свёрток) гасит спиннер (query.answer вызван)")
+
+
+# ── 22. send_chat_action перед некэшированным рендером фото ──────────
+async def test_slow_renders_send_chat_action():
+    """Некэшированный рендер витрины/карточки бланта — реальная задержка
+    (executor + сборка изображения), экран всё это время выглядит
+    замершим на прежнем кадре. send_chat_action — нативный, бесплатный
+    индикатор Telegram («отправляет фото…») — статически проверяем, что
+    обе функции, которые реально рендерят, его зовут."""
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "bot.py"), encoding="utf-8").read()
+    wall_start = src.index("async def _send_collection_wall(")
+    wall_end = src.index("\nasync def achievements_callback(", wall_start)
+    check("send_chat_action" in src[wall_start:wall_end],
+          "_send_collection_wall должна слать send_chat_action перед некэшированным рендером")
+
+    card_start = src.index("async def _send_blunt_card(")
+    card_end = src.index("\nasync def send_whisper_dm(", card_start)
+    check("send_chat_action" in src[card_start:card_end],
+          "_send_blunt_card должна слать send_chat_action перед некэшированным рендером")
+
+
+# ── 23. «🏰 В меню» на экранах удачи вёл НЕ в меню — мисклейбл пофикшен ──
+async def test_luck_result_buttons_dont_claim_menu():
+    """Результаты Колеса/Алхимии показывали кнопку «🏰 В меню», но
+    callback_data вёл в хаб «Удача» (Колесо/Мины/Алхимия), а не в реальное
+    главное меню игры — игрок жал «в меню», ожидая выйти из азартной
+    секции, а вместо этого оставался внутри неё."""
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "bot.py"), encoding="utf-8").read()
+    check('InlineKeyboardButton("🏰 В меню", callback_data="luck")' not in src,
+          "кнопка результата Колеса/Алхимии больше не выдаёт себя за «В меню»")
+    check(src.count('InlineKeyboardButton("🍀 К удаче", callback_data="luck")') == 2,
+          "оба экрана (Колесо, Алхимия) честно ведут «К удаче», не «В меню»")
+
+
 # ── 10. Внутренние вызовы @cb-хендлеров без лишнего ctx ──────────────
 async def test_no_double_ctx_callsites():
     import re
@@ -878,6 +985,11 @@ async def main():
                test_edit_or_send_photo_debounces_concurrent_edits,
                test_fmt_oac_thousands_separator,
                test_help_covers_mechanics_missing_from_rules,
+               test_build_share_url_requires_url_param,
+               test_share_buttons_pass_url_param,
+               test_query_answer_called_in_profile_craft_smoke,
+               test_slow_renders_send_chat_action,
+               test_luck_result_buttons_dont_claim_menu,
                test_no_double_ctx_callsites):
         print(f"\n{fn.__name__}:")
         await fn()

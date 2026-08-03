@@ -213,6 +213,24 @@ def game_handler(func):
                     await update.effective_message.reply_text("⚠️ Что-то пошло не так. Попробуйте позже.")
             except Exception:
                 pass
+            # Алерт на callback_query — не гарантированная доставка: CallbackQuery
+            # объекты в PTB имеют __slots__ (нельзя пометить «уже отвечен» на самом
+            # объекте), а сам хендлер мог УЖЕ успешно ответить на этот же
+            # callback_query до падения (обычная практика — answer() в первой
+            # строке). Telegram либо тихо игнорирует повторный answer(), либо
+            # отвечает ошибкой — в обоих случаях игрок не видит вообще никакого
+            # сигнала о реальном сбое, просто «ничего не произошло». Дублируем
+            # предупреждение постоянным сообщением в чат — канал, не зависящий
+            # от состояния уже отвеченного callback_query. Только для настоящих
+            # багов (not noisy): на RetryAfter/Forbidden хватает alert'а, не
+            # спамим чат сообщением на каждый flood-control.
+            if not noisy and update.callback_query:
+                try:
+                    await context.bot.send_message(
+                        chat_id=update.effective_chat.id,
+                        text="⚠️ Что-то пошло не так. Админ уже в курсе — попробуй ещё раз.")
+                except Exception:
+                    pass
             if settings.admin_id and not noisy:
                 try:
                     err_msg = f"🚨 <b>Ошибка в {func.__name__}</b>\n<code>{html.escape(str(e))}</code>"
@@ -326,8 +344,22 @@ def has_rank(earned: int, rank_name: str = "Ветеран") -> bool:
     
 from urllib.parse import quote
 
-def build_share_url(share_text: str) -> str:
-    return f"https://t.me/share/url?text={quote(share_text, safe='')}"
+def build_share_url(url: str, text: str = "") -> str:
+    """Диплинк на нативный шер-пикер Telegram («выбери, кому переслать»).
+
+    Параметр url ОБЯЗАТЕЛЕН: без него t.me/share/url не открывает пикер
+    выбора получателя вообще — просто резолвится в мёртвую веб-страницу
+    (в приложении открывается системный браузер поверх Telegram, в браузере
+    — пустая/нерабочая страница). Раньше сюда передавался только text (со
+    ссылкой, зашитой ВНУТРИ текста) — выглядело как рабочая ссылка на шер,
+    по факту КАЖДАЯ кнопка «Поделиться»/«Отправить другу» в игре вела в
+    тупик: ни один игрок не мог переслать реферальную ссылку ни одному
+    другу — единственный настоящий вирусный канал был сломан с самого
+    своего появления."""
+    parts = [f"url={quote(url, safe='')}"]
+    if text:
+        parts.append(f"text={quote(text, safe='')}")
+    return "https://t.me/share/url?" + "&".join(parts)
 
 
 async def _win_share_button(context, uid: int, win_line: str) -> InlineKeyboardButton:
@@ -346,7 +378,7 @@ async def _win_share_button(context, uid: int, win_line: str) -> InlineKeyboardB
     bot_username = (await context.bot.get_me()).username
     ref_link = f"https://t.me/{bot_username}?start=ref_{uid}"
     share_text = f"{win_line}\n\n🎁 Заходи по ссылке — +100 OAC на старт:\n{ref_link}"
-    return InlineKeyboardButton("📤 Поделиться победой", url=build_share_url(share_text))
+    return InlineKeyboardButton("📤 Поделиться победой", url=build_share_url(ref_link, share_text))
 
 # ── Исключения ──────────────────────────────────────────────
         
@@ -1979,6 +2011,14 @@ async def _send_blunt_card(context, chat_id, item, owner_name, caption, reply_ma
     if render_blunt_card is None:
         return False
 
+    # Некэшированный рендер занимает заметное время — нативный индикатор
+    # Telegram («отправляет фото…») говорит игроку «тап сработал, жди»,
+    # вместо замершего экрана без единого сигнала.
+    try:
+        await context.bot.send_chat_action(chat_id=chat_id, action="upload_photo")
+    except Exception:
+        pass
+
     # Перегрузка: ждать в длинной очереди хуже, чем показать текстовый вариант
     # сразу. Отказ здесь не теряет карточку — предмет перерисуется при следующем
     # заходе, когда очередь рассосётся.
@@ -2197,7 +2237,7 @@ MAIN_MENU_COOLDOWNS = {
 
 
 def get_back_to_menu_keyboard():
-    return InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 В меню", callback_data="menu")]])
 
 @cb
 async def world_hub(update, context, ctx):
@@ -2304,7 +2344,7 @@ async def destiny_hub(update, context, ctx):
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🪴 Растить империю", callback_data="collect"),
          InlineKeyboardButton("💍 Крафт", callback_data="craft")],
-        [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+        [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
     ])
     await edit_or_reply(update, context, text, reply_markup=kb, parse_mode='HTML')
 
@@ -3364,7 +3404,7 @@ async def farm_callback_v2(update, context, ctx, player):
             btn_text, btn_callback, advice = ("🏰 Выбрать Гильдию", "guild_info",
                 "Гильдия открывает Войну ⚔️, Ритуалы 🕯️ и Исповеди ⚜️ — выбери сторону!")
         else:
-            btn_text, btn_callback, advice = ("🏰 В меню", "menu",
+            btn_text, btn_callback, advice = ("🔙 В меню", "menu",
                                               "Все шаги на сегодня сделаны — загляни позже!")
     
         progress = getattr(player, 'daily_progress', {}) or {}
@@ -3438,7 +3478,7 @@ async def farm_callback_v2(update, context, ctx, player):
             update, context, message_text,
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton(btn_text, callback_data=btn_callback)],
-                [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+                [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
             ])
         )
         return
@@ -3457,7 +3497,7 @@ async def farm_callback_v2(update, context, ctx, player):
         result_kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("🍬 Фармить ещё", callback_data="farm"),
              InlineKeyboardButton("🌿 Крафт", callback_data="craft")],
-            [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+            [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
         ])
     else:
         text += (f"\n\n🌱 <i>Грядка зреет — новый фарм через "
@@ -3465,7 +3505,7 @@ async def farm_callback_v2(update, context, ctx, player):
         result_kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("🌿 Крафт", callback_data="craft"),
              InlineKeyboardButton("💨 Дунуть", callback_data="smoke")],
-            [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+            [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
         ])
     # Juice ТОЛЬКО на mega-крит ×10 (1% фармов) — единственный сегмент, где по
     # всем 4 призмам ревил строго-положителен: редко → латентность не
@@ -3608,6 +3648,11 @@ def _format_dust_message(name: str, reaction: str) -> str:
 @rate_limit(1)
 @game_handler
 async def craft_callback_v2(update, context, ctx, player):
+    if update.callback_query:
+        try:
+            await update.callback_query.answer()
+        except Exception:
+            pass
     user = update.effective_user
     uid = user.id
 
@@ -3667,7 +3712,7 @@ async def handle_craft_normal_v2(update, context, ctx, player):
             f"<b>❌ Недостаточно OAC.</b>\n🕯️ Требуется <b>{GAME_CONFIG['craft_cost']} OAC</b> 🍬.",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🍬 Фармить", callback_data="farm")],
-                [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+                [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
             ])
         )
         return
@@ -3679,7 +3724,7 @@ async def handle_craft_normal_v2(update, context, ctx, player):
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🌿 Скрафтить ещё", callback_data="craft_normal"),
          InlineKeyboardButton("💨 Дунуть", callback_data="smoke")],
-        [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
+        [InlineKeyboardButton("🔙 В меню", callback_data="menu")]
     ])
 
     # Единый живой экран: анимация и результат редактируют нажатый экран.
@@ -3777,7 +3822,7 @@ async def handle_named_name(update, context):
                 await update.message.reply_text(caption, parse_mode='HTML',
                     reply_markup=InlineKeyboardMarkup([
                         [InlineKeyboardButton("💍 Мои бланты", callback_data="my_blunts")],
-                        [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+                        [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
                     ]))
                 context.user_data.pop('awaiting_named_blunt', None)
                 return
@@ -3819,7 +3864,7 @@ async def handle_named_name(update, context):
                 parse_mode='HTML',
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("🍬 Фармить", callback_data="farm")],
-                    [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+                    [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
                 ]))
             return
 
@@ -3892,14 +3937,14 @@ async def handle_named_name(update, context):
             f"{ref_link}"
         )
 
-        share_url = build_share_url(share_text)
+        share_url = build_share_url(ref_link, share_text)
         
         kb = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton("🎁 Подарить", callback_data=f"gift_blunt_{blunt_id}"),
                 InlineKeyboardButton("🔗 Поделиться", url=share_url)
             ],
-            [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
+            [InlineKeyboardButton("🔙 В меню", callback_data="menu")]
         ])
 
         # Суспенс-ревил: предвкушение перед результатом (дофаминовый пик гачи)
@@ -4005,7 +4050,7 @@ async def handle_named_name(update, context):
             "Блант не скрутился, OAC остались при тебе. Попробуй ещё раз.",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🌿 Крафт", callback_data="craft")],
-                [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+                [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
             ]))
     finally:
         context.user_data['awaiting_named_blunt'] = False
@@ -4057,7 +4102,7 @@ async def handle_use_dust(update, context):
 
     await safe_send_blunt_image(context, query.message.chat.id, "legendary", caption=None, reply_markup=None)
     text = _format_dust_message(name, reaction)
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 В меню", callback_data="menu")]])
     await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
 
     # ── Оповещение в канал (закомментировано) ──
@@ -4250,6 +4295,11 @@ async def gift_blunt_start(update, context, ctx, player):
 @rate_limit(1)
 @game_handler
 async def smoke_callback(update, context, ctx, player):
+    if update.callback_query:
+        try:
+            await update.callback_query.answer()
+        except Exception:
+            pass
     user, msg = get_user_and_msg(update)
     uid = user.id
 
@@ -4261,12 +4311,9 @@ async def smoke_callback(update, context, ctx, player):
         )
         empty_kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("🌿 Крафт", callback_data="craft")],
-            [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
+            [InlineKeyboardButton("🔙 В меню", callback_data="menu")]
         ])
-        if update.callback_query:
-            await update.callback_query.message.edit_text(empty_text, reply_markup=empty_kb, parse_mode='HTML')
-        else:
-            await msg.reply_text(empty_text, reply_markup=empty_kb, parse_mode='HTML')
+        await edit_or_reply(update, context, empty_text, reply_markup=empty_kb, parse_mode='HTML')
         return
 
     main_text = f"<b>💨 ДУНУТЬ</b>\n\n🌿 Блантов в свёртке: <b>{player.blunts}</b>"
@@ -4274,10 +4321,7 @@ async def smoke_callback(update, context, ctx, player):
         [InlineKeyboardButton("💨 Дунуть", callback_data="do_smoke")],
         [InlineKeyboardButton("🔙 Назад", callback_data="menu")]
     ])
-    if update.callback_query:
-        await update.callback_query.message.edit_text(main_text, reply_markup=main_kb, parse_mode='HTML')
-    else:
-        await msg.reply_text(main_text, reply_markup=main_kb, parse_mode='HTML')
+    await edit_or_reply(update, context, main_text, reply_markup=main_kb, parse_mode='HTML')
 
 @rate_limit(1) #версия 2
 @game_handler
@@ -4331,7 +4375,7 @@ async def do_smoke(update, context, ctx, player):
             "<b>💨 ДУНУТЬ</b>\n\n<b>🌿 Твой свёрток пуст</b>\n\n<i>🎈 Скрути новый блант</i>",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🌿 Крафт", callback_data="craft")],
-                [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
+                [InlineKeyboardButton("🔙 В меню", callback_data="menu")]
             ]),
             parse_mode='HTML'
         )
@@ -4362,7 +4406,7 @@ async def do_smoke(update, context, ctx, player):
     kb_rows = [
         [InlineKeyboardButton("💨 Дунуть ещё", callback_data="do_smoke") if bl_left >= 1
          else InlineKeyboardButton("🌿 Крафтить ещё", callback_data="craft")],
-        [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
+        [InlineKeyboardButton("🔙 В меню", callback_data="menu")]
     ]
     # Suspense-ревил ТОЛЬКО на джекпоте (2%): предвкушение поднимает дофаминовый
     # пик именно там, где он редкий и ценный (dopamine живёт на фазе ожидания).
@@ -4452,7 +4496,7 @@ async def ritual_callback(update, context):
             f"<b>🕯️ Тёмный алтарь истощён 🌙</b>\n\n<b>🗝️ Жди {wait}</b>",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🍬 Фармить", callback_data="farm")],
-                [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+                [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
             ]))
         return
 
@@ -4472,7 +4516,7 @@ async def ritual_callback(update, context):
     ritual_kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🏛️ Храм", callback_data="guild_shrine"),
          InlineKeyboardButton("🏰 Гильдия", callback_data="guild_info")],
-        [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+        [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
     ])
     anim_msg = await animate_progress_bar(update, context, title="🕯️ Ритуал проводится...", in_place=True)
     if anim_msg is not None:
@@ -4821,7 +4865,7 @@ async def _show_plantation(update, context, ctx, player):
         )
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("🌱 Посадить (бесплатно)", callback_data="plant_start")],
-            [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+            [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
         ])
     else:
         earned, _hrs, capped = _plant_pending_player(player, now)
@@ -4856,7 +4900,7 @@ async def _show_plantation(update, context, ctx, player):
         rows = [[InlineKeyboardButton(f"🌾 Собрать ({earned} OAC)", callback_data="plant_harvest")]]
         if up_cost is not None:
             rows.append([InlineKeyboardButton(f"⬆️ Улучшить · {up_cost} OAC", callback_data="plant_upgrade")])
-        rows.append([InlineKeyboardButton("🏰 В меню", callback_data="menu")])
+        rows.append([InlineKeyboardButton("🔙 В меню", callback_data="menu")])
         kb = InlineKeyboardMarkup(rows)
 
     await edit_or_reply(update, context, text, reply_markup=kb, parse_mode='HTML')
@@ -4949,6 +4993,14 @@ async def plant_upgrade_handler(update, context, ctx):
 @rate_limit(1)
 @game_handler
 async def profile_callback(update, context, ctx, player):
+    # query.answer() гасит спиннер загрузки на кнопке, пока не позвано —
+    # Telegram показывает нажатие «висящим» до таймаута. Раньше этого вызова
+    # не было нигде в функции.
+    if update.callback_query:
+        try:
+            await update.callback_query.answer()
+        except Exception:
+            pass
     user, msg = get_user_and_msg(update)
     uid = user.id
     uname = html.escape(user.username or user.first_name)
@@ -5058,7 +5110,7 @@ async def profile_callback(update, context, ctx, player):
         InlineKeyboardButton("📖 Правила мира", callback_data="rules"),
         InlineKeyboardButton("🎨 Кастомизация", callback_data="skins_menu"),
     ])
-    kb_rows.append([InlineKeyboardButton("🏰 В меню", callback_data="menu")])
+    kb_rows.append([InlineKeyboardButton("🔙 В меню", callback_data="menu")])
     kb = InlineKeyboardMarkup(kb_rows)
 
     # Раньше профиль с аватаркой ВСЕГДА уходил фото-сообщением, и любая
@@ -5223,6 +5275,28 @@ async def _send_collection_wall(update, context, ctx, uid, page_blunts, owner_na
 
     photo = fid
     if photo is None:
+        # Некэшированный рендер — реальная задержка (executor + сборка
+        # изображения), а не мгновенная отдача file_id. Экран всё это время
+        # выглядит замершим на прежнем кадре — игрок не знает, сработал ли
+        # тап. send_chat_action — нативный, бесплатный индикатор Telegram
+        # («отправляет фото…» в шапке чата); подпись-плейсхолдер — второй,
+        # более явный сигнал прямо на экране, если есть что редактировать
+        # (родное фото уже есть — правим только подпись, не гоняем лишний
+        # editMessageMedia на плейсхолдер).
+        try:
+            await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="upload_photo")
+        except Exception:
+            pass
+        _query = update.callback_query
+        _cur_msg = _query.message if _query else None
+        if _cur_msg and getattr(_cur_msg, "photo", None):
+            try:
+                await context.bot.edit_message_caption(
+                    chat_id=update.effective_chat.id, message_id=_cur_msg.message_id,
+                    caption="⏳ Рисуем твою витрину...")
+            except Exception:
+                pass
+
         sem = _get_blunt_render_sem()
         if sem.locked() and len(getattr(sem, "_waiters", None) or ()) >= BLUNT_RENDER_MAX_QUEUE:
             return False
@@ -5583,7 +5657,7 @@ async def top_callback(update, context, ctx, player):
 
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔍 Разведка", callback_data="top_scout")],
-        [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
+        [InlineKeyboardButton("🔙 В меню", callback_data="menu")]
     ])
     await edit_or_reply(update, context, text, reply_markup=kb, parse_mode="HTML")
 
@@ -5908,7 +5982,7 @@ async def repent_callback(update, context, ctx):
     if result is None:
         await query.message.edit_text(
             "❌ Профиль не найден. Напиши /start",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 В меню", callback_data="menu")]])
         )
         return
 
@@ -5919,7 +5993,7 @@ async def repent_callback(update, context, ctx):
         repent_kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("🏛️ Храм", callback_data="guild_shrine"),
              InlineKeyboardButton("🏰 Гильдия", callback_data="guild_info")],
-            [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+            [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
         ])
         anim_msg = await animate_progress_bar(update, context, title="🕊️ Исповедь...", duration=0.6, steps=4, in_place=True)
         if anim_msg is not None:
@@ -5985,7 +6059,7 @@ async def rules_callback(update, context):
         await msg.reply_text(text, parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("❓ Полная справка", callback_data="help")],
-                [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
+                [InlineKeyboardButton("🔙 В меню", callback_data="menu")]
             ]))
 
 
@@ -6029,7 +6103,7 @@ async def help_callback(update, context):
     )
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("📖 Правила мира", callback_data="rules")],
-        [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+        [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
     ])
     if update.callback_query:
         await edit_or_reply(update, context, text, reply_markup=kb, parse_mode='HTML')
@@ -6073,7 +6147,7 @@ async def catalog_callback(update, context):
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔗 Открыть Каталог", url="https://t.me/antysocialshop")],
         [InlineKeyboardButton("🛒 Магазин", callback_data="shop"),
-         InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+         InlineKeyboardButton("🔙 В меню", callback_data="menu")],
     ])
     await edit_or_reply(update, context,
         "<b>🕯️ ANTYSOCIALSHOP · КАТАЛОГ</b>\n\n"
@@ -6151,7 +6225,7 @@ def _build_luck_keyboard(now, player, cfg, wheel_ok, mines_ok, alchemy_ok):
             rows.append([InlineKeyboardButton(f"🍀 Бездна шепчет всё громче. Жди {hrs} ч {mins} мин", callback_data="luck_mines")])
 
     rows.append([InlineKeyboardButton("🔮 Алхимия", callback_data="alchemy_start") if alchemy_ok else InlineKeyboardButton("🔮 Алхимия 🔒", callback_data="alchemy_start")])
-    rows.append([InlineKeyboardButton("🏰 В меню", callback_data="menu")])
+    rows.append([InlineKeyboardButton("🔙 В меню", callback_data="menu")])
     return rows
 
 
@@ -6260,7 +6334,7 @@ async def _process_wheel(update, context, uid, player, cfg, ctx):
         msg_text += "\n\n😤 <i>Стрелка замерла у самого ДЖЕКПОТА (1000 OAC)! Ещё чуть-чуть — крутани снова завтра.</i>"
 
     await edit_or_reply(update, context, msg_text,
-                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]))
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🍀 К удаче", callback_data="luck")]]))
 
 # МИНЫ
 import json
@@ -6754,7 +6828,7 @@ async def _process_alchemy_confirm(update, context, uid, player, cfg, ctx):
         return
 
     await edit_or_reply(update, context, data[0],
-                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]))
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🍀 К удаче", callback_data="luck")]]))
     # alchemy_count растёт именно тут — «alchemy_15»/«alchemy_50» (и через них
     # «Лунный лорд») раньше ждали случайного следующего фарма/крафта вместо
     # срабатывания в момент самой алхимии — самого дорогого веторан-ритуала.
@@ -7266,7 +7340,7 @@ async def show_lab_final(update, context):
         f"<b>🏆 Глубина увеличена! (Этаж {depth})</b>"
     )
     kb_rows = [[InlineKeyboardButton("🔙 К Лабиринту", callback_data="lab_start")],
-               [InlineKeyboardButton("🏰 В меню", callback_data="menu")]]
+               [InlineKeyboardButton("🔙 В меню", callback_data="menu")]]
     # Только на РЕКОРДЕ (не на каждом прохождении): та же логика, что у
     # джекпота и ранг-апа — гильд-чат уже видел анонимный анонс, самому
     # игроку поделиться было нечем.
@@ -7318,7 +7392,7 @@ async def show_lab_death(update, context):
         f"<i>💪 В следующий раз донеси добычу до Сундука!</i>"
     )
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 К Лабиринту", callback_data="lab_start")],
-                               [InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
+                               [InlineKeyboardButton("🔙 В меню", callback_data="menu")]])
     await edit_or_reply(update, context, text, reply_markup=kb, parse_mode='HTML')
     # lab_deaths растёт именно здесь, но эту ветку раньше никто не проверял на
     # достижения — «lab_death_5» (и заодно «Лунный лорд» через него) ждал
@@ -7589,7 +7663,7 @@ async def handle_gift_username(update: Update, context: ContextTypes.DEFAULT_TYP
 
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("💍 Мои бланты", callback_data="my_blunts")],
-        [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+        [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
     ])
 
     # ── Числовой ID: раньше промпт-текст ОБЕЩАЛ поддержку «@username или
@@ -7786,7 +7860,7 @@ async def pet_name_skip_handler(update, context, ctx):
     await query.message.edit_text("🐕 Хорошо, твой питомец будет просто Песиком!",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("🐾 Питомец", callback_data="pet_preview")],
-            [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+            [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
         ]))
 
 async def handle_pet_name(update, context):
@@ -7811,7 +7885,7 @@ async def handle_pet_name(update, context):
             f"Отлично! Теперь твоего питомца зовут «{name}»! 🐕",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🐾 Питомец", callback_data="pet_preview")],
-                [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+                [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
             ]))
     context.user_data.pop('awaiting_pet_name', None)
 
@@ -7892,7 +7966,7 @@ def _build_shop_view(balance, now, earned=None):
         InlineKeyboardButton("🪪 Скидка", callback_data="privilege"),
         InlineKeyboardButton("📦 Каталог", callback_data="catalog"),
     ])
-    rows.append([InlineKeyboardButton("🏰 В меню", callback_data="menu")])
+    rows.append([InlineKeyboardButton("🔙 В меню", callback_data="menu")])
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
@@ -9403,7 +9477,7 @@ async def all_features_handler(update, context, ctx):
         text += ("\n\n<b>Откроется с ⚔️ Ветерана (5000 🍬):</b>\n"
                  "   🐾 Питомец — верный спутник в пути")
     kb_rows.append([InlineKeyboardButton("📖 Правила мира", callback_data="rules"),
-                    InlineKeyboardButton("🏰 В меню", callback_data="menu")])
+                    InlineKeyboardButton("🔙 В меню", callback_data="menu")])
     await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode='HTML')
 
 async def bush_preview_handler(update, context):
@@ -9601,9 +9675,14 @@ async def share_blunt_handler(update, context, ctx, player):
     # Рабочий шеринг: switch_inline_query требует inline-режима/обработчика (их нет)
     # → кнопка была мёртвой. Используем нативный t.me/share/url (без HTML — он там
     # не рендерится) и мотивируем двусторонним бонусом (реферер+приглашённый).
+    # build_share_url ОБЯЗАН получить url= отдельным параметром — раньше сюда
+    # шёл только text с зашитой внутри ссылкой, и t.me/share/url без url=
+    # не открывал пикер выбора получателя вообще: "рабочий шеринг" из
+    # комментария выше на деле тоже вёл в тупик, просто в другой (браузер
+    # вместо мёртвого inline-режима).
     share_plain = re.sub(r"<[^>]+>", "", share_text)
     share_kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📤 Отправить другу", url=build_share_url(share_plain))],
+        [InlineKeyboardButton("📤 Отправить другу", url=build_share_url(ref_link, share_plain))],
         [InlineKeyboardButton("🔙 Назад", callback_data="my_blunts")],
     ])
     await query.answer()
@@ -9777,7 +9856,7 @@ async def guild_join_handler(update, context, ctx):
 
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton(f"{action_emoji} {action_text}", callback_data=action_cb)],
-            [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
+            [InlineKeyboardButton("🔙 В меню", callback_data="menu")]
         ])
 
         bonus_line = "🎁 <b>+50 OAC 🍬 за выбор стороны!</b>\n\n" if was_guildless else ""
@@ -9879,7 +9958,7 @@ async def invite_friend_handler(update, context, ctx, player):
     group_url = f"https://t.me/{bot_username}?startgroup=community"
 
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📤 Отправить ссылку другу", url=build_share_url(plain))],
+        [InlineKeyboardButton("📤 Отправить ссылку другу", url=build_share_url(ref_link, plain))],
         [InlineKeyboardButton("👥 Добавить бота в свой чат", url=group_url)],
         [InlineKeyboardButton("🔙 Назад", callback_data="profile")],
     ])
