@@ -3375,8 +3375,13 @@ async def farm_callback_v2(update, context, ctx, player):
         async def _advance_onboarding(p, conn):
             p.onboarding_step = 2
         await ctx.repo.atomic_update(uid, _advance_onboarding)
+        # update.effective_chat.id, не uid: тот же чат, где нажали «Фармить» —
+        # фарм доступен и из группового чата (game_handler резолвит игрока по
+        # нажавшему, не по чату), а safe_send_message(uid) шлёт ЛС и падает
+        # с "Forbidden: bot can't initiate conversation" для тех, кто ни разу
+        # не открывал ЛС с ботом (зарегистрировался через /start в группе).
         await safe_send_message(
-            context, uid,
+            context, update.effective_chat.id,
             "<b>🎓 ОБУЧЕНИЕ [▓▓▓] 3/3</b>\n\n"
             "<b>🌿 Отлично! Теперь создадим твой первый блант.</b>\n"
             "Нажми кнопку ниже, чтобы <b>сразу создать обычный блант</b>.\n\n"
@@ -3558,8 +3563,9 @@ async def handle_craft_normal_v2(update, context, ctx, player):
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("🎁 Забрать награду", callback_data="onboarding_reward")]
         ])
+        # chat_id (чат нажатия), не uid — см. тот же фикс в farm_callback_v2.
         await safe_send_message(
-            context, uid,
+            context, chat_id,
             "<b>🎓 Обучение [▓▓▓] (шаг 3 из 3)</b>\n\n🎉 Поздравляю! Ты освоил основы.</b>\n\nНажми кнопку ниже, чтобы получить бонус за обучение!",
             reply_markup=kb
         )
@@ -8893,7 +8899,9 @@ async def skip_onboarding_handler(update, context):
     try:
         await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
     except Exception:
-        await safe_send_message(context, uid, text, reply_markup=kb, parse_mode='HTML')
+        # chat нажатия, не uid — тот же класс бага, что и в остальных
+        # онбординг-сообщениях этой правки (см. farm_callback_v2/train_callback).
+        await safe_send_message(context, query.message.chat.id, text, reply_markup=kb, parse_mode='HTML')
 
 
 @rate_limit(2)
@@ -8905,6 +8913,7 @@ async def train_callback(update, context, ctx, player):
     (сбрасывается вместе с дневным прогрессом), поэтому не требует новой колонки БД.
     """
     uid = update.effective_user.id
+    chat_id = update.effective_chat.id
     if update.callback_query:
         try:
             await update.callback_query.answer()
@@ -8923,16 +8932,19 @@ async def train_callback(update, context, ctx, player):
     result = await ctx.repo.atomic_update(uid, _train)
     if not result:
         return
+    # chat_id (чат нажатия), не uid — тренировка доступна и из группового
+    # чата, а безусловный ЛС на uid падает "Forbidden: bot can't initiate
+    # conversation" для тех, кто ни разу не открывал ЛС с ботом.
     if result[0] == "already":
         await safe_send_message(
-            context, uid,
+            context, chat_id,
             "⚔️ <b>Ты уже тренировался сегодня.</b>\n"
             "<i>Дух воина крепнет постепенно — возвращайся завтра.</i>",
             parse_mode='HTML')
         return
     _, reward, new_balance = result
     await safe_send_message(
-        context, uid,
+        context, chat_id,
         f"⚔️ <b>ТРЕНИРОВКА ЗАВЕРШЕНА!</b>\n\n"
         f"🛡️ Ты закалил дух воина. <b>+{reward} OAC</b>\n"
         f"💎 <b>Баланс:</b> {new_balance} OAC",
@@ -9516,8 +9528,13 @@ async def guild_join_handler(update, context, ctx):
                 [InlineKeyboardButton("🍬 Фармить", callback_data="farm")],
                 [InlineKeyboardButton("⏭️ Пропустить обучение", callback_data="skip_onboarding")]
             ])
+            # query.message.chat.id (чат нажатия), не uid — эти кнопки гильдии
+            # показываются и в welcome_new_member внутри группового чата; ЛС
+            # на uid падает "Forbidden: bot can't initiate conversation" для
+            # тех, кто ни разу не открывал ЛС с ботом (вступил в гильдию из
+            # группы, зарегистрировавшись там же через /start).
             await safe_send_message(
-                context, uid,
+                context, query.message.chat.id,
                 f"🏰 <b>Ты в {g_name} Гильдии!</b> Сейчас в ней <b>{online}</b> странников.\n\n"
                 "<b>🎓 ОБУЧЕНИЕ [▓▓░] 2/3</b>\n\n"
                 "<b>🍬 Твой первый шаг — фарм!</b>\n"

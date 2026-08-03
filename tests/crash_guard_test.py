@@ -245,6 +245,52 @@ def check_webhook_url_no_double_slash():
             f"лишний слэш ломает совпадение с зарегистрированным aiohttp-роутом")
 
 
+def check_onboarding_messages_reply_in_invoking_chat():
+    """Онбординг-сообщения обязаны отвечать в чат нажатия, не в ЛС игрока.
+
+    Реальный инцидент: несколько онбординг-переходных сообщений (после
+    первого фарма/крафта/выбора гильдии/тренировки) были жёстко зашиты на
+    safe_send_message(context, uid, ...) — личное сообщение конкретному
+    user_id, а не в чат, откуда пришло нажатие. С тех пор как бот перестал
+    быть немым при добавлении в группу (welcome_new_member,
+    _announce_bot_added_to_chat) и /start в группе создаёт игрока прямо
+    там, farm/train/craft/guild_join стали регулярно нажиматься из
+    ГРУППОВОГО чата людьми, ни разу не открывавшими ЛС с ботом. Telegram
+    на такой безусловный ЛС отвечает `403 Forbidden: bot can't initiate
+    conversation with a user` — необработанное исключение в
+    @game_handler-обёрнутых farm_callback_v2/train_callback долетало до
+    админа как «🚨 Ошибка в farm_callback_v2» на каждое такое нажатие.
+
+    Проверяем статически: ни один из этих хендлеров не зовёт
+    safe_send_message с `context, uid`/`context, user_id` — только с
+    вычисленным chat_id текущего апдейта (update.effective_chat.id,
+    query.message.chat.id или локальная переменная chat_id).
+    """
+    src = open(os.path.join(ROOT, "bot.py"), encoding="utf-8").read()
+    bad_pattern = re.compile(r"safe_send_message\(\s*context,\s*(uid|user_id)\b")
+
+    spans = {
+        "farm_callback_v2": ("async def farm_callback_v2(update, context, ctx, player):",
+                             "async def craft_callback_v2(update, context, ctx, player):"),
+        "handle_craft_normal_v2": ("async def handle_craft_normal_v2(update, context, ctx, player):",
+                                   "async def handle_craft_named(update, context, ctx, player):"),
+        "skip_onboarding_handler": ("async def skip_onboarding_handler(update, context):",
+                                    "async def train_callback(update, context, ctx, player):"),
+        "train_callback": ("async def train_callback(update, context, ctx, player):",
+                           "async def handle_quest_action(update, context):"),
+        "guild_join_handler": ("async def guild_join_handler(update, context, ctx):",
+                               "async def luck_wheel_handler(update, context):"),
+    }
+    for name, (start_marker, end_marker) in spans.items():
+        start = src.index(start_marker)
+        end = src.index(end_marker, start)
+        body = src[start:end]
+        assert not bad_pattern.search(body), (
+            f"{name}: safe_send_message(context, uid/user_id, ...) — личное "
+            f"сообщение вместо ответа в чат нажатия, упадёт 'Forbidden: bot "
+            f"can't initiate conversation' для тех, кто нажал из группы")
+
+
 def check_no_calls_to_undefined_names():
     """Вызов имени, которого нигде нет в модуле, — гарантированный NameError.
 
@@ -438,6 +484,8 @@ def main():
     passed = []
     check_webhook_url_no_double_slash()
     passed.append("RENDER_URL со слэшем на конце не ломает вебхук (страж «бот молчал всем»)")
+    check_onboarding_messages_reply_in_invoking_chat()
+    passed.append("онбординг-сообщения отвечают в чат нажатия, не в ЛС (страж «Forbidden: can't initiate conversation»)")
     check_no_calls_to_undefined_names()
     passed.append("нет вызовов неопределённых имён (страж «_send_http_message 20 дней молчала»)")
     check_duplicate_dict_keys()
