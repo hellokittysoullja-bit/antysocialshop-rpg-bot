@@ -2052,6 +2052,18 @@ def progress_bar(percent):
     return "▓" * filled + "░" * empty
 
 
+def _fmt_oac(n) -> str:
+    """Разделитель разрядов на крупных числах OAC (пробел — привычная для
+    рус. текста форма, «50 000», не «50,000»). Пороги рангов и Алтаря
+    доходят до десятков тысяч — на экранах, где решение принимается по
+    цифре (Алтарь — необратимый донат всего баланса), читаемость числа
+    не мелочь."""
+    try:
+        return f"{int(n):,}".replace(",", " ")
+    except (TypeError, ValueError):
+        return str(n)
+
+
 async def process_daily_login(user_id: int, context) -> None:
     ctx = context.bot_data.get("ctx")
     if not ctx:
@@ -3279,8 +3291,8 @@ def _format_farm_message(earned: int, crit: bool, happy: bool,
     # Сборка сообщения
     msg = (
         f"{banner}"
-        f"💎 <b>Ты нафармил: +{earned} OAC</b> {crit_emoji}{happy_str}{temple_str}\n"
-        f"🎉 <b>У тебя: {new_balance} OAC</b>\n\n"
+        f"💎 <b>Ты нафармил: +{_fmt_oac(earned)} OAC</b> {crit_emoji}{happy_str}{temple_str}\n"
+        f"🎉 <b>У тебя: {_fmt_oac(new_balance)} OAC</b>\n\n"
         f"{medal_text}"
         f"🎯 <b>Фарминг: {new_count} / {target}</b>\n"
         f"{progress_bar_str}\n\n"
@@ -3577,7 +3589,7 @@ def _format_normal_craft_message(medal_text: str, new_count: int, target: int,
     return (
         f"<b>🌿 БЛАНТ СКРУЧЕН!</b>\n\n"
         f"💎 Потрачено: <b>15 OAC 🍬</b>\n"
-        f"⚜️ У тебя: <b>{new_balance} OAC 🍬</b>\n\n"
+        f"⚜️ У тебя: <b>{_fmt_oac(new_balance)} OAC 🍬</b>\n\n"
         f"{medal_text}"
         f"🎯 Крафтинг: <b>{new_count} / {target}</b>\n"
         f"<b>{progress_bar_str}</b>\n\n"
@@ -4702,10 +4714,10 @@ async def _render_altar(update, context, ctx, player):
         "<b>🕯️ АЛТАРЬ ВЕЧНОСТИ</b>",
         "<i>Жертва невозвратна. Уровень — навсегда.</i>", "",
         f"{title} · <b>уровень {level}</b>",
-        f"💠 Вложено всего: <b>{prestige} OAC</b>", "",
+        f"💠 Вложено всего: <b>{_fmt_oac(prestige)} OAC</b>", "",
     ]
     if cost_to_next > 0:
-        lines.append(f"{bar} {pct}%  · до ур.{level + 1}: <b>{cost_to_next} OAC</b>")
+        lines.append(f"{bar} {pct}%  · до ур.{level + 1}: <b>{_fmt_oac(cost_to_next)} OAC</b>")
     lines.append("")
 
     if rows:
@@ -4717,20 +4729,20 @@ async def _render_altar(update, context, ctx, player):
             if _mark:
                 uname = f"{_mark}{uname}{_mark}"
             marker = "➤ " if row["user_id"] == player.user_id else f"{i}. "
-            lines.append(f"{marker}<b>{uname}</b> — {row['prestige']} OAC")
+            lines.append(f"{marker}<b>{uname}</b> — {_fmt_oac(row['prestige'])} OAC")
         if my_rank and my_rank > 10:
             lines.append(f"<i>Твоя позиция: #{my_rank}</i>")
         lines.append("")
 
-    lines.append(f"💰 В кошельке: <b>{balance} OAC</b>")
+    lines.append(f"💰 В кошельке: <b>{_fmt_oac(balance)} OAC</b>")
     text = "\n".join(lines)
 
     kb_rows = []
     if balance >= 10:
         half = balance // 2
-        kb_rows.append([InlineKeyboardButton(f"🕯️ Вложить половину · {half} OAC",
+        kb_rows.append([InlineKeyboardButton(f"🕯️ Вложить половину · {_fmt_oac(half)} OAC",
                                               callback_data="altar_invest_half")])
-        kb_rows.append([InlineKeyboardButton(f"🔥 Вложить всё · {balance} OAC",
+        kb_rows.append([InlineKeyboardButton(f"🔥 Вложить всё · {_fmt_oac(balance)} OAC",
                                              callback_data="altar_invest_all")])
     kb_rows.append([InlineKeyboardButton("🔙 В меню", callback_data="menu")])
 
@@ -4776,7 +4788,7 @@ async def altar_invest_handler(update, context, ctx, player):
     _, amount, new_prestige = result
     level, _cost, _into = _altar_level(new_prestige)
     title, _mark = _altar_tier(level)
-    await query.answer(f"🔥 Вложено {amount} OAC. {title}, уровень {level}!", show_alert=True)
+    await query.answer(f"🔥 Вложено {_fmt_oac(amount)} OAC. {title}, уровень {level}!", show_alert=True)
     # Перерисовываем экран со СВЕЖИМ игроком (баланс и престиж только что
     # изменились). Зовём _render_altar, а не altar_hub: см. её docstring.
     await _render_altar(update, context, ctx, await ctx.repo.get_by_id(uid))
@@ -5002,8 +5014,8 @@ async def profile_callback(update, context, ctx, player):
         f"👤 <b>{uname}</b>{guild_line}\n"
         f"🫧 Фон: {bg}\n\n"
         f"{rank_progress}\n\n"
-        f"💎 <b>Кошелёк:</b> <b>{bal} OAC</b> 🍬 <i>(тратится)</i>\n"
-        f"🏛️ <b>Заработано за всё время:</b> <b>{earned} OAC</b> — <i>твой ранг держится на этом числе, траты его не трогают</i>\n"
+        f"💎 <b>Кошелёк:</b> <b>{_fmt_oac(bal)} OAC</b> 🍬 <i>(тратится)</i>\n"
+        f"🏛️ <b>Заработано за всё время:</b> <b>{_fmt_oac(earned)} OAC</b> — <i>твой ранг держится на этом числе, траты его не трогают</i>\n"
         f"🌿 <b>Блантов в свёртке:</b> <b>{bl}</b>\n"
         f"{bush_line}\n"
         f"🧬 <b>Титул:</b> {active_title}\n"
@@ -5965,14 +5977,65 @@ async def rules_callback(update, context):
     if update.callback_query:
         await edit_or_reply(update, context, text,
     reply_markup=InlineKeyboardMarkup([
+        [InlineKeyboardButton("❓ Полная справка (Мины, Алтарь, Питомец…)", callback_data="help")],
         [InlineKeyboardButton("💍 Создать именной блант", callback_data="craft_named")],
         [InlineKeyboardButton("🔙 Назад", callback_data="profile")]
     ]))
     else:
         await msg.reply_text(text, parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❓ Полная справка", callback_data="help")],
                 [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
             ]))
+
+
+async def help_callback(update, context):
+    """Полная справка — раньше «Правила мира» не упоминали Лабиринт, Мины,
+    Алтарь Вечности, Плантацию, Питомца, Достижения, Витрину и рефералов
+    ни словом: у половины механик игры не было НИ ОДНОГО места в боте, где
+    новичок мог бы прочитать, что это и как этим пользоваться."""
+    user, msg = get_user_and_msg(update)
+    text = (
+        "<b>❓ ПОЛНАЯ СПРАВКА</b>\n\n"
+        "<b>🏛️ Лабиринт</b> <code>/lab</code>\n"
+        "<i>Спускайся по комнатам, собирай награду, выходи вовремя — смерть "
+        "стоит часть добычи. Кулдаун между попытками.</i>\n\n"
+        "<b>💣 Мины</b>\n"
+        "<i>Ставка на сетку 5×5 с 3 минами: чем больше открытых клеток без "
+        "подрыва — тем выше множитель. Забрать можно в любой момент.</i>\n\n"
+        "<b>🕯️ Алтарь Вечности</b>\n"
+        "<i>Эндгейм-цель для тех, кто уже всё скопил: баланс необратимо "
+        "превращается в престиж. Открывается на позднем этапе игры.</i>\n\n"
+        "<b>🪴 Плантация</b>\n"
+        "<i>Открой в разделе «🌍 Мир»: посади куст (бесплатно) — он копит OAC "
+        "сам по себе, пока тебя нет. Собирай урожай регулярно — хранилище не "
+        "бесконечное.</i>\n\n"
+        "<b>🐾 Питомец</b> <code>/pet</code>\n"
+        "<i>Доступен с ранга ⚔️ Ветеран. Корми — голодный питомец даёт меньше "
+        "бонуса к плантации, но эффект никогда не падает до нуля.</i>\n\n"
+        "<b>🎴 Витрина коллекции</b>\n"
+        "<i>«Мои бланты» в профиле — у каждого именного бланта свой уникальный "
+        "силуэт. Собирай редкости (4 уровня) и формы скрутки (8 видов).</i>\n\n"
+        "<b>🏆 Достижения</b>\n"
+        "<i>Открываются автоматически по игровым показателям — смотри "
+        "прогресс в разделе «Достижения».</i>\n\n"
+        "<b>🔗 Пригласить друга</b>\n"
+        "<i>Постоянная ссылка в профиле — тебе и другу за каждого приведённого "
+        "игрока бонус OAC.</i>\n\n"
+        "<b>🔥 Серия входов и Час Удачи</b>\n"
+        "<i>Заходи каждый день — награда растёт с серией. Час Удачи выпадает "
+        "случайно и на время удваивает часть наград.</i>\n\n"
+        "<i>📖 Базовые команды (фарм/крафт/дым/гильдия) — в «Правила мира».</i>"
+    )
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📖 Правила мира", callback_data="rules")],
+        [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+    ])
+    if update.callback_query:
+        await edit_or_reply(update, context, text, reply_markup=kb, parse_mode='HTML')
+    else:
+        await msg.reply_text(text, parse_mode='HTML', reply_markup=kb)
+
 
 async def privilege_callback(update, context):
     ctx = context.application.bot_data["ctx"]
@@ -9849,6 +9912,7 @@ TEXT_COMMAND_HANDLERS = {
     "profile": profile_callback,
     "top": top_callback,
     "rules": rules_callback,
+    "help": help_callback,
     "privilege": privilege_callback,
     "catalog": catalog_callback,
     "luck": luck_callback,
@@ -9876,6 +9940,8 @@ TEXT_COMMAND_HANDLERS = {
     "профиль": profile_callback,
     "сбор": collect_callback,
     "правила": rules_callback,
+    "помощь": help_callback,
+    "справка": help_callback,
     "исповедь": repent_callback,
     "гильдия": guild_info_callback,
     "привилегия": privilege_callback,
@@ -9904,6 +9970,7 @@ CALLBACKS: Dict[str, Callable] = {
     "top": top_callback,
     "guild_info": guild_info_callback,
     "rules": rules_callback,
+    "help": help_callback,
     "privilege": privilege_callback,
     "catalog": catalog_callback,
     "luck": luck_callback,

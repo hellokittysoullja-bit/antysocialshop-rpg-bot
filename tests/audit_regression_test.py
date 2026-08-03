@@ -389,7 +389,9 @@ async def test_altar_rerenders():
     check(any("АЛТАРЬ" in t for t in u.callback_query.message.edits),
           "после жертвы экран Алтаря перерисован (не залипает на старых цифрах)")
     last = [t for t in u.callback_query.message.edits if "АЛТАРЬ" in t][-1]
-    check("10000 OAC" in last, "перерисовка показывает СВЕЖИЙ престиж, а не прежний")
+    # "10 000", не "10000" — крупные числа теперь идут через _fmt_oac
+    # (разделитель разрядов, см. полировку читаемости Алтаря).
+    check("10 000 OAC" in last, "перерисовка показывает СВЕЖИЙ престиж, а не прежний")
 
 
 # ── 6. Отмена именного бланта не падает ──────────────────────────────
@@ -787,6 +789,64 @@ async def test_edit_or_send_photo_debounces_concurrent_edits():
           "лок отпускается после завершения — следующий, не гоночный вызов проходит")
 
 
+# ── 18. _fmt_oac: разделитель разрядов на крупных числах ─────────────
+async def test_fmt_oac_thousands_separator():
+    """Пороги рангов и Алтаря доходят до десятков тысяч; на экране, где
+    решение принимается по цифре (Алтарь — необратимый донат всего
+    баланса), читаемость числа не мелочь. Проверяем чистую функцию
+    форматирования: пробел как разделитель разрядов, малые числа и
+    отрицательные/нечисловые значения не ломаются."""
+    check(bot._fmt_oac(50000) == "50 000", f"{bot._fmt_oac(50000)!r}")
+    check(bot._fmt_oac(1234567) == "1 234 567", f"{bot._fmt_oac(1234567)!r}")
+    check(bot._fmt_oac(85) == "85", "малые числа — без разделителя")
+    check(bot._fmt_oac(0) == "0", "ноль — без разделителя")
+    check(bot._fmt_oac("не число") == "не число", "нечисловой ввод не роняет форматирование")
+
+
+# ── 19. /help — справка по механикам, которых нет в «Правилах» ───────
+async def test_help_covers_mechanics_missing_from_rules():
+    """«Правила мира» не упоминали Лабиринт, Мины, Алтарь, Плантацию,
+    Питомца, Достижения, Витрину и рефералов ни словом — у половины
+    механик игры не было НИ ОДНОГО места, где новичок мог бы прочитать,
+    что это такое. Проверяем: /help существует, реально описывает эти
+    механики, и на него есть кросс-ссылка с экрана «Правила»."""
+    p = Player(user_id=1, exists=True, balance=100, total_earned=100)
+    ctx = make_ctx(p)
+    upd = FakeUpdate("help", uid=1)
+    fctx = FakeContext(ctx)
+    await bot.help_callback(upd, fctx)
+    check(len(upd.callback_query.message.edits) == 1, "«/help» отвечает ровно одним сообщением")
+    text = upd.callback_query.message.edits[0]
+    for mechanic in ("Лабиринт", "Мины", "Алтарь", "Плантация", "Питомец",
+                     "Витрина", "Достижения", "Пригласить друга"):
+        check(mechanic in text, f"справка описывает «{mechanic}» — раньше об этом негде было прочитать")
+
+    check("help" in bot.TEXT_COMMAND_HANDLERS and bot.TEXT_COMMAND_HANDLERS["help"] is bot.help_callback,
+          "команда /help зарегистрирована")
+    check("help" in bot.CALLBACKS and bot.CALLBACKS["help"] is bot.help_callback,
+          "кнопка callback_data=\"help\" зарегистрирована")
+
+    # Кросс-ссылка: с «Правил» на полную справку — ловим reply_markup, а не
+    # только текст (FakeMsg.edit_text по умолчанию не сохраняет kwargs).
+    class _KbCapturingMsg(FakeMsg):
+        def __init__(self):
+            super().__init__()
+            self.last_kb = None
+
+        async def edit_text(self, text, reply_markup=None, **kw):
+            self.last_kb = reply_markup
+            return await super().edit_text(text, reply_markup=reply_markup, **kw)
+
+    upd2 = FakeUpdate("rules", uid=1)
+    upd2.callback_query.message = _KbCapturingMsg()
+    upd2.effective_message = upd2.callback_query.message
+    fctx2 = FakeContext(ctx)
+    await bot.rules_callback(upd2, fctx2)
+    kb = upd2.callback_query.message.last_kb
+    cb_data = [btn.callback_data for row in kb.inline_keyboard for btn in row] if kb else []
+    check("help" in cb_data, "с экрана «Правила» есть кнопка на полную справку («help» среди callback_data)")
+
+
 # ── 10. Внутренние вызовы @cb-хендлеров без лишнего ctx ──────────────
 async def test_no_double_ctx_callsites():
     import re
@@ -816,6 +876,8 @@ async def main():
                test_profile_avatar_edits_media_in_place,
                test_edit_or_reply_cleans_up_own_message_not_user_command,
                test_edit_or_send_photo_debounces_concurrent_edits,
+               test_fmt_oac_thousands_separator,
+               test_help_covers_mechanics_missing_from_rules,
                test_no_double_ctx_callsites):
         print(f"\n{fn.__name__}:")
         await fn()
