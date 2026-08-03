@@ -577,6 +577,55 @@ async def test_menu_handler_recovers_from_non_text_message():
     check(bool(fctx.bot.sent), "«🏰 В меню» из фото-сообщения отвечает (новым сообщением), а не молчит")
 
 
+# ── 14. profile_callback: редактирует из текста, чистит за собой из фото ──
+async def test_profile_edits_from_text_deletes_from_photo():
+    """Пользователь: заход в «Мои бланты» из профиля работает, но «назад» —
+    снова НОВОЕ сообщение профиля вместо редактирования того же самого,
+    хотя у полированных ботов экран меняется на месте («изменено» внизу).
+
+    Полная симметрия невозможна физически: витрина «Мои бланты» — реальное
+    фото, Telegram не даёт превратить фото-сообщение в текстовое через edit.
+    Но заход в профиль из ДРУГОГО ТЕКСТОВОГО экрана (меню, достижения…)
+    обязан редактироваться на месте — это и есть «единый живой экран»,
+    ничем не отличающийся от того, что уже работает в остальной игре. А
+    для единственного настоящего исключения (фото) — старое сообщение
+    обязано убираться, а не висеть мусором рядом с новым."""
+    p = Player(user_id=1, exists=True, balance=100, total_earned=100)
+    ctx = make_ctx(p)
+
+    class _TrackedMsg(FakeMsg):
+        def __init__(self, text_value):
+            super().__init__()
+            self.text = text_value
+            self.deleted = False
+
+        async def delete(self):
+            self.deleted = True
+
+    # Случай 1: заход из ТЕКСТОВОГО экрана (меню) — редактирует то же сообщение.
+    upd1 = FakeUpdate("profile", uid=1)
+    upd1.callback_query.message = _TrackedMsg("предыдущий текстовый экран")
+    upd1.effective_message = upd1.callback_query.message
+    fctx1 = FakeContext(ctx)
+    await bot.profile_callback(upd1, fctx1)
+    check(len(upd1.callback_query.message.edits) == 1,
+          "заход в профиль из текста редактирует то же сообщение (не плодит новое)")
+    check(not upd1.callback_query.message.deleted,
+          "текстовое сообщение не удаляется — оно было отредактировано на месте")
+
+    # Случай 2: заход из ФОТО-сообщения (витрина «Мои бланты») — новое +
+    # уборка старого, чтобы не копился мусор из мёртвых экранов.
+    upd2 = FakeUpdate("profile", uid=1)
+    upd2.callback_query.message = _TrackedMsg(None)   # фото: text=None
+    upd2.effective_message = upd2.callback_query.message
+    fctx2 = FakeContext(ctx)
+    await bot.profile_callback(upd2, fctx2)
+    check(len(upd2.callback_query.message.edits) == 1,
+          "заход в профиль из фото шлёт новое сообщение (отредактировать фото в текст нельзя)")
+    check(upd2.callback_query.message.deleted,
+          "старое фото-сообщение убирается — не остаётся мусором рядом с новым профилем")
+
+
 # ── 10. Внутренние вызовы @cb-хендлеров без лишнего ctx ──────────────
 async def test_no_double_ctx_callsites():
     import re
@@ -602,6 +651,7 @@ async def main():
                test_named_blunt_name_persisted, test_bot_added_to_chat_announces,
                test_flood_control_is_not_admin_noise,
                test_menu_handler_recovers_from_non_text_message,
+               test_profile_edits_from_text_deletes_from_photo,
                test_no_double_ctx_callsites):
         print(f"\n{fn.__name__}:")
         await fn()
