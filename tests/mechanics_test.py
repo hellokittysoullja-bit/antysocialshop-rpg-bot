@@ -11,6 +11,7 @@
 import os
 import sys
 import asyncio
+import types
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -24,11 +25,13 @@ import asyncpg
 import redis.asyncio as aioredis
 from cachetools import TTLCache
 
+import bot
 from bot import (
     calculate_smoke_reward, _calculate_reward, daily_config,
     _calc_multiplier, _generate_mines_field, get_medal_target,
     get_rank_progress, _get_craft_stats, FARM_MEDALS,
     _build_next_day_preview, _build_daily_message, _reengagement_text, reengagement_push,
+    winback_push, activation_push,
     _farm_on_cooldown, _quest_progress_counts, _plural_steps, QUEST_TEMPLATES,
     _resolve_referrer, _reward_referrer,
     _plant_rate, _plant_upgrade_cost, _plant_pending,
@@ -489,6 +492,59 @@ async def test_services(passed):
         redis = None
     await reengagement_push(_NoRedisCtx())   # должно тихо вернуться
     passed.append("reengagement_push: fail-closed без Redis")
+
+    # --- activation_push: единственная джоба, видящая last_farm IS NULL ---
+    # reengagement_push и winback_push обе фильтруют last_farm IS NOT NULL —
+    # ни разу не фармивший игрок им структурно невидим. Проверяем на реальном
+    # Postgres: такой игрок ПОЛУЧАЕТ активацию (гвардия проставляется), но
+    # ни reengagement_push, ни winback_push его не трогают (гвардии остаются
+    # NULL) — именно тот разрыв, который activation_push закрывает.
+    class _FakeTgResp:
+        status_code = 200
+        text = "{}"
+
+    class _FakeAsyncClient:
+        def __init__(self, *a, **k): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, *a, **k): return _FakeTgResp()
+
+    class _PushCtx:
+        db_pool = pool
+        settings = types.SimpleNamespace(bot_token="123:DUMMY")
+
+    ACT_UID = 999006
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM players WHERE user_id=$1", ACT_UID)
+    await repo.save(Player(user_id=ACT_UID, username="NeverFarmed", balance=800, exists=True))
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE players SET last_farm=NULL, created_at=now() - interval '2 hours' "
+            "WHERE user_id=$1", ACT_UID)
+
+    orig_client = bot.httpx.AsyncClient
+    bot.httpx.AsyncClient = _FakeAsyncClient
+    try:
+        await reengagement_push(_PushCtx())
+        await winback_push(_PushCtx())
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT last_reengagement_sent, last_winback_sent FROM players WHERE user_id=$1",
+                ACT_UID)
+        assert row["last_reengagement_sent"] is None and row["last_winback_sent"] is None, (
+            "reengagement/winback не должны видеть ни разу не фармившего игрока")
+        passed.append("reengagement_push/winback_push: не видят last_farm IS NULL (структурный разрыв подтверждён)")
+
+        await activation_push(_PushCtx())
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT last_activation_push_sent, activation_push_count FROM players WHERE user_id=$1",
+                ACT_UID)
+        assert row["last_activation_push_sent"] is not None and row["activation_push_count"] == 1, (
+            f"activation_push должна была дойти до ни разу не фармившего игрока: {row}")
+        passed.append("activation_push: закрывает разрыв — доходит до ни разу не фармившего игрока")
+    finally:
+        bot.httpx.AsyncClient = orig_client
 
     # --- _reward_referrer: реферер получает +50 OAC, счётчик, метку 🩸 ---
     REF_UID = 999003

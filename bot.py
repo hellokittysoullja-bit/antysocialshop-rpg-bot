@@ -1165,6 +1165,18 @@ async def _run_migrations(conn):
             ) THEN
                 ALTER TABLE players ADD COLUMN lab_best_oac INTEGER DEFAULT 0;
             END IF;
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='players' AND column_name='last_activation_push_sent'
+            ) THEN
+                ALTER TABLE players ADD COLUMN last_activation_push_sent TIMESTAMPTZ DEFAULT NULL;
+            END IF;
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='players' AND column_name='activation_push_count'
+            ) THEN
+                ALTER TABLE players ADD COLUMN activation_push_count INTEGER DEFAULT 0;
+            END IF;
         END $$;
     """)
     # Диагностика /growth (здоровье джоб, возраст процесса) — раньше жила в
@@ -7984,7 +7996,8 @@ async def growth_stats_command(update, context, ctx):
     # «нет данных», неотличимо от «не было вообще ни разу».
     lines.append("\n<b>⚙️ Здоровье пуш-джоб:</b>")
     for job, label, max_age in (("reengagement", "Возврат (2ч-3д дрейфа)", timedelta(hours=3)),
-                                ("winback", "Винбэк (3-30д дрейфа)", timedelta(days=9))):
+                                ("winback", "Винбэк (3-30д дрейфа)", timedelta(days=9)),
+                                ("activation", "Активация (ни разу не фармили)", timedelta(days=2))):
         row = health_rows.get(job)
         if not row:
             lines.append(f"🔴 {label}: <i>нет свежих запусков</i>")
@@ -10352,6 +10365,103 @@ async def winback_push(ctx: AppContext) -> None:
     logger.info("winback: sent %d pushes to %d candidates (blocked=%d, failed=%d)",
                 sent, len(rows), blocked, failed)
     await _record_job_health(ctx, "winback", sent, len(rows), blocked, failed)
+
+
+def _activation_text(balance: int) -> str:
+    """Тон принципиально другой, чем у reengagement/winback: тем НЕЧЕГО терять
+    (нет ни созревшей грядки, ни серии, ни рейтинга — они ни разу не
+    фармили), поэтому давление построено на endowment («уже твоё, просто
+    забери») и любопытстве, а не на угрозе потери прогресса, которого нет."""
+    return (
+        f"🍬 <b>Твой стартовый дар всё ещё ждёт тебя</b> — <b>{balance} OAC</b> "
+        f"и первый именной блант никуда не делись.\n\n"
+        f"Один тап — и грядка начнёт приносить урожай. Жми ниже, это займёт "
+        f"пару секунд:"
+    )
+
+
+async def activation_push(ctx: AppContext) -> None:
+    """Единственный пуш, нацеленный на тех, кто ни разу не фармил.
+
+    И reengagement_push (окно 2ч-3д), и winback_push (окно 3-30д) фильтруют
+    `last_farm IS NOT NULL` — оба структурно не видят игрока, у которого
+    last_farm вообще NULL. На проде это 53 из 157 аккаунтов (34% всей базы,
+    больше, чем кандидатов в обеих других джобах вместе) — люди, которые
+    прошли /start (получили стартовый баланс и блант), но НИ РАЗУ не нажали
+    «Фармить» — и до этой функции не получали от бота ни единого напоминания
+    никогда, потому что были невидимы для всего механизма пушей разом.
+
+    created_at < now()-1ч: не дёргаем того, кто буквально секунду назад
+    зарегистрировался и ещё не долистал приветственный экран.
+    activation_push_count < 4: не спамим бесконечно явно незаинтересованного
+    мёртвого аккаунта — 4 попытки (при кулдауне ниже это ~2 недели) и тишина.
+    last_activation_push_sent обновляется и на blocked/dead-chat, не только
+    на sent — иначе мёртвый чат ретраился бы каждый прогон вечно; на
+    настоящей ошибке (failed) не обновляется — это может быть временный сбой,
+    стоит попробовать раньше положенного кулдауна.
+    """
+    if not ctx or not ctx.db_pool:
+        return
+
+    guard_before = datetime.now(timezone.utc) - timedelta(days=3)
+    created_before = datetime.now(timezone.utc) - timedelta(hours=1)
+
+    try:
+        async with ctx.db_pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT user_id, balance FROM players "
+                "WHERE last_farm IS NULL AND created_at < $1 "
+                "AND activation_push_count < 4 "
+                "AND (last_activation_push_sent IS NULL OR last_activation_push_sent < $2)",
+                created_before, guard_before,
+            )
+    except Exception as e:
+        logger.error(f"activation query error: {e}")
+        return
+
+    token = ctx.settings.bot_token
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    sent = 0
+    blocked = 0
+    failed = 0
+    first_failure_logged = False
+    kb = {"inline_keyboard": [[{"text": "🍬 Фармить", "callback_data": "farm"}]]}
+    async with httpx.AsyncClient(timeout=10) as client:
+        for row in rows:
+            uid = row["user_id"]
+            text = _activation_text(row["balance"] or 0)
+
+            try:
+                r = await client.post(url, json={"chat_id": uid, "text": text,
+                                                   "parse_mode": "HTML", "reply_markup": kb})
+                if r.status_code == 200:
+                    sent += 1
+                    async with ctx.db_pool.acquire() as conn:
+                        await conn.execute(
+                            "UPDATE players SET last_activation_push_sent=now(), "
+                            "activation_push_count=activation_push_count+1 WHERE user_id=$1", uid)
+                elif _is_dead_chat_error(r.status_code, r.text):
+                    blocked += 1
+                    async with ctx.db_pool.acquire() as conn:
+                        await conn.execute(
+                            "UPDATE players SET last_activation_push_sent=now(), "
+                            "activation_push_count=activation_push_count+1 WHERE user_id=$1", uid)
+                else:
+                    failed += 1
+                    if not first_failure_logged:
+                        first_failure_logged = True
+                        logger.error("activation: sendMessage %d для uid=%s: %s",
+                                     r.status_code, uid, r.text[:300])
+            except Exception as e:
+                failed += 1
+                if not first_failure_logged:
+                    first_failure_logged = True
+                    logger.error("activation: исключение при отправке uid=%s: %s", uid, e)
+            await asyncio.sleep(0.05)
+
+    logger.info("activation: sent %d pushes to %d candidates (blocked=%d, failed=%d)",
+                sent, len(rows), blocked, failed)
+    await _record_job_health(ctx, "activation", sent, len(rows), blocked, failed)
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
