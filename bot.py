@@ -377,7 +377,11 @@ async def _win_share_button(context, uid: int, win_line: str) -> InlineKeyboardB
     """
     bot_username = (await context.bot.get_me()).username
     ref_link = f"https://t.me/{bot_username}?start=ref_{uid}"
-    share_text = f"{win_line}\n\n🎁 Заходи по ссылке — +100 OAC на старт:\n{ref_link}"
+    # Ссылка НЕ дублируется в тексте — build_share_url несёт её отдельным
+    # параметром url=, Telegram сам покажет её получателю (с превью).
+    # Повторение той же ссылки текстом внутри text= давало на экране друга
+    # одну и ту же голую ссылку дважды подряд.
+    share_text = f"{win_line}\n\n🎁 Заходи по ссылке — +100 OAC на старт:"
     return InlineKeyboardButton("📤 Поделиться победой", url=build_share_url(ref_link, share_text))
 
 # ── Исключения ──────────────────────────────────────────────
@@ -3926,15 +3930,18 @@ async def handle_named_name(update, context):
         # что и в invite_friend_handler.
         #
         # Без HTML-тегов: share_text уходит прямиком в URL (build_share_url →
-        # t.me/share/url?text=...), Telegram НЕ парсит здесь HTML — <b> показался
-        # бы другу буквальными угловыми скобками, а не жирным текстом.
+        # t.me/share/url?url=...&text=...), Telegram НЕ парсит здесь HTML —
+        # <b> показался бы другу буквальными угловыми скобками, а не жирным
+        # текстом. Ссылка НЕ дублируется в тексте — она уже в url= отдельным
+        # параметром, Telegram сам покажет её другу с превью; повторение той
+        # же голой ссылки текстом давало на экране друга одну и ту же ссылку
+        # дважды подряд.
         share_text = (
             f"🕯️⚜️ Я играю в Antysocialshop — RPG про гильдии и войну миров.\n"
             f"Только что скрутил {color} «{meme_name}» — {label.lower()}, "
             f"#{item.get('rare_number', '?-????')}.\n\n"
             f"💬 {reaction}\n\n"
-            f"🎁 Заходи по ссылке — +100 OAC на старт:\n"
-            f"{ref_link}"
+            f"🎁 Заходи по ссылке — +100 OAC на старт:"
         )
 
         share_url = build_share_url(ref_link, share_text)
@@ -9680,7 +9687,12 @@ async def share_blunt_handler(update, context, ctx, player):
     # не открывал пикер выбора получателя вообще: "рабочий шеринг" из
     # комментария выше на деле тоже вёл в тупик, просто в другой (браузер
     # вместо мёртвого inline-режима).
-    share_plain = re.sub(r"<[^>]+>", "", share_text)
+    #
+    # share_plain НЕ включает ref_link (в отличие от share_text выше, который
+    # игрок видит на СВОЁМ экране) — ссылка уже в url= отдельным параметром,
+    # Telegram сам покажет её другу с превью; повторение той же голой ссылки
+    # текстом давало на экране друга одну и ту же ссылку дважды подряд.
+    share_plain = re.sub(r"<[^>]+>", "", share_text.replace(f"\n{ref_link}", ""))
     share_kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("📤 Отправить другу", url=build_share_url(ref_link, share_plain))],
         [InlineKeyboardButton("🔙 Назад", callback_data="my_blunts")],
@@ -9945,9 +9957,15 @@ async def invite_friend_handler(update, context, ctx, player):
     outro = (f"🎁 Заходи по ссылке — сразу +100 OAC на старт:\n{ref_link}\n\n"
             f"👥 Или добавь бота в свой чат — джекпоты и легендарки друзей "
             f"видны всем сами, без ссылок.")
+    # outro_plain — без ref_link (для plain/build_share_url): ссылка уже в
+    # url= отдельным параметром, Telegram сам покажет её другу с превью;
+    # caption (СВОЙ экран игрока) сохраняет ссылку текстом — там дубля нет.
+    outro_plain = (f"🎁 Заходи по ссылке — сразу +100 OAC на старт:\n\n"
+                  f"👥 Или добавь бота в свой чат — джекпоты и легендарки друзей "
+                  f"видны всем сами, без ссылок.")
 
     caption = intro + best_line.format(name=html.escape((best or {}).get("name", "?"))) + outro
-    plain = intro + best_line.format(name=(best or {}).get("name", "?")) + outro
+    plain = intro + best_line.format(name=(best or {}).get("name", "?")) + outro_plain
     # Пересланная ссылка бьёт по ОДНОМУ конкретному другу и стоит социальной
     # цены (просьба, «не спамлю ли я»). Добавление бота в СВОЙ чат — другой канал:
     # никого не просишь; дальше КАЖДЫЙ джекпот, легендарный крафт и итог войны

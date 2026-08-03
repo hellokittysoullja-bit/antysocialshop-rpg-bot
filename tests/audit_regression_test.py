@@ -893,6 +893,28 @@ async def test_share_buttons_pass_url_param():
     check(not bad, f"build_share_url вызван БЕЗ ref_link отдельным аргументом (сломанный шеринг): {bad}")
 
 
+async def test_win_share_button_does_not_duplicate_link_in_text():
+    """После фикса ссылка шла ОДНОВРЕМЕННО в url= (Telegram сам показывает
+    её другу с превью) И была по-прежнему зашита в text= — друг получал
+    одну и ту же голую ссылку дважды подряд на экране (баг, найденный
+    пользователем на реальной отправке). Ссылка обязана попадать в
+    итоговый диплинк ровно один раз (через url=), не дважды."""
+    bot_username = "testbot"
+
+    class _FakeBotGetMe:
+        async def get_me(self):
+            return types.SimpleNamespace(username=bot_username)
+
+    fctx = types.SimpleNamespace(bot=_FakeBotGetMe())
+    btn = await bot._win_share_button(fctx, 42, "⚡ Я достиг ранга Ветеран!")
+    ref_link = f"https://t.me/{bot_username}?start=ref_42"
+    from urllib.parse import quote as _quote
+    encoded = _quote(ref_link, safe='')
+    check(btn.url.count(encoded) == 1,
+          f"ссылка должна встречаться в диплинке ровно один раз (через url=), "
+          f"а не дублироваться внутри text=: {btn.url!r}")
+
+
 # ── 21. query.answer() гасит спиннер загрузки — 3 подтверждённых пробела ──
 async def test_query_answer_called_in_profile_craft_smoke():
     """profile_callback/craft_callback_v2/smoke_callback раньше НИ РАЗУ не
@@ -987,6 +1009,7 @@ async def main():
                test_help_covers_mechanics_missing_from_rules,
                test_build_share_url_requires_url_param,
                test_share_buttons_pass_url_param,
+               test_win_share_button_does_not_duplicate_link_in_text,
                test_query_answer_called_in_profile_craft_smoke,
                test_slow_renders_send_chat_action,
                test_luck_result_buttons_dont_claim_menu,
