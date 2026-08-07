@@ -228,15 +228,20 @@ async def background_jobs(ctx: AppContext):
         # И reengagement_push, и winback_push фильтруют last_farm IS NOT
         # NULL — оба структурно не видят игрока, который вообще ни разу не
         # фармил (на проде это 34% всей базы, больше, чем кандидатов в
-        # обеих других джобах вместе). Раз в сутки: своя гвардия внутри
-        # activation_push (3 дня на игрока) всё равно не даст спамить чаще.
+        # обеих других джобах вместе). Было раз в сутки: первый (и самый
+        # ценный — интерес к только что открытой игре ещё свеж) пуш реально
+        # мог уйти только на следующий суточный прогон, т.е. с задержкой до
+        # ~24ч сверх и так уже выставленной часовой грации. Раз в час: своя
+        # гвардия внутри activation_push (эскалирующий кулдаун 1д→3д→5д на
+        # игрока) всё равно не даст спамить чаще — учащение джобы просто не
+        # даёт СВЕЖИМ кандидатам застрять в очереди на сутки.
         await asyncio.sleep(900)   # старт позже остальных, чтобы не толкаться при деплое
         while True:
             try:
                 await activation_push(ctx)
             except Exception:
                 logger.exception("activation_push error")
-            await asyncio.sleep(86400)
+            await asyncio.sleep(3600)
 
     for coro in (job_keep_db_alive, job_update_pulse, job_echo_of_distortion,
                  job_happy_hour, job_weekly_guild_rating, job_reengagement, job_winback,

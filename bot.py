@@ -11316,7 +11316,20 @@ async def activation_push(ctx: AppContext) -> None:
     created_at < now()-1ч: не дёргаем того, кто буквально секунду назад
     зарегистрировался и ещё не долистал приветственный экран.
     activation_push_count < 4: не спамим бесконечно явно незаинтересованного
-    мёртвого аккаунта — 4 попытки (при кулдауне ниже это ~2 недели) и тишина.
+    мёртвого аккаунта — 4 попытки и тишина.
+
+    Кулдаун между попытками СВОИМ ЖЕ раньше был плоский 3 дня на каждую —
+    и первый напоминание могло реально дойти только на следующий суточный
+    прогон джобы (job_activation спала 86400с), т.е. окно, где интерес к
+    только что открытой игре ещё жив, использовалось в лучшем случае на
+    четверть. Джоба (main.py) теперь просыпается раз в час — эта функция
+    подхватывает свежих кандидатов быстро; сам кулдаун между попытками —
+    убывающая лестница 1д → 3д → 5д (день выбора для догоняющих писем/пушей
+    в growth-практике — не флэт), а не растянутый плоский 3-дневный шаг:
+    2-я попытка ловит момент, пока регистрация ещё свежа в памяти, 3-я и
+    4-я расходятся шире для явно не откликнувшихся — не в наказание, а
+    чтобы не превращаться в надоедливый шум для тех, кто уже трижды
+    показал, что не вернётся.
     last_activation_push_sent обновляется и на blocked/dead-chat, не только
     на sent — иначе мёртвый чат ретраился бы каждый прогон вечно; на
     настоящей ошибке (failed) не обновляется — это может быть временный сбой,
@@ -11325,8 +11338,10 @@ async def activation_push(ctx: AppContext) -> None:
     if not ctx or not ctx.db_pool:
         return
 
-    guard_before = datetime.now(timezone.utc) - timedelta(days=3)
     created_before = datetime.now(timezone.utc) - timedelta(hours=1)
+    gate_2 = datetime.now(timezone.utc) - timedelta(days=1)
+    gate_3 = datetime.now(timezone.utc) - timedelta(days=3)
+    gate_4 = datetime.now(timezone.utc) - timedelta(days=5)
 
     try:
         async with ctx.db_pool.acquire() as conn:
@@ -11334,8 +11349,13 @@ async def activation_push(ctx: AppContext) -> None:
                 "SELECT user_id, balance FROM players "
                 "WHERE last_farm IS NULL AND created_at < $1 "
                 "AND activation_push_count < 4 "
-                "AND (last_activation_push_sent IS NULL OR last_activation_push_sent < $2)",
-                created_before, guard_before,
+                "AND ("
+                "  (activation_push_count = 0 AND last_activation_push_sent IS NULL)"
+                "  OR (activation_push_count = 1 AND last_activation_push_sent < $2)"
+                "  OR (activation_push_count = 2 AND last_activation_push_sent < $3)"
+                "  OR (activation_push_count = 3 AND last_activation_push_sent < $4)"
+                ")",
+                created_before, gate_2, gate_3, gate_4,
             )
     except Exception as e:
         logger.error(f"activation query error: {e}")
