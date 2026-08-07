@@ -21,6 +21,7 @@ from tenacity import (
 from pydantic import BaseModel, ConfigDict, Field
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
+from telegram.constants import ChatMemberStatus
 from telegram.ext import ContextTypes
 from telegram.error import BadRequest, Forbidden, RetryAfter
 
@@ -1491,6 +1492,17 @@ async def _run_migrations(conn):
     await conn.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS prestige BIGINT DEFAULT 0;")
     await conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_players_prestige ON players(prestige DESC);")
+
+    # ── blocked_at: момент реальной блокировки бота игроком ──
+    # Раньше блокировка обнаруживалась только реактивно: push-джоба сама
+    # пыталась написать игроку и ловила 403 — /growth видел агрегат
+    # «заблокировали: N», но не момент блокировки. «Заблокировал сразу
+    # после /start» (проблема первого впечатления) и «заблокировал спустя
+    # недели дрейфа» (обычный отток) выглядели в этой метрике одинаково.
+    # my_chat_member — нативный сигнал Telegram о смене статуса чата,
+    # приходит независимо от того, пытались ли мы вообще что-то слать —
+    # см. track_chat_member_update.
+    await conn.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS blocked_at TIMESTAMPTZ DEFAULT NULL;")
 
     # ── Бэкфилл nft_registry: реестр начал реально заполняться (см.
     # create_named_blunt/_register_nft), но уже созданные до этой правки
@@ -7480,6 +7492,36 @@ async def welcome_new_member(update, context):
 
         await safe_send_message(context, update.message.chat.id, welcome_text, reply_markup=keyboard, parse_mode='HTML')
 
+
+async def track_chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Ловит блокировку/разблокировку бота в реальном времени через
+    my_chat_member — в отличие от 403 на попытке отправки (см. push-джобы),
+    этот сигнал приходит от Telegram сам по себе, независимо от того, слали
+    ли мы вообще что-то игроку. Даёт честный blocked_at: момент, когда
+    игрок реально заблокировал бота, а не момент, когда мы это заметили.
+    """
+    ctx = context.bot_data.get("ctx")
+    if not ctx or not ctx.db_pool:
+        return
+    cm = update.my_chat_member
+    if not cm or not cm.new_chat_member:
+        return
+    uid = cm.from_user.id
+    status = cm.new_chat_member.status
+    try:
+        async with ctx.db_pool.acquire() as conn:
+            if status == ChatMemberStatus.BANNED:
+                await conn.execute(
+                    "UPDATE players SET blocked_at = now() "
+                    "WHERE user_id = $1 AND blocked_at IS NULL", uid)
+            elif status == ChatMemberStatus.MEMBER:
+                # Запустил бота заново после блокировки — снимаем отметку,
+                # иначе игрок навсегда выглядел бы «заблокировавшим».
+                await conn.execute(
+                    "UPDATE players SET blocked_at = NULL WHERE user_id = $1", uid)
+    except Exception:
+        logger.exception("track_chat_member_update: не удалось обновить blocked_at для uid=%s", uid)
+
 logger = logging.getLogger(__name__)
 
 # ============================================================
@@ -8216,6 +8258,17 @@ async def growth_stats_command(update, context, ctx):
         top = await conn.fetch(
             "SELECT username, referral_count FROM players "
             "WHERE referral_count > 0 ORDER BY referral_count DESC LIMIT 10")
+        # blocked_at — момент реальной блокировки (my_chat_member), не момент,
+        # когда push-джоба случайно наткнулась на 403. Различает «заблокировал
+        # почти сразу после /start» (проблема первого впечатления) от
+        # «заблокировал спустя недели дрейфа» (обычный отток) — без этого
+        # разреза оба случая тонут в одном агрегате «заблокировали: N» у
+        # push-джоб ниже.
+        blocked_week = await conn.fetchval(
+            "SELECT COUNT(*) FROM players WHERE blocked_at >= now() - interval '7 days'")
+        blocked_week_early = await conn.fetchval(
+            "SELECT COUNT(*) FROM players WHERE blocked_at >= now() - interval '7 days' "
+            "AND blocked_at - created_at < interval '24 hours'")
 
     never_pct = round(never_farmed / total * 100) if total else 0
     lines = [
@@ -8225,6 +8278,8 @@ async def growth_stats_command(update, context, ctx):
         f"🆕 Новых за 7 дней: <b>{new_week}</b> (по приглашению: <b>{new_week_referred}</b>)",
         f"🟢 Активны сегодня (открыли /start или фармили): <b>{dau}</b>",
         f"🔴 Ни разу не фармили: <b>{never_farmed} ({never_pct}%)</b>",
+        f"🚫 Заблокировали бота за 7 дней: <b>{blocked_week}</b> "
+        f"(в первые 24ч после регистрации: <b>{blocked_week_early}</b>)",
     ]
 
     # created_at появился только этой миграцией: если бОльшая часть ВСЕХ
@@ -8238,6 +8293,18 @@ async def growth_stats_command(update, context, ctx):
             "старым игрокам дата регистрации проставлена задним числом "
             "(миграция), число «новых» временно завышено. Станет честным "
             "через 7 дней.</i>")
+
+    if blocked_week == 0:
+        # blocked_at не бэкфиллится — Telegram не сообщает задним числом,
+        # когда игрок заблокировал бота до того, как заработал этот трекинг.
+        # Ноль сразу после деплоя — это «ещё не накопилось данных», а не
+        # «никто не блокирует» (последнее уже опровергнуто блоками в
+        # push-джобах ниже).
+        lines.append(
+            "\n<i>🚫-метрика — новая (my_chat_member), считает только блоки "
+            "с момента, когда это отследили. Ноль сейчас не значит «никто не "
+            "блокирует» — смотри «заблокировали» у пуш-джоб ниже, там счёт "
+            "не с нуля.</i>")
 
     if top:
         lines.append("\n<b>🏆 Топ по приглашениям:</b>")

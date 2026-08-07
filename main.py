@@ -12,7 +12,7 @@ from cachetools import TTLCache
 from telegram import Update
 from telegram.ext import (
     Application, ApplicationBuilder,
-    MessageHandler, CallbackQueryHandler,
+    MessageHandler, CallbackQueryHandler, ChatMemberHandler,
     AIORateLimiter, filters
 )
 from telegram.request import HTTPXRequest
@@ -34,6 +34,7 @@ from bot import (
     button_handler,
     global_error_handler,
     welcome_new_member,
+    track_chat_member_update,
     create_tables,
     _run_migrations,
     keep_db_alive,
@@ -348,6 +349,7 @@ async def main_async():
         tg_app.add_handler(MessageHandler(filters.TEXT, handle_text))
         tg_app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_member))
         tg_app.add_handler(CallbackQueryHandler(button_handler))
+        tg_app.add_handler(ChatMemberHandler(track_chat_member_update, ChatMemberHandler.MY_CHAT_MEMBER))
         tg_app.add_error_handler(global_error_handler)
 
         logger.info("🔄 Запуск tg_app.initialize()...")
@@ -439,7 +441,10 @@ async def main_async():
         await tg_app.bot.set_webhook(
             url=webhook_url,
             secret_token=settings.webhook_secret,
-            allowed_updates=["message", "callback_query"],
+            # my_chat_member — без него Telegram молча не шлёт апдейты о
+            # блокировке/разблокировке бота, даже если ChatMemberHandler
+            # зарегистрирован (см. track_chat_member_update в bot.py).
+            allowed_updates=["message", "callback_query", "my_chat_member"],
             drop_pending_updates=True
         )
 
