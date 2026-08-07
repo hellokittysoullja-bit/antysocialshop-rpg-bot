@@ -1415,6 +1415,44 @@ async def test_luck_result_buttons_dont_claim_menu():
           "оба экрана (Колесо, Алхимия) честно ведут «К удаче», не «В меню»")
 
 
+# ── 33. Колесо/Алхимия: подвеска ожидания перед раскрытием результата ──
+async def test_wheel_and_alchemy_have_suspense_before_reveal():
+    """SLAYER Red Team (Cluster Б, A1 Dopamine/Neuroscience): дофаминовые
+    нейроны отвечают сильнее на предсказывающий сигнал, чем на сам приз
+    (Schultz 1997, reward prediction error) — раньше обе азартные механики
+    раскрывали результат МГНОВЕННО на тап, ноль кадров ожидания. Проверяем,
+    что подвеска реально рендерится (несколько edit_text ДО финального
+    результата), а сам финальный результат/кнопка при этом не меняются."""
+    p = Player(user_id=1, exists=True, balance=1000, total_earned=1000,
+               blunts=20, last_daily=None, daily_progress={})
+    ctx = make_ctx(p)
+    upd = FakeUpdate("luck_wheel", uid=1)
+    await bot._process_wheel(upd, FakeContext(ctx), 1, p, bot.LUCK_CONFIG, ctx)
+    calls = upd.callback_query.message.edit_calls
+    check(len(calls) == 5,
+          f"Колесо: 4 кадра подвески + 1 финальный результат (было 0+1): получили {len(calls)}")
+    check("крутится" in calls[0][0],
+          "первый кадр Колеса — визуальная подвеска, не готовый результат")
+    final_kb = calls[-1][1].get("reply_markup")
+    check(final_kb and final_kb.inline_keyboard[0][0].callback_data == "luck"
+          and final_kb.inline_keyboard[0][0].text == "🍀 К удаче",
+          "финальный кадр Колеса несёт настоящую кнопку результата, не подвеску")
+
+    p2 = Player(user_id=2, exists=True, balance=1000, total_earned=1000,
+                blunts=20, daily_progress={})
+    ctx2 = make_ctx(p2)
+    upd2 = FakeUpdate("alchemy_confirm", uid=2)
+    await bot._process_alchemy_confirm(upd2, FakeContext(ctx2), 2, p2, bot.LUCK_CONFIG, ctx2)
+    calls2 = upd2.callback_query.message.edit_calls
+    check(len(calls2) == 5,
+          f"Алхимия: 4 кадра подвески + 1 финальный результат (было 0+1): получили {len(calls2)}")
+    check("кипит" in calls2[0][0],
+          "первый кадр Алхимии — визуальная подвеска (кипящая реакция), не готовый результат")
+    final_kb2 = calls2[-1][1].get("reply_markup")
+    check(final_kb2 and final_kb2.inline_keyboard[0][0].callback_data == "luck",
+          "финальный кадр Алхимии несёт настоящую кнопку результата, не подвеску")
+
+
 # ── 32. Час Удачи: личное DM-уведомление, не только чат гильдии ──────
 async def test_happy_hour_dm_broadcast_reaches_candidates():
     """SLAYER Red Team (Cluster Б, A1 Dopamine/Neuroscience + A3 Systems):
@@ -1541,6 +1579,7 @@ async def main():
                test_skip_onboarding_referral_reward_guarded_against_double_fire,
                test_happy_hour_dm_broadcast_reaches_candidates,
                test_happy_hour_trigger_schedules_dm_broadcast,
+               test_wheel_and_alchemy_have_suspense_before_reveal,
                test_no_double_ctx_callsites):
         print(f"\n{fn.__name__}:")
         await fn()

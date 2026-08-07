@@ -6653,6 +6653,45 @@ async def luck_callback(update, context, action=None):
     await edit_or_reply(update, context, text, reply_markup=kb, parse_mode='HTML')
 
 
+async def _suspense_reveal(update, context, frames: list, frame_delay: float = 0.35) -> None:
+    """Короткая подвеска ожидания перед раскрытием результата азартной
+    механики: несколько кадров редактируют ОДИН И ТОТ ЖЕ экран (не плодит
+    сообщений); сам финальный результат кладёт вызывающий код отдельным
+    edit_or_reply сразу после — эта функция чисто косметическая, сбой
+    здесь (устаревшее сообщение, фото вместо текста) не должен стоить
+    самого результата, просто тихо пропускаем подвеску.
+
+    SLAYER Red Team (Cluster Б, A1 Dopamine/Neuroscience): дофаминовые
+    нейроны отвечают СИЛЬНЕЕ на предсказывающий сигнал, чем на сам приз,
+    как только связь усвоена (Schultz 1997 — reward prediction error;
+    сигнал ожидания несёт больше нейрохимического отклика, чем момент
+    доставки). Колесо и Алхимия — единственные две по-настоящему азартные
+    механики игры, и обе раскрывали результат МГНОВЕННО на тап, без
+    единого кадра ожидания — отдавая большую часть отклика впустую.
+
+    query.answer() — здесь, а не только внутри финального edit_or_reply:
+    подвеска сама по себе занимает ~секунду смены кадров, спиннер кнопки
+    не должен висеть всё это время до финального edit_or_reply. Двойной
+    answer() безопасен — тот же приём уже используется в edit_or_reply.
+    """
+    query = update.callback_query
+    if not query or not query.message:
+        return
+    try:
+        await query.answer()
+    except Exception:
+        pass
+    for frame in frames:
+        try:
+            await query.message.edit_text(frame, parse_mode='HTML')
+        except Exception:
+            return   # экран не поддаётся редактированию — тихо пропускаем подвеску
+        await asyncio.sleep(frame_delay)
+
+
+_WHEEL_SPIN_SYMBOLS = ("🍬", "💰", "🌿", "🩸", "⚜️", "🎯")
+
+
 # ── Колесо ──────────────────────────────────────────────────
 async def _process_wheel(update, context, uid, player, cfg, ctx):
     if not _check_wheel_availability(player, datetime.now(), cfg["wheel"]["cooldown_hours"]):
@@ -6691,6 +6730,15 @@ async def _process_wheel(update, context, uid, player, cfg, ctx):
         await _notify_user(update, context, "❌ Ошибка при обработке. Попробуй позже.")
         return
     prize, ptype, new_balance, near_miss = result
+
+    # Подвеска ожидания ДО раскрытия — см. _suspense_reveal. Исход уже
+    # определён (result выше), кадры не влияют на экономику, чисто визуальный
+    # разгон-и-замедление перед тем же самым результатом.
+    await _suspense_reveal(
+        update, context,
+        frames=[f"<b>🎡 Колесо крутится...</b>\n\n{'  '.join(random.sample(_WHEEL_SPIN_SYMBOLS, 3))}"
+                for _ in range(3)] + ["<b>🎡 Колесо замедляется...</b>"],
+    )
 
     uname = html.escape(update.effective_user.username or update.effective_user.first_name)
     if ptype == "jackpot":
@@ -7203,6 +7251,17 @@ async def _process_alchemy_confirm(update, context, uid, player, cfg, ctx):
     if status == AlchemyResult.NO_RESOURCES:
         await _notify_user(update, context, "❌ Недостаточно ресурсов. Нужно 10 блантов и 250 OAC.", show_alert=True)
         return
+
+    # Подвеска ожидания ДО раскрытия — см. _suspense_reveal у Колеса. Исход
+    # уже определён (result выше), кадры — тот же ▓░-бар, что и везде в
+    # игре (медали/ранги/серия), а не новый визуальный язык с нуля.
+    await _suspense_reveal(
+        update, context,
+        frames=["<b>⚗️ Реакция кипит...</b>\n\n🧪 ▓░░░░",
+                "<b>⚗️ Реакция кипит...</b>\n\n🧪 ▓▓▓░░",
+                "<b>⚗️ Реакция кипит...</b>\n\n🧪 ▓▓▓▓▓",
+                "<b>⚗️ Котёл готов раскрыть тайну...</b>"],
+    )
 
     await edit_or_reply(update, context, data[0],
                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🍀 К удаче", callback_data="luck")]]))
