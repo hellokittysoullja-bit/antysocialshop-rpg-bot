@@ -2176,7 +2176,15 @@ def get_medal_text_and_reward(old_count, new_count, medals_list):
     for threshold, medal_name, reward in medals_list:
         if old_count < threshold <= new_count:
             bonus += reward
-            text += f"🎉 <b>Твой ранг повышен до {medal_name}!</b> (+{reward} OAC)\n"
+            # Label-style "Новый уровень: X", не "повышен до X" — старые
+            # тематические названия (Бронза/Серебро/...) случайно совпадали
+            # с нужным падежом ("до Бронзы" — нет, на самом деле уже было
+            # неверно грамматически); новые многословные титулы («Хозяин
+            # Урожая», «Заклинатель» и т.п.) делают несклоняемую вставку
+            # обязательной, не косметической. Тот же приём уже используется
+            # в get_rank_progress («⚜️ Ранг: X → Y») — не новый голос, а
+            # уже принятый в игре паттерн.
+            text += f"🎉 <b>Новый уровень: {medal_name}!</b> (+{reward} OAC)\n"
     return text, bonus
 
 def progress_bar(percent):
@@ -2709,9 +2717,13 @@ def get_medal_progress(new_count, medals_list, just_leveled=False):
         goal_str = f"<b>{cur_medal}</b> → <b>{next_medal}</b>"
         # Goal-gradient: на последних 1–3 шагах до медали — явный крючок близости
         # к цели (дофаминовый пик предвкушения тем сильнее, чем ближе награда).
+        # Label-style "Ещё N: X", не "N до X" — та же причина, что в
+        # get_medal_text_and_reward (см. комментарий там): "до X" требует
+        # родительного падежа, который новые тематические названия не
+        # выдерживают без отдельной словоформы на каждое.
         remaining = next_th - new_count
         if 1 <= remaining <= 3:
-            goal_str += f"\n🔥 <b>Ещё {remaining} до {next_medal}!</b>"
+            goal_str += f"\n🔥 <b>Ещё {remaining} до цели: {next_medal}!</b>"
     return f"{bar} {progress}%\n{goal_str}"
 
 def get_rank_progress(balance, compact=False):

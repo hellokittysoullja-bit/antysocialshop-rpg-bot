@@ -1453,6 +1453,35 @@ async def test_wheel_and_alchemy_have_suspense_before_reveal():
           "финальный кадр Алхимии несёт настоящую кнопку результата, не подвеску")
 
 
+# ── 34. Названия медалей: свой голос на каждой дорожке, без слома падежа ─
+async def test_medal_names_are_thematic_and_grammar_safe():
+    """SLAYER Red Team (Cluster «начало игры», A5 Voice/Copy): Бронза/
+    Серебро/Золото/Платина были ОДНИМ шаблоном на всех пяти дорожках сразу —
+    голос, который ничего не говорит рядом с «Фабрика №9»/«Искажение». Заодно
+    ловим грамматику: "повышен до {name}"/"{N} до {name}" требуют
+    родительного падежа — с новыми многословными титулами это стало бы
+    заметной ломаной фразой, если бы вставки остались падежными."""
+    tracks = (bot.FARM_MEDALS, bot.CRAFT_MEDALS, bot.SMOKE_MEDALS,
+              bot.RITUAL_MEDALS, bot.REPENT_MEDALS)
+    all_names = [name for track in tracks for _, name, _ in track]
+    check(not any(generic in name for name in all_names
+                  for generic in ("Бронза", "Серебро", "Золото", "Платина")),
+          "ни одна дорожка не использует старый олимпийский шаблон")
+    check(len(set(all_names)) == len(all_names),
+          "все 20 титулов (5 дорожек × 4 тира) различны — ни одного дубля между дорожками")
+
+    text, bonus = bot.get_medal_text_and_reward(0, 1, bot.FARM_MEDALS)
+    check("Новый уровень:" in text and bot.FARM_MEDALS[0][1] in text,
+          "рангап медали — label-конструкция, не требует падежа от названия")
+    check("повышен до" not in text,
+          "старая падежно-ломкая формулировка не вернулась")
+    check(bonus == bot.FARM_MEDALS[0][2], "награда за медаль не тронута правкой текста")
+
+    progress = bot.get_medal_progress(bot.FARM_MEDALS[0][0] - 1, bot.FARM_MEDALS, just_leveled=False)
+    check("до цели:" in progress,
+          "goal-gradient строка тоже label-конструкция, не падежная вставка")
+
+
 # ── 32. Час Удачи: личное DM-уведомление, не только чат гильдии ──────
 async def test_happy_hour_dm_broadcast_reaches_candidates():
     """SLAYER Red Team (Cluster Б, A1 Dopamine/Neuroscience + A3 Systems):
@@ -1580,6 +1609,7 @@ async def main():
                test_happy_hour_dm_broadcast_reaches_candidates,
                test_happy_hour_trigger_schedules_dm_broadcast,
                test_wheel_and_alchemy_have_suspense_before_reveal,
+               test_medal_names_are_thematic_and_grammar_safe,
                test_no_double_ctx_callsites):
         print(f"\n{fn.__name__}:")
         await fn()
