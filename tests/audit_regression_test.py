@@ -1415,6 +1415,81 @@ async def test_luck_result_buttons_dont_claim_menu():
           "оба экрана (Колесо, Алхимия) честно ведут «К удаче», не «В меню»")
 
 
+# ── 32. Час Удачи: личное DM-уведомление, не только чат гильдии ──────
+async def test_happy_hour_dm_broadcast_reaches_candidates():
+    """SLAYER Red Team (Cluster Б, A1 Dopamine/Neuroscience + A3 Systems):
+    раньше пик Часа Удачи (x2 OAC, 30 минут) был виден только в публичном
+    чате гильдии и пассивным баннером внутри самого бота — тому, кто не
+    открыл бот именно в эти 30 минут, событие было немым. Личное DM тянет
+    игрока обратно ровно в момент реальной ценности (раз в сутки — не спам)."""
+    class _FakeResp:
+        status_code = 200
+        text = "{}"
+
+    class _FakeAsyncClient:
+        posts = []
+        def __init__(self, *a, **k): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, url, json=None, **k):
+            _FakeAsyncClient.posts.append(json)
+            return _FakeResp()
+
+    pool = FakePool(rows=[{"user_id": 111}, {"user_id": 222}])
+    ctx = make_ctx(Player(user_id=1), pool=pool)
+    orig_client = bot.httpx.AsyncClient
+    bot.httpx.AsyncClient = _FakeAsyncClient
+    _FakeAsyncClient.posts = []
+    try:
+        await bot._happy_hour_dm_broadcast(ctx)
+        check(len(_FakeAsyncClient.posts) == 2,
+              "DM уходит каждому кандидату из выборки (blocked_at IS NULL)")
+        check(all(p["chat_id"] in (111, 222) for p in _FakeAsyncClient.posts),
+              "получатели — реальные uid из выборки")
+        check(all("x2 OAC" in p["text"] and "ЧАС УДАЧИ" in p["text"] for p in _FakeAsyncClient.posts),
+              "текст сообщает и про x2, и про сам Час Удачи")
+        check(all(p.get("reply_markup", {}).get("inline_keyboard") for p in _FakeAsyncClient.posts),
+              "сообщение несёт кнопку прямого входа в фарм, не тупиковый текст")
+    finally:
+        bot.httpx.AsyncClient = orig_client
+
+
+async def test_happy_hour_trigger_schedules_dm_broadcast():
+    """happy_hour_trigger должен ЗАПУСТИТЬ рассылку (не забыть про неё при
+    рефакторинге) — проверяем реальным monkeypatch на модуле, не догадкой по
+    исходнику."""
+    class _FakeResp:
+        status_code = 200
+        text = "{}"
+
+    class _FakeAsyncClient:
+        def __init__(self, *a, **k): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, *a, **k): return _FakeResp()
+
+    calls = []
+    async def _fake_broadcast(ctx):
+        calls.append(ctx)
+    async def _fake_reset(ctx, delay):
+        pass
+    orig_broadcast = bot._happy_hour_dm_broadcast
+    orig_reset = bot._reset_happy_hour_after
+    orig_client = bot.httpx.AsyncClient
+    bot._happy_hour_dm_broadcast = _fake_broadcast
+    bot._reset_happy_hour_after = _fake_reset
+    bot.httpx.AsyncClient = _FakeAsyncClient
+    try:
+        ctx = make_ctx(Player(user_id=1))
+        await bot.happy_hour_trigger(ctx)
+        await asyncio.sleep(0)   # даём créate_task прокрутиться
+        check(len(calls) == 1, "happy_hour_trigger реально планирует DM-рассылку")
+    finally:
+        bot._happy_hour_dm_broadcast = orig_broadcast
+        bot._reset_happy_hour_after = orig_reset
+        bot.httpx.AsyncClient = orig_client
+
+
 # ── 10. Внутренние вызовы @cb-хендлеров без лишнего ctx ──────────────
 async def test_no_double_ctx_callsites():
     import re
@@ -1464,6 +1539,8 @@ async def main():
                test_referral_registration_defers_full_reward,
                test_referral_reward_fires_on_onboarding_completion,
                test_skip_onboarding_referral_reward_guarded_against_double_fire,
+               test_happy_hour_dm_broadcast_reaches_candidates,
+               test_happy_hour_trigger_schedules_dm_broadcast,
                test_no_double_ctx_callsites):
         print(f"\n{fn.__name__}:")
         await fn()

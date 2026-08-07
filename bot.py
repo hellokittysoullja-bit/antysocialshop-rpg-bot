@@ -8770,7 +8770,8 @@ async def growth_stats_command(update, context, ctx):
     lines.append("\n<b>⚙️ Здоровье пуш-джоб:</b>")
     for job, label, max_age in (("reengagement", "Возврат (1ч-3д дрейфа)", timedelta(hours=3)),
                                 ("winback", "Винбэк (3-30д дрейфа)", timedelta(days=9)),
-                                ("activation", "Активация (ни разу не фармили)", timedelta(days=2))):
+                                ("activation", "Активация (ни разу не фармили)", timedelta(days=2)),
+                                ("happy_hour_dm", "DM о Часе Удачи", timedelta(days=2))):
         row = health_rows.get(job)
         if not row:
             lines.append(f"🔴 {label}: <i>нет свежих запусков</i>")
@@ -10749,6 +10750,71 @@ async def update_pulse(ctx: AppContext):
     except Exception:
         pass
 
+async def _happy_hour_dm_broadcast(ctx: AppContext) -> None:
+    """Личное DM-уведомление о старте Часа Удачи — тем, кто не сидит в боте
+    прямо сейчас.
+
+    SLAYER Red Team (Cluster Б, A1 Dopamine/Neuroscience + A3 Systems: пик
+    ценности не должен быть немым): раньше пик был виден только в публичном
+    чате гильдии (кто там не сидит — не увидит) и пассивным баннером внутри
+    самого бота (_happy_hour_banner — нужно САМОМУ зайти в игру, чтобы его
+    заметить). x2 OAC на 30 минут — реальная, не фейковая, ограниченная по
+    времени ценность (Cialdini: настоящий дефицит работает, придуманный —
+    подрывает доверие при разоблачении); именно такому событию место в
+    личном канале, а не только в фоне. Раз в сутки (см. job_happy_hour) —
+    частота DM не спамная сама по себе.
+
+    blocked_at IS NULL — фильтруем известно-заблокировавших ДО отправки
+    (остальные пуш-джобы полагаются только на реактивный dead-chat-хэндлинг
+    в момент отправки; здесь фильтр дешёвый и данные уже есть — не грузим
+    HTTP-запросами тех, кто гарантированно не получит сообщение).
+    """
+    if not ctx or not ctx.db_pool:
+        return
+    try:
+        async with ctx.db_pool.acquire() as conn:
+            rows = await conn.fetch("SELECT user_id FROM players WHERE blocked_at IS NULL")
+    except Exception as e:
+        logger.error(f"happy_hour dm query error: {e}")
+        return
+
+    text = ("🎉 <b>ЧАС УДАЧИ начался!</b>\n"
+            "🌠 Все действия приносят x2 OAC — 30 минут, прямо сейчас.")
+    kb = {"inline_keyboard": [[{"text": "🍬 Фармить", "callback_data": "farm"}]]}
+    token = ctx.settings.bot_token
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    sent = 0
+    blocked = 0
+    failed = 0
+    first_failure_logged = False
+    async with httpx.AsyncClient(timeout=10) as client:
+        for row in rows:
+            uid = row["user_id"]
+            try:
+                r = await client.post(url, json={"chat_id": uid, "text": text,
+                                                   "parse_mode": "HTML", "reply_markup": kb})
+                if r.status_code == 200:
+                    sent += 1
+                elif _is_dead_chat_error(r.status_code, r.text):
+                    blocked += 1
+                else:
+                    failed += 1
+                    if not first_failure_logged:
+                        first_failure_logged = True
+                        logger.error("happy_hour dm: sendMessage %d для uid=%s: %s",
+                                     r.status_code, uid, r.text[:300])
+            except Exception as e:
+                failed += 1
+                if not first_failure_logged:
+                    first_failure_logged = True
+                    logger.error("happy_hour dm: исключение при отправке uid=%s: %s", uid, e)
+            await asyncio.sleep(0.05)
+
+    logger.info("happy_hour dm: sent %d pushes to %d candidates (blocked=%d, failed=%d)",
+                sent, len(rows), blocked, failed)
+    await _record_job_health(ctx, "happy_hour_dm", sent, len(rows), blocked, failed)
+
+
 async def happy_hour_trigger(ctx: AppContext):
     if not ctx:
         return
@@ -10761,6 +10827,11 @@ async def happy_hour_trigger(ctx: AppContext):
             "🎉 <b>ЧАС УДАЧИ!</b> 🌠 Все действия приносят x2 OAC 🍬 (30 минут)!")
     except Exception as e:
         logger.error(f"Happy hour announce error: {e}")
+
+    # Личный канал — не только публичный чат и пассивный баннер (см. докстрок
+    # _happy_hour_dm_broadcast). Фоном: полная рассылка не должна держать
+    # включение Часа Удачи и таймер сброса ниже.
+    asyncio.create_task(_happy_hour_dm_broadcast(ctx))
 
     # Отложенное выключение через asyncio вместо PTB job_queue
     asyncio.create_task(_reset_happy_hour_after(ctx, ctx.settings.happy_hour_duration_min * 60))
