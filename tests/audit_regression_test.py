@@ -47,13 +47,16 @@ class FakeMsg:
         self.message_id = 1
         self.chat = types.SimpleNamespace(id=1)
         self.edits = []
+        self.edit_calls = []   # (text, kwargs) — для тестов, которым нужен reply_markup
 
     async def edit_text(self, text, **kw):
         self.edits.append(text)
+        self.edit_calls.append((text, kw))
         return self
 
     async def reply_text(self, text, **kw):
         self.edits.append(text)
+        self.edit_calls.append((text, kw))
         return self
 
     async def delete(self):
@@ -470,18 +473,57 @@ async def test_named_blunt_name_persisted():
     check('item["original_name"] = original_name' in body,
           "исходный ввод игрока сохраняется рядом (его показывают в деталях)")
 
-    # Гарантированный CTA «Первый друг»: на первой персонализации (называние
-    # бесплатного стартового бланта) — единственный 100%-гарантированный,
-    # не завязанный на удачу момент компетентности в игре. Гейт на
-    # referral_count==0 обязателен — иначе уже пригласившим показывали бы
-    # тот же CTA снова и снова (нагрузка, а не крючок).
+    # Автограф-фрейминг должен стоять в обоих местах (бесплатный ре-нейминг
+    # и платный крафт) — извлекается ДО того, как index() ниже сдвинет body.
     free_branch = body[:body.index("=== ГЕНЕРАЦИЯ ИМЕНИ")]
-    check("player.referral_count or 0" in free_branch,
-          "CTA «Подари другу» гейтится на referral_count==0 — не показывается тем, кто уже приглашал")
-    check('callback_data="invite_friend"' in free_branch,
-          "CTA ведёт на уже готовый invite_friend_handler, не дублирует его логику")
     check("автограф" in free_branch and "автограф" in body[body.index("=== ГЕНЕРАЦИЯ ИМЕНИ"):],
           "оба момента (бесплатный и платный именной блант) используют autograph-фрейминг (extended self)")
+
+    # SLAYER Red Team (A₈) поймал реальный баг: гарантированный CTA «Первый
+    # друг» раньше стоял в ветке переименования БЕЗЫМЯННОГО named-item —
+    # но create_named_blunt нигде в файле не вызывается с пустым именем
+    # (стартовый блант получает имя сразу при регистрации), так что та
+    # ветка мертва для любого реального игрока, и CTA никогда никому не
+    # показывался. Теперь CTA — в onboarding_reward, единственном по-настоящему
+    # гарантированном (onboarding_step необратимо 2→-1) экране.
+    check('callback_data="invite_friend"' not in free_branch,
+          "мёртвая ветка переименования больше не несёт CTA, который никогда не показывался")
+
+
+# ── 30. Гарантированный CTA «Первый друг» теперь на РЕАЛЬНО гарантированном
+#        экране (onboarding_reward), не на мёртвой ветке ────────────────────
+async def test_onboarding_reward_has_reachable_referral_cta():
+    """onboarding_step необратимо переходит 2→-1 непосредственно перед этим
+    экраном (craft_normal_v2), и путь farm→craft_normal→reward — обязательный
+    маршрут онбординга, не опциональный. В отличие от прежнего места (ветка
+    переименования безымянного бланта в handle_named_name, которая никогда
+    не выполнялась ни для одного реального игрока), этот экран действительно
+    гарантирован."""
+    def _last_markup(upd):
+        calls = upd.callback_query.message.edit_calls
+        return calls[-1][1].get("reply_markup") if calls else None
+
+    def _has_invite_button(markup):
+        if not markup:
+            return False
+        return any(getattr(btn, "callback_data", None) == "invite_friend"
+                   for row in markup.inline_keyboard for btn in row)
+
+    p1 = Player(user_id=1, exists=True, balance=100, total_earned=100,
+                referral_count=0, daily_progress={})
+    ctx1 = make_ctx(p1)
+    upd1 = FakeUpdate("onboarding_reward", uid=1)
+    await bot.onboarding_reward(upd1, FakeContext(ctx1))
+    check(_has_invite_button(_last_markup(upd1)),
+          "игрок БЕЗ рефералов видит гарантированный CTA на реально гарантированном экране")
+
+    p2 = Player(user_id=2, exists=True, balance=100, total_earned=100,
+                referral_count=3, daily_progress={})
+    ctx2 = make_ctx(p2)
+    upd2 = FakeUpdate("onboarding_reward", uid=2)
+    await bot.onboarding_reward(upd2, FakeContext(ctx2))
+    check(not _has_invite_button(_last_markup(upd2)),
+          "игрок, который УЖЕ приглашал, не видит CTA повторно (не нагрузка, а разовый крючок)")
 
 
 # ── 11. Добавление бота в чат — больше не немой момент ───────────────
@@ -1287,6 +1329,7 @@ async def main():
                test_world_hub_fog_note_matches_locked_locations,
                test_altar_locked_shows_endgame_showcase,
                test_welcome_text_has_framing_without_extra_tap,
+               test_onboarding_reward_has_reachable_referral_cta,
                test_no_double_ctx_callsites):
         print(f"\n{fn.__name__}:")
         await fn()

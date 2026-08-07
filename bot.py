@@ -4026,22 +4026,21 @@ async def handle_named_name(update, context):
                     f"подаренный, останется твоим следом в чужой коллекции."
                 )
 
-                kb_rows = [[InlineKeyboardButton("💍 Мои бланты", callback_data="my_blunts")]]
-                # Гарантированный (не вероятностный) момент для тех, кто ещё
-                # НИ РАЗУ никого не приглашал: это первая персонализация в
-                # игре — пик компетентности «я это создал» (IKEA-эффект),
-                # а не пик удачи вроде джекпота/ранг-апа, до которого
-                # свежий игрок может и не дожить. invite_friend_handler уже
-                # полностью собран (соц-пруф, дарение, двойная выгода) —
-                # просто живёт в Профиле, куда новичок сам может не дойти
-                # рано. Роутим сюда, не дублируя его логику.
-                if not (player.referral_count or 0):
-                    kb_rows.insert(0, [InlineKeyboardButton(
-                        "🎁 Подари другу лучший старт", callback_data="invite_friend")])
-                kb_rows.append([InlineKeyboardButton("🔙 В меню", callback_data="menu")])
-
+                # Red Team (SLAYER A₈) поймал реальный баг: этот CTA раньше стоял
+                # ЗДЕСЬ с комментарием "гарантированный момент" — но эта ветка
+                # переименовывает БЕЗЫМЯННЫЙ named-item, а create_named_blunt
+                # НИГДЕ в файле не вызывается с пустым именем (проверено по всем
+                # call site'ам) — стартовый блант при регистрации получает имя
+                # сразу (_create_new_player: create_named_blunt(uid, new_name, …)
+                # с непустым new_name). Ветка мертва для любого реального игрока,
+                # CTA внутри нее никогда не показывался никому. Перенесён в
+                # onboarding_reward — единственный по-настоящему гарантированный,
+                # ровно один раз наступающий момент (см. там).
                 await update.message.reply_text(caption, parse_mode='HTML',
-                    reply_markup=InlineKeyboardMarkup(kb_rows))
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("💍 Мои бланты", callback_data="my_blunts")],
+                        [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
+                    ]))
                 context.user_data.pop('awaiting_named_blunt', None)
                 return
 
@@ -4406,14 +4405,26 @@ async def onboarding_reward(update, context, ctx, player):
         except Exception:
             pass
 
+        # Гарантированный (не вероятностный) CTA первого приглашения для тех,
+        # кто ещё НИ РАЗУ никого не приглашал. Раньше стоял в ветке переименования
+        # безымянного стартового бланта — SLAYER Red Team (A₈) поймал, что та
+        # ветка мертва (create_named_blunt нигде не вызывается с пустым именем,
+        # стартовый блант получает имя сразу при регистрации). Этот экран —
+        # ЕДИНСТВЕННЫЙ реально гарантированный: onboarding_step необратимо
+        # переходит 2→-1 прямо перед вызовом этой функции, и путь сюда
+        # (farm → craft_normal → reward) — тот самый обязательный, не
+        # опциональный маршрут онбординга.
+        kb_rows = [[InlineKeyboardButton(cta, callback_data="daily_quest_hub")]]
+        if not (player.referral_count or 0):
+            kb_rows.append([InlineKeyboardButton(
+                "🎁 Подари другу лучший старт", callback_data="invite_friend")])
+
         await query.message.edit_text(
             f"🎓 <b>Отныне Фабрика №9 признаёт тебя Странником.</b>\n\n"
             f"🎁 <b>Бонус за обучение: +30 OAC, +1 блант!</b>\n"
             f"💎 Баланс: {new_bal} OAC · 🗞️ Блантов: {new_blunts}\n\n"
             f"{body}",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton(cta, callback_data="daily_quest_hub")
-            ]]),
+            reply_markup=InlineKeyboardMarkup(kb_rows),
             parse_mode='HTML'
         )
     
