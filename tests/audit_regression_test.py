@@ -1114,6 +1114,45 @@ async def test_send_whisper_dm_has_navigation():
     check(len(upd.callback_query.answers) >= 1, "send_whisper_dm гасит спиннер")
 
 
+# ── 26. Незарегистрированный чужак не видит игровые экраны в обход /start ──
+async def test_unregistered_stranger_gets_start_prompt():
+    """get_by_id для никогда не регистрировавшегося возвращает не None, а
+    пустой Player(exists=False) (repository.py: return Player(user_id=user_id))
+    — тот же баг, что уже чинили в welcome_new_member/guild_join_handler.
+    guild_info_callback/privilege_callback/luck_callback/lab_enter не идут
+    через @game_handler (нет гейта выше) и проверяли `if not player`/
+    `not player.user_id` — оба всегда False для такого Player, так что
+    незнакомец, набравший /guild, /privilege, /luck или /lab БЕЗ /start,
+    видел полноценный игровой экран с нулевыми полями вместо приглашения
+    активироваться."""
+    stranger = Player(user_id=999, exists=False)
+    ctx = make_ctx(stranger)
+
+    def _last_edit(upd):
+        edits = upd.callback_query.message.edits
+        return (edits[-1] or "") if edits else ""
+
+    upd1 = FakeUpdate("guild_info", uid=999)
+    await bot.guild_info_callback(upd1, FakeContext(ctx))
+    check("start" in _last_edit(upd1).lower(),
+          f"guild_info_callback отправляет незнакомца к /start, а не в экран Гильдий: {_last_edit(upd1)!r}")
+
+    upd2 = FakeUpdate("privilege", uid=999)
+    await bot.privilege_callback(upd2, FakeContext(ctx))
+    check("start" in _last_edit(upd2).lower(),
+          f"privilege_callback отправляет незнакомца к /start: {_last_edit(upd2)!r}")
+
+    upd3 = FakeUpdate("luck", uid=999)
+    await bot.luck_callback(upd3, FakeContext(ctx))
+    check("start" in _last_edit(upd3).lower(),
+          f"luck_callback отправляет незнакомца к /start вместо хаба Удачи: {_last_edit(upd3)!r}")
+
+    upd4 = FakeUpdate("lab_start", uid=999)
+    await bot.lab_enter(upd4, FakeContext(ctx))
+    check("start" in _last_edit(upd4).lower(),
+          f"lab_enter отвечает незнакомцу приглашением /start, а не молчит: {_last_edit(upd4)!r}")
+
+
 # ── 23. «🏰 В меню» на экранах удачи вёл НЕ в меню — мисклейбл пофикшен ──
 async def test_luck_result_buttons_dont_claim_menu():
     """Результаты Колеса/Алхимии показывали кнопку «🏰 В меню», но
@@ -1169,6 +1208,7 @@ async def main():
                test_luck_result_buttons_dont_claim_menu,
                test_query_answer_called_second_wave,
                test_send_whisper_dm_has_navigation,
+               test_unregistered_stranger_gets_start_prompt,
                test_no_double_ctx_callsites):
         print(f"\n{fn.__name__}:")
         await fn()

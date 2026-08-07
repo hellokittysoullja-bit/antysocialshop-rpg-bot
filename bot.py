@@ -5890,7 +5890,13 @@ async def guild_info_callback(update, context):
     user, msg = get_user_and_msg(update)
     uid = user.id
     player = await ctx.repo.get_by_id(uid)
-    if not player:
+    # Было `if not player:` — get_by_id для незарегистрированного возвращает
+    # не None, а пустой Player(exists=False) (тот же баг, что уже чинили в
+    # welcome_new_member/guild_join_handler). Условие никогда не срабатывало:
+    # незнакомец, набравший /guild или "гильдия" НЕ через /start (эта команда
+    # без декоратора/гейта), видел полный экран Гильдий с нулевыми полями
+    # вместо приглашения активироваться.
+    if not player or not player.exists:
         await edit_or_reply(update, context, "Профиль не найден. Напиши /start")
         return
 
@@ -6310,7 +6316,11 @@ async def privilege_callback(update, context):
     user, msg = get_user_and_msg(update)
     uid = user.id
     player = await ctx.repo.get_by_id(uid)
-    if not player or not player.user_id:
+    # Было `not player.user_id` — get_by_id всегда конструирует Player(user_id=uid)
+    # даже для незарегистрированного (repository.py: return Player(user_id=user_id)),
+    # так что user_id truthy в любом случае — условие никогда не срабатывало.
+    # /privilege и "привилегия" не идут через @game_handler (нет гейта выше).
+    if not player or not player.exists:
         await _notify_user(update, context, "Сначала активируйся: /start")
         return
     # Ранг и «сила» — по заработанному за всё время, а не по остатку кошелька.
@@ -6444,7 +6454,12 @@ async def luck_callback(update, context, action=None):
     user, msg = get_user_and_msg(update)
     uid = user.id
     player = await ctx.repo.get_by_id(uid)
-    if not player or not player.user_id:
+    # Тот же баг, что в privilege_callback/guild_info_callback: user_id у
+    # get_by_id truthy даже для незарегистрированного, условие никогда не
+    # срабатывало. Дальше по коду player.balance/player.guild читаются
+    # напрямую (не через atomic_update) — без этого гейта незнакомец видел бы
+    # полноценный хаб Удачи и мог бы тапнуть в _process_wheel/_process_mines.
+    if not player or not player.exists:
         await _notify_user(update, context, "Сначала активируйся: /start")
         return
 
@@ -7113,7 +7128,15 @@ async def lab_enter(update, context):
     user, msg = get_user_and_msg(update)
     uid = user.id
     player = await ctx.repo.get_by_id(uid)
-    if not player:
+    # Было `if not player: return` — самый тихий вариант того же бага, что и
+    # в guild_info_callback/privilege_callback/luck_callback: условие никогда
+    # не срабатывало (get_by_id не возвращает None), а незнакомец, набравший
+    # /lab или "лабиринт" без /start, не только видел полный экран входа —
+    # при полной тишине (не «профиль не найден», а буквально НИЧЕГО) не имел
+    # даже намёка, что пошло не так, и мог начать забег в user_data для
+    # аккаунта, которого нет в БД.
+    if not player or not player.exists:
+        await _notify_user(update, context, "Сначала активируйся: /start")
         return
     depth = player.lab_depth or 1
     now = datetime.now()
@@ -8370,8 +8393,19 @@ async def give_oac(update, context, ctx):
         return
 
     try:
+        # /give_oac намеренно умеет начислять НЕзарегистрированному (см. ниже:
+        # atomic_update вернёт None, и для него создастся свежий Player) — сам
+        # факт "не найден в БД" тут не ошибка. Баг был в другом: get_by_id
+        # всегда возвращает объект (Player(exists=False), не None), поэтому
+        # `if target_player else` никогда не уходил в фолбэк, и для настоящего
+        # незнакомца target_name становился None (username по умолчанию) —
+        # html.escape(None) ниже бросал AttributeError, тот молча гасился
+        # внешним except, а админ видел ложное "не удалось начислить" ПОСЛЕ
+        # того, как баланс уже реально зачислился.
         target_player = await ctx.repo.get_by_id(target_id, with_inventory=False)
-        target_name = target_player.username if target_player else f"ID{target_id}"
+        target_name = (target_player.username
+                        if target_player and target_player.exists and target_player.username
+                        else f"ID{target_id}")
     except Exception:
         target_name = f"ID{target_id}"
 
