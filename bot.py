@@ -392,11 +392,21 @@ async def _win_share_button(context, uid: int, win_line: str) -> InlineKeyboardB
     """
     bot_username = (await context.bot.get_me()).username
     ref_link = f"https://t.me/{bot_username}?start=ref_{uid}"
+    # Соц-доказательство в самом приглашении, не только в приветствии тем, кто
+    # уже вступил в чат — тот же сдвиг, что в invite_friend_handler. Хелпер
+    # раньше не трогал bot_data вообще — getattr, а не прямой доступ, чтобы
+    # не заводить новую жёсткую зависимость там, где раньше её не было.
+    ctx = getattr(context, "bot_data", None) and context.bot_data.get("ctx")
+    proof = ""
+    if ctx:
+        total_players = await count_total_players(ctx)
+        if total_players:
+            proof = f"\n👥 Уже {total_players} Странников в игре."
     # Ссылка НЕ дублируется в тексте — build_share_url несёт её отдельным
     # параметром url=, Telegram сам покажет её получателю (с превью).
     # Повторение той же ссылки текстом внутри text= давало на экране друга
     # одну и ту же голую ссылку дважды подряд.
-    share_text = f"{win_line}\n\n🎁 Заходи по ссылке — +100 OAC на старт:"
+    share_text = f"{win_line}{proof}\n\n🎁 Заходи по ссылке — +100 OAC на старт:"
     return InlineKeyboardButton("📤 Поделиться победой", url=build_share_url(ref_link, share_text))
 
 # ── Исключения ──────────────────────────────────────────────
@@ -1805,6 +1815,41 @@ async def count_guilds(ctx: AppContext) -> dict:
     )
 
 
+async def get_guild_war_scores(ctx: AppContext) -> dict:
+    """Текущий счёт войны гильдий этой недели — кэш 60с (счёт не обязан быть
+    посекундно точным, только видимым между сбросами). Раньше guild_weekly
+    читался ровно один раз в неделю, в момент подведения итогов —
+    compulsion loop без видимого промежуточного счёта работает вхолостую;
+    см. использование в _format_farm_message."""
+    week_start = datetime.now().date() - timedelta(days=datetime.now().weekday())
+    return await perfected_cache.fetch(
+        redis_client=ctx.redis,
+        db_pool=ctx.db_pool,
+        cache_key="guild_war_scores",
+        query="SELECT guild, total_score FROM guild_weekly WHERE week_start = $1",
+        params=(week_start,),
+        ttl=60,
+        adapter=lambda rows: {"BLACK": 0, "WHITE": 0} | {r["guild"]: r["total_score"] for r in rows},
+        fallback={"BLACK": 0, "WHITE": 0}
+    )
+
+
+async def count_total_players(ctx: AppContext) -> int:
+    """Общее число игроков — соц-доказательство в реферальных текстах
+    (invite_friend_handler/_win_share_button): решение принимается ДО клика
+    другом, а не после — число должно быть в тексте приглашения, не только
+    в приветствии тем, кто уже вступил в чат."""
+    return await perfected_cache.fetch(
+        redis_client=ctx.redis,
+        db_pool=ctx.db_pool,
+        cache_key="total_players_count",
+        query='SELECT COUNT(*) as cnt FROM players WHERE COALESCE("exists", TRUE)',
+        ttl=300,
+        adapter=lambda rows: rows[0]["cnt"] if rows else 0,
+        fallback=0
+    )
+
+
 
 async def set_setting(key: str, value: str, ctx: AppContext = None) -> None:
     if ctx is None:
@@ -2225,7 +2270,22 @@ async def process_daily_login(user_id: int, context) -> None:
             text += f"\n\n❄️ <b>Заморозка спасла твою серию!</b> Осталось: {freeze_info.get('count', 0)} ❄️"
         elif freeze_info.get("granted"):
             text += f"\n\n❄️ <b>+1 Заморозка серии за верность!</b> Всего: {freeze_info.get('count', 0)} ❄️"
-        await safe_send_message(context, user_id, text, parse_mode='HTML')
+        # Два кадра, не один: антиципация даёт больше дофамина, чем голое
+        # получение — reward prediction error выше, когда перед раскрытием
+        # есть доля секунды ожидания. Кривая наград D1-D14 детерминирована
+        # (её можно выучить наизусть за неделю), это единственный дешёвый
+        # способ вернуть в неё элемент сюрприза без изменения самих чисел.
+        # Тот же приём (send → sleep → edit_text), что уже работает в
+        # check_rank_up, применён к самому частому push-сообщению в игре.
+        msg = await safe_send_message(
+            context, user_id, f"🕯️ <i>День {streak} — открываем…</i>", parse_mode='HTML')
+        await asyncio.sleep(0.5)
+        try:
+            await msg.edit_text(text, parse_mode='HTML')
+        except Exception:
+            # Сообщение исчезло/не редактируется — награда всё равно должна
+            # дойти, анимация тут декоративна, а не критична.
+            await safe_send_message(context, user_id, text, parse_mode='HTML')
     except Exception as e:
         logger.error("Failed to send daily login msg", extra={"user_id": user_id}, exc_info=True)
 
@@ -2925,13 +2985,16 @@ def _shared_blunt_info(ref_player, args):
     return None
 
 
-async def _reward_referrer(ctx, context, creator_id):
+async def _reward_referrer(ctx, context, creator_id, new_username=None):
     """Награда рефереру: +50 OAC, счётчик, легендарный блант, метка 🩸 + уведомление."""
+    creator_username = {}
+
     async def _reward(p, conn):
         p.balance = (p.balance or 0) + 50
         p.referral_count = (p.referral_count or 0) + 1
         if "🩸" not in (p.titles or ""):
             p.titles = f"{p.titles or ''} 🩸".strip()
+        creator_username["value"] = p.username
         return p.referral_count
     count = await ctx.repo.atomic_update(creator_id, _reward)
     if count is None:
@@ -2952,6 +3015,21 @@ async def _reward_referrer(ctx, context, creator_id):
             parse_mode='HTML')
     except Exception:
         pass
+    # Оповещение в публичный чат гильдии — раньше существовало только как
+    # закомментированный блок в мёртвой _handle_referral (нигде не вызывалась,
+    # эффекта не имела). Реальный путь реферала — этот, здесь. Соц-доказательство
+    # («кто-то уже пришёл по приглашению») работает только там, где его видят
+    # посторонние, не только сам приглашённый и его друг лично — используем тот
+    # же проверенный канал/хелпер и тот же грациозный фолбэк без @username, что
+    # и check_rank_up (bot.py ~974: "Один из наших", когда юзернейма нет).
+    ref_username = creator_username.get("value")
+    who_new = f"@{html.escape(new_username)}" if new_username else "Один Странник"
+    who_ref = f"@{html.escape(ref_username)}" if ref_username else "одного из Странников"
+    await _safe_send_guild_message(
+        ctx,
+        f"<b><i>🩸 ЭХО ИСКАЖЕНИЯ</i></b>\n\n"
+        f"⚜️ <b>{who_new}</b> был призван нитью <b>{who_ref}</b>.\n"
+        f"🕸️ Искажение становится плотнее...")
     # referral_count растёт именно тут — «referral_1»/«referral_5» раньше
     # ждали случайного следующего фарма/крафта РЕФЕРЕРА вместо срабатывания
     # в момент, когда он реально видит «пришёл новый Странник».
@@ -2984,7 +3062,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _create_new_player(update, context, uid, username, invited_by=creator_id,
                                      inviter_name=inviter_name, shared_blunt=shared_blunt)
             if creator_id:
-                await _reward_referrer(ctx, context, creator_id)
+                await _reward_referrer(ctx, context, creator_id, new_username=username)
             # _create_new_player уже создал строку с АКТУАЛЬНЫМ username
             # (это и есть `username` переменная выше) — отдельный рефреш здесь
             # не нужен. Разбираем только очередь подарков.
@@ -3531,6 +3609,24 @@ async def farm_callback_v2(update, context, ctx, player):
     if _next_step:
         text += f"\n\n💡 <b>Дальше:</b> {_next_step[2]}"
 
+    # Статус войны гильдий — раньше guild_weekly читался РОВНО раз в неделю,
+    # в момент подведения итогов; между сбросами счёт был невидим никому.
+    # Дешёвый кэшированный SELECT (get_guild_war_scores, TTL 60с) на самом
+    # частом экране игры превращает войну в видимый счётчик «ещё чуть-чуть»,
+    # а не сюрприз раз в воскресенье.
+    if player.guild and ctx.war_service and await ctx.war_service.is_war_active():
+        scores = await get_guild_war_scores(ctx)
+        mine = scores.get(player.guild, 0)
+        theirs = scores.get("WHITE" if player.guild == "BLACK" else "BLACK", 0)
+        gap = mine - theirs
+        if gap > 0:
+            war_line = f"⚔️ Гильдия: 1-е место, впереди на {gap} очков"
+        elif gap < 0:
+            war_line = f"⚔️ Гильдия: 2-е место, отстаём на {-gap} очков"
+        else:
+            war_line = "⚔️ Гильдия: ровно, очко в очко"
+        text += f"\n{war_line}"
+
     # Экран-результат несёт навигацию (единый живой экран). На кулдауне НЕ
     # показываем «фарм» — это тупик (тап вернёт тот же кулдаун). Вместо этого
     # уводим в следующий шаг петли (крафт/дунуть), а таймер — в текст. В грейсе
@@ -4069,17 +4165,10 @@ async def handle_named_name(update, context):
         except Exception:
             logger.warning("FOMO-бонус: не удалось отправить сообщение uid=%d", uid)
         
-        # ── Оповещение в канал (закомментировано) ──
-        # try:
-        #     uname = html.escape(user.username or user.first_name)
-        #     await context.bot.send_message(
-        #         chat_id="@guild_antysocial",
-        #         text=f"<b><i>🩸 ЭХО ИСКАЖЕНИЯ</i></b>\n\n⚜️ <b>@{uname}</b> создал свой именной Блант {color} "
-        #              f"<b><i>«{name_escaped}»</i></b> 🌿\n<i>Редкость: {item['rarity']}</i>\n🩸 <i>{reaction}</i>",
-        #         parse_mode='HTML'
-        #     )
-        # except Exception as e:
-        #     logger.error(f"Ошибка отправки в канал: {e}")
+        # Оповещение о создании блантика в канал — уже покрыто активным вызовом
+        # _safe_send_guild_message выше (rarity in legendary/epic); этот блок был
+        # старым, мёртвым дублем той же логики (удалён, а не раскомментирован,
+        # чтобы не постить одно и то же событие в канал дважды подряд).
 
         await check_achievements(uid, context)
 
@@ -4150,13 +4239,16 @@ async def handle_use_dust(update, context):
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 В меню", callback_data="menu")]])
     await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
 
-    # ── Оповещение в канал (закомментировано) ──
-    # try:
-    #     await context.bot.send_message(chat_id="@guild_antysocial",
-    #         text=f"<b><i>⚜️ ЭХО ИСКАЖЕНИЯ 🩸</i></b>\n\n🎉 <b>@{html.escape(player.username)}</b> использовал 💠 Пыль и получил легендарный Блант <b><i>«{name}»💍</i></b>!",
-    #         parse_mode='HTML')
-    # except Exception as e:
-    #     logger.error(f"Ошибка отправки в канал: {e}")
+    # Оповещение в канал — раньше сырой context.bot.send_message без ретраев,
+    # никогда не раскомментированный. Переведено на проверенный хелпер
+    # (тот же, что у джекпотов/ранг-апов/легендарных крафтов), с грациозным
+    # фолбэком без @username, как в check_rank_up.
+    who = f"@{html.escape(player.username)}" if player.username else "Один из наших"
+    asyncio.create_task(_safe_send_guild_message(
+        ctx,
+        f"<b><i>⚜️ ЭХО ИСКАЖЕНИЯ 🩸</i></b>\n\n"
+        f"🎉 <b>{who}</b> использовал 💠 Пыль и получил легендарный Блант "
+        f"<b><i>«{html.escape(name)}»💍</i></b>!"))
 
     await check_achievements(uid, context)
 
@@ -5149,7 +5241,12 @@ async def profile_callback(update, context, ctx, player):
     # есть. Раньше она существовала одноразово и только сразу после крафта
     # именного бланта (50 OAC) — уйти с того экрана, и позвать следующего друга
     # было нечем. Полноширинная: это единственный канал органического роста.
-    kb_rows.append([InlineKeyboardButton("🔗 Пригласить друга (+100 OAC ему)", callback_data="invite_friend")])
+    # Анкер на СВОЮ выгоду, не на выгоду друга: решение нажать принимает тот, кто
+    # видит эту кнопку, а якорь собственного выигрыша убеждает сильнее чужого,
+    # даже когда мотив искренне про друга. Текст, который реально уходит другу
+    # (invite_friend_handler → share_text), анкерит на его выгоду правильно —
+    # это тот самый случай, когда разным адресатам нужен разный порядок якоря.
+    kb_rows.append([InlineKeyboardButton("🔗 Позвать друга (+50 OAC и легендарка тебе)", callback_data="invite_friend")])
     # Утилитарные — парой в ряд: короче вертикаль, удобнее большому пальцу.
     kb_rows.append([
         InlineKeyboardButton("📖 Правила мира", callback_data="rules"),
@@ -8377,7 +8474,7 @@ async def growth_stats_command(update, context, ctx):
     # TTL записи — можно честно сказать «был 5 дней назад», а не просто
     # «нет данных», неотличимо от «не было вообще ни разу».
     lines.append("\n<b>⚙️ Здоровье пуш-джоб:</b>")
-    for job, label, max_age in (("reengagement", "Возврат (2ч-3д дрейфа)", timedelta(hours=3)),
+    for job, label, max_age in (("reengagement", "Возврат (1ч-3д дрейфа)", timedelta(hours=3)),
                                 ("winback", "Винбэк (3-30д дрейфа)", timedelta(days=9)),
                                 ("activation", "Активация (ни разу не фармили)", timedelta(days=2))):
         row = health_rows.get(job)
@@ -8614,9 +8711,13 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
         # звезда присутствует всегда — постоянный ответ «к чему я иду».
         lines = [f"<i>{whisper}</i>", "", _north_star_line(earned)]
 
-    # Общие краткие сообщения (всегда) — новые фичи оставлены
+    # Общие краткие сообщения (всегда) — новые фичи оставлены. Жирным — только
+    # то слово, ради которого строка вообще существует (награда/число), а не
+    # вся фраза целиком: этот блок может встать РЯДОМ с уже жирным приветствием
+    # и подсказкой full_mode — если жирное там, тут и в hint выше, контраст,
+    # который должен выделять САМОЕ важное, перестаёт что-либо выделять.
     if context and context.user_data.get("return_after_pause"):
-        lines.append("🎁 <b>Пока вас не было: накопились задания и готова награда</b>")
+        lines.append("🎁 Пока вас не было: накопились задания и <b>готова награда</b>")
         context.user_data["return_after_pause"] = False
 
     # Было `== 3`: нудж показывался РОВНО один день. Пропустил — и предложение
@@ -8630,7 +8731,7 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
     if _streak >= 3:
         _fz = player.streak_freezes or 0
         _fz_note = f" · ❄️{_fz}" if _fz > 0 else ""
-        lines.append(f"🔥 <b>Серия входов: {_streak} дн.</b>{_fz_note} — вернись завтра за наградой!")
+        lines.append(f"🔥 Серия входов: <b>{_streak} дн.</b>{_fz_note} — вернись завтра за наградой!")
 
     # Час Удачи — баннер поверх всего меню (peak-момент нельзя прятать)
     hh_banner = _happy_hour_banner(ctx, now)
@@ -10058,6 +10159,14 @@ async def invite_friend_handler(update, context, ctx, player):
     bot_username = (await context.bot.get_me()).username
     ref_link = f"https://t.me/{bot_username}?start=ref_{uid}"
 
+    # Соц-доказательство ДО клика: раньше число «сколько уже играет» было
+    # видно только вступившему В ЧАТ (welcome_new_member), то есть ПОСЛЕ
+    # решения зайти — в самом приглашении, где решение реально принимается,
+    # его не было вообще. count_total_players уже кэширован (perfected_cache),
+    # лишнего похода в БД на каждый тап не добавляет.
+    total_players = await count_total_players(ctx)
+    proof_line = f"👥 Уже {total_players} Странников в игре.\n\n" if total_players else ""
+
     named = [it for it in (player.inventory or []) if it.get("type") == "named"]
     rarity_order = {"legendary": 0, "epic": 1, "rare": 2, "common": 3}
     named.sort(key=lambda x: rarity_order.get(x.get("rarity"), 3))
@@ -10077,7 +10186,7 @@ async def invite_friend_handler(update, context, ctx, player):
     best_line = (f"Вот один из моих — «{{name}}» {best_rarity_emoji}, поймал сам.\n\n"
                 if best else "")
     intro = ("🕯️⚜️ Я играю в Antysocialshop — RPG про гильдии, крафт легендарных "
-            "блантов и войну миров.\n\n")
+            "блантов и войну миров.\n\n" + proof_line)
     outro = (f"🎁 Заходи по ссылке — сразу +100 OAC на старт:\n{ref_link}\n\n"
             f"👥 Или добавь бота в свой чат — джекпоты и легендарки друзей "
             f"видны всем сами, без ссылок.")
@@ -10598,15 +10707,20 @@ async def reengagement_push(ctx: AppContext) -> None:
         фичи молча. БД есть всегда, раз есть db_pool;
       • не чаще ~1 раза в 20 ч на игрока (last_reengagement_sent в WHERE —
         фильтруется в самом запросе, не построчной проверкой после выборки);
-      • окно активности 2 ч … 3 дня (не трогаем активных и давно ушедших);
+      • окно активности 1 ч … 3 дня (не трогаем активных и давно ушедших);
       • 403 (заблокировал бота) — молча пропускаем.
+
+    Нижняя граница была 2ч — почти вчетверо дольше кулдауна фарма (30 мин):
+    грядка уже час с лишним стоит созревшей, а джоба её ещё не видит. Пик
+    желания вернуться («созрело — заберу») ближе к моменту, когда кулдаун
+    только закончился, а не спустя два часа, когда он уже остыл до фона.
     """
     if not ctx or not ctx.db_pool:
         return
 
     now = datetime.now()
     farm_cd = timedelta(hours=settings.farm_cooldown_hours)
-    drift_min = now - timedelta(hours=2)      # неактивен хотя бы 2 часа
+    drift_min = now - timedelta(hours=1)      # неактивен хотя бы 1 час
     active_window = now - timedelta(days=3)   # но не ушёл насовсем
 
     try:
@@ -10739,7 +10853,7 @@ async def _record_job_health(ctx: AppContext, job: str, sent: int, candidates: i
         pass
 
 
-def _winback_text(days_gone: int, balance: int) -> str:
+def _winback_text(days_gone: int, balance: int, item_name: str = None, item_rarity: str = None) -> str:
     """Текст для игрока, пропавшего 3-30 дней назад — окно, куда
     reengagement_push никогда не заглядывает (его верхняя граница — 3 дня).
 
@@ -10747,10 +10861,20 @@ def _winback_text(days_gone: int, balance: int) -> str:
     фарма и серия входов уже ничего не значат — это фальшивый повод. Работает
     endowment («твоё никуда не делось») + честная новизна (реальные фичи этой
     сессии — уникальные карточки, витрина, формы), а не выдуманное давление.
+
+    item_name/item_rarity — конкретный лучший предмет игрока (см. winback_push),
+    не родовое слово «блант»: endowment effect сильнее на конкретном, уникальном
+    объекте, чем на абстрактной категории — тот же принцип, что уже работает в
+    invite_friend_handler для карточки приглашения.
     """
+    if item_name:
+        emoji = {"legendary": "🟡", "epic": "🟣", "rare": "🔵"}.get(item_rarity, "🟢")
+        thing_line = f"Твой {emoji} «{html.escape(item_name)}»"
+    else:
+        thing_line = "Твой блант"
     return (
         f"🕯️ <b>Давно не виделись</b> — с последнего фарма прошло {days_gone} дн.\n\n"
-        f"Твой блант, <b>{balance} OAC</b> и место в Гильдии никуда не делись — "
+        f"{thing_line}, <b>{balance} OAC</b> и место в Гильдии никуда не делись — "
         f"всё ждёт тебя ровно там, где ты оставил.\n\n"
         f"За это время в игре кое-что изменилось: у именных блантов теперь у "
         f"КАЖДОГО свой уникальный облик, появилась витрина коллекции и наборы "
@@ -10786,7 +10910,7 @@ async def winback_push(ctx: AppContext) -> None:
     try:
         async with ctx.db_pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT user_id, last_farm, balance FROM players "
+                "SELECT user_id, last_farm, balance, inventory FROM players "
                 "WHERE last_farm IS NOT NULL AND last_farm BETWEEN $1 AND $2 "
                 "AND (last_winback_sent IS NULL OR last_winback_sent < $3)",
                 window_start, window_end, guard_before,
@@ -10794,6 +10918,8 @@ async def winback_push(ctx: AppContext) -> None:
     except Exception as e:
         logger.error(f"winback query error: {e}")
         return
+
+    rarity_order = {"legendary": 0, "epic": 1, "rare": 2, "common": 3}
 
     token = ctx.settings.bot_token
     url = f"https://api.telegram.org/bot{token}/sendMessage"
@@ -10805,7 +10931,13 @@ async def winback_push(ctx: AppContext) -> None:
         for row in rows:
             uid = row["user_id"]
             days_gone = (now - row["last_farm"]).days
-            text = _winback_text(days_gone, row["balance"] or 0)
+            named = [it for it in _json_safe_load(row["inventory"], [])
+                     if it.get("type") == "named"]
+            named.sort(key=lambda x: rarity_order.get(x.get("rarity"), 3))
+            best = named[0] if named else None
+            text = _winback_text(days_gone, row["balance"] or 0,
+                                  item_name=(best or {}).get("name"),
+                                  item_rarity=(best or {}).get("rarity"))
 
             try:
                 r = await client.post(url, json={"chat_id": uid, "text": text, "parse_mode": "HTML"})
