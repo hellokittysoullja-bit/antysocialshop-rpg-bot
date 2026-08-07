@@ -399,9 +399,9 @@ async def _win_share_button(context, uid: int, win_line: str) -> InlineKeyboardB
     ctx = getattr(context, "bot_data", None) and context.bot_data.get("ctx")
     proof = ""
     if ctx:
-        total_players = await count_total_players(ctx)
-        if total_players:
-            proof = f"\n👥 Уже {total_players} Странников в игре."
+        new_players = await count_new_players_week(ctx)
+        if new_players:
+            proof = f"\n👥 {new_players} новых Странников за эту неделю."
     # Ссылка НЕ дублируется в тексте — build_share_url несёт её отдельным
     # параметром url=, Telegram сам покажет её получателю (с превью).
     # Повторение той же ссылки текстом внутри text= давало на экране друга
@@ -1834,16 +1834,25 @@ async def get_guild_war_scores(ctx: AppContext) -> dict:
     )
 
 
-async def count_total_players(ctx: AppContext) -> int:
-    """Общее число игроков — соц-доказательство в реферальных текстах
+async def count_new_players_week(ctx: AppContext) -> int:
+    """Новых игроков за 7 дней — соц-доказательство в реферальных текстах
     (invite_friend_handler/_win_share_button): решение принимается ДО клика
     другом, а не после — число должно быть в тексте приглашения, не только
-    в приветствии тем, кто уже вступил в чат."""
+    в приветствии тем, кто уже вступил в чат.
+
+    Было: общий тотал игроков. Red Team на этой же находке (см. отчёт):
+    небольшое АБСОЛЮТНОЕ число (172 при текущем масштабе) в исследованиях
+    про social proof читается как сигнал «здесь мало кто есть», а не «здесь
+    многие есть» — тот самый эффект, ради обхода которого число вообще
+    добавлялось, работал бы против цели. Темп роста («N новых за неделю»)
+    звучит как momentum независимо от абсолютного размера базы — тот же
+    /growth уже считает это число (new_week), просто не в этом тексте.
+    """
     return await perfected_cache.fetch(
         redis_client=ctx.redis,
         db_pool=ctx.db_pool,
-        cache_key="total_players_count",
-        query='SELECT COUNT(*) as cnt FROM players WHERE COALESCE("exists", TRUE)',
+        cache_key="new_players_week_count",
+        query="SELECT COUNT(*) as cnt FROM players WHERE created_at >= now() - interval '7 days'",
         ttl=300,
         adapter=lambda rows: rows[0]["cnt"] if rows else 0,
         fallback=0
@@ -3614,15 +3623,29 @@ async def farm_callback_v2(update, context, ctx, player):
     # Дешёвый кэшированный SELECT (get_guild_war_scores, TTL 60с) на самом
     # частом экране игры превращает войну в видимый счётчик «ещё чуть-чуть»,
     # а не сюрприз раз в воскресенье.
-    if player.guild and ctx.war_service and await ctx.war_service.is_war_active():
+    #
+    # Red Team на этой же находке (см. отчёт): loss aversion работает только
+    # в ДОГОНЯЕМОМ диапазоне — голый, неограниченный разрыв на КАЖДОМ фарме
+    # рискует развернуться в learned helplessness у отстающей гильдии.
+    # Два ограничения чинят именно это, не отменяя саму находку:
+    #   • раз в 3 фарма, не на каждом — иначе тот же баннер-эффект, который
+    #     только что чинили в главном меню, просто переехал сюда;
+    #   • при разрыве больше чем в 2 раза (mine < theirs/2) — нейтральный тон
+    #     без цифры вместо потенциально деморализующего числа. Ведущей
+    #     гильдии цифра не грозит: большой отрыв мотивирует «держать темп»,
+    #     не капитулировать, асимметрия оправдана.
+    if (player.guild and ctx.war_service and new_count % 3 == 0
+            and await ctx.war_service.is_war_active()):
         scores = await get_guild_war_scores(ctx)
         mine = scores.get(player.guild, 0)
         theirs = scores.get("WHITE" if player.guild == "BLACK" else "BLACK", 0)
         gap = mine - theirs
         if gap > 0:
             war_line = f"⚔️ Гильдия: 1-е место, впереди на {gap} очков"
-        elif gap < 0:
+        elif gap < 0 and mine >= theirs / 2:
             war_line = f"⚔️ Гильдия: 2-е место, отстаём на {-gap} очков"
+        elif gap < 0:
+            war_line = "⚔️ Гильдия: 2-е место — отставание большое, но неделя не кончилась"
         else:
             war_line = "⚔️ Гильдия: ровно, очко в очко"
         text += f"\n{war_line}"
@@ -10162,10 +10185,13 @@ async def invite_friend_handler(update, context, ctx, player):
     # Соц-доказательство ДО клика: раньше число «сколько уже играет» было
     # видно только вступившему В ЧАТ (welcome_new_member), то есть ПОСЛЕ
     # решения зайти — в самом приглашении, где решение реально принимается,
-    # его не было вообще. count_total_players уже кэширован (perfected_cache),
-    # лишнего похода в БД на каждый тап не добавляет.
-    total_players = await count_total_players(ctx)
-    proof_line = f"👥 Уже {total_players} Странников в игре.\n\n" if total_players else ""
+    # его не было вообще. count_new_players_week уже кэширован
+    # (perfected_cache), лишнего похода в БД на каждый тап не добавляет.
+    # Темп роста, не тотал: небольшое абсолютное число при текущем масштабе
+    # читалось бы как «тут мало кто есть», а не как соц-доказательство
+    # (см. Red Team отчёт на этой же находке).
+    new_players = await count_new_players_week(ctx)
+    proof_line = f"👥 {new_players} новых Странников за эту неделю.\n\n" if new_players else ""
 
     named = [it for it in (player.inventory or []) if it.get("type") == "named"]
     rarity_order = {"legendary": 0, "epic": 1, "rare": 2, "common": 3}
