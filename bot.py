@@ -9129,20 +9129,26 @@ async def progress_hub_handler(update, context, ctx):
         )
         
         # --- Список заданий (галочки) ---
-        #tasks_list = []
-        #for task in filtered_tasks:
-            #label = task["label"]
-            #if progress.get(task["key"], False):
-                #tasks_list.append(f"   ✅ {label}")
-            #else:
-                #tasks_list.append(f"   ⬜️ {label}")
-        #tasks_text = "\n".join(tasks_list)
-     
+        # Был закомментирован — экран показывал только абстрактный % и счётчик
+        # «3/5 этапов», ни разу не называя, КАКИЕ шаги закрыты и какой остался.
+        # Единственное место на этом же экране, где goal-gradient не конкретный
+        # (ближайшая веха и лестница рангов ниже — оба называют точную цель):
+        # внутренняя нестыковка, а не осознанный выбор. Прогресс-хаб — один из
+        # двух постоянных пунктов подвала главного меню, трафик высокий.
+        tasks_list = []
+        for task in filtered_tasks:
+            label = task.get("label", "Задание")
+            if progress.get(task["key"], False):
+                tasks_list.append(f"   ✅ {label}")
+            else:
+                tasks_list.append(f"   ⬜️ {label}")
+        tasks_text = "\n".join(tasks_list)
+
         # --- Если всё выполнено — радостный текст (всегда!) ---
         if done == total:
-            tasks_block = f"{tasks_header}\n🎉 <b>ВСЕ ЗАДАНИЯ ВЫПОЛНЕНЫ!</b>"
+            tasks_block = f"{tasks_header}\n{tasks_text}\n🎉 <b>ВСЕ ЗАДАНИЯ ВЫПОЛНЕНЫ!</b>"
         else:
-            tasks_block = f"{tasks_header}" #\n{tasks_text}
+            tasks_block = f"{tasks_header}\n{tasks_text}"
 
         # ===== 3. СРАВНЕНИЕ С СОСЕДЯМИ =====
         # Соседи по рейтингу — по той же оси, что и сам рейтинг (total_earned).
