@@ -2714,13 +2714,21 @@ def get_medal_progress(new_count, medals_list, just_leveled=False):
             goal_str += f"\n🔥 <b>Ещё {remaining} до {next_medal}!</b>"
     return f"{bar} {progress}%\n{goal_str}"
 
-def get_rank_progress(balance):
+def get_rank_progress(balance, compact=False):
     """Возвращает прогресс ранга с жирным "Ранг:" и жирным прогресс-баром.
 
-    На вход — total_earned: шкала ранга не должна пятиться от трат."""
+    На вход — total_earned: шкала ранга не должна пятиться от трат.
+
+    compact=True — 1 строка вместо 3, без жирного (SLAYER Red Team A₄/A₅:
+    экран фарма стекует до ~10 жирных блоков разом, "жирное везде" гасит
+    само себя как сигнал). Профиль (единственный второй вызывающий) не
+    трогаем — там подробная разбивка уместна, это выделенный экран статуса,
+    а не быстрый результат действия."""
     if balance >= RANKS[-1][1]:
         emoji = RANKS[-1][0]
         name = emoji.split(' ',1)[1]
+        if compact:
+            return f"⚜️ {emoji} {name} — максимум"
         return f"<b>⚜️ Ранг:</b> {emoji} {name} (Максимум)\n<b>▓▓▓▓▓▓▓▓▓▓ 100%</b>"
     for i in range(len(RANKS)-1):
         curr_emoji, curr_th, _ = RANKS[i]
@@ -2729,6 +2737,8 @@ def get_rank_progress(balance):
             curr_name = curr_emoji.split(' ',1)[1] if ' ' in curr_emoji else curr_emoji
             progress = int((balance - curr_th) / (next_th - curr_th) * 100)
             bar = "▓" * (progress // 10) + "░" * (10 - progress // 10)
+            if compact:
+                return f"⚜️ {curr_emoji}→{next_emoji} {bar} {progress}% · {balance}/{next_th} OAC"
             return (
                 f"<b>⚜️ Ранг: {curr_emoji} → {next_emoji}</b>\n"
                 f"🎯 <b>{bar} {progress}%</b>\n"
@@ -3484,16 +3494,22 @@ def _format_farm_message(earned: int, crit: bool, happy: bool,
     # Прогресс-бары
     progress_bar_str = get_medal_progress(new_count, FARM_MEDALS, just_leveled=bool(medal_text))
     # Шкала ранга — по заработанному за всё время, а не по кошельку.
-    rank_progress = get_rank_progress(new_balance if new_earned is None else new_earned)
+    # compact=True: SLAYER Red Team (A₄/A₅) поймал экран фарма стекующим до
+    # ~10 жирных блоков в худшем случае — "жирное везде" гасит "жирное" как
+    # сигнал важности. Один герой-факт (сколько нафармил) остаётся жирным,
+    # остальное — тихая, но не потерянная информация ниже.
+    rank_progress = get_rank_progress(new_balance if new_earned is None else new_earned, compact=True)
 
-    # Сборка сообщения
+    # Сборка сообщения: единственная жирная строка — герой-факт (сколько
+    # нафармил). Баланс и прогресс — та же информация, но не конкурирует
+    # за внимание с самим результатом действия.
     msg = (
         f"{banner}"
         f"💎 <b>Ты нафармил: +{_fmt_oac(earned)} OAC</b> {crit_emoji}{happy_str}{temple_str}\n"
-        f"🎉 <b>У тебя: {_fmt_oac(new_balance)} OAC</b>\n\n"
+        f"🎉 У тебя: {_fmt_oac(new_balance)} OAC\n\n"
         f"{medal_text}"
-        f"🎯 <b>Фарминг: {new_count} / {target}</b>\n"
-        f"{progress_bar_str}\n\n"
+        f"🎯 Фарминг: {new_count} / {target}\n"
+        f"{progress_bar_str}\n"
         f"{rank_progress}"
     )
     return msg
@@ -3655,9 +3671,14 @@ async def farm_callback_v2(update, context, ctx, player):
     # приём против «протухшего» player, что и у кулдаун-ветки (см. ниже):
     # daily_progress в этом объекте ещё не отражает только что засчитанный
     # фарм.
+    # SLAYER Red Team (A₄/A₅): экран фарма стекует до ~10 отдельно оправданных
+    # жирных/абзацных блоков — здесь убрана пустая строка-разрыв и жирный
+    # ярлык "Дальше:" (эмодзи 💡 сам сигналит "подсказка", ярлык был дублем).
+    # Подсказка и строка войны ниже теперь читаются одним тихим футером под
+    # прогрессом, а не двумя отдельно объявленными абзацами.
     _next_step = next_quest_step(player, exclude_key="farm")
     if _next_step:
-        text += f"\n\n💡 <b>Дальше:</b> {_next_step[2]}"
+        text += f"\n💡 {_next_step[2]}"
 
     # Статус войны гильдий — раньше guild_weekly читался РОВНО раз в неделю,
     # в момент подведения итогов; между сбросами счёт был невидим никому.
@@ -8948,27 +8969,38 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
         # звезда присутствует всегда — постоянный ответ «к чему я иду».
         lines = [f"<i>{whisper}</i>", "", _north_star_line(earned)]
 
-    # Общие краткие сообщения (всегда) — новые фичи оставлены. Жирным — только
-    # то слово, ради которого строка вообще существует (награда/число), а не
-    # вся фраза целиком: этот блок может встать РЯДОМ с уже жирным приветствием
-    # и подсказкой full_mode — если жирное там, тут и в hint выше, контраст,
-    # который должен выделять САМОЕ важное, перестаёт что-либо выделять.
-    if context and context.user_data.get("return_after_pause"):
-        lines.append("🎁 Пока вас не было: накопились задания и <b>готова награда</b>")
+    # SLAYER Red Team (A₄/A₅) поймал реальное накопление: до этой правки здесь
+    # могли встать РЯДОМ 3 отдельных строки (пауза-возврат, гильд-нудж, стрик),
+    # каждая обоснованная в изоляции своим коммитом — но никто не сложил их
+    # вместе на одном экране. Рабочая память держит ~4 независимых чанка
+    # (Cowan 2001, не устаревшее «7±2» Миллера); на самом частом экране бота
+    # это било по потолку. Схлопываем "пауза-возврат" и "стрик" в ОДНУ строку,
+    # когда обе истинны (обычно так и есть: заморозка серии переживает паузу
+    # ≤2 дня) — приоритет у более конкретного повода (готовая награда).
+    _streak = player.login_streak or 0
+    _has_pause = bool(context and context.user_data.get("return_after_pause"))
+    _has_streak = _streak >= 3
+    if context and _has_pause:
         context.user_data["return_after_pause"] = False
 
-    # Было `== 3`: нудж показывался РОВНО один день. Пропустил — и предложение
-    # вступить в гильдию не возвращалось никогда, хотя без гильдии закрыты
-    # Ритуал, Исповедь, Храм и Война.
-    if not guild and (player.login_streak or 0) >= 3:
-        lines.append("🏰 Гильдии помогают расти быстрее — загляните")
-
-    # Loss-aversion по серии входов: показываем, что можно потерять
-    _streak = player.login_streak or 0
-    if _streak >= 3:
+    if _has_pause and _has_streak:
+        _fz = player.streak_freezes or 0
+        _fz_note = f" · ❄️{_fz}" if _fz > 0 else ""
+        lines.append(f"🎁 Пока вас не было: готова награда · 🔥 серия {_streak} дн.{_fz_note} держится!")
+    elif _has_pause:
+        lines.append("🎁 Пока вас не было: накопились задания и <b>готова награда</b>")
+    elif _has_streak:
         _fz = player.streak_freezes or 0
         _fz_note = f" · ❄️{_fz}" if _fz > 0 else ""
         lines.append(f"🔥 Серия входов: <b>{_streak} дн.</b>{_fz_note} — вернись завтра за наградой!")
+
+    # Гильд-нудж: в full_mode это уже сказано (и подробнее, с CTA) в блоке
+    # приветствия выше ("Ты ещё не ВЫБРАЛ сторону!") — вторая строка о том же
+    # была чистым дублем. В коротком режиме (обычный путь "🔙 В меню") это
+    # приветствие не показывается вообще — там строка остаётся единственным
+    # напоминанием про гильдию.
+    if not guild and _streak >= 3 and not full_mode:
+        lines.append("🏰 Гильдии помогают расти быстрее — загляните")
 
     # Час Удачи — баннер поверх всего меню (peak-момент нельзя прятать)
     hh_banner = _happy_hour_banner(ctx, now)
