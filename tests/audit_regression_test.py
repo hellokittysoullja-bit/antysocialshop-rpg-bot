@@ -1166,6 +1166,31 @@ async def test_unregistered_stranger_gets_start_prompt():
           f"lab_enter отвечает незнакомцу приглашением /start, а не молчит: {_last_edit(upd4)!r}")
 
 
+# ── 27. Карта Фабрики: фог-заметка честно считает закрытые локации ───────
+async def test_world_hub_fog_note_matches_locked_locations():
+    """world_hub (теперь «🗺️ Карта Фабрики») помечает закрытые локации
+    «в тумане» вместо 🔒 и считает их число в заметке под картой — эта
+    заметка не должна расходиться с тем, сколько кнопок реально в тумане."""
+    # Низкий ранг: Питомец и Алтарь оба закрыты → 2 локации в тумане.
+    low = Player(user_id=1, exists=True, balance=100, total_earned=100, passive_level=1)
+    ctx = make_ctx(low)
+    upd = FakeUpdate("world_hub", uid=1)
+    await bot.world_hub(upd, FakeContext(ctx))
+    text = upd.callback_query.message.edits[-1] if upd.callback_query.message.edits else ""
+    check("2 локации" in text, f"низкий ранг: заметка честно считает 2 локации в тумане: {text!r}")
+
+    # Максимальный игрок: Ветеран с питомцем + Алтарь открыт → тумана нет.
+    maxed = Player(user_id=2, exists=True, balance=100000, total_earned=100000,
+                   pet="🐕 Песик", passive_level=10, prestige=0)
+    ctx2 = make_ctx(maxed)
+    upd2 = FakeUpdate("world_hub", uid=2)
+    await bot.world_hub(upd2, FakeContext(ctx2))
+    text2 = upd2.callback_query.message.edits[-1] if upd2.callback_query.message.edits else ""
+    check("Вся карта открыта" in text2, f"максимальный игрок видит честное «вся карта открыта»: {text2!r}")
+    check("туман" not in text2.split("</b>")[-1] or "🌫️" not in text2,
+          "у максимального игрока нет тумана в заметке")
+
+
 # ── 23. «🏰 В меню» на экранах удачи вёл НЕ в меню — мисклейбл пофикшен ──
 async def test_luck_result_buttons_dont_claim_menu():
     """Результаты Колеса/Алхимии показывали кнопку «🏰 В меню», но
@@ -1222,6 +1247,7 @@ async def main():
                test_query_answer_called_second_wave,
                test_send_whisper_dm_has_navigation,
                test_unregistered_stranger_gets_start_prompt,
+               test_world_hub_fog_note_matches_locked_locations,
                test_no_double_ctx_callsites):
         print(f"\n{fn.__name__}:")
         await fn()

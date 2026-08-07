@@ -2364,6 +2364,12 @@ async def world_hub(update, context, ctx):
 
     # «Путь к власти» переехал в 📊 Прогресс (там теперь живёт вся статус-линия:
     # лестница рангов + легенда). «Мир» — это МЕСТА, а не прогресс.
+    #
+    # Карта, не список: та же спатиальная память (hippocampus), что держит
+    # реальные карты лучше плоских меню, плюс переформулировка «закрыто» →
+    # «в тумане» — curiosity gap (Loewenstein: любопытство сильнее давит,
+    # когда обозначен РАЗРЫВ между известным и неизвестным, а не просто факт
+    # запрета). Гейты контента не тронуты — те же условия, другая подача.
 
     # Плантация — idle-крючок «зайди собрать». Кнопка живая: показывает
     # созревший урожай (goal-gradient тянет вернуться) или зовёт посадить.
@@ -2379,27 +2385,34 @@ async def world_hub(update, context, ctx):
 
     # Питомец – виден всем
     if is_veteran and has_pet:
-        kb_rows.append([InlineKeyboardButton("🐾 Питомец", callback_data="pet_preview")])
+        kb_rows.append([InlineKeyboardButton("🐾 Логово Питомца", callback_data="pet_preview")])
     elif is_veteran and not has_pet:
-        kb_rows.append([InlineKeyboardButton("🐾 Питомец (купить)", callback_data="pet_preview")])
+        kb_rows.append([InlineKeyboardButton("🐾 Логово Питомца (купить)", callback_data="pet_preview")])
     else:
-        kb_rows.append([InlineKeyboardButton("🐾 Питомец 🔒", callback_data="pet_locked")])
+        kb_rows.append([InlineKeyboardButton("🌫️ Логово Питомца (в тумане)", callback_data="pet_locked")])
 
-    kb_rows.append([InlineKeyboardButton("🎲 Удача ›", callback_data="luck")])
-    kb_rows.append([InlineKeyboardButton("🏛️ Лабиринт ›", callback_data="lab_start")])
-    kb_rows.append([InlineKeyboardButton("🛒 Магазин ›", callback_data="shop")])
+    kb_rows.append([InlineKeyboardButton("🎲 Зал Удачи ›", callback_data="luck")])
+    kb_rows.append([InlineKeyboardButton("🏛️ Лабиринт Искажения ›", callback_data="lab_start")])
+    kb_rows.append([InlineKeyboardButton("🛒 Лавка Фабрики ›", callback_data="shop")])
     # Алтарь Вечности — виден всем (интрига «что это»), но открыт только на
     # вершине вертикали (Некромант / макс-плантация) — ровно где по аудиту
     # начинается валютная пустота.
     if _altar_gate_open(player):
         kb_rows.append([InlineKeyboardButton("🕯️ Алтарь Вечности ›", callback_data="altar_hub")])
     else:
-        kb_rows.append([InlineKeyboardButton("🕯️ Алтарь Вечности 🔒", callback_data="altar_hub")])
+        kb_rows.append([InlineKeyboardButton("🌫️ Алтарь Вечности (в тумане)", callback_data="altar_hub")])
     kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="menu")])
+
+    fogged = sum(1 for row in kb_rows for btn in row if "туман" in btn.text)
+    map_note = (f"<i>{fogged} {_plural_ru(fogged, 'локация', 'локации', 'локаций')} ещё "
+                f"скрыты туманом Искажения — путь к ним открывается с ростом.</i>"
+                if fogged else "<i>Вся карта открыта — ты повидал каждый уголок Фабрики.</i>")
 
     kb = InlineKeyboardMarkup(kb_rows)
     await query.message.edit_text(
-            "<b>🏰 Главное Меню › 🌍 Мир</b>\n\n<i>Древние земли ждут своего исследователя.</i>",
+            f"<b>🗺️ КАРТА ФАБРИКИ №9</b>\n\n"
+            f"<i>Ты стоишь на распутье. Выбери, куда лежит путь.</i>\n\n"
+            f"{map_note}",
         reply_markup=kb, parse_mode='HTML'
     )
 
@@ -4368,7 +4381,25 @@ async def onboarding_reward(update, context, ctx, player):
             )
             cta = f"📋 Продолжить · осталось {left}"
 
+        # Ритуал перехода: единственный раз за всю жизнь игрока (onboarding_step
+        # необратимо ушёл 2→-1 до этого экрана) — в отличие от обычного крита
+        # на фарме (5% КАЖДОГО фарма навсегда, где такая же анимация была
+        # намеренно отклонена — риск хабитуации), здесь риска нет вообще.
+        # Peak-end rule: без явного маркера перехода у мозга нет «якоря», что
+        # туториал закончился и началась «настоящая» игра — тихая смена флага
+        # такого якоря не создаёт (flashbulb-подобные воспоминания требуют
+        # эмоциональной salience, не факта записи в БД).
+        try:
+            for frame in ("🌫️ <i>Фабрика присматривается к тебе...</i>",
+                          "🕯️ <i>Искажение шепчет твоё имя...</i>",
+                          "🎓 <b>ОБУЧЕНИЕ ЗАВЕРШЕНО</b>"):
+                await query.message.edit_text(frame, parse_mode='HTML')
+                await asyncio.sleep(0.6)
+        except Exception:
+            pass
+
         await query.message.edit_text(
+            f"🎓 <b>Отныне Фабрика №9 признаёт тебя Странником.</b>\n\n"
             f"🎁 <b>Бонус за обучение: +30 OAC, +1 блант!</b>\n"
             f"💎 Баланс: {new_bal} OAC · 🗞️ Блантов: {new_blunts}\n\n"
             f"{body}",
@@ -5267,7 +5298,7 @@ async def profile_callback(update, context, ctx, player):
     # фантомную формулу от баланса, которая нигде не начислялась и врала игроку.
     plant_lvl = player.passive_level or 0
     bush_line = (f"🪴 <b>Плантация:</b> ур.{plant_lvl} · +{_plant_rate(plant_lvl)} OAC/ч"
-                 if plant_lvl > 0 else "🪴 <b>Плантация:</b> <i>не посажена — открой в 🌍 Мир</i>")
+                 if plant_lvl > 0 else "🪴 <b>Плантация:</b> <i>не посажена — открой на 🗺️ Карте</i>")
 
     text = (
         f"<b>⚜️ ПРОФИЛЬ</b>\n"
@@ -6307,7 +6338,7 @@ async def help_callback(update, context):
         "<i>Эндгейм-цель для тех, кто уже всё скопил: баланс необратимо "
         "превращается в престиж. Открывается на позднем этапе игры.</i>\n\n"
         "<b>🪴 Плантация</b>\n"
-        "<i>Открой в разделе «🌍 Мир»: посади куст (бесплатно) — он копит OAC "
+        "<i>Открой на «🗺️ Карте»: посади куст (бесплатно) — он копит OAC "
         "сам по себе, пока тебя нет. Собирай урожай регулярно — хранилище не "
         "бесконечное.</i>\n\n"
         "<b>🐾 Питомец</b> <code>/pet</code>\n"
@@ -7174,7 +7205,7 @@ async def lab_enter(update, context):
             hrs = int(remain // 3600)
             mins = int((remain % 3600) // 60)
             text = (
-                f"<b>🏰 Главное Меню › 🌍 Мир › 🏛️ Лабиринт</b>\n\n"
+                f"<b>🏰 Главное Меню › 🗺️ Карта › 🏛️ Лабиринт</b>\n\n"
                 f"<b>🏛️ ЛАБИРИНТ ИСКАЖЕНИЯ — ЭТАЖ {depth}</b>\n\n"
                 f"<i>– Портал откроется через <b>{hrs} ч {mins} мин</b>.</i>"
             )
@@ -9029,7 +9060,7 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
     # твоя позиция + приз, который надо удержать). 2-в-ряд, без обрезки подписей.
     keyboard.append([
         InlineKeyboardButton("🏅 Лидеры ›", callback_data="top"),
-        InlineKeyboardButton("🌍 Мир ›", callback_data="world_hub"),
+        InlineKeyboardButton("🗺️ Карта ›", callback_data="world_hub"),
     ])
 
     return text, InlineKeyboardMarkup(keyboard)
