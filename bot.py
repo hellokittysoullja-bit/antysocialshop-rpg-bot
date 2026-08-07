@@ -7648,13 +7648,22 @@ async def welcome_new_member(update, context):
         username = member.username or member.first_name
         ctx = context.bot_data.get("ctx")
         online = 0
+        player_exists = False
         player_guild = None
         if ctx:
             try:
                 cnt = await count_guilds(ctx)
                 online = cnt.get("BLACK", 0) + cnt.get("WHITE", 0)
                 player = await ctx.repo.get_by_id(member.id)
-                if player:
+                # Баг: get_by_id для НИКОГДА не регистрировавшегося юзера
+                # возвращает не None, а пустой Player(exists=False) — тот же
+                # приём, что уже задокументирован в guild_join_handler чуть
+                # ниже. `if player:` здесь был всегда True (Player — объект,
+                # не None), поэтому player_guild оставался None и для «нет
+                # гильдии», и для «вообще ни разу не запускал бота» — эти два
+                # случая уходили в ОДНУ ветку клавиатуры.
+                player_exists = bool(player and player.exists)
+                if player_exists:
                     player_guild = player.guild
             except Exception: pass
 
@@ -7670,11 +7679,26 @@ async def welcome_new_member(update, context):
             keyboard = InlineKeyboardMarkup([[
                 InlineKeyboardButton("🍬 Начать фарм", callback_data="farm")
             ]])
-        else:
+        elif player_exists:
+            # Уже зарегистрирован (хотя бы раз открывал ЛС с ботом) — ЛС
+            # доступно, callback безопасен ровно как в guild_join_handler.
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("🕯️ Тёмная Гильдия (+50 🍬)", callback_data="guild_join_BLACK"),
                  InlineKeyboardButton("⚜️ Светлая Гильдия (+50 🍬)", callback_data="guild_join_WHITE")]
             ])
+        else:
+            # Настоящий новичок: НИ РАЗУ не открывал ЛС с ботом — это как раз
+            # самый частый случай при появлении человека в группе (пришёл в
+            # чат, а не по личной реф-ссылке). Тап по callback-кнопке гильдии
+            # здесь бил в guild_join_handler:10098 ("Сначала активируйся: /start")
+            # и на этом всё — короткий alert без единой кнопки, а /start нужно
+            # было печатать руками. Тот же диплинк-приём, что уже работает в
+            # _announce_bot_added_to_chat чуть выше: url сразу открывает ЛС и
+            # создаёт игрока одним тапом, без набора команды руками.
+            start_url = f"https://t.me/{bot_username}?start=1"
+            keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton("🍬 Начать играть", url=start_url)
+            ]])
 
         await safe_send_message(context, update.message.chat.id, welcome_text, reply_markup=keyboard, parse_mode='HTML')
 

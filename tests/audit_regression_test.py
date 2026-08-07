@@ -87,11 +87,13 @@ class FakeUpdate:
 class FakeBot:
     def __init__(self):
         self.sent = []
+        self.sent_calls = []   # (text, kwargs) — для тестов, которым нужен reply_markup
         self.photos_sent = []
         self.media_edits = []
 
     async def send_message(self, chat_id=None, text=None, **kw):
         self.sent.append(text)
+        self.sent_calls.append((text, kw))
         return FakeMsg()
 
     async def edit_message_text(self, **kw):
@@ -527,6 +529,29 @@ async def test_bot_added_to_chat_announces():
     await bot.welcome_new_member(upd2, fctx2)
     check(len(upd2.message.edits) == 0,
           "добавление ЧУЖОГО бота по-прежнему не порождает анонса от нас")
+
+    # Случай 3: в чат зашёл ЖИВОЙ человек, который НИ РАЗУ не открывал ЛС с
+    # ботом (самый частый случай group-discovery — не личная реф-ссылка).
+    # get_by_id для такого возвращает не None, а пустой Player(exists=False)
+    # — `if player:` раньше был True в любом случае, поэтому этот человек
+    # получал те же callback-кнопки «Вступить в гильдию», что и уже
+    # зарегистрированный игрок без гильдии. Тап по ним бил в
+    # guild_join_handler → "Сначала активируйся: нажми /start" и на этом всё:
+    # эфемерный alert без единой кнопки, а /start нужно было печатать руками.
+    never_registered = Player(user_id=777, exists=False)
+    ctx3 = make_ctx(never_registered)
+    fctx3 = FakeContext(ctx3)
+    fctx3.bot.get_me = fake_get_me
+    upd3 = FakeGroupUpdate([FakeMember(777, False, "newcomer")])
+    await bot.welcome_new_member(upd3, fctx3)
+    check(bool(fctx3.bot.sent_calls), "незарегистрированному новичку из группы всё ещё приходит приветствие")
+    if fctx3.bot.sent_calls:
+        _, kw = fctx3.bot.sent_calls[-1]
+        kb = kw.get("reply_markup")
+        btn = kb.inline_keyboard[0][0] if kb else None
+        url = getattr(btn, "url", None) if btn else None
+        check(bool(url) and "?start=" in url,
+              "незарегистрированный получает url-диплинк в ЛС, а не мёртвую callback-кнопку гильдии")
 
 
 # ── 12. RetryAfter/Forbidden — ожидаемый шум, не «🚨 Ошибка» админу ──
