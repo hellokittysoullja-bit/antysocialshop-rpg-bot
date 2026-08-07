@@ -2858,7 +2858,15 @@ async def _create_new_player(update, context, uid, username, invited_by=None,
     # первый тап, доступна в любой момент через кнопку «🏰 Гильдия» в меню
     # (см. guild_join_handler: награда даётся один раз, независимо от
     # момента выбора).
+    # Две строки атмосферы ПЕРЕД наградой, не отдельный экран/тап — иначе это
+    # ровно та же ошибка, что описана в комментарии выше (стена лора + шаг
+    # решения ДО первого действия). Narrative Transportation (Green & Brock)
+    # и context effects (Schwarz & Clore): фрейминг ДО опыта меняет то, как
+    # воспринимается сам опыт, сильнее, чем фрейминг после — но здесь это
+    # именно 2 коротких строки внутри ТОГО ЖЕ сообщения, ноль лишних тапов.
     welcome_text = (
+        "<i>🕯️⚜️ Фабрика №9 давно ждала того, кто впишет новое имя в её "
+        "летопись.</i>\n<i>Сегодня это ты.</i>\n\n"
         "<b>🎉 Добро пожаловать в Antysocialshop!</b>\n\n"
         f"{ref_bonus_line}"
         f"🎁 Тебе подарили <code>{start_balance}</code> 🍬 OAC и первый именной блант.\n\n"
@@ -4947,11 +4955,35 @@ def _altar_tier(level: int):
     return title, mark
 
 
-def _altar_locked_text() -> str:
-    return ("🔒 <b>Алтарь Вечности закрыт.</b>\n\n"
-            "Открывается на ранге 🪬 Некромант или на максимуме Плантации-империи "
-            "(ур.10) — ровно там, где вертикаль роста исчерпана, и OAC нужна новая, "
-            "бесконечная цель.")
+async def _altar_locked_text(ctx) -> str:
+    """Витрина эндгейма для тех, кто ещё не дошёл — не просто «закрыто», а
+    честный, конкретный превью финала: какие титулы ждут и кто уже там.
+    Отвечает на «а смысл во всём этом?» напрямую — curiosity gap
+    (Loewenstein) тянет сильнее, когда виден конкретный разрыв между «вот
+    цель» и «я ещё не там», чем абстрактное «открой позже»."""
+    lines = [
+        "🌫️ <b>Алтарь Вечности — пока в тумане.</b>\n",
+        "Открывается на ранге 🪬 Некромант или на максимуме Плантации-империи "
+        "(ур.10) — ровно там, где вертикаль роста исчерпана, и OAC нужна "
+        "новая, бесконечная цель.\n",
+        "<b>🏆 Титулы, что ждут за туманом:</b>",
+    ]
+    lines.extend(f"  {title}" for _threshold, title, _mark in ALTAR_TIERS)
+
+    try:
+        async with ctx.db_pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT username, prestige FROM players WHERE prestige > 0 "
+                "ORDER BY prestige DESC LIMIT 3")
+        if rows:
+            lines.append("\n<b>🕯️ Уже там:</b>")
+            for row in rows:
+                uname = html.escape(row["username"] or "Странник")
+                lines.append(f"  {uname} — {_fmt_oac(row['prestige'])} OAC вложено")
+    except Exception:
+        pass
+
+    return "\n".join(lines)
 
 
 @rate_limit(1)
@@ -4973,7 +5005,7 @@ async def _render_altar(update, context, ctx, player):
     if not _altar_gate_open(player):
         await query.answer()
         await query.message.edit_text(
-            _altar_locked_text(), parse_mode='HTML',
+            await _altar_locked_text(ctx), parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 В меню", callback_data="menu")]]))
         return
 

@@ -1191,6 +1191,43 @@ async def test_world_hub_fog_note_matches_locked_locations():
           "у максимального игрока нет тумана в заметке")
 
 
+# ── 28. Алтарь-в-тумане — витрина эндгейма, не просто «закрыто» ──────────
+async def test_altar_locked_shows_endgame_showcase():
+    """Раньше тап по закрытому Алтарю показывал только условие гейта —
+    отвечает не пиону «а смысл?», это сухая механика. Теперь виден весь
+    ряд титулов (curiosity gap: конкретная цель ближе тянет, чем
+    абстрактная), и, если престиж уже у кого-то есть, честный топ-3."""
+    p = Player(user_id=1, exists=True, balance=100, total_earned=100, passive_level=1)
+    rows = [{"username": "Странник1", "prestige": 500}]
+    ctx = make_ctx(p, pool=FakePool(rows=rows))
+    upd = FakeUpdate("altar_hub", uid=1)
+    await bot.altar_hub(upd, FakeContext(ctx))
+    text = upd.callback_query.message.edits[-1] if upd.callback_query.message.edits else ""
+    check("Послушник Алтаря" in text and "Вечный" in text,
+          f"закрытый Алтарь показывает весь ряд титулов, а не только факт блокировки: {text!r}")
+    check("Странник1" in text, f"закрытый Алтарь показывает честный топ уже вложивших: {text!r}")
+
+
+# ── 29. Первое сообщение: атмосфера ДО награды, но БЕЗ второго тапа ──────
+async def test_welcome_text_has_framing_without_extra_tap():
+    """Комментарий в _create_new_player сам документирует прошлый провал:
+    старое первое сообщение было «стеной лора + выбором фракции ДО первого
+    действия» — 2 тапа и 2 экрана до первой награды, там терялось больше
+    половины холодного трафика. Новая атмосферная строка обязана жить
+    ВНУТРИ того же сообщения (Narrative Transportation: фрейминг до опыта
+    меняет сам опыт) и не добавлять ни одного лишнего тапа/декоративного
+    экрана — единственная кнопка по-прежнему должна вести прямиком в farm."""
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "bot.py"), encoding="utf-8").read()
+    body = src[src.index("async def _create_new_player"):src.index("async def defer_faction_handler")]
+    check("Фабрика №9 давно ждала" in body,
+          "атмосферная строка добавлена в welcome_text")
+    check('InlineKeyboardButton("🍬 Собрать первый урожай", callback_data="farm")' in body,
+          "кнопка по-прежнему одна и ведёт прямиком в фарм — ни одного лишнего тапа/экрана")
+    check(body.count("InlineKeyboardMarkup(") == 1,
+          "ровно одна клавиатура в welcome-сообщении — атмосфера не породила отдельный экран-прокладку")
+
+
 # ── 23. «🏰 В меню» на экранах удачи вёл НЕ в меню — мисклейбл пофикшен ──
 async def test_luck_result_buttons_dont_claim_menu():
     """Результаты Колеса/Алхимии показывали кнопку «🏰 В меню», но
@@ -1248,6 +1285,8 @@ async def main():
                test_send_whisper_dm_has_navigation,
                test_unregistered_stranger_gets_start_prompt,
                test_world_hub_fog_note_matches_locked_locations,
+               test_altar_locked_shows_endgame_showcase,
+               test_welcome_text_has_framing_without_extra_tap,
                test_no_double_ctx_callsites):
         print(f"\n{fn.__name__}:")
         await fn()
