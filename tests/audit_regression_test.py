@@ -197,6 +197,42 @@ class FakeRepo:
         return r
 
 
+class FakeMultiRepo:
+    """Как FakeRepo, но держит НЕСКОЛЬКИХ игроков по uid — нужен для сценариев
+    с двумя реальными сторонами (реферер + приглашённый), где однопользовательский
+    FakeRepo не может различить, кого из двоих правят."""
+
+    def __init__(self, players):
+        self.players = {p.user_id: p for p in players}
+        self.saves = 0
+
+    async def get_by_id(self, uid, with_inventory=True):
+        # Реальный repository.get_by_id ставит exists=True при найденной строке
+        # (repository.py:106) — без этого повторный get_by_id внутри одного
+        # запроса (напр. create_named_blunt перечитывает игрока) считает только
+        # что созданного игрока несуществующим и подменяет его пустым Player().
+        p = self.players.get(uid)
+        if p is None:
+            return Player(user_id=uid)
+        p.exists = True
+        return p
+
+    async def save(self, player, conn=None):
+        self.saves += 1
+        self.players[player.user_id] = player
+
+    async def atomic_update(self, uid, fn):
+        p = self.players.get(uid)
+        if p is None:
+            return None
+        before = p.balance or 0
+        r = await fn(p, None)
+        gain = (p.balance or 0) - before
+        if gain > 0:
+            p.total_earned = (p.total_earned or 0) + gain
+        return r
+
+
 class FakeMinesPool:
     """Мини-БД в памяти только под players.mines_state/mines_state_updated_at.
 
@@ -266,10 +302,10 @@ class FakeRedis:
         self.store.pop(k, None)
 
 
-def make_ctx(player, redis=None, pool=None, war=None):
+def make_ctx(player, redis=None, pool=None, war=None, repo=None):
     return bot.AppContext(
         db_pool=pool or FakePool(), redis_client=redis, cache={},
-        settings=bot.settings, repo=FakeRepo(player),
+        settings=bot.settings, repo=repo or FakeRepo(player),
         war_service=war or FakeWar(), pet_service=None, achievement_service=None)
 
 
@@ -524,6 +560,101 @@ async def test_onboarding_reward_has_reachable_referral_cta():
     await bot.onboarding_reward(upd2, FakeContext(ctx2))
     check(not _has_invite_button(_last_markup(upd2)),
           "игрок, который УЖЕ приглашал, не видит CTA повторно (не нагрузка, а разовый крючок)")
+
+
+# ── 31. Реферальная награда: закрыт эксплойт мгновенного фарма ────────
+async def test_referral_registration_defers_full_reward():
+    """SLAYER Red Team (A₂ Behavioral Econ/Ethics, E3/E5): раньше реферер получал
+    +50 OAC, легендарный блант и метку МГНОВЕННО на голый /start приглашённого
+    по ссылке — фармабельно пустыми аккаунтами, ни разу не открывшими игру:
+    создал N аккаунтов, тапнул ссылку N раз, собрал N легендарок без единого
+    реального игрока на том конце. Регистрация теперь только линкует
+    invited_by и шлёт лёгкое «ожидай» уведомление; полная награда проверяется
+    отдельными тестами ниже, на реальном завершении обучения приглашённым."""
+    referrer = Player(user_id=555, exists=True, username="referrer",
+                       balance=500, total_earned=500, referral_count=0)
+    repo = FakeMultiRepo([referrer])
+    ctx = make_ctx(referrer, repo=repo)
+    upd = FakeUpdate("start", uid=777)
+    fctx = FakeContext(ctx)
+    fctx.args = ["ref_555"]
+    await bot.start(upd, fctx)
+
+    new_player = repo.players.get(777)
+    check(new_player is not None and new_player.invited_by == 555,
+          "приглашённый корректно связан с реферером (invited_by)")
+    check(referrer.balance == 500 and referrer.referral_count == 0,
+          "реферер НЕ получает награду мгновенно на голый /start приглашённого")
+    check(any(t and "зашёл" in t and "Награда откроется" in t for t in fctx.bot.sent),
+          "реферер получает лёгкое уведомление-ожидание вместо мгновенной награды")
+
+
+async def test_referral_reward_fires_on_onboarding_completion():
+    """Реальная награда (_reward_referrer) срабатывает, когда приглашённый
+    ЗАВЕРШИЛ обучение (последний крафт, onboarding_step 2→-1) — реальное
+    игровое действие, не факт регистрации. Органический игрок (без invited_by)
+    не должен вызывать _reward_referrer вовсе."""
+    calls = []
+    async def _fake_reward(ctx, context, creator_id, new_username=None):
+        calls.append(creator_id)
+    orig = bot._reward_referrer
+    bot._reward_referrer = _fake_reward
+    try:
+        p = Player(user_id=10, exists=True, balance=100, total_earned=100,
+                   blunts=0, craft_count=0, onboarding_step=2, invited_by=555,
+                   daily_progress={}, username="friend")
+        repo = FakeMultiRepo([p])
+        ctx = make_ctx(p, repo=repo)
+        upd = FakeUpdate("craft_normal", uid=10)
+        await bot.handle_craft_normal_v2(upd, FakeContext(ctx))
+        check(calls == [555],
+              "завершение обучения приглашённым (последний крафт) запускает награду рефереру")
+
+        calls.clear()
+        p2 = Player(user_id=11, exists=True, balance=100, total_earned=100,
+                    blunts=0, craft_count=0, onboarding_step=2, invited_by=None,
+                    daily_progress={}, username="organic")
+        repo2 = FakeMultiRepo([p2])
+        ctx2 = make_ctx(p2, repo=repo2)
+        upd2 = FakeUpdate("craft_normal", uid=11)
+        await bot.handle_craft_normal_v2(upd2, FakeContext(ctx2))
+        check(calls == [],
+              "органический игрок (без invited_by) не запускает несуществующую награду")
+    finally:
+        bot._reward_referrer = orig
+
+
+async def test_skip_onboarding_referral_reward_guarded_against_double_fire():
+    """«Пропустить обучение» — тоже реальное действие внутри игры (не голый
+    /start), так что тоже открывает награду рефереру. _was_active защищает от
+    повторного начисления, если кнопка нажата ещё раз после того, как
+    обучение уже завершено (в частности — уже награждённый прошлым нажатием)."""
+    calls = []
+    async def _fake_reward(ctx, context, creator_id, new_username=None):
+        calls.append(creator_id)
+    async def _fake_menu(player, ctx, context, full_mode=False):
+        return "stub", None
+    orig_reward = bot._reward_referrer
+    orig_menu = bot.build_main_menu
+    bot._reward_referrer = _fake_reward
+    bot.build_main_menu = _fake_menu
+    try:
+        p = Player(user_id=20, exists=True, balance=100, total_earned=100,
+                   onboarding_step=1, invited_by=555, daily_progress={},
+                   username="skipper")
+        repo = FakeMultiRepo([p])
+        ctx = make_ctx(p, repo=repo)
+
+        await bot.skip_onboarding_handler(FakeUpdate("skip_onboarding", uid=20), FakeContext(ctx))
+        check(calls == [555],
+              "«Пропустить обучение» тоже засчитывается как реальное завершение — награда рефереру приходит")
+
+        await bot.skip_onboarding_handler(FakeUpdate("skip_onboarding", uid=20), FakeContext(ctx))
+        check(calls == [555],
+              "повторное нажатие «Пропустить» после уже завершённого онбординга не начисляет награду повторно")
+    finally:
+        bot._reward_referrer = orig_reward
+        bot.build_main_menu = orig_menu
 
 
 # ── 11. Добавление бота в чат — больше не немой момент ───────────────
@@ -1330,6 +1461,9 @@ async def main():
                test_altar_locked_shows_endgame_showcase,
                test_welcome_text_has_framing_without_extra_tap,
                test_onboarding_reward_has_reachable_referral_cta,
+               test_referral_registration_defers_full_reward,
+               test_referral_reward_fires_on_onboarding_completion,
+               test_skip_onboarding_referral_reward_guarded_against_double_fire,
                test_no_double_ctx_callsites):
         print(f"\n{fn.__name__}:")
         await fn()

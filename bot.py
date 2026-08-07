@@ -3096,6 +3096,23 @@ async def _reward_referrer(ctx, context, creator_id, new_username=None):
     await check_achievements(creator_id, context, ctx=ctx)
 
 
+async def _notify_referral_pending(context, creator_id, new_username=None):
+    """Лёгкое уведомление сразу на /start по ссылке: «друг зашёл» — без
+    начисления награды. Награда (см. _reward_referrer) приходит позже, когда
+    приглашённый реально пройдёт/пропустит обучение — тут только держим
+    открытой петлю ожидания (Zeigarnik: незакрытое действие тянет внимание
+    сильнее закрытого), не давая ей провиснуть до этого момента."""
+    who_new = f"@{html.escape(new_username)}" if new_username else "Один Странник"
+    try:
+        await safe_send_message(
+            context, creator_id,
+            f"🩸 <b>По твоей ссылке зашёл {who_new}!</b>\n"
+            "🎁 Награда откроется, как только он освоится в игре.",
+            parse_mode='HTML')
+    except Exception:
+        pass
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ctx = context.bot_data.get("ctx")
     if not ctx:
@@ -3122,7 +3139,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _create_new_player(update, context, uid, username, invited_by=creator_id,
                                      inviter_name=inviter_name, shared_blunt=shared_blunt)
             if creator_id:
-                await _reward_referrer(ctx, context, creator_id, new_username=username)
+                # Полная награда (SLAYER Red Team, A₂ Behavioral Econ/Ethics: E3/E5)
+                # больше НЕ выдаётся здесь. Раньше она начислялась мгновенно на
+                # голый /start по чужой ссылке — фармабельно пустыми аккаунтами,
+                # которые ни разу не сыграли: создал N ботов-аккаунтов, тапнул
+                # ссылку N раз, собрал N легендарок и +50N OAC рефереру без
+                # единого реального игрока на том конце. Реальная награда теперь
+                # в _reward_referrer, вызывается из handle_craft_normal_v2 и
+                # skip_onboarding_handler — оба места, где приглашённый реально
+                # прошёл (или осознанно пропустил) обучение, т.е. точно открыл
+                # игру и что-то в ней сделал. Здесь — только лёгкое уведомление,
+                # чтобы открытая петля ожидания (Zeigarnik) не терялась впустую.
+                await _notify_referral_pending(context, creator_id, new_username=username)
             # _create_new_player уже создал строку с АКТУАЛЬНЫМ username
             # (это и есть `username` переменная выше) — отдельный рефреш здесь
             # не нужен. Разбираем только очередь подарков.
@@ -3975,6 +4003,14 @@ async def handle_craft_normal_v2(update, context, ctx, player):
             "<b>🎓 Обучение [▓▓▓] (шаг 3 из 3)</b>\n\n🎉 Поздравляю! Ты освоил основы.</b>\n\nНажми кнопку ниже, чтобы получить бонус за обучение!",
             reply_markup=kb
         )
+        # Реферальная награда рефереру — теперь именно здесь, не на голом
+        # /start приглашённого (см. комментарий в start()). onboarding_step
+        # переходит 2 → -1 ровно один раз за игрока (обратно в 2 никогда не
+        # выставляется), поэтому лишнего срабатывания при повторных заходах
+        # не будет. player.invited_by читаем из уже загруженного декоратором
+        # снимка — это поле пишется один раз при регистрации и не меняется.
+        if player.invited_by:
+            await _reward_referrer(ctx, context, player.invited_by, new_username=player.username)
 
 @rate_limit(3)
 @game_handler
@@ -9667,8 +9703,17 @@ async def skip_onboarding_handler(update, context):
     player = await ctx.repo.get_by_id(uid)
     if not player or not player.exists:
         return
+    _was_active = player.onboarding_step != -1
     player.onboarding_step = -1
     await ctx.repo.save(player)
+
+    # Тот же гейт реферальной награды, что и в handle_craft_normal_v2: даже
+    # «пропустить обучение» — реальное действие внутри игры, не голый /start,
+    # так что это тоже валидный сигнал для разблокировки награды рефереру.
+    # _was_active защищает от повторного начисления, если кнопка почему-то
+    # нажата ещё раз после того, как обучение уже завершено.
+    if _was_active and player.invited_by:
+        await _reward_referrer(ctx, context, player.invited_by, new_username=player.username)
 
     text, kb = await build_main_menu(player, ctx, context, full_mode=True)
     try:
