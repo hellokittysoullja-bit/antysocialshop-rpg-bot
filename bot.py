@@ -3984,6 +3984,17 @@ async def handle_craft_normal_v2(update, context, ctx, player):
     target = get_medal_target(new_count, CRAFT_MEDALS)
     text = _format_normal_craft_message(medal_text, new_count, target, blunts, new_balance)
 
+    # Тот же приём, что уже на экране фарма (см. farm_callback_v2): следующий
+    # незакрытый шаг квеста — тихой строкой-футером, а не отдельным экраном.
+    # Держит цепочку фарм→крафт→дунуть видимой на каждом звене, не только на
+    # первом — незакрытая цель тянет внимание сильнее закрытой (Zeigarnik),
+    # и именно это разрывает момент «а что дальше?» между действиями.
+    # exclude_key="craft": player — снимок ДО этого крафта, daily_progress в
+    # нём ещё не видит только что сделанный шаг (тот же приём, что у фарма).
+    _next_step = next_quest_step(player, exclude_key="craft")
+    if _next_step:
+        text += f"\n💡 {_next_step[2]}"
+
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🌿 Скрафтить ещё", callback_data="craft_normal"),
          InlineKeyboardButton("💨 Дунуть", callback_data="smoke")],
@@ -4718,6 +4729,13 @@ async def do_smoke(update, context, ctx, player):
         f"{pity_line}\n\n"
         f"<b>🍃 Блантов в свёртке:</b> <b>{bl_left}</b>"
     )
+
+    # Та же цепочка «что дальше», что теперь на фарме и крафте (см. их
+    # комментарии) — держит видимой связку фарм→крафт→дунуть на каждом звене.
+    # exclude_key="smoke": player — снимок ДО этой тяги.
+    _next_step = next_quest_step(player, exclude_key="smoke")
+    if _next_step:
+        text += f"\n💡 {_next_step[2]}"
     if save:
         text += "\n⚜️ <i>Светлая Гильдия сохранила твой Блант!</i>"
 
@@ -5383,7 +5401,21 @@ async def profile_callback(update, context, ctx, player):
     # Фон по умолчанию читаемый, иначе строка «🫧 Фон: » висела пустой (выглядит
     # как баг). Пустой active_background → «🌑 Обычный».
     bg = skins.get("active_background") or "🌑 Обычный"
-    active_title = skins.get("active_title", "—")
+    active_title = skins.get("active_title") or "—"
+    # SLAYER (early-game, D1-D2 retention): «Титул: —» и «Заслуги: —» раньше
+    # были тупиковыми прочерками — для новичка это ДВЕ строки подряд «у тебя
+    # ничего нет», без единого намёка, что с этим делать (тот же класс
+    # проблемы, что уже решён для Плантации/Гильдии на этом же экране — у них
+    # есть CTA прямо в тексте, здесь не было). Пустой экран без крючка вперёд
+    # не тянет открыть бота завтра; конкретная, близкая, честная цель тянет
+    # (Zeigarnik: незакрытое держит внимание сильнее закрытого).
+    earned_titles = (player.titles or "").split()
+    if active_title != "—":
+        title_line = active_title
+    elif earned_titles:
+        title_line = "<i>есть, но не выбран — 🎨 Кастомизация</i>"
+    else:
+        title_line = "<i>ещё нет — первый за 7-дневную серию входов</i>"
 
     inv_data = player.inventory or []
     badges = []
@@ -5395,7 +5427,7 @@ async def profile_callback(update, context, ctx, player):
         badges.append("🔥")
     if player.check_count >= 10:
         badges.append("👁️")
-    badge_str = ' '.join(badges) if badges else "—"
+    badge_str = ' '.join(badges) if badges else "<i>0/4 — играй и получишь первую</i>"
 
     rank_progress = get_rank_progress(earned)
 
@@ -5412,6 +5444,19 @@ async def profile_callback(update, context, ctx, player):
     bush_line = (f"🪴 <b>Плантация:</b> ур.{plant_lvl} · +{_plant_rate(plant_lvl)} OAC/ч"
                  if plant_lvl > 0 else "🪴 <b>Плантация:</b> <i>не посажена — открой на 🗺️ Карте</i>")
 
+    # Серия входов — раньше на профиле не показывалась вообще (только в
+    # главном меню и только как временный нудж). Профиль — экран «кто я»;
+    # держать серию видимой именно здесь, каждый раз, когда игрок сюда
+    # заходит, — постоянное, не разовое напоминание «не рви цепочку» (loss
+    # aversion работает только пока есть что терять, поэтому строка стоит с
+    # первого дня серии, не с какого-то порога).
+    streak = player.login_streak or 0
+    streak_line = ""
+    if streak >= 1:
+        fz = player.streak_freezes or 0
+        fz_note = f" · ❄️{fz}" if fz > 0 else ""
+        streak_line = f"🔥 <b>Серия входов:</b> {streak} дн.{fz_note}\n"
+
     text = (
         f"<b>⚜️ ПРОФИЛЬ</b>\n"
         f"👤 <b>{uname}</b>{guild_line}\n"
@@ -5421,7 +5466,8 @@ async def profile_callback(update, context, ctx, player):
         f"🏛️ <b>Заработано за всё время:</b> <b>{_fmt_oac(earned)} OAC</b> — <i>твой ранг держится на этом числе, траты его не трогают</i>\n"
         f"🌿 <b>Блантов в свёртке:</b> <b>{bl}</b>\n"
         f"{bush_line}\n"
-        f"🧬 <b>Титул:</b> {active_title}\n"
+        f"{streak_line}"
+        f"🧬 <b>Титул:</b> {title_line}\n"
         f"🧠 <b>Нейро-статус:</b> <i>{neuro}</i>\n"
         f"{pet_line}"
         f"🎖️ <b>Заслуги:</b> {badge_str}"

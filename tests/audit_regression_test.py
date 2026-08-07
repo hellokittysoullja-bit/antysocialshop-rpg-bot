@@ -1482,6 +1482,60 @@ async def test_medal_names_are_thematic_and_grammar_safe():
           "goal-gradient строка тоже label-конструкция, не падежная вставка")
 
 
+# ── 35. Профиль новичка: серия видна, пустые поля — не тупик ──────────
+async def test_profile_shows_streak_and_empty_state_hooks():
+    """Early-game / D1-D2 retention: «Титул: —» и «Заслуги: —» были тупиковыми
+    прочерками для новичка — теперь оба несут конкретный, честный следующий
+    шаг (Zeigarnik: незакрытое тянет внимание сильнее закрытого). Серия
+    входов теперь видна на самом экране идентичности (профиль), не только
+    в главном меню, — постоянное, не разовое напоминание «не рви цепочку»."""
+    p = Player(user_id=1, exists=True, balance=100, total_earned=100,
+               login_streak=0, titles="", profile_skins={})
+    ctx = make_ctx(p)
+    upd = FakeUpdate("profile", uid=1)
+    await bot.profile_callback(upd, FakeContext(ctx))
+    text = upd.callback_query.message.edit_calls[-1][0]
+    check("Серия входов" not in text,
+          "серия НЕ показывается при streak=0 (нечего защищать loss-aversion'ом)")
+    check("ещё нет — первый за 7-дневную серию" in text,
+          "пустой Титул — конкретная честная цель, не тупиковый прочерк")
+    check("0/4 — играй и получишь первую" in text,
+          "пустые Заслуги — счётчик-цель, не тупиковый прочерк")
+
+    p2 = Player(user_id=2, exists=True, balance=100, total_earned=100,
+                login_streak=5, streak_freezes=1, titles="🩸", profile_skins={})
+    ctx2 = make_ctx(p2)
+    upd2 = FakeUpdate("profile", uid=2)
+    await bot.profile_callback(upd2, FakeContext(ctx2))
+    text2 = upd2.callback_query.message.edit_calls[-1][0]
+    check("🔥 <b>Серия входов:</b> 5 дн. · ❄️1" in text2,
+          "серия входов видна на профиле с заморозками, если streak>=1")
+    check("есть, но не выбран — 🎨 Кастомизация" in text2,
+          "заработанный, но не выбранный титул — конкретная подсказка, не тот же прочерк")
+
+
+# ── 36. Крафт/дунуть: та же цепочка «что дальше», что уже на фарме ────
+async def test_craft_and_smoke_chain_to_next_quest_step():
+    """next_quest_step раньше подключён только к экрану фарма — крафт и
+    дуновение раскрывали результат и ничего не предлагали дальше, разрывая
+    цепочку фарм→крафт→дунуть на каждом следующем звене."""
+    p = Player(user_id=1, exists=True, balance=1000, total_earned=1000,
+               blunts=0, craft_count=0, onboarding_step=1, daily_progress={})
+    ctx = make_ctx(p)
+    upd = FakeUpdate("craft_normal", uid=1)
+    await bot.handle_craft_normal_v2(upd, FakeContext(ctx))
+    text = upd.callback_query.message.edit_calls[-1][0]
+    check("💡" in text, "экран крафта несёт подсказку следующего шага квеста")
+
+    p2 = Player(user_id=2, exists=True, balance=1000, total_earned=1000,
+                blunts=5, smoke_count=0, onboarding_step=1, daily_progress={})
+    ctx2 = make_ctx(p2)
+    upd2 = FakeUpdate("smoke", uid=2)
+    await bot.do_smoke(upd2, FakeContext(ctx2))
+    text2 = upd2.callback_query.message.edit_calls[-1][0]
+    check("💡" in text2, "экран дуновения несёт подсказку следующего шага квеста")
+
+
 # ── 32. Час Удачи: личное DM-уведомление, не только чат гильдии ──────
 async def test_happy_hour_dm_broadcast_reaches_candidates():
     """SLAYER Red Team (Cluster Б, A1 Dopamine/Neuroscience + A3 Systems):
@@ -1610,6 +1664,8 @@ async def main():
                test_happy_hour_trigger_schedules_dm_broadcast,
                test_wheel_and_alchemy_have_suspense_before_reveal,
                test_medal_names_are_thematic_and_grammar_safe,
+               test_profile_shows_streak_and_empty_state_hooks,
+               test_craft_and_smoke_chain_to_next_quest_step,
                test_no_double_ctx_callsites):
         print(f"\n{fn.__name__}:")
         await fn()
