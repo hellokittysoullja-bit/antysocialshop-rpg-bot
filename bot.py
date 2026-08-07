@@ -2133,12 +2133,21 @@ async def _send_blunt_card(context, chat_id, item, owner_name, caption, reply_ma
         return False
 
 
-async def send_whisper_dm(update, context, text):
+async def send_whisper_dm(update, context, text, reply_markup=None):
+    # Тот же баг, что в edit_or_reply (см. её комментарий) — плюс отдельный
+    # тупик: раньше сообщение всегда уходило БЕЗ клавиатуры, так что тап по
+    # «Ритуалу» не в той гильдии или донат в Храм (после реального списания
+    # OAC) оставлял игрока без единой кнопки — пришлось бы печатать /menu.
     if update.callback_query:
+        try:
+            await update.callback_query.answer()
+        except Exception:
+            pass
         chat_id = update.callback_query.message.chat.id
     else:
         chat_id = update.effective_chat.id
-    await safe_send_message(context, chat_id, text, parse_mode='HTML')
+    await safe_send_message(context, chat_id, text, parse_mode='HTML',
+                            reply_markup=reply_markup or get_back_to_menu_keyboard())
 
 def format_date(iso_string):
     try:
@@ -2475,6 +2484,17 @@ async def safe_edit(message, text, **kwargs):
 #короче тут у нас этот ёбаный эдит
 
 async def edit_or_reply(update, context, text, reply_markup=None, parse_mode='HTML', disable_web_page_preview=True):
+    # Баг: добрая половина экранов игры рендерится через edit_or_reply и
+    # больше НИЧЕГО не отвечает на callback_query. Telegram-клиент держит
+    # кнопку в состоянии загрузки до собственного таймаута — на самых частых
+    # экранах (Правила, Топ, Колесо, Алхимия, Каталог…) это читается как
+    # «бот завис», хотя ответ отрисовался. Двойной answer() безопасен —
+    # тот же приём уже используется в _mines_bet_wrapper этого файла.
+    if update.callback_query:
+        try:
+            await update.callback_query.answer()
+        except Exception:
+            pass
     chat_id = update.effective_chat.id
     # Своё сообщение (бот сам его отправил раньше) можно чистить за собой,
     # если редактировать не вышло. Сообщение игрока (пришли из команды типа
@@ -4603,6 +4623,15 @@ async def do_smoke(update, context, ctx, player):
 
 @rate_limit(3)
 async def ritual_callback(update, context):
+    # Баг: успешный путь рендерится через animate_progress_bar → edit_text
+    # напрямую, минуя edit_or_reply — там query.answer() тоже никогда не
+    # звался. Отвечаем сразу на входе, до любых веток (та же схема, что уже
+    # в _process_mines этого файла).
+    if update.callback_query:
+        try:
+            await update.callback_query.answer()
+        except Exception:
+            pass
     ctx = context.bot_data.get("ctx")
     if not ctx:
         await update.effective_message.reply_text("⚠️ Бот инициализируется, попробуйте позже.")
@@ -6282,7 +6311,7 @@ async def privilege_callback(update, context):
     uid = user.id
     player = await ctx.repo.get_by_id(uid)
     if not player or not player.user_id:
-        await msg.reply_text("Сначала активируйся: /start")
+        await _notify_user(update, context, "Сначала активируйся: /start")
         return
     # Ранг и «сила» — по заработанному за всё время, а не по остатку кошелька.
     bal = player.total_earned or 0
@@ -6304,7 +6333,11 @@ async def privilege_callback(update, context):
         f"{progress_bar_str} {percent}%\n\n"
         f"🎯 <b>До след. уровня:</b> {next_rank_name}"
     )
-    await msg.reply_text(text, parse_mode='HTML', reply_markup=get_back_to_menu_keyboard())
+    # Было: msg.reply_text безусловно — на тапе кнопки это НОВОЕ сообщение
+    # поверх старого (не единый живой экран, как везде в игре) и без
+    # query.answer() (та же серия багов, см. edit_or_reply). edit_or_reply
+    # сам решает править на месте (кнопка) или прислать новое (команда).
+    await edit_or_reply(update, context, text, reply_markup=get_back_to_menu_keyboard(), parse_mode='HTML')
 
 async def catalog_callback(update, context):
     # Раньше был тупик: только внешняя ссылка, назад в игру — никак (приходилось
@@ -6874,6 +6907,12 @@ async def _mines_cashout(update, context, state, redis_key, uid, ctx):
 async def _mines_open_cell_wrapper(update, context):
     # Извлекаем uid и данные из callback_data, затем вызываем основную функцию
     query = update.callback_query
+    # Баг: ни этот враппер, ни _mines_open_cell дальше по цепочке нигде не
+    # звали query.answer() на успешном пути (только на паре ошибочных веток).
+    # Это САМЫЙ частый тап во всей игре — каждая открытая клетка Мин — и
+    # каждый такой тап оставлял кнопку крутиться до таймаута Telegram.
+    # Двойной answer() безопасен — та же схема уже в _mines_bet_wrapper ниже.
+    await query.answer()
     uid = query.from_user.id
     ctx = context.bot_data.get("ctx")
     redis_key = f"mines_game:{uid}"
@@ -6885,6 +6924,7 @@ async def _mines_open_cell_wrapper(update, context):
 
 async def _mines_cashout_wrapper(update, context):
     query = update.callback_query
+    await query.answer()
     uid = query.from_user.id
     ctx = context.bot_data.get("ctx")
     redis_key = f"mines_game:{uid}"

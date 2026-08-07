@@ -141,6 +141,14 @@ class FakeConn:
     async def execute(self, *a, **k):
         return None
 
+    def transaction(self):
+        class _Tx:
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self, *exc):
+                return False
+        return _Tx()
+
 
 class FakePool:
     def __init__(self, rows=None, value=0):
@@ -1021,6 +1029,66 @@ async def test_slow_renders_send_chat_action():
           "_send_blunt_card должна слать send_chat_action перед некэшированным рендером")
 
 
+# ── 24. query.answer() гасит спиннер — вторая волна пробелов (Мины/Ритуал/
+#        Привилегия), плюс edit_or_reply/send_whisper_dm отвечают централизованно ──
+async def test_query_answer_called_second_wave():
+    """Продолжение находки #21: тот же дефект (ни разу не звали
+    query.answer() на успешном пути) обнаружился в _mines_open_cell_wrapper
+    (САМЫЙ частый тап во всей игре — каждая открытая клетка Мин) и
+    _mines_cashout_wrapper, в ritual_callback (рендерит через
+    animate_progress_bar, минуя edit_or_reply) и в privilege_callback
+    (раньше — msg.reply_text напрямую, вообще без edit_or_reply). Плюс
+    структурная проверка: edit_or_reply и send_whisper_dm теперь отвечают
+    сами — этим чинится каждый экран, который через них рендерится."""
+    p = Player(user_id=1, exists=True, balance=1000, total_earned=1000, guild="BLACK")
+    mines_ctx = make_ctx(p, redis=FakeRedis(), pool=FakeMinesPool())
+    state = {"field": [[0] * 5 for _ in range(5)], "mines": [[4, 4]], "bet": 100,
+             "step": 0, "multiplier": 1.0, "status": "playing", "created_at": 0}
+    await bot._mines_state_set(mines_ctx, 1, state)
+    upd = FakeUpdate("mines_open_0_0", uid=1)
+    await bot._mines_open_cell_wrapper(upd, FakeContext(mines_ctx))
+    check(len(upd.callback_query.answers) >= 1,
+          "_mines_open_cell_wrapper гасит спиннер на КАЖДОЙ открытой клетке")
+
+    state2 = {"field": [[1] * 5 for _ in range(4)] + [[0] * 5], "mines": [[4, 4]], "bet": 100,
+              "step": 5, "multiplier": 1.5, "status": "playing", "created_at": 0}
+    await bot._mines_state_set(mines_ctx, 1, state2)
+    upd2 = FakeUpdate("mines_cashout", uid=1)
+    await bot._mines_cashout_wrapper(upd2, FakeContext(mines_ctx))
+    check(len(upd2.callback_query.answers) >= 1,
+          "_mines_cashout_wrapper гасит спиннер на успешном кэшауте")
+
+    # ritual/privilege/catalog зовут check_achievements/обычные SELECT'ы —
+    # им нужен обычный FakePool (FakeMinesPool отвечает только на SQL Мин).
+    ctx = make_ctx(p)
+    upd3 = FakeUpdate("ritual", uid=1)
+    await bot.ritual_callback(upd3, FakeContext(ctx))
+    check(len(upd3.callback_query.answers) >= 1,
+          "ritual_callback гасит спиннер (рендер идёт мимо edit_or_reply)")
+
+    upd4 = FakeUpdate("privilege", uid=1)
+    await bot.privilege_callback(upd4, FakeContext(ctx))
+    check(len(upd4.callback_query.answers) >= 1, "privilege_callback гасит спиннер")
+    check(upd4.callback_query.message.edits, "privilege_callback правит единый экран на месте, не шлёт новое сообщение")
+
+    upd5 = FakeUpdate("catalog", uid=1)
+    await bot.catalog_callback(upd5, FakeContext(ctx))
+    check(len(upd5.callback_query.answers) >= 1,
+          "catalog_callback гасит спиннер (через централизованный фикс в edit_or_reply)")
+
+
+# ── 25. send_whisper_dm больше не оставляет игрока без единой кнопки ─────
+async def test_send_whisper_dm_has_navigation():
+    """Донат в Храм списывает реальный баланс и раньше подтверждал это
+    сообщением БЕЗ единой кнопки — игроку приходилось печатать /menu
+    руками, чтобы продолжить играть."""
+    p = Player(user_id=1, exists=True, balance=100, total_earned=100)
+    ctx = make_ctx(p)
+    upd = FakeUpdate("x", uid=1)
+    await bot.send_whisper_dm(upd, FakeContext(ctx), "💎 Ты внёс 50 OAC в Храм. Спасибо, Странник!")
+    check(len(upd.callback_query.answers) >= 1, "send_whisper_dm гасит спиннер")
+
+
 # ── 23. «🏰 В меню» на экранах удачи вёл НЕ в меню — мисклейбл пофикшен ──
 async def test_luck_result_buttons_dont_claim_menu():
     """Результаты Колеса/Алхимии показывали кнопку «🏰 В меню», но
@@ -1074,6 +1142,8 @@ async def main():
                test_query_answer_called_in_profile_craft_smoke,
                test_slow_renders_send_chat_action,
                test_luck_result_buttons_dont_claim_menu,
+               test_query_answer_called_second_wave,
+               test_send_whisper_dm_has_navigation,
                test_no_double_ctx_callsites):
         print(f"\n{fn.__name__}:")
         await fn()
