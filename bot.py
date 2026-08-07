@@ -3992,19 +3992,35 @@ async def handle_named_name(update, context):
                 color = {"legendary": "🟡", "epic": "🟣", "rare": "🔵"}.get(rarity, "🟢")
                 reaction = item.get("reaction", "")
 
+                # Автограф, не инвентарный предмет: имя навсегда прикреплено
+                # к вещи — тот же психологический механизм extended self
+                # (Belk), что заставляет беречь и хотеть показать вещь с
+                # собственным именем сильнее, чем безымянный дроп.
                 caption = (
                     f"✅ <b>ИМЯ ДАНО! ✨</b>\n\n"
                     f"{color} <b><i>«{html.escape(name)}»</i></b> 🌿\n"
                     f"<i>Редкость: {rarity}</i>\n\n"
                     f"📜 <i>{reaction}</i>\n\n"
-                    f"💎 Этот блант навсегда останется в твоей коллекции!"
+                    f"💎 Он навсегда несёт твоё имя — как автограф: даже "
+                    f"подаренный, останется твоим следом в чужой коллекции."
                 )
-                
+
+                kb_rows = [[InlineKeyboardButton("💍 Мои бланты", callback_data="my_blunts")]]
+                # Гарантированный (не вероятностный) момент для тех, кто ещё
+                # НИ РАЗУ никого не приглашал: это первая персонализация в
+                # игре — пик компетентности «я это создал» (IKEA-эффект),
+                # а не пик удачи вроде джекпота/ранг-апа, до которого
+                # свежий игрок может и не дожить. invite_friend_handler уже
+                # полностью собран (соц-пруф, дарение, двойная выгода) —
+                # просто живёт в Профиле, куда новичок сам может не дойти
+                # рано. Роутим сюда, не дублируя его логику.
+                if not (player.referral_count or 0):
+                    kb_rows.insert(0, [InlineKeyboardButton(
+                        "🎁 Подари другу лучший старт", callback_data="invite_friend")])
+                kb_rows.append([InlineKeyboardButton("🔙 В меню", callback_data="menu")])
+
                 await update.message.reply_text(caption, parse_mode='HTML',
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("💍 Мои бланты", callback_data="my_blunts")],
-                        [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
-                    ]))
+                    reply_markup=InlineKeyboardMarkup(kb_rows))
                 context.user_data.pop('awaiting_named_blunt', None)
                 return
 
@@ -4086,7 +4102,10 @@ async def handle_named_name(update, context):
 
         caption = fanfare + (
             f"<b>💍 ТЫ СОЗДАЛ ИМЕННОЙ БЛАНТ!</b>\n"
-            f"🎉 Он навсегда останется в <b>твоей коллекции</b>.\n\n"
+            # Автограф, не инвентарный предмет (тот же сдвиг, что и в
+            # renaming-ветке free-бланта выше) — extended self (Belk):
+            # вещь с твоим именем ценится и бережётся сильнее.
+            f"🎉 Он навсегда несёт твоё имя — <b>твой автограф</b> в этом мире.\n\n"
             f"{color}<b><i>«{html.escape(meme_name)}»</i></b>\n"
             f"💎 Редкость: <b>{label} • #{item.get('rare_number', '?-????')}</b>\n"
             f"👑 Первый владелец: <b>{html.escape(player.username or 'игрок')}</b>\n"
@@ -6242,6 +6261,13 @@ async def rules_callback(update, context):
         "<b>ℹ️ ИНФОРМАЦИЯ</b>\n"
         "⚜️ <code>/profile</code> — твой профиль и коллекция\n"
         "🏆 <code>/top</code> — список сильнейших\n\n"
+        # Был только в /help (более глубокой справке), не здесь — «Кодекс»
+        # читается раньше и чаще, а реферала в нём не было ни строкой: чистый
+        # Ability-барьер по Fogg — человек не приглашает не потому что не
+        # хочет, а потому что не знает, что вообще можно.
+        "<b>🤝 ДРУЗЬЯ</b>\n"
+        "🎁 Постоянная ссылка — в профиле (кнопка «Пригласить друга»).\n"
+        "<i>Другу — 100 OAC на старт, тебе — 50 OAC и легендарный блант.</i>\n\n"
         "<b>🛡️ МАГАЗИН</b>\n"
         "<code>/privilege</code> — твоя скидка\n"
         "<code>/catalog</code> — ссылка на каталог\n\n"

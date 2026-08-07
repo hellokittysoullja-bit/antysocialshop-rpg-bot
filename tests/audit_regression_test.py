@@ -470,6 +470,19 @@ async def test_named_blunt_name_persisted():
     check('item["original_name"] = original_name' in body,
           "исходный ввод игрока сохраняется рядом (его показывают в деталях)")
 
+    # Гарантированный CTA «Первый друг»: на первой персонализации (называние
+    # бесплатного стартового бланта) — единственный 100%-гарантированный,
+    # не завязанный на удачу момент компетентности в игре. Гейт на
+    # referral_count==0 обязателен — иначе уже пригласившим показывали бы
+    # тот же CTA снова и снова (нагрузка, а не крючок).
+    free_branch = body[:body.index("=== ГЕНЕРАЦИЯ ИМЕНИ")]
+    check("player.referral_count or 0" in free_branch,
+          "CTA «Подари другу» гейтится на referral_count==0 — не показывается тем, кто уже приглашал")
+    check('callback_data="invite_friend"' in free_branch,
+          "CTA ведёт на уже готовый invite_friend_handler, не дублирует его логику")
+    check("автограф" in free_branch and "автограф" in body[body.index("=== ГЕНЕРАЦИЯ ИМЕНИ"):],
+          "оба момента (бесплатный и платный именной блант) используют autograph-фрейминг (extended self)")
+
 
 # ── 11. Добавление бота в чат — больше не немой момент ───────────────
 async def test_bot_added_to_chat_announces():
