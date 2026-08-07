@@ -9,7 +9,7 @@ import redis.asyncio as aioredis
 from aiohttp import web
 from cachetools import TTLCache
 
-from telegram import Update
+from telegram import Update, BotCommand
 from telegram.ext import (
     Application, ApplicationBuilder,
     MessageHandler, CallbackQueryHandler, ChatMemberHandler,
@@ -69,6 +69,56 @@ def resilient_task(func):
                 logger.exception(f"Задача {func.__name__} упала, перезапуск через 5с")
                 await asyncio.sleep(5)
     return wrapper
+
+# ============================================================
+async def configure_bot_profile(app: Application):
+    """Имя/описание/список команд бота нигде в репозитории не задавались
+    программно — либо выставлены руками через BotFather когда-то давно (и
+    не под контролем версий), либо не выставлены вовсе. А ведь short_description
+    — это ЕДИНСТВЕННЫЙ текст, который человек видит ДО решения нажать Start:
+    экран профиля бота в Telegram, до всякого /start и до всякой активации.
+    Ни одна из механик онбординга (дефер фракции, мгновенный первый фарм и
+    т.д.) физически не может сработать раньше этого момента — он выше по
+    воронке, чем весь остальной код в этом репозитории.
+
+    Идемпотентно и дёшево — Telegram просто перезаписывает текущее значение,
+    безопасно звать на каждом старте процесса, отдельный try/except не даёт
+    сбою здесь уронить остальную инициализацию.
+    """
+    try:
+        await app.bot.set_my_short_description(
+            "🕯️ RPG Фабрики №9 — крафти легендарные бланты, воюй за Гильдию. "
+            "Первый именной блант — бесплатно, прямо сейчас 🎁"
+        )
+        await app.bot.set_my_description(
+            "Добро пожаловать на Фабрику №9 🕯️⚜️\n\n"
+            "RPG прямо в Telegram: фарми OAC, крафти именные бланты редкости от "
+            "обычной до легендарной, выбери Тёмную или Светлую Гильдию и сражайся "
+            "в еженедельной Войне Гильдий за общий приз.\n\n"
+            "Колесо, Мины и Алхимия — испытай удачу. Плантация — пассивный доход. "
+            "Лабиринт Искажения — для смелых.\n\n"
+            "Жми Start — первые 800 OAC и именной блант ждут тебя."
+        )
+        # Список нарочно короче полного набора команд (см. TEXT_COMMAND_HANDLERS)
+        # — это автодополнение по вводу "/", Hick's law: 9 пунктов читаются,
+        # 20 — игнорируются. Админ-команды (setbluntpic/give_oac/broadcast/growth/
+        # debugpet/checkbluntpics) сюда не идут: они и так работают по прямому
+        # вводу, светить их в автодополнении обычным игрокам незачем.
+        await app.bot.set_my_commands([
+            BotCommand("start", "🎮 Начать игру"),
+            BotCommand("farm", "🍬 Собрать урожай OAC"),
+            BotCommand("craft", "🌿 Скрутить блант"),
+            BotCommand("luck", "🍀 Колесо, Мины, Алхимия"),
+            BotCommand("profile", "⚜️ Профиль и коллекция"),
+            BotCommand("top", "🏆 Топ игроков"),
+            BotCommand("shop", "🏪 Лавка Фабрики"),
+            BotCommand("rules", "📜 Правила мира"),
+            BotCommand("help", "❓ Полная справка"),
+        ])
+        logger.info("✅ Профиль бота (описание/команды) настроен")
+    except Exception:
+        logger.exception("Не удалось настроить профиль бота (описание/команды)")
+
 
 # ============================================================
 async def load_blunt_images(ctx: AppContext):
@@ -291,6 +341,9 @@ async def on_startup(app: Application):
         # ================== Прогрев кэша ==================
         if redis_client:
             await load_blunt_images(ctx)
+
+        # ================== Профиль бота ==================
+        await configure_bot_profile(app)
 
     except Exception:
         logger.exception("Критическая ошибка инициализации")

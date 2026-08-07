@@ -8149,8 +8149,18 @@ async def handle_pet_name(update, context):
     context.user_data.pop('awaiting_pet_name', None)
 
 async def pet_locked_handler(update, context):
+    # Было: голый порог без единого слова о том, что вообще открывается —
+    # единственный локед-экран в игре без аспирации (Алхимия хотя бы
+    # называет механику в своём locked-тексте, у Алтаря — целый абзац "что
+    # там"). Разница дорого стоит именно тут: "нужно 5000 OAC" не тянет
+    # вперёд, а "сытый питомец даёт +10% к доходу" — тянет, потому что
+    # называет РЕАЛЬНУЮ выгоду (bonus_max_pct=10 из PET_CONFIG), не выдумку.
     query = update.callback_query
-    await query.answer("❌ Доступно с ранга ⚔️ Ветеран (5000 OAC 🍬)", show_alert=True)
+    max_pct = PET_CONFIG.get("dog", {}).get("bonus_max_pct", 0)
+    await query.answer(
+        f"❌ Питомец открывается на ранге ⚔️ Ветеран (5000 OAC 🍬) — "
+        f"сытый Песик даёт +{max_pct}% к доходу Плантации.",
+        show_alert=True)
 
 # ============================================================
 # МАГАЗИН, АДМИН-КОМАНДЫ
