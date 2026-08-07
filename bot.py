@@ -5427,7 +5427,7 @@ async def profile_callback(update, context, ctx, player):
         badges.append("🔥")
     if player.check_count >= 10:
         badges.append("👁️")
-    badge_str = ' '.join(badges) if badges else "<i>0/4 — играй и получишь первую</i>"
+    badge_str = ' '.join(badges) if badges else "<i>0/4 — см. 🏆 Достижения ниже</i>"
 
     rank_progress = get_rank_progress(earned)
 
@@ -5507,6 +5507,13 @@ async def profile_callback(update, context, ctx, player):
     # (invite_friend_handler → share_text), анкерит на его выгоду правильно —
     # это тот самый случай, когда разным адресатам нужен разный порядок якоря.
     kb_rows.append([InlineKeyboardButton("🔗 Позвать друга (+50 OAC и легендарка тебе)", callback_data="invite_friend")])
+    # achievements_callback уже ЖДАЛ этот вход: ветка data == "achievements_profile"
+    # существовала (и корректно вела back_cb="profile") — но ни одна кнопка
+    # нигде в игре не отправляла именно этот callback_data. Богатый список из
+    # 33 достижений с честными прогресс-барами (см. achievements_callback) был
+    # практически ненаходим — только через 📊 Личный прогресс, до которого
+    # ещё нужно догадаться дойти. Теперь виден прямо с экрана «кто я».
+    kb_rows.append([InlineKeyboardButton("🏆 Достижения", callback_data="achievements_profile")])
     # Утилитарные — парой в ряд: короче вертикаль, удобнее большому пальцу.
     kb_rows.append([
         InlineKeyboardButton("📖 Правила мира", callback_data="rules"),

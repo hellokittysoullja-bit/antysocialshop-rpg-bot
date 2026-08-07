@@ -1499,8 +1499,8 @@ async def test_profile_shows_streak_and_empty_state_hooks():
           "серия НЕ показывается при streak=0 (нечего защищать loss-aversion'ом)")
     check("ещё нет — первый за 7-дневную серию" in text,
           "пустой Титул — конкретная честная цель, не тупиковый прочерк")
-    check("0/4 — играй и получишь первую" in text,
-          "пустые Заслуги — счётчик-цель, не тупиковый прочерк")
+    check("0/4 — см. 🏆 Достижения ниже" in text,
+          "пустые Заслуги — счётчик-цель со ссылкой на реальный экран, не тупиковый прочерк")
 
     p2 = Player(user_id=2, exists=True, balance=100, total_earned=100,
                 login_streak=5, streak_freezes=1, titles="🩸", profile_skins={})
@@ -1512,6 +1512,14 @@ async def test_profile_shows_streak_and_empty_state_hooks():
           "серия входов видна на профиле с заморозками, если streak>=1")
     check("есть, но не выбран — 🎨 Кастомизация" in text2,
           "заработанный, но не выбранный титул — конкретная подсказка, не тот же прочерк")
+
+    kb = upd2.callback_query.message.edit_calls[-1][1].get("reply_markup")
+    has_ach_btn = kb and any(btn.callback_data == "achievements_profile"
+                              for row in kb.inline_keyboard for btn in row)
+    check(has_ach_btn,
+          "профиль несёт реальную кнопку в Достижения (achievements_profile — "
+          "раньше эта ветка существовала в achievements_callback, но ни одна "
+          "кнопка в игре её не вызывала)")
 
 
 # ── 36. Крафт/дунуть: та же цепочка «что дальше», что уже на фарме ────
