@@ -178,6 +178,20 @@ def game_handler(func):
                     pass
                 return
 
+            # Дневной hook на возврат (стрик, заморозка, превью завтрашней
+            # награды) раньше запускался ТОЛЬКО из ветки /start для старых
+            # игроков — обычные действия (фарм/крафт/что угодно) через этот
+            # же декоратор его никогда не задевали, а именно так обычно и
+            # играют (жмут старые кнопки в чате, а не перепечатывают /start).
+            # onboarding_step == -1: гейт «онбординг пройден» (тот же, что и
+            # в build_main_menu, bot.py:8698) — без него карточка выстрелила
+            # бы посреди choreographed онбординг-сообщений у новичка.
+            # last_login_date уже лежит в этом же player — сравнение
+            # бесплатно, идемпотентность гонок закрывает сама process_daily_login.
+            if (player.onboarding_step == -1
+                    and _parse_last_login_date(player.last_login_date) != date.today()):
+                asyncio.create_task(process_daily_login(uid, context))
+
         # === СБОР АРГУМЕНТОВ ===
         new_kwargs = {**kwargs}
         if needs_ctx:
@@ -3504,6 +3518,18 @@ async def farm_callback_v2(update, context, ctx, player):
     target = get_medal_target(new_count, FARM_MEDALS)
     text = _format_farm_message(earned, crit, happy, medal_text, new_count, target,
                                 new_balance, new_earned, temple_pct)
+
+    # Подсказка следующего шага главы — та же чистая функция, что и в
+    # кулдаун-ветке ниже (next_quest_step), но здесь ей раньше вообще не
+    # было места: экран успешного фарма показывал только Крафт/Дунуть, а
+    # задачи вроде Ритуала/Исповеди/Пожертвования/Лабиринта на самом частом
+    # экране игры никак не подсвечивались. exclude_key="farm" — тот же
+    # приём против «протухшего» player, что и у кулдаун-ветки (см. ниже):
+    # daily_progress в этом объекте ещё не отражает только что засчитанный
+    # фарм.
+    _next_step = next_quest_step(player, exclude_key="farm")
+    if _next_step:
+        text += f"\n\n💡 <b>Дальше:</b> {_next_step[2]}"
 
     # Экран-результат несёт навигацию (единый живой экран). На кулдауне НЕ
     # показываем «фарм» — это тупик (тап вернёт тот же кулдаун). Вместо этого
@@ -8756,6 +8782,13 @@ async def menu_handler(update, context, ctx):
         await query.answer("Профиль не найден. Напиши /start", show_alert=True)
         return
 
+    # Тот же дневной hook, что в game_handler (bot.py ~180) — «🔙 В меню»
+    # не проходит через game_handler (отдельный декоратор @cb), а это,
+    # вероятно, самая нажимаемая кнопка в боте.
+    if (player.onboarding_step == -1
+            and _parse_last_login_date(player.last_login_date) != date.today()):
+        asyncio.create_task(process_daily_login(uid, context))
+
     text, kb = await build_main_menu(player, ctx, context)
     # edit_or_reply, не query.message.edit_text напрямую: последнее падает
     # BadRequest без единого фолбэка, если нажатие пришло из фото-сообщения
@@ -9492,6 +9525,19 @@ async def claim_reward_handler(update, context, ctx):
         reward_bg = template.get("reward_bg")
         if reward_bg:
             reward_text += f"\n🖼️ <b>Новый фон профиля: {reward_bg}</b>"
+
+        # Прохождение главы — тот же класс пика, что у ранг-апа/джекпота/
+        # рекорда Лабиринта (см. _win_share_button), но единственный из них
+        # без кнопки шеринга: почти каждый вовлечённый игрок хотя бы раз
+        # проходит ГЛАВУ 1, а реферал в этот момент сейчас нигде не всплывает.
+        claim_kb = None
+        try:
+            share_btn = await _win_share_button(
+                context, uid, f"📜 Я прошёл «{template['title']}» в Antysocialshop!")
+            claim_kb = InlineKeyboardMarkup([[share_btn]])
+        except Exception:
+            pass
+
         await context.bot.send_message(
             chat_id=query.message.chat.id,
             text=(
@@ -9500,7 +9546,8 @@ async def claim_reward_handler(update, context, ctx):
                 f"<b>📜 {template['title']} — пройдена! {reward_text}</b>\n\n"
                 f"Отличная работа!"
             ),
-            parse_mode='HTML'
+            parse_mode='HTML',
+            reply_markup=claim_kb
         )
     else:
         await query.answer("Ошибка при начислении награды. Попробуйте позже.", show_alert=True)
