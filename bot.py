@@ -6944,8 +6944,16 @@ async def _show_mines_bet_menu(update, context, player, cfg):
     query = update.callback_query
     if not query:
         return
+    # Было parse_mode='Markdown' (легаси-режим Telegram) с "**жирным**" —
+    # легаси-Markdown Telegram понимает только ОДИНАРНЫЕ звёздочки для
+    # жирного; двойные — не его синтаксис вообще (это MarkdownV2/CommonMark).
+    # На практике это либо съедало звёздочки без жирности (два пустых
+    # bold-спана подряд), либо визуально ломало экран — единственный во всей
+    # игре очаг парсинга, отличный от HTML, которым размечено абсолютно всё
+    # остальное. Мины — доступная с самого начала механика в хабе Удачи,
+    # рядом с уже дожатыми в этой сессии Колесом/Алхимией.
     text = (
-        "💣 **МИНЫ**\n\n"
+        "💣 <b>МИНЫ</b>\n\n"
         "Выбери ставку и начни игру.\n"
         "Поле 5×5, спрятано 3 мины.\n"
         "Открывай клетки, множитель растёт!\n"
@@ -6956,7 +6964,7 @@ async def _show_mines_bet_menu(update, context, player, cfg):
     for bet in cfg["mines"]["bet_options"]:
         keyboard.append([InlineKeyboardButton(f"{bet} OAC", callback_data=f"mines_bet_{bet}")])
     keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="luck")])
-    await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+    await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
 
 async def _mines_start_game(update, context, uid, bet, ctx):
     """Создаёт новую игру, списывает ставку и показывает поле."""
@@ -7033,8 +7041,13 @@ async def _mines_show_field(update, context, state, redis_key, uid, ctx):
     # весомее победы. Ноль уместен только там, где ставка действительно сгорела.
     win = 0 if status == "lost" else int(bet * multiplier)
 
+    # Было parse_mode='Markdown' (легаси) с "**жирным**" — не синтаксис
+    # легаси-Markdown Telegram вообще (только одинарные звёздочки); см. тот
+    # же фикс в _show_mines_bet_menu. Тройные бэктики (код-блок для ASCII-поля)
+    # заменены на <pre> — прямой эквивалент в HTML, без изменения того, что
+    # видит игрок (моноширинный блок никуда не делся).
     text = (
-        f"💣 **МИНЫ**\n\n"
+        f"💣 <b>МИНЫ</b>\n\n"
         f"💰 Ставка: {bet} OAC\n"
         f"🏆 Множитель: x{multiplier:.2f}\n"
         f"📊 Прогресс: {step}/22 клеток\n"
@@ -7042,7 +7055,7 @@ async def _mines_show_field(update, context, state, redis_key, uid, ctx):
 
     if status == "playing":
         text += f"💰 Возможный выигрыш: {win} OAC\n\n"
-        text += f"```\n{field_str}\n```\n"
+        text += f"<pre>{field_str}</pre>\n"
         # Клавиатура с клетками
         keyboard = []
         for r in range(size):
@@ -7056,27 +7069,27 @@ async def _mines_show_field(update, context, state, redis_key, uid, ctx):
         keyboard.append([InlineKeyboardButton(f"🏆 Забрать {win} OAC", callback_data="mines_cashout")])
         keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="luck")])
     elif status == "won":
-        text += f"🎉 **ПОБЕДА!** Ты открыл все клетки!\n"
-        text += f"💰 Выигрыш: {win} OAC\n\n```\n{field_str}\n```"
+        text += f"🎉 <b>ПОБЕДА!</b> Ты открыл все клетки!\n"
+        text += f"💰 Выигрыш: {win} OAC\n\n<pre>{field_str}</pre>"
         keyboard = [[InlineKeyboardButton("💣 Новая игра", callback_data="mines_bet_50")],
                     [InlineKeyboardButton("🔙 Назад", callback_data="luck")]]
     elif status == "lost":
-        text += f"💥 **ВЗРЫВ!** Ты попал на мину!\n"
+        text += f"💥 <b>ВЗРЫВ!</b> Ты попал на мину!\n"
         if step >= 1:
             almost = int(bet * multiplier)
             text += f"😱 Так близко! Открыто {step}/22 — ты мог забрать {almost} OAC (x{multiplier:.2f}).\n"
-            text += f"💰 Ставка сгорела. Ещё один шаг — и куш был бы твой.\n\n```\n{field_str}\n```"
+            text += f"💰 Ставка сгорела. Ещё один шаг — и куш был бы твой.\n\n<pre>{field_str}</pre>"
         else:
-            text += f"💰 Ты потерял ставку.\n\n```\n{field_str}\n```"
+            text += f"💰 Ты потерял ставку.\n\n<pre>{field_str}</pre>"
         keyboard = [[InlineKeyboardButton("💣 Попробовать снова", callback_data="mines_bet_50")],
                     [InlineKeyboardButton("🔙 Назад", callback_data="luck")]]
     else:  # cashed_out
-        text += f"✅ **Ты забрал выигрыш!**\n"
-        text += f"💰 Выигрыш: {win} OAC\n\n```\n{field_str}\n```"
+        text += f"✅ <b>Ты забрал выигрыш!</b>\n"
+        text += f"💰 Выигрыш: {win} OAC\n\n<pre>{field_str}</pre>"
         keyboard = [[InlineKeyboardButton("💣 Новая игра", callback_data="mines_bet_50")],
                     [InlineKeyboardButton("🔙 Назад", callback_data="luck")]]
 
-    await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+    await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
 
 async def _mines_open_cell(update, context, state, redis_key, uid, ctx):
     """Открывает клетку, проверяет мину, обновляет состояние."""

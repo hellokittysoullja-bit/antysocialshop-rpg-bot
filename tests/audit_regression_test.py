@@ -1522,6 +1522,35 @@ async def test_profile_shows_streak_and_empty_state_hooks():
           "кнопка в игре её не вызывала)")
 
 
+# ── 37. Мины: HTML вместо сломанного легаси-Markdown ──────────────────
+async def test_mines_screens_use_html_not_broken_markdown():
+    """Мины были единственным очагом во всей игре с parse_mode='Markdown' —
+    легаси-режим Telegram понимает только ОДИНАРНЫЕ звёздочки для жирного;
+    "**двойные**", которыми был размечен весь экран, вообще не его синтаксис
+    (это MarkdownV2/CommonMark) — либо съедались без жирности, либо ломали
+    рендер. Код-блоки на тройных бэктиках заменены на HTML <pre>."""
+    p = Player(user_id=1, exists=True, balance=1000, total_earned=1000)
+    ctx = make_ctx(p, redis=FakeRedis(), pool=FakeMinesPool())
+
+    upd = FakeUpdate("luck_mines", uid=1)
+    await bot.luck_mines_handler(upd, FakeContext(ctx))
+    text, kw = upd.callback_query.message.edit_calls[-1]
+    check(kw.get("parse_mode") == "HTML", "меню ставки Мин размечено HTML, не Markdown")
+    check("<b>МИНЫ</b>" in text and "**" not in text,
+          "заголовок — настоящий HTML-жирный, не сломанные двойные звёздочки")
+
+    state = {"field": [[0] * 5 for _ in range(5)], "mines": [[0, 0]], "bet": 100,
+             "step": 3, "multiplier": 1.27, "status": "playing", "created_at": 0}
+    await bot._mines_state_set(ctx, 1, state)
+    upd2 = FakeUpdate("mines_cashout", uid=1)
+    await bot._mines_cashout_wrapper(upd2, FakeContext(ctx))
+    text2, kw2 = upd2.callback_query.message.edit_calls[-1]
+    check(kw2.get("parse_mode") == "HTML", "экран результата Мин размечен HTML, не Markdown")
+    check("<pre>" in text2 and "```" not in text2,
+          "игровое поле — HTML <pre>, не markdown-код-блок")
+    check("**" not in text2, "на экране результата не осталось сломанных двойных звёздочек")
+
+
 # ── 36. Крафт/дунуть: та же цепочка «что дальше», что уже на фарме ────
 async def test_craft_and_smoke_chain_to_next_quest_step():
     """next_quest_step раньше подключён только к экрану фарма — крафт и
@@ -1674,6 +1703,7 @@ async def main():
                test_medal_names_are_thematic_and_grammar_safe,
                test_profile_shows_streak_and_empty_state_hooks,
                test_craft_and_smoke_chain_to_next_quest_step,
+               test_mines_screens_use_html_not_broken_markdown,
                test_no_double_ctx_callsites):
         print(f"\n{fn.__name__}:")
         await fn()
