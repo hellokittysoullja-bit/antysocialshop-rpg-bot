@@ -104,6 +104,25 @@ def main() -> int:
     assert not bad_guild, f"Гильдейское задание только для одной стороны (другая застрянет): {bad_guild}"
     passed.append("гильдейские задания симметричны (ни одна сторона не застревает)")
 
+    # 6b. Гильдейское ДЕЙСТВИЕ без условия гильдии — капкан: ritual выполним
+    #     только Тёмной, repent — только Светлой. Задача с таким ключом БЕЗ
+    #     condition невыполнима для второй стороны и для безгильдийных (баг:
+    #     безусловная «Исповедь» в chapter3_benefactor запирала Тёмных навсегда).
+    #     Сюда же donate: единственный вход в пожертвование — Храм, а он
+    #     отвечает «Ты не в гильдии» (guild_shrine_callback). Онбординг сам
+    #     предлагает «Позже — сначала играть», то есть уводит новичка в
+    #     безгильдейное состояние → без условия он вставал в саге навсегда.
+    GUILD_GATED = {"ritual": "guild_black", "repent": "guild_white",
+                   "donate": "has_guild"}
+    bad_gated = []
+    for qid, tpl in QUEST_TEMPLATES.items():
+        for t in tpl.get("tasks", []):
+            need = GUILD_GATED.get(t["key"])
+            if need and t.get("condition") != need:
+                bad_gated.append(f"{qid}:{t['key']} (condition={t.get('condition')!r}, нужно {need!r})")
+    assert not bad_gated, f"Гильдейские действия без правильного условия (капкан): {bad_gated}"
+    passed.append("ritual/repent/donate под условием гильдии (капканов нет)")
+
     for name in passed:
         print(f"  OK  {name}")
     print(f"\nТест контента пройден: {len(passed)}/{len(passed)}")

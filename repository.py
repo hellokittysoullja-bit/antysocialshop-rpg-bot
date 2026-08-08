@@ -23,16 +23,25 @@ logger = logging.getLogger(__name__)
 # Используется во всех операциях чтения/записи (get_by_id, save, atomic_update),
 # чтобы схема была описана ровно в одном месте.
 PLAYER_COLUMNS = (
-    "user_id", "username", "balance", "blunts", "guild", "last_farm",
+    "user_id", "username", "balance", "total_earned", "blunts", "guild", "last_farm",
     "last_ritual", "last_repent", "last_daily", "titles", "last_farm_date", "passive_level",
     "passive_collected", "karma", "inhaled", "smoke_count", "farm_count",
     "craft_count", "ritual_count", "referral_count", "last_mines",
     "inventory", "invited_by", "profile_skins", "login_streak",
-    "last_login_date", "oath", "keys", "check_count", "m_essence",
+    "last_login_date", "streak_freezes", "oath", "keys", "check_count", "m_essence",
     "lab_chests", "lab_deaths", "alchemy_count", "last_lab_attempt",
     "donated", "daily_progress", "pending_transfer", "lab_depth", "pet", "pet_name",
-    "repent_count", "onboarding_step", "pet_hunger", "exists",
+    "repent_count", "onboarding_step", "pet_hunger", "exists", "prestige",
+    "lab_best_oac",
 )
+# Не в PLAYER_COLUMNS намеренно: last_reengagement_sent, last_winback_sent,
+# last_known_rank, mines_state, mines_state_updated_at. Все пять пишутся
+# точечным UPDATE одной колонки в горячих путях (фоновая джоба, перебирающая
+# много игроков за раз; клик по клетке в «Минах» на каждый тап) — грузить
+# через них весь объект Player и гонять save() по ~50 колонкам ради одного
+# поля было бы накладно и не даёт ничего, поскольку раздельная запись не
+# требует согласованности с остальными полями игрока в той же транзакции.
+# save() эти колонки просто не видит и не трогает — конфликта нет.
 
 
 class PlayerRepository:
@@ -95,7 +104,14 @@ class PlayerRepository:
             p["daily_progress"] = _json_safe_load(p.get("daily_progress"), {})
             player = Player(**p)
             player.exists = True
-            await self._cache_put(user_id, player)
+            # Помечаем частичную загрузку, чтобы save() не записал пустой
+            # инвентарь поверх реальной коллекции игрока.
+            player._inventory_loaded = bool(with_inventory)
+            # Частично загруженного игрока в кэш НЕ кладём: приватный флаг не
+            # переживает сериализацию, и следующий читатель принял бы пустой
+            # инвентарь за настоящий — баг вернулся бы через кэш.
+            if player._inventory_loaded:
+                await self._cache_put(user_id, player)
             return player
 
         logger.debug("Игрок %d не найден в БД", user_id)
@@ -107,15 +123,25 @@ class PlayerRepository:
         if player.balance < 0:
             logger.warning("Попытка сохранить игрока %d с отрицательным балансом", player.user_id)
             player.balance = 0
+        # Страховочный пол статуса: заработано не может быть меньше того, что
+        # игрок держит в руках. Нужен для (а) бэкфилла старых игроков, (б) путей,
+        # которые сохраняются напрямую через save() минуя atomic_update.
+        if (player.total_earned or 0) < player.balance:
+            player.total_earned = player.balance
         player.exists = True
         if conn and conn.is_closed():
             conn = None
 
         columns = PLAYER_COLUMNS
         json_cols = {"inventory", "profile_skins", "pending_transfer", "daily_progress"}
+        # Колонки, которые этот объект не вправе перезаписывать: инвентарь, если
+        # он не загружался (иначе пустой список затрёт коллекцию). Для новой
+        # строки INSERT всё равно проставит дефолт — терять нечего.
+        skip_update = set() if player._inventory_loaded else {"inventory"}
         cols_sql = ", ".join(f'"{c}"' for c in columns)
         placeholders = ", ".join(f"${i+1}" for i in range(len(columns)))
-        update_set = ", ".join(f'"{c}" = EXCLUDED."{c}"' for c in columns if c != "user_id")
+        update_set = ", ".join(f'"{c}" = EXCLUDED."{c}"' for c in columns
+                               if c != "user_id" and c not in skip_update)
         values = [getattr(player, col) for col in columns]
         for idx, col in enumerate(columns):
             if col in json_cols:
@@ -174,9 +200,66 @@ class PlayerRepository:
                 p["daily_progress"] = _json_safe_load(p.get("daily_progress"), {})
                 player = Player(**p)
 
+                # Единая точка учёта заработка. Все 40+ начислений (фарм, тяга,
+                # медали, ритуал, исповедь, плантация, квесты, колесо, лабиринт…)
+                # идут через atomic_update, поэтому дельту достаточно поймать
+                # здесь — не размазывая += по всему bot.py и не рискуя забыть
+                # источник. Растёт только вверх: траты статус не отбирают.
+                _bal_before = player.balance or 0
                 result = await update_func(player, conn)
+                _gain = (player.balance or 0) - _bal_before
+                if _gain > 0:
+                    player.total_earned = (player.total_earned or 0) + _gain
                 await self.save(player, conn=conn)
                 logger.info("Атомарное обновление для игрока %d успешно завершено", user_id)
+                return result
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=5))
+    async def atomic_pair_update(self, user_id_a: int, user_id_b: int, update_func):
+        """Атомарно блокирует ДВУХ игроков в ОДНОЙ транзакции и передаёт их
+        update_func(player_a, player_b, conn) для правки обоих сразу.
+
+        Единственный способ безопасно передать предмет от одного игрока
+        другому: раньше дарение читало обоих игроков через get_by_id (может
+        отдать снимок из Redis-кэша с TTL 10с) и делало ДВА независимых save()
+        — ни блокировки, ни общей транзакции. Крах между двумя save()
+        удваивал или терял предмет; конкурентное действие любого из двоих
+        (фарм, крафт — что угодно) в эти секунды откатывалось перезаписью
+        устаревшего снимка. Здесь оба игрока блокируются SELECT…FOR UPDATE в
+        ОДНОЙ транзакции, правки и оба save() — тоже в ней; крах откатывает
+        всё, конкурентное чтение других запросов просто ждёт лока.
+
+        Блокировка берётся в порядке возрастания user_id — детерминированно
+        для ЛЮБОЙ пары, что исключает deadlock при встречных подарках A→B и
+        B→A, идущих одновременно.
+        """
+        if not user_id_a or user_id_a <= 0 or not user_id_b or user_id_b <= 0:
+            raise ValueError("Некорректный user_id при парном атомарном обновлении")
+
+        lo, hi = sorted((user_id_a, user_id_b))
+        async with self.db_pool.acquire() as conn:
+            async with conn.transaction():
+                columns = PLAYER_COLUMNS
+                cols_sql = ", ".join(f'"{c}"' for c in columns)
+                loaded = {}
+                for uid in (lo, hi):
+                    row = await conn.fetchrow(
+                        f"SELECT {cols_sql} FROM players WHERE user_id = $1 FOR UPDATE", uid)
+                    if not row:
+                        loaded[uid] = None
+                        continue
+                    p = dict(row)
+                    p["inventory"] = _json_safe_load(p.get("inventory"), [])
+                    p["profile_skins"] = _json_safe_load(p.get("profile_skins"), {})
+                    p["pending_transfer"] = _json_safe_load(p.get("pending_transfer"), None)
+                    p["daily_progress"] = _json_safe_load(p.get("daily_progress"), {})
+                    loaded[uid] = Player(**p)
+
+                player_a, player_b = loaded[user_id_a], loaded[user_id_b]
+                result = await update_func(player_a, player_b, conn)
+                for p in (player_a, player_b):
+                    if p is not None:
+                        await self.save(p, conn=conn)
                 return result
 
     async def _cache_put(self, user_id: int, player: Player):
