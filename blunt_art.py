@@ -69,27 +69,27 @@ from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 #   edition — нумерация тиража вместо простого серийника
 _RARITY = {
     "common": {
-        "glow": (38, 74, 60), "frame": (112, 152, 128), "accent": (188, 214, 192),
-        "label": "ОБЫЧНЫЙ", "pips": 1, "rings": 0, "foil": 0.0, "stars": 26,
-        "rays": 0, "rosette": 3, "band": 7.0, "art_y1": 0.575,
+        "glow": (24, 116, 78), "frame": (78, 184, 134), "accent": (184, 246, 211),
+        "label": "ОБЫЧНЫЙ", "pips": 1, "rings": 0, "foil": 0.04, "stars": 38,
+        "rays": 8, "rosette": 3, "band": 9.0, "art_y1": 0.608,
         "burst": False, "seal": False, "edition": False,
     },
     "rare": {
-        "glow": (30, 62, 116), "frame": (104, 140, 190), "accent": (196, 214, 238),
-        "label": "РЕДКИЙ", "pips": 2, "rings": 1, "foil": 0.0, "stars": 46,
-        "rays": 14, "rosette": 4, "band": 9.0, "art_y1": 0.590,
+        "glow": (26, 86, 186), "frame": (72, 142, 226), "accent": (179, 226, 255),
+        "label": "РЕДКИЙ", "pips": 2, "rings": 1, "foil": 0.10, "stars": 58,
+        "rays": 18, "rosette": 4, "band": 11.0, "art_y1": 0.614,
         "burst": False, "seal": False, "edition": False,
     },
     "epic": {
-        "glow": (78, 48, 110), "frame": (150, 112, 196), "accent": (214, 192, 238),
-        "label": "ЭПИЧЕСКИЙ", "pips": 3, "rings": 2, "foil": 0.16, "stars": 72,
-        "rays": 20, "rosette": 6, "band": 11.5, "art_y1": 0.605,
+        "glow": (124, 38, 188), "frame": (177, 82, 226), "accent": (242, 184, 255),
+        "label": "ЭПИЧЕСКИЙ", "pips": 3, "rings": 2, "foil": 0.24, "stars": 86,
+        "rays": 28, "rosette": 6, "band": 13.0, "art_y1": 0.620,
         "burst": True, "seal": False, "edition": False,
     },
     "legendary": {
-        "glow": (140, 96, 34), "frame": (214, 172, 96), "accent": (244, 226, 186),
-        "label": "ЛЕГЕНДАРНЫЙ", "pips": 4, "rings": 3, "foil": 0.26, "stars": 104,
-        "rays": 28, "rosette": 8, "band": 14.0, "art_y1": 0.625,
+        "glow": (198, 102, 16), "frame": (232, 164, 48), "accent": (255, 232, 150),
+        "label": "ЛЕГЕНДАРНЫЙ", "pips": 4, "rings": 3, "foil": 0.34, "stars": 126,
+        "rays": 38, "rosette": 8, "band": 16.0, "art_y1": 0.630,
         "burst": True, "seal": True, "edition": True,
     },
 }
@@ -98,15 +98,15 @@ _RARITY = {
 # отражения». Линейный градиент читается как пластик, этот — как металл.
 _METAL_RAMP = (0.22, 0.60, 1.00, 0.38, 0.82, 0.30, 0.55, 0.18)
 
-_BG_CORE = (34, 28, 48)
-_BG_EDGE = (9, 8, 14)
-_ART_BG = (11, 9, 17)
+_BG_CORE = (30, 21, 44)
+_BG_EDGE = (5, 4, 10)
+_ART_BG = (6, 5, 12)
 
 # Обёртка скрутки — одна на всех редкостях: предмет должен узнаваться сразу,
 # а статус нести огранка и ореол. Диапазон расширен, чтобы было чем лепить объём.
-_WRAP_LIGHT = (146, 118, 86)
-_WRAP_MID = (86, 66, 48)
-_WRAP_DARK = (26, 20, 17)
+_WRAP_LIGHT = (198, 132, 68)
+_WRAP_MID = (104, 58, 30)
+_WRAP_DARK = (24, 12, 8)
 _EMBER = (255, 150, 48)
 # Дым холодный — третий тон карты. Тёплый дым делал легендарку монохромной
 # (золото и огонь в одном хью), а холодный делает уголёк по-настоящему горячим.
@@ -126,7 +126,7 @@ _W, _H = 640, 896          # пропорция 2.5:3.5 — канон колл�
 # переписываний подряд, шестое неизбежно, поэтому инвалидация сделана ленивой
 # (сверка версии при показе), а не разовой миграцией: миграцию пришлось бы
 # повторять каждый раз, а этот счётчик работает сам и навсегда.
-ART_VERSION = 5
+ART_VERSION = 6
 
 _FONT_DIRS = ("/usr/share/fonts/truetype/dejavu",)
 
@@ -455,6 +455,56 @@ def _rays(draw, cx, cy, rng, color, count, r0, r1, width, sector=None):
                   fill=color, width=width)
 
 
+def _energy_aura(size, cx, cy, rng, glow, accent, tier, radius, u):
+    """Игровой ореол редкости: кольца, разрывы и кристаллические лучи.
+
+    Гильоше сообщает «ценная печать», но почти исчезает в превью. Ореол держит
+    статус на самом дешёвом масштабе: один круг у common, два у rare, разорванная
+    корона у epic и полноценное солнечное ядро у legendary. Всё строится
+    геометрией Pillow — никаких внешних картинок или генеративных моделей.
+    """
+    tier = max(1, min(4, int(tier)))
+    w, h = size
+    crisp = Image.new("RGB", size, (0, 0, 0))
+    cd = ImageDraw.Draw(crisp)
+
+    # Незамкнутые кольца выглядят энергией, а не мишенью. Каждый следующий тир
+    # получает дополнительный физический контур, а не только более яркий цвет.
+    for i in range(tier):
+        rr = radius * (0.36 + i * 0.115)
+        col = _sc(_mix(glow, accent, 0.48), 0.34 + i * 0.09)
+        ww = max(2, int(u * (1.1 + i * 0.24)))
+        start = int(rng.uniform(8, 70))
+        gap = 54 - tier * 6
+        cd.arc([cx - rr, cy - rr, cx + rr, cy + rr], start=start,
+               end=start + 176 - gap, fill=col, width=ww)
+        cd.arc([cx - rr, cy - rr, cx + rr, cy + rr], start=start + 198,
+               end=start + 356 - gap // 2, fill=col, width=ww)
+        for a in (math.radians(start), math.radians(start + 198)):
+            x, y = cx + rr * math.cos(a), cy + rr * math.sin(a)
+            _diamond(cd, x, y, u * (2.2 + tier * 0.7), accent, col, max(1, int(u)))
+
+    # С epic появляются крупные осколки света; legendary получает плотную
+    # корону. Они читаются даже после уменьшения карточки до 120 px.
+    shards = max(0, (tier - 1) * 7)
+    base = rng.uniform(0, math.pi * 2)
+    for i in range(shards):
+        a = base + 2 * math.pi * i / max(1, shards) + rng.uniform(-0.08, 0.08)
+        r0 = radius * rng.uniform(0.43, 0.55)
+        r1 = radius * rng.uniform(0.62, 0.92) * (1.12 if tier == 4 and i % 2 == 0 else 1.0)
+        half_w = u * rng.uniform(2.0, 5.5) * (0.72 + tier * 0.12)
+        tx, ty = -math.sin(a) * half_w, math.cos(a) * half_w
+        p0 = (cx + math.cos(a) * r0, cy + math.sin(a) * r0)
+        p1 = (cx + math.cos(a) * r1, cy + math.sin(a) * r1)
+        cd.polygon([(p0[0] - tx, p0[1] - ty), p1, (p0[0] + tx, p0[1] + ty)],
+                   fill=_sc(_mix(glow, accent, 0.60), 0.20 + tier * 0.055))
+
+    # Мягкий bloom берётся из той же геометрии, поэтому свечение подчёркивает
+    # форму, а не превращает фон в бесформенное цветное облако.
+    soft = crisp.filter(ImageFilter.GaussianBlur(u * (7 + tier * 2)))
+    return ImageChops.screen(crisp, _dim(soft, 0.72 if tier < 4 else 0.92))
+
+
 def _corner_flourish(draw, x, y, sx, sy, size, rings, frame, accent, wgt):
     """Угловая филигрань. Примыкает к рамке, а не висит рядом: оторванные
     L-скобки читаются как наклеенный клипарт."""
@@ -616,13 +666,30 @@ def _relic(draw, cx, cy, length, ang, rng, accent, u, lit=1, pose=None):
     прочитан, а мелкая филигрань физически не видна.
     """
     pose = pose or {}
+    tier = max(1, min(4, int(pose.get("tier", 1))))
     ca, sa = math.cos(ang), math.sin(ang)
-    t0 = length * rng.uniform(0.050, 0.060) * pose.get("girth", 1.0)
-    t1 = t0 * rng.uniform(0.62, 0.74)
+    # Толщина — главный фикс силуэта. Старые 5–6% длины читались как сигарета;
+    # 7.8–9.1% дают тяжёлый blunt/cigar-профиль, который выглядит наградой.
+    t0 = length * rng.uniform(0.078, 0.091) * pose.get("girth", 1.0)
+    t1 = t0 * rng.uniform(0.69, 0.79)
     half = length / 2
 
     def P(uu, v):
         return (cx + uu * ca - v * sa, cy + uu * sa + v * ca)
+
+    def cross_section(uu, thick, long_r, fill, outline=None, width=1):
+        pts = []
+        for i in range(26):
+            a = 2 * math.pi * i / 26
+            pts.append(P(uu + math.cos(a) * long_r, math.sin(a) * thick))
+        draw.polygon(pts, fill=fill)
+        if outline:
+            draw.line(pts + [pts[0]], fill=outline, width=width, joint="curve")
+
+    # Тёмный торец кладётся ДО тела: половину эллипса перекроют полосы, и он
+    # будет восприниматься настоящим срезом цилиндра, а не наклейкой поверх.
+    cross_section(-half, t0, t0 * 0.34, _WRAP_DARK, _sc(accent, 0.32),
+                  max(1, int(u * 1.1)))
 
     # тело: 14 полос, ключ сверху-слева
     N = 14
@@ -630,10 +697,10 @@ def _relic(draw, cx, cy, length, ang, rng, accent, u, lit=1, pose=None):
         n0 = -1.0 + 2.0 * j / N
         n1 = -1.0 + 2.0 * (j + 1) / N
         nl = ((n0 + n1) / 2) * lit               # нормаль в системе источника света
-        sh = 0.22 + 0.98 * max(0.0, math.cos((nl + 0.40) * 1.45)) ** 1.6
-        col = list(_sc(_WRAP_MID, sh))
+        sh = max(0.0, math.cos((nl + 0.40) * 1.45)) ** 1.55
+        col = list(_mix(_WRAP_DARK, _WRAP_LIGHT, 0.08 + sh * 0.83))
         if abs(nl + 0.40) < 0.10:                     # спекуляр — узкая полоса
-            col = [min(255, col[k] + (58, 52, 40)[k]) for k in range(3)]
+            col = [min(255, col[k] + (70, 52, 32)[k]) for k in range(3)]
         if nl > 0.55:                                 # тёплый отскок от уголька
             b = (nl - 0.55) / 0.45
             col = [min(255, col[k] + int((34, 16, 5)[k] * b)) for k in range(3)]
@@ -694,6 +761,39 @@ def _relic(draw, cx, cy, length, ang, rng, accent, u, lit=1, pose=None):
             uu = -half * 0.72 + span * (i / max(1, ns - 1))
             _seam_at(uu, 0.55)
 
+    # Натуральные прожилки листа: редкая крупная фактура делает оболочку
+    # материальной и отличает дорогой blunt от гладкой коричневой трубки.
+    vein = _mix(_WRAP_LIGHT, accent, 0.18)
+    for q in (-0.42, 0.02, 0.43):
+        pts = []
+        for i in range(15):
+            a = i / 14
+            uu = -half * 0.76 + length * 0.70 * a
+            tt = t0 + (t1 - t0) * ((uu + half) / length)
+            vv = tt * (q + math.sin(a * math.pi * 2 + q * 4) * 0.07)
+            pts.append(P(uu, vv))
+        draw.line(pts, fill=_sc(vein, 0.44), width=max(1, int(u * 0.75)))
+
+    # Коллекционная бандероль — новый предметный маркер статуса. Она впервые
+    # появляется на rare, усложняется на epic и получает камень на legendary.
+    if tier >= 2:
+        bc = -half * (0.13 if tier == 2 else 0.05)
+        bw = length * (0.035 + tier * 0.005)
+        band_dark = _sc(accent, 0.30)
+        band_mid = _mix(_sc(accent, 0.62), _WRAP_LIGHT, 0.28)
+        draw.polygon([P(bc - bw, -t0 * 0.98), P(bc + bw, -t0 * 0.91),
+                      P(bc + bw, t0 * 0.91), P(bc - bw, t0 * 0.98)], fill=band_dark)
+        for k, kk in enumerate((0.22, 0.78)):
+            uu = bc - bw + 2 * bw * kk
+            draw.line([P(uu, -t0 * 0.95), P(uu, t0 * 0.95)],
+                      fill=_sc(band_mid, 0.72 + k * 0.25), width=max(1, int(u * 1.5)))
+        draw.line([P(bc, -t0 * 0.88), P(bc, t0 * 0.88)],
+                  fill=_sc(accent, 0.88), width=max(1, int(u * (1.4 + tier * 0.25))))
+        if tier == 4:
+            gx, gy = P(bc, -t0 * 0.06 * lit)
+            _diamond(draw, gx, gy, t0 * 0.24, _sc(accent, 0.95), (255, 244, 206),
+                     max(1, int(u * 1.1)))
+
     bu = -half * rng.uniform(0.60, 0.76)
     draw.line([P(bu, -t0 * 0.98), P(bu, t0 * 0.98)], fill=seam, width=max(2, int(u * 2.0)))
 
@@ -745,6 +845,18 @@ def _relic(draw, cx, cy, length, ang, rng, accent, u, lit=1, pose=None):
         sp = t1 * rng.uniform(0.35, 0.72)
         glow = _mix((214, 96, 32), (255, 190, 88), b)
         draw.line([P(uu, -sp), P(uu, sp)], fill=glow, width=max(1, int(u)))
+
+    # Раскалённый торец: тёмное кольцо, горячая сердцевина и трещины. Круглый
+    # bloom остаётся снаружи, но теперь под ним есть реальная конструкция.
+    cross_section(half, t1 * 0.98, t1 * 0.30, (82, 28, 14), (242, 108, 32),
+                  max(2, int(u * 1.5)))
+    tx, ty = P(half, 0)
+    cross_section(half + t1 * 0.04, t1 * 0.62, t1 * 0.18,
+                  (224, 82, 24), (255, 184, 80), max(1, int(u)))
+    for a in (-1.9, -0.7, 0.45, 1.65):
+        draw.line([(tx, ty), P(half + math.cos(a) * t1 * 0.13,
+                               math.sin(a) * t1 * 0.76)],
+                  fill=(255, 196, 96), width=max(1, int(u * 0.9)))
 
     return P(half, 0) + (t1,)
 
@@ -820,6 +932,7 @@ def _pose(rng, pal):
         "ros_y": rng.uniform(0.36, 0.54),
         "ros_k": rng.uniform(0.80, 1.02),
         "star_k": rng.uniform(0.85, 1.15),
+        "tier": pal["pips"],
     }
 
 
@@ -845,7 +958,7 @@ def render_blunt_card(item: dict, owner_name: str = "") -> bytes:
 
     # подложка: виньетка тонируется цветом редкости (6% — незаметно как цвет,
     # но подложка перестаёт спорить с огранкой). Лён/фольга/зерно — ПОСЛЕ ресайза.
-    img = _radial_bg((W, H), _mix(_BG_CORE, glow, 0.06), _mix(_BG_EDGE, glow, 0.03))
+    img = _radial_bg((W, H), _mix(_BG_CORE, glow, 0.14), _mix(_BG_EDGE, glow, 0.055))
 
     # ── геометрия зон ──
     band = pal["band"] * u
@@ -856,7 +969,7 @@ def render_blunt_card(item: dict, owner_name: str = "") -> bytes:
     art_r = Wa * 0.5
 
     # ══ ОКНО АРТА ══
-    art = Image.new("RGB", (Wa, Ha), _ART_BG)
+    art = _radial_bg((Wa, Ha), _mix((18, 13, 27), glow, 0.19), _ART_BG)
 
     # план 0 — дальний фон: розетка + звёзды, слегка расфокусирован.
     # Лёгкое расфокусирование фона — самый убедительный признак глубины.
@@ -880,7 +993,7 @@ def render_blunt_card(item: dict, owner_name: str = "") -> bytes:
         cal = rng.choice([0.35, 0.6, 1.0])
         rr = max(1, u * (0.8 if cal < 0.5 else 1.3 if cal < 0.8 else 1.9))
         bd.ellipse([sx - rr, sy - rr, sx + rr, sy + rr], fill=_sc(accent if cal > 0.8 else glow, cal))
-    art = ImageChops.screen(art, _dim(bg.filter(ImageFilter.GaussianBlur(u * 1.6)), 0.62))
+    art = ImageChops.screen(art, _dim(bg.filter(ImageFilter.GaussianBlur(u * 1.6)), 0.72))
 
     # ── композиция строится ОТ точки интереса ──
     # Точка интереса, наклон и длина — из позы: пересечение третей остаётся
@@ -907,6 +1020,13 @@ def render_blunt_card(item: dict, owner_name: str = "") -> bytes:
     half = item_len / 2
     cx_item = ember_x - half * math.cos(ang)
     cy_item = ember_y - half * math.sin(ang)
+
+    # Главный «loot»-сигнал: структурный ореол редкости за предметом. В отличие
+    # от мелкой филиграни он остаётся читаемым в Telegram-превью и делает тир
+    # эмоционально понятным до того, как игрок успел прочитать подпись.
+    aura = _energy_aura((Wa, Ha), cx_item, cy_item, rng, glow, accent,
+                        pal["pips"], art_r * 0.86, u)
+    art = ImageChops.screen(art, aura)
 
     # заполняющий свет — холодный, цвета редкости, из центра розетки
     fillh = Image.new("RGB", (Wa, Ha), (0, 0, 0))
@@ -945,8 +1065,8 @@ def render_blunt_card(item: dict, owner_name: str = "") -> bytes:
     # дым ЗА предметом (перекрытие → дым обвивает, а не лежит сверху)
     sm_back = Image.new("RGB", (Wa, Ha), (0, 0, 0))
     _smoke(ImageDraw.Draw(sm_back), ember_x, ember_y, rng, accent,
-           art_r * 0.34 * pose["smoke_k"], art_r * 0.95, 2)
-    art = ImageChops.screen(art, _dim(sm_back.filter(ImageFilter.GaussianBlur(u * 5)), 0.7))
+           art_r * 0.38 * pose["smoke_k"], art_r * 0.98, 2)
+    art = ImageChops.screen(art, _dim(sm_back.filter(ImageFilter.GaussianBlur(u * 5)), 0.82))
 
     # контактная тень под предметом → отрыв от плоскости
     sh = Image.new("L", (Wa, Ha), 0)
@@ -978,7 +1098,8 @@ def render_blunt_card(item: dict, owner_name: str = "") -> bytes:
 
     # искры кластером в сторону дыма
     _sparkles(ImageDraw.Draw(art), ex, ey, rng, art_r * 0.8, accent,
-              rng.randint(7, 12), u, direction=-math.pi / 2)
+              rng.randint(6 + pal["pips"] * 2, 9 + pal["pips"] * 4), u,
+              direction=-math.pi / 2)
 
     # передний план: боке у краёв → камера с малой ГРИП
     fg = Image.new("RGB", (Wa, Ha), (0, 0, 0))
@@ -1028,10 +1149,18 @@ def render_blunt_card(item: dict, owner_name: str = "") -> bytes:
         _corner_flourish(draw, x, y, sx, sy, fl, pal["rings"], _sc(frame, 0.8), accent, thin)
 
     # ══ МЕТКА РЕДКОСТИ ══
-    f_label = _font("DejaVuSans-Bold.ttf", int(19 * u))
+    f_label = _font("DejaVuSans-Bold.ttf", int(20 * u))
     label, tr = pal["label"], u * 4.6
     lw = _text_w(draw, label, f_label, tr)
     ly_t = H * 0.043
+    badge_pad_x, badge_pad_y = u * 38, u * 11
+    bx0, bx1 = (W - lw) / 2 - badge_pad_x, (W + lw) / 2 + badge_pad_x
+    by0, by1 = ly_t - badge_pad_y, ly_t + int(20 * u) + badge_pad_y
+    draw.rounded_rectangle([bx0, by0, bx1, by1], radius=u * 9,
+                           fill=_mix((7, 5, 12), glow, 0.12),
+                           outline=_sc(frame, 0.62), width=max(2, thin))
+    draw.rounded_rectangle([bx0 + u * 4, by0 + u * 4, bx1 - u * 4, by1 - u * 4],
+                           radius=u * 6, outline=_sc(accent, 0.32), width=max(1, thin - 1))
     _draw_tracked(draw, ((W - lw) / 2, ly_t), label, f_label, _sc(accent, 0.86), tr)
     gy = ly_t + int(10 * u)
     pad = u * 18
@@ -1053,23 +1182,24 @@ def render_blunt_card(item: dict, owner_name: str = "") -> bytes:
     _diamond(draw, px1, (cy0 + cy1) / 2, u * 9, (13, 10, 19), accent, thin)
 
     name = _sanitize(item.get("name", "Безымянный"))
-    size = int(40 * u)
-    f_name = _font("DejaVuSerif-Bold.ttf", size)
+    size = int(38 * u)
+    f_name = _font("DejaVuSans-Bold.ttf", size)
     avail = (px1 - px0) - u * 52
-    txt = f"«{name}»"
+    txt = name.upper()
     while size > int(17 * u) and draw.textlength(txt, font=f_name) > avail:
         size = int(size * 0.94)
-        f_name = _font("DejaVuSerif-Bold.ttf", size)
+        f_name = _font("DejaVuSans-Bold.ttf", size)
     # если даже минимальный кегль не влезает — режем с многоточием, СОХРАНЯЯ
     # закрывающую кавычку: обрезка вида «Вздох без пары читается как баг
     if draw.textlength(txt, font=f_name) > avail:
-        base = name
-        while base and draw.textlength(f"«{base}…»", font=f_name) > avail:
+        base = name.upper()
+        while base and draw.textlength(f"{base}…", font=f_name) > avail:
             base = base[:-1]
-        txt = f"«{base}…»"
+        txt = f"{base}…"
     nw = draw.textlength(txt, font=f_name)
     ny = (cy0 + cy1) / 2 - size * 0.66
-    _metal_text(img, ((W - nw) / 2, ny), txt, f_name, (236, 230, 242), 0, u, size)
+    _metal_text(img, ((W - nw) / 2, ny), txt, f_name,
+                _mix((244, 240, 250), accent, 0.18), 0, u, size)
     draw = ImageDraw.Draw(img)
 
     # ══ ПЛОТНЫЙ СЛУЖЕБНЫЙ БЛОК ══
@@ -1213,14 +1343,14 @@ def _wall_tile(tile, item, u):
     rng = random.Random(seed)
     pose = _pose(rng, pal)      # та же поза, что и на полной карте
 
-    tile.paste(_radial_bg((W, H), _mix(_BG_CORE, glow, 0.10), _mix(_BG_EDGE, glow, 0.04)), (0, 0))
+    tile.paste(_radial_bg((W, H), _mix(_BG_CORE, glow, 0.18), _mix(_BG_EDGE, glow, 0.07)), (0, 0))
     d = ImageDraw.Draw(tile)
 
     # окно арта
     ax0, ay0 = int(u * 12), int(u * 12)
     ax1, ay1 = W - int(u * 12), int(H * 0.66)
     Wa, Ha = ax1 - ax0, ay1 - ay0
-    art = Image.new("RGB", (Wa, Ha), _ART_BG)
+    art = _radial_bg((Wa, Ha), _mix((17, 12, 25), glow, 0.20), _ART_BG)
     art_r = Wa * 0.5
 
     ex_, ey_ = Wa * pose["fx"], Ha * pose["fy"]
@@ -1246,6 +1376,8 @@ def _wall_tile(tile, item, u):
 
     cxi = ex_ - (ln / 2) * ca
     cyi = ey_ - (ln / 2) * sa
+    art = ImageChops.screen(art, _energy_aura(
+        (Wa, Ha), cxi, cyi, rng, glow, accent, pal["pips"], art_r * 0.78, u))
     ad = ImageDraw.Draw(art)
     tx, ty, tip_t = _relic(ad, cxi, cyi, ln, ang, rng, accent, u,
                            lit=pose["lit"], pose=pose)
@@ -1259,18 +1391,19 @@ def _wall_tile(tile, item, u):
     _metal_frame(d, ax0, ay0, ax1, ay1, pal["band"] * u * 0.42, frame, max(1, int(u)))
 
     # имя
-    f = _font("DejaVuSerif-Bold.ttf", int(19 * u))
+    f = _font("DejaVuSans-Bold.ttf", int(19 * u))
     nm = _sanitize(item.get("name", "Безымянный"), 22)
-    txt = f"«{nm}»"
+    txt = nm.upper()
     avail = W - int(u * 26)
     size = int(19 * u)
     while size > int(11 * u) and d.textlength(txt, font=f) > avail:
         size = int(size * 0.92)
-        f = _font("DejaVuSerif-Bold.ttf", size)
+        f = _font("DejaVuSans-Bold.ttf", size)
     if d.textlength(txt, font=f) > avail:
-        while nm and d.textlength(f"«{nm}…»", font=f) > avail:
+        nm = nm.upper()
+        while nm and d.textlength(f"{nm}…", font=f) > avail:
             nm = nm[:-1]
-        txt = f"«{nm}…»"
+        txt = f"{nm}…"
     tw = d.textlength(txt, font=f)
     d.text(((W - tw) / 2, H * 0.70), txt, font=f, fill=(234, 228, 240))
 
