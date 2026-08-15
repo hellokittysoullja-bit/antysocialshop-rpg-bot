@@ -369,7 +369,6 @@ LUCK_CONFIG = {
     "alchemy": {
         "cost_blunts": 10,
         "cost_oac": 250,
-        "required_balance": 5000,
         "reactions": [
             (0.40, "dust", 1),
             (0.75, "none", 0),

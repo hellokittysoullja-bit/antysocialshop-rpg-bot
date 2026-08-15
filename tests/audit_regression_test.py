@@ -495,6 +495,37 @@ async def test_temple_bonus_applies():
     check("+25%" in shown, "карточка фарма показывает вклад Храма (сток стал видимым)")
 
 
+# ── 8b. Донат квеста: цель накопительная (M15) ────────────────────────
+async def test_donate_quest_progress_is_cumulative():
+    """Задание «Пожертвовать» Главы 2 объявляет target=200 OAC. Раньше ЛЮБОЙ
+    донат (даже минимальные 100) закрывал шаг сразу — заявленная цель была
+    декоративной. Теперь прогресс копится за цикл и сверяется с target."""
+    today = datetime.now().date().isoformat()
+    p = Player(user_id=1, exists=True, balance=1000, total_earned=1000, guild="BLACK",
+               daily_progress={"reset_date": today, "quest_id": "chapter2"})
+    ctx = make_ctx(p)
+
+    await bot.shrine_donate_handler(FakeUpdate("shrine_donate_100", uid=1), FakeContext(ctx))
+    check(p.daily_progress.get("donate_amount") == 100, "первый донат накапливается (100/200)")
+    check(p.daily_progress.get("donate") is False,
+          "донат 100 из 200 НЕ закрывает задание (было: закрывал любой донат)")
+
+    await bot.shrine_donate_handler(FakeUpdate("shrine_donate_100", uid=1), FakeContext(ctx))
+    check(p.daily_progress.get("donate_amount") == 200, "второй донат доводит сумму до цели")
+    check(p.daily_progress.get("donate") is True, "достижение target=200 закрывает задание")
+
+    # Ветка отказа возвращает кортеж короче ("no_money",) — ловим регрессию
+    # на unpacking (status, cycle_donated, target = result) без проверки
+    # длины, которая упала бы ValueError на бедном игроке вместо алерта.
+    poor = Player(user_id=2, exists=True, balance=0, total_earned=0, guild="BLACK",
+                  daily_progress={"reset_date": today, "quest_id": "chapter2"})
+    ctx2 = make_ctx(poor)
+    u2 = FakeUpdate("shrine_donate_100", uid=2)
+    await bot.shrine_donate_handler(u2, FakeContext(ctx2))
+    check(u2.callback_query.answers and "Недостаточно" in u2.callback_query.answers[0],
+          "донат без денег даёт алерт, а не падает на unpacking результата")
+
+
 # ── 9. Именной блант: имя в БД совпадает с показанным ────────────────
 async def test_named_blunt_name_persisted():
     src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -1670,6 +1701,7 @@ async def main():
                test_guild_join_requires_start,
                test_altar_rerenders, test_cancel_named,
                test_war_score_per_action, test_temple_bonus_applies,
+               test_donate_quest_progress_is_cumulative,
                test_named_blunt_name_persisted, test_bot_added_to_chat_announces,
                test_flood_control_is_not_admin_noise,
                test_menu_handler_recovers_from_non_text_message,

@@ -6684,7 +6684,11 @@ async def luck_callback(update, context, action=None):
 
     wheel_ok = _check_wheel_availability(player, now, cfg["wheel"]["cooldown_hours"])
     mines_ok = _check_mines_availability(player, now, cfg["mines"]["cost"], cfg["mines"]["cooldown_hours"])
-    alchemy_ok = player.balance >= cfg["alchemy"]["required_balance"]
+    # Замок кнопки должен отражать тот же гейт, что и сам хендлер
+    # (_process_alchemy_start: has_rank по total_earned, не по кошельку) —
+    # иначе Ветеран, потративший OAC, видит 🔒 на механике, которая по тапу
+    # всё равно откроется.
+    alchemy_ok = has_rank(player.total_earned or 0, "Ветеран")
 
     if action == "luck_wheel":
         await _process_wheel(update, context, uid, player, cfg, ctx)     
@@ -9716,6 +9720,12 @@ async def daily_quest_hub(update, context, ctx):
         label = task["label"]
         key = task["key"]
         is_done = progress.get(key, False)
+        # Донат — единственное задание с накопительной целью, которую можно
+        # честно показать (не ограничено кулдауном, копится за цикл, см.
+        # shrine_donate_handler). Остальные ключи (farm/craft/ritual/train…)
+        # закрываются одним действием — их "target" не отслеживается по счётчику.
+        if key == "donate" and not is_done and task.get("target", 1) > 1:
+            label = f"{label} ({progress.get('donate_amount', 0)}/{task['target']} OAC)"
         if is_done:
             text += f"✅ {label}\n"
         else:
@@ -10394,10 +10404,19 @@ async def shrine_donate_handler(update, context, ctx, player):
         p.balance -= amount
         p.donated = (p.donated or 0) + amount
         # Отмечаем задание квеста «Пожертвовать» (раньше не трекалось → глава 2
-        # была непроходима)
+        # была непроходима). Задание объявляет target (200/300 OAC) — донат не
+        # ограничен кулдауном, в отличие от фарма/крафта/ритуала, поэтому здесь
+        # (и только здесь) можно честно накапливать сумму за цикл и сверять её
+        # с целью, а не закрывать шаг первым же донатом в 100 OAC при target 200.
         p.daily_progress = p.daily_progress or {}
-        p.daily_progress["donate"] = True
-        return ("ok",)
+        quest_id = p.daily_progress.get("quest_id", "chapter1")
+        template = QUEST_TEMPLATES.get(quest_id) or {}
+        donate_task = next((t for t in template.get("tasks", []) if t["key"] == "donate"), None)
+        target = donate_task.get("target", 1) if donate_task else 1
+        cycle_donated = (p.daily_progress.get("donate_amount") or 0) + amount
+        p.daily_progress["donate_amount"] = cycle_donated
+        p.daily_progress["donate"] = cycle_donated >= target
+        return ("ok", cycle_donated, target)
 
     result = await ctx.repo.atomic_update(uid, _donate)
     if result is None:
@@ -10407,8 +10426,15 @@ async def shrine_donate_handler(update, context, ctx, player):
     if status == "no_money":
         await query.answer("Недостаточно OAC.", show_alert=True)
         return
+    _, cycle_donated, target = result
 
-    await send_whisper_dm(update, context, f"💎 Ты внёс {amount} OAC в Храм. Спасибо, Странник!")
+    text = f"💎 Ты внёс {amount} OAC в Храм. Спасибо, Странник!"
+    if target and target > 1:
+        if cycle_donated >= target:
+            text += f"\n\n✅ Задание главы «Пожертвовать» выполнено ({cycle_donated}/{target} OAC)."
+        else:
+            text += f"\n\n📿 Задание главы «Пожертвовать»: {cycle_donated}/{target} OAC."
+    await send_whisper_dm(update, context, text)
     
 @cb
 async def guild_shrine_callback(update, context, ctx):
