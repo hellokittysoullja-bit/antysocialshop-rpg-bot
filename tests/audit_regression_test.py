@@ -1643,6 +1643,53 @@ async def test_happy_hour_dm_broadcast_reaches_candidates():
         bot.httpx.AsyncClient = orig_client
 
 
+# ── 32b. Час Удачи DM: не бьёт по всей базе, только по «тёплым» ──────
+async def test_happy_hour_dm_excludes_dormant_players():
+    """Раньше запрос был `WHERE blocked_at IS NULL` без окна активности —
+    ежедневная рассылка достигала и тех, кого winback_push сознательно не
+    трогает после 30 дней простоя (сам winback объясняет почему: «шанс
+    раздражить/схватить блок растёт быстрее, чем шанс вернуть»). На проде
+    это била рассылка ~176 адресатам с 50% блоком за один прогон, и именно
+    поэтому winback находил уже заблокировавшими 96% своих целей — та же
+    когорта успевала выгореть от ежедневного DM раньше, чем до неё доходил
+    редкий еженедельный winback."""
+    class _SqlCapturingPool:
+        def __init__(self, rows=None):
+            self._rows = rows or []
+            self.last_sql = None
+            self.last_args = None
+
+        def acquire(self, *a, **k):
+            pool = self
+
+            class _Conn:
+                async def fetch(self, sql, *args):
+                    pool.last_sql = sql
+                    pool.last_args = args
+                    return pool._rows
+
+            class _CM:
+                async def __aenter__(self):
+                    return _Conn()
+                async def __aexit__(self, *exc):
+                    return False
+            return _CM()
+
+    pool = _SqlCapturingPool(rows=[])
+    ctx = make_ctx(Player(user_id=1), pool=pool)
+    await bot._happy_hour_dm_broadcast(ctx)
+
+    check(pool.last_sql is not None and "last_farm" in pool.last_sql,
+          "запрос фильтрует по last_farm — не бьёт по всей базе разом")
+    check(bool(pool.last_args) and isinstance(pool.last_args[0], datetime),
+          "передан cutoff-параметр окна активности")
+    if pool.last_args:
+        now = datetime.now(timezone.utc)
+        gap = now - pool.last_args[0]
+        check(timedelta(days=2, hours=20) < gap < timedelta(days=3, hours=4),
+              f"окно ~3 дня — та же граница, что reengagement_push (получено: {gap})")
+
+
 async def test_happy_hour_trigger_schedules_dm_broadcast():
     """happy_hour_trigger должен ЗАПУСТИТЬ рассылку (не забыть про неё при
     рефакторинге) — проверяем реальным monkeypatch на модуле, не догадкой по
@@ -1730,6 +1777,7 @@ async def main():
                test_referral_reward_fires_on_onboarding_completion,
                test_skip_onboarding_referral_reward_guarded_against_double_fire,
                test_happy_hour_dm_broadcast_reaches_candidates,
+               test_happy_hour_dm_excludes_dormant_players,
                test_happy_hour_trigger_schedules_dm_broadcast,
                test_wheel_and_alchemy_have_suspense_before_reveal,
                test_medal_names_are_thematic_and_grammar_safe,

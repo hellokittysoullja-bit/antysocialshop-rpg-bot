@@ -10925,12 +10925,29 @@ async def _happy_hour_dm_broadcast(ctx: AppContext) -> None:
     (остальные пуш-джобы полагаются только на реактивный dead-chat-хэндлинг
     в момент отправки; здесь фильтр дешёвый и данные уже есть — не грузим
     HTTP-запросами тех, кто гарантированно не получит сообщение).
+
+    last_farm > NOW()-3д — этого фильтра раньше не было: рассылка била ПО
+    ВСЕЙ базе, включая тех, кого reengagement_push/winback_push сознательно
+    не трогают (winback сам объясняет почему за окном 30д: «шанс раздражить/
+    схватить блок растёт быстрее, чем шанс вернуть»). «Час Удачи» длится 30
+    минут — сообщение бесполезно тому, кто не заходит неделями, а стреляет
+    оно в одно и то же время КАЖДЫЙ день без остановки, всей базе разом.
+    На проде это была ежедневная рассылка ~176 адресатам с 50% блоком за
+    один прогон — и именно поэтому winback (окно 3-30д, тот же контингент,
+    что не успел заблокироваться от этой рассылки) находил уже заблокировавшими
+    96% своих целей. Оставляем только тех, кто фармил в последние 3 дня —
+    ту же границу, что reengagement_push уже считает «ещё тёплым»; дальше
+    получателя ведут winback/activation, не ежедневный широковещательный пуш.
     """
     if not ctx or not ctx.db_pool:
         return
+    cutoff = datetime.now(timezone.utc) - timedelta(days=3)
     try:
         async with ctx.db_pool.acquire() as conn:
-            rows = await conn.fetch("SELECT user_id FROM players WHERE blocked_at IS NULL")
+            rows = await conn.fetch(
+                "SELECT user_id FROM players "
+                "WHERE blocked_at IS NULL AND last_farm IS NOT NULL AND last_farm > $1",
+                cutoff)
     except Exception as e:
         logger.error(f"happy_hour dm query error: {e}")
         return
