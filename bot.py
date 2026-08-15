@@ -4392,7 +4392,17 @@ async def handle_use_dust(update, context):
 
     await safe_send_blunt_image(context, query.message.chat.id, "legendary", caption=None, reply_markup=None)
     text = _format_dust_message(name, reaction)
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 В меню", callback_data="menu")]])
+    kb_rows = [[InlineKeyboardButton("🔙 В меню", callback_data="menu")]]
+    # Тот же пробел, что чинил _win_share_button для ранг-апа/джекпота/рекорда
+    # Лабиринта: легендарка за Пыль — тоже личный триумф, транслируемый в
+    # гильд-чат АНОНИМНО для чужих, но у самого игрока не было ни одной кнопки
+    # поделиться ЭТОЙ победой за пределами официального чата.
+    try:
+        kb_rows.insert(0, [await _win_share_button(
+            context, uid, f"💠 Я получил легендарный блант «{name}» через Пыль в Antysocialshop!")])
+    except Exception:
+        pass
+    kb = InlineKeyboardMarkup(kb_rows)
     await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
 
     # Оповещение в канал — раньше сырой context.bot.send_message без ретраев,

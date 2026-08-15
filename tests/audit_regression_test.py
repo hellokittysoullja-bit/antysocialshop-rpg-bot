@@ -557,6 +557,25 @@ async def test_named_blunt_name_persisted():
           "мёртвая ветка переименования больше не несёт CTA, который никогда не показывался")
 
 
+# ── 9b. Легендарка за Пыль: тоже получает кнопку «Поделиться» ────────
+async def test_dust_legendary_has_share_button():
+    """_win_share_button уже стоит на ранг-апе, джекпоте «Дунуть» и рекорде
+    Лабиринта — три личных триумфа, транслируемых в гильд-чат АНОНИМНО для
+    чужих, но без единой кнопки поделиться СВОЕЙ победой у самого игрока за
+    пределами официального чата (см. докстринг _win_share_button). Легендарка
+    за Кристальную Пыль — тот же класс победы (гарантированная легендарка),
+    но кнопки у неё не было вообще — только «🔙 В меню». Статическая проверка
+    (не поведенческая): create_named_blunt внутри требует полноценной БД-
+    транзакции, которую FakeRepo/FakePool не воспроизводят бесплатно."""
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "bot.py"), encoding="utf-8").read()
+    start = src.index("async def handle_use_dust")
+    end = src.index("async def _clear_named_blunt_state_after")
+    body = src[start:end]
+    check("_win_share_button(" in body,
+          "handle_use_dust предлагает поделиться победой, как и остальные личные триумфы")
+
+
 # ── 30. Гарантированный CTA «Первый друг» теперь на РЕАЛЬНО гарантированном
 #        экране (onboarding_reward), не на мёртвой ветке ────────────────────
 async def test_onboarding_reward_has_reachable_referral_cta():
@@ -1749,7 +1768,8 @@ async def main():
                test_altar_rerenders, test_cancel_named,
                test_war_score_per_action, test_temple_bonus_applies,
                test_donate_quest_progress_is_cumulative,
-               test_named_blunt_name_persisted, test_bot_added_to_chat_announces,
+               test_named_blunt_name_persisted, test_dust_legendary_has_share_button,
+               test_bot_added_to_chat_announces,
                test_flood_control_is_not_admin_noise,
                test_menu_handler_recovers_from_non_text_message,
                test_share_blunt_handler_recovers_from_photo_message,
