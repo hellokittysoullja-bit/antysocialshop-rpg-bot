@@ -358,6 +358,44 @@ async def test_lab_run_is_bounded():
           "спец-действие расходует комнату — бесконечная добыча OAC закрыта")
 
 
+# ── 2b. Лабиринт: комната не подменяется под игроком (M9) ────────────
+async def test_lab_room_stable_across_non_advancing_actions():
+    """show_lab_room раньше перевыбирала комнату (random.choice) на КАЖДЫЙ
+    рендер, а не на каждый room_index. «Сконцентрироваться» тратит Фокус на
+    бонус к следующей атаке и НЕ продвигает room_index (комната не покинута)
+    — но экран после неё показывал уже другую комнату с другими шансами и
+    наградой, чем ту, для которой игрок только что принял тактическое
+    решение. Единственная механика в игре с настоящим риск-менеджментом
+    (выбор тира атаки, трата HP/Фокуса) на ощущение играла как лотерея."""
+    p = Player(user_id=1, exists=True, balance=0, total_earned=0, lab_depth=1)
+    ctx = make_ctx(p)
+    c = FakeContext(ctx)
+    c.user_data.update({
+        "lab_hp": 100, "lab_max_hp": 100, "lab_focus": 3, "lab_room": 1,
+        "lab_total_rooms": 5, "lab_rewards": [], "lab_depth": 1,
+        "lab_msg_id": 1, "lab_chat_id": 1,
+    })
+    await bot.show_lab_room(FakeUpdate("lab_noop", uid=1), c)
+    room_before = c.user_data["lab_current_room"]["name"]
+
+    await bot.handle_lab_option(FakeUpdate("lab_focus_use", uid=1), c)
+    check(c.user_data["lab_room"] == 1,
+          "«Сконцентрироваться» не продвигает счётчик комнат")
+    check(c.user_data["lab_current_room"]["name"] == room_before,
+          "и не подменяет саму комнату — тактическое решение остаётся в силе")
+
+    # Повторный рендер БЕЗ продвижения (тот же room_index) — тоже должен
+    # держать ту же комнату, не только сразу после конкретного действия.
+    await bot.show_lab_room(FakeUpdate("lab_noop", uid=1), c)
+    check(c.user_data["lab_current_room"]["name"] == room_before,
+          "и повторный рендер той же комнаты её не перевыбирает")
+
+    # Реальное продвижение (атака) — комната ДОЛЖНА смениться на новую.
+    await bot.handle_lab_option(FakeUpdate("lab_attack_0", uid=1), c)
+    check(c.user_data["lab_room"] == 2,
+          "атака низшего тира продвигает забег на следующую комнату")
+
+
 # ── 3. Мины: кэшаут платит один раз и не сжигает партию впустую ──────
 async def test_mines_cashout():
     p = Player(user_id=1, exists=True, balance=0, total_earned=0)
@@ -1763,6 +1801,7 @@ async def test_no_double_ctx_callsites():
 async def main():
     print("\nРегресс по находкам аудита SLAYER\n" + "─" * 46)
     for fn in (test_lab_entry_survives_redis, test_lab_run_is_bounded,
+               test_lab_room_stable_across_non_advancing_actions,
                test_mines_cashout, test_mines_survive_redis_roundtrip,
                test_guild_join_requires_start,
                test_altar_rerenders, test_cancel_named,

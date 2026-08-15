@@ -7516,8 +7516,12 @@ async def lab_enter_confirm(update, context):
     # ни где-либо ещё. Мёртвая страховка, которая ничего не страхует; рантайм
     # и так читает состояние только из context.user_data.
 
-    room = random.choice(LABYRINTH_ROOMS)
-    context.user_data["lab_current_room"] = room
+    # Комнату здесь больше не выбираем: show_lab_room делает это сама, кэшируя
+    # результат по lab_room (см. её комментарий). Сбрасываем индекс кэша явно —
+    # иначе новый забег мог унаследовать комнату ПРОШЛОГО забега (тот же
+    # lab_room=1, который умерший/сбежавший игрок уже видел минуту назад).
+    context.user_data.pop("lab_current_room", None)
+    context.user_data.pop("lab_room_index_for_current_room", None)
     await show_lab_room(update, context)
 
 # ─── ОТОБРАЖЕНИЕ КОМНАТЫ ─────────────────────────────────────
@@ -7537,15 +7541,29 @@ async def show_lab_room(update, context):
         await show_lab_final(update, context)
         return
 
-    # масштабирование комнаты под глубину
-    base_room = random.choice(LABYRINTH_ROOMS)
-    room = copy.deepcopy(base_room)
-    risk_mult = 1.0 + (depth - 1) * 0.05
-    reward_mult = 1.0 + (depth - 1) * 0.10
-    atk = room["actions"]["attack"]
-    atk["risks"] = [min(0.95, r * risk_mult) for r in atk["risks"]]
-    atk["rewards"] = [(int(lo * reward_mult), int(hi * reward_mult)) for lo, hi in atk["rewards"]]
-    context.user_data["lab_current_room"] = room
+    # Комната выбирается ОДИН раз за room_index, не на каждый рендер этой
+    # функции. Раньше `random.choice` стоял тут безусловно — и любой рендер,
+    # который НЕ продвигает lab_room (например «🌀 Сконцентрироваться»: тратит
+    # Фокус на бонус к СЛЕДУЮЩЕЙ атаке, но комнату не покидает), молча
+    # подменял комнату под игроком. Игрок читал шансы «Зала Наблюдателя»,
+    # решал копить Фокус ради его атаки — а бил уже по «Склепу Короля» с
+    # другими шансами и наградой. Решение принималось по одной комнате,
+    # исполнялось против другой: тактика переставала иметь смысл, а Лабиринт —
+    # единственная механика в игре с настоящим выбором (риск-тир атаки,
+    # менеджмент HP/Фокуса) — на ощущение играла как лотерея.
+    if (context.user_data.get("lab_current_room") is None
+            or context.user_data.get("lab_room_index_for_current_room") != room_index):
+        base_room = random.choice(LABYRINTH_ROOMS)
+        room = copy.deepcopy(base_room)
+        risk_mult = 1.0 + (depth - 1) * 0.05
+        reward_mult = 1.0 + (depth - 1) * 0.10
+        atk = room["actions"]["attack"]
+        atk["risks"] = [min(0.95, r * risk_mult) for r in atk["risks"]]
+        atk["rewards"] = [(int(lo * reward_mult), int(hi * reward_mult)) for lo, hi in atk["rewards"]]
+        context.user_data["lab_current_room"] = room
+        context.user_data["lab_room_index_for_current_room"] = room_index
+    else:
+        room = context.user_data["lab_current_room"]
 
     # прогресс-бар здоровья
     hp_percent = int(hp / max_hp * 10)
@@ -7853,7 +7871,8 @@ async def show_lab_final(update, context):
     total_rooms = context.user_data.get("lab_total_rooms", 0)
 
     # очистка состояний
-    for key in ("lab_hp", "lab_focus", "lab_room", "lab_total_rooms", "lab_rewards"):
+    for key in ("lab_hp", "lab_focus", "lab_room", "lab_total_rooms", "lab_rewards",
+                "lab_current_room", "lab_room_index_for_current_room"):
         context.user_data.pop(key, None)
 
     depth = player.lab_depth + 1
@@ -7913,7 +7932,8 @@ async def show_lab_death(update, context):
 
     await ctx.repo.atomic_update(uid, _lab_die)
 
-    for key in ("lab_hp", "lab_focus", "lab_room", "lab_total_rooms", "lab_rewards"):
+    for key in ("lab_hp", "lab_focus", "lab_room", "lab_total_rooms", "lab_rewards",
+                "lab_current_room", "lab_room_index_for_current_room"):
         context.user_data.pop(key, None)
 
     # Признание пройденного пути + форвард-фрейминг вместо наказующего регрета:
