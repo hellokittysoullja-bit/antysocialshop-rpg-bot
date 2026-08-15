@@ -1639,6 +1639,39 @@ async def test_mines_screens_use_html_not_broken_markdown():
     check("**" not in text2, "на экране результата не осталось сломанных двойных звёздочек")
 
 
+# ── 35b. Мины — часть направляемого онбординга Главы 1 ────────────────
+async def test_mines_is_reachable_from_quest_and_marks_progress():
+    """Фарм/крафт/дунуть (Глава 1) — три экрана без единого реального
+    решения игрока (тап → случайное число, статистику которого мозг
+    полностью моделирует за первые 10-20 повторов — reward prediction error
+    Schultz 1997 гаснет, действие ощущается рутиной). Мины — единственная
+    механика в игре, где выбор (какую клетку открыть, когда забрать
+    выигрыш) реально делает игрок; уже доступна с первой минуты (0 OAC
+    кулдаун, ставка от 50 при старте в 800 OAC) — но не была частью
+    направляемого онбординга. Новичок мог пройти всю Главу 1 и уйти, ни
+    разу не увидев единственную механику с настоящей агентностью."""
+    chapter1_keys = {t["key"] for t in bot.QUEST_TEMPLATES["chapter1"]["tasks"]}
+    check("mines" in chapter1_keys, "Мины — реальный шаг Главы 1, не спрятаны за её пределами")
+
+    p = Player(user_id=1, exists=True, balance=800, total_earned=800,
+               onboarding_step=1, daily_progress={"quest_id": "chapter1"})
+    ctx = make_ctx(p)
+
+    # Кнопка задания «Мины» доводит до экрана выбора ставки, а не «Неизвестное задание».
+    upd = FakeUpdate("quest_mines", uid=1)
+    await bot.handle_quest_action(upd, FakeContext(ctx))
+    check(not any("Неизвестное" in (a or "") for a in upd.callback_query.answers),
+          "кнопка «Мины» в чек-листе Главы 1 доходит до реального экрана")
+
+    # Сам запуск партии (реальный выбор ставки) отмечает шаг квеста — тот же
+    # принцип, что у входа в Лабиринт (_mark_lab): считается знакомство с
+    # механикой, а не конкретный исход партии.
+    upd2 = FakeUpdate("mines_bet_50", uid=1)
+    await bot._mines_start_game(upd2, FakeContext(ctx), 1, 50, ctx)
+    check(p.daily_progress.get("mines") is True,
+          "старт партии Мин отмечает задание квеста")
+
+
 # ── 36. Крафт/дунуть: та же цепочка «что дальше», что уже на фарме ────
 async def test_craft_and_smoke_chain_to_next_quest_step():
     """next_quest_step раньше подключён только к экрану фарма — крафт и
@@ -1843,6 +1876,7 @@ async def main():
                test_profile_shows_streak_and_empty_state_hooks,
                test_craft_and_smoke_chain_to_next_quest_step,
                test_mines_screens_use_html_not_broken_markdown,
+               test_mines_is_reachable_from_quest_and_marks_progress,
                test_no_double_ctx_callsites):
         print(f"\n{fn.__name__}:")
         await fn()

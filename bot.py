@@ -2941,6 +2941,7 @@ QUEST_STEP_ADVICE = {
     "farm":   "🍬 Фарм — основа роста. Заполни шкалу!",
     "craft":  "🌿 Скрути блант — получишь случайный эффект!",
     "smoke":  "🧿 Испытай удачу — выкури блант!",
+    "mines":  "🎲 Здесь решаешь ты: какую клетку открыть, когда забрать выигрыш!",
     "ritual": "🕯️ Тёмная магия ждёт тебя!",
     "repent": "🪽 Светлая удача улыбнётся тебе!",
     "lab":    "🏛️ Глубины Лабиринта полны сокровищ!",
@@ -6990,6 +6991,12 @@ async def _mines_start_game(update, context, uid, bet, ctx):
         if p.balance < bet:
             raise ValueError("Недостаточно средств")
         p.balance -= bet
+        # Отмечаем задание квеста «Мины» (Глава 1) на СТАРТЕ партии, не на
+        # исходе — тот же принцип, что у «lab» (_mark_lab отмечает вход в
+        # Лабиринт). Цель шага — знакомство с механикой реального выбора,
+        # а не конкретный результат.
+        p.daily_progress = p.daily_progress or {}
+        p.daily_progress["mines"] = True
         return p.balance
 
     try:
@@ -9996,6 +10003,12 @@ async def handle_quest_action(update, context):
         return
     elif action == "lab":
         await lab_enter(update, context)
+        return
+    elif action == "mines":
+        # Ведёт сразу на выбор ставки (luck_callback → _process_mines), не в
+        # общий хаб Удачи — тот же принцип, что у donate/lab: один тап от
+        # чек-листа задания до самого действия, без промежуточного экрана.
+        await luck_callback(update, context, action="luck_mines")
         return
     else:
         await query.answer("Неизвестное задание", show_alert=True)

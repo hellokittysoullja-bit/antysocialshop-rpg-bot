@@ -20,7 +20,7 @@ from bot import QUEST_TEMPLATES
 
 # Ключи заданий, которые хендлеры реально выставляют в daily_progress.
 TRACKED_KEYS = {
-    "farm", "craft", "smoke", "guild_action", "ritual", "repent",
+    "farm", "craft", "smoke", "mines", "guild_action", "ritual", "repent",
     "donate", "lab", "pet", "train",
 }
 
@@ -84,7 +84,7 @@ def main() -> int:
 
     # 5. Каждый ключ задания обрабатывается в handle_quest_action — иначе кнопка
     #    задания выдаёт «Неизвестное задание» (баг donate/lab в главе 2).
-    QUEST_ACTION_KEYS = {"farm", "craft", "smoke", "ritual", "repent", "train", "pet", "donate", "lab"}
+    QUEST_ACTION_KEYS = {"farm", "craft", "smoke", "mines", "ritual", "repent", "train", "pet", "donate", "lab"}
     bad_keys = []
     for qid, tpl in QUEST_TEMPLATES.items():
         for task in tpl.get("tasks", []):
