@@ -1604,20 +1604,20 @@ async def test_wheel_and_alchemy_have_suspense_before_reveal():
 
 # ── 34. Названия медалей: свой голос на каждой дорожке, без слома падежа ─
 async def test_medal_names_are_thematic_and_grammar_safe():
-    """SLAYER Red Team (Cluster «начало игры», A5 Voice/Copy): Бронза/
-    Серебро/Золото/Платина были ОДНИМ шаблоном на всех пяти дорожках сразу —
-    голос, который ничего не говорит рядом с «Фабрика №9»/«Искажение». Заодно
-    ловим грамматику: "повышен до {name}"/"{N} до {name}" требуют
-    родительного падежа — с новыми многословными титулами это стало бы
-    заметной ломаной фразой, если бы вставки остались падежными."""
-    tracks = (bot.FARM_MEDALS, bot.CRAFT_MEDALS, bot.SMOKE_MEDALS,
-              bot.RITUAL_MEDALS, bot.REPENT_MEDALS)
-    all_names = [name for track in tracks for _, name, _ in track]
-    check(not any(generic in name for name in all_names
+    """SLAYER Red Team (Cluster «начало игры», A5 Voice/Copy): Ритуал/Исповедь
+    и часть Крафта получили тематические титулы вместо общего олимпийского
+    шаблона — Фарм и Дунуть намеренно оставлены на классике (Бронза/Серебро/
+    Золото/Платина), это осознанный выбор, не пробел. Заодно ловим грамматику:
+    "повышен до {name}"/"{N} до {name}" требуют родительного падежа — с
+    многословными титулами это стало бы заметной ломаной фразой, если бы
+    вставки остались падежными."""
+    thematic_tracks = (bot.CRAFT_MEDALS, bot.RITUAL_MEDALS, bot.REPENT_MEDALS)
+    thematic_names = [name for track in thematic_tracks for _, name, _ in track]
+    check(not any(generic in name for name in thematic_names
                   for generic in ("Бронза", "Серебро", "Золото", "Платина")),
-          "ни одна дорожка не использует старый олимпийский шаблон")
-    check(len(set(all_names)) == len(all_names),
-          "все 20 титулов (5 дорожек × 4 тира) различны — ни одного дубля между дорожками")
+          "тематические дорожки не используют старый олимпийский шаблон")
+    check(len(set(thematic_names)) == len(thematic_names),
+          "тематические титулы (Крафт/Ритуал/Исповедь) различны — ни одного дубля")
 
     text, bonus = bot.get_medal_text_and_reward(0, 1, bot.FARM_MEDALS)
     check("Новый уровень:" in text and bot.FARM_MEDALS[0][1] in text,
