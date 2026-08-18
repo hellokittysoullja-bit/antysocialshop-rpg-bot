@@ -1,0 +1,85 @@
+name: State Integrity
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test-suite:
+    # Раньше эта джоба гоняла ТОЛЬКО tests/state_integrity_test.py — единственный
+    # тестовый файл во всём CI. Остальные 13 файлов (crash_guard_test, content_test,
+    # mechanics_test, audit_regression_test и т.д.) не были подключены никуда:
+    # регресс мог сломать любой из них, и ни push, ни PR не увидели бы красного
+    # статуса. Именно так в main прошёл коммит, ломавший total_earned для наград
+    # Лабиринта (поймал только локальный прогон crash_guard_test.py) и FakeRepo в
+    # audit_regression_test.py (AttributeError на первом же тесте). Гоняем весь
+    # набор — по одному файлу в отдельном шаге, чтобы падение было видно точечно.
+    name: Full test suite (Postgres + Redis)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: antysocialshop_state_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d antysocialshop_state_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      TOKEN: 123456:ci-state-integrity-token
+      RENDER_URL: http://localhost
+      ADMIN_ID: "0"
+      DATABASE_URL_AIVEN: postgresql://postgres:postgres@127.0.0.1:5432/antysocialshop_state_test
+      REDIS_URL: redis://127.0.0.1:6379/0
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install runtime dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt
+      - name: altar_test
+        run: python tests/altar_test.py
+      - name: audit_regression_test
+        run: python tests/audit_regression_test.py
+      - name: blunt_art_test
+        run: python tests/blunt_art_test.py
+      - name: content_test
+        run: python tests/content_test.py
+      - name: crash_guard_test
+        run: python tests/crash_guard_test.py
+      - name: gift_nft_earned_test
+        run: python tests/gift_nft_earned_test.py
+      - name: mechanics_test
+        run: python tests/mechanics_test.py
+      - name: milestone_test
+        run: python tests/milestone_test.py
+      - name: pet_bonus_test
+        run: python tests/pet_bonus_test.py
+      - name: routing_test
+        run: python tests/routing_test.py
+      - name: smoke_pity_test
+        run: python tests/smoke_pity_test.py
+      - name: smoke_test
+        run: python tests/smoke_test.py
+      - name: state_integrity_test
+        run: python tests/state_integrity_test.py
+      - name: streak_curve_test
+        run: python tests/streak_curve_test.py

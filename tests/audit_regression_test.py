@@ -8,6 +8,7 @@
 """
 import os
 import sys
+import copy
 import types
 import asyncio
 import logging
@@ -155,6 +156,35 @@ class FakeConn:
         return _Tx()
 
 
+class _NoOpConn:
+    """conn-заглушка для atomic_update-семейства в FakeRepo/FakeMultiRepo.
+
+    Раньше туда передавался голый None — рабочий, пока замыкания сами не
+    трогали conn. check_achievements теперь делает реальный SQL внутри
+    atomic_update (ON CONFLICT DO NOTHING вместо снятого глобального
+    LOCK TABLE) — None ронял AttributeError на любом тесте, где действие
+    попутно зовёт check_achievements. fetch пустой, fetchval/fetchrow None —
+    «ничего не найдено, ничего не вставлено»: безопасный дефолт, который не
+    начисляет несвязанных с самим тестом наград и не меняет его поведение
+    ни для одного из уже проходивших сценариев (None крашился бы точно так
+    же на первом обращении к conn, так что это строго более щадящий дефолт)."""
+
+    async def fetch(self, *a, **k):
+        return []
+
+    async def fetchval(self, *a, **k):
+        return None
+
+    async def fetchrow(self, *a, **k):
+        return None
+
+    async def execute(self, *a, **k):
+        return None
+
+
+_NOOP_CONN = _NoOpConn()
+
+
 class FakePool:
     def __init__(self, rows=None, value=0):
         self._rows = rows
@@ -175,11 +205,16 @@ class FakePool:
 
 class FakeRepo:
     """Повторяет ключевую семантику repository.atomic_update: дельта баланса
-    капает в total_earned, обновление применяется к одному объекту игрока."""
+    капает в total_earned, обновление применяется к одному объекту игрока.
+
+    Плюс мини-репликация lab_runs (см. repository.atomic_start_lab_run /
+    atomic_mutate_lab_run / atomic_finish_lab_run) — один слот на игрока,
+    этого достаточно для однопользовательских тестов Лабиринта."""
 
     def __init__(self, player):
         self.p = player
         self.saves = 0
+        self.lab_run = None
 
     async def get_by_id(self, uid, with_inventory=True):
         return self.p
@@ -190,11 +225,44 @@ class FakeRepo:
 
     async def atomic_update(self, uid, fn):
         before = self.p.balance or 0
-        r = await fn(self.p, None)
+        r = await fn(self.p, _NOOP_CONN)
         gain = (self.p.balance or 0) - before
         if gain > 0:
             self.p.total_earned = (self.p.total_earned or 0) + gain
         return r
+
+    async def get_lab_run(self, uid):
+        return copy.deepcopy(self.lab_run)
+
+    async def atomic_start_lab_run(self, uid, state, update_player):
+        if self.p is None:
+            return ("player_missing", None)
+        if self.lab_run is not None:
+            return ("already_active", copy.deepcopy(self.lab_run))
+        result = await update_player(self.p, _NOOP_CONN)
+        self.lab_run = copy.deepcopy(state)
+        return ("ok", result)
+
+    async def atomic_mutate_lab_run(self, uid, mutate):
+        if self.lab_run is None:
+            return None
+        result = await mutate(self.lab_run, _NOOP_CONN)
+        return result, copy.deepcopy(self.lab_run)
+
+    async def atomic_finish_lab_run(self, uid, finalize):
+        if self.lab_run is None:
+            return None
+        # Та же дельта-логика, что в atomic_update и в реальном
+        # atomic_finish_lab_run (repository.py) — см. фикс total_earned там.
+        before = self.p.balance or 0
+        result = await finalize(self.p, self.lab_run, _NOOP_CONN)
+        if result is None:
+            return None
+        gain = (self.p.balance or 0) - before
+        if gain > 0:
+            self.p.total_earned = (self.p.total_earned or 0) + gain
+        self.lab_run = None
+        return result
 
 
 class FakeMultiRepo:
@@ -226,7 +294,7 @@ class FakeMultiRepo:
         if p is None:
             return None
         before = p.balance or 0
-        r = await fn(p, None)
+        r = await fn(p, _NOOP_CONN)
         gain = (p.balance or 0) - before
         if gain > 0:
             p.total_earned = (p.total_earned or 0) + gain
@@ -309,51 +377,47 @@ def make_ctx(player, redis=None, pool=None, war=None, repo=None):
         war_service=war or FakeWar(), pet_service=None, achievement_service=None)
 
 
-# ── 1. Лабиринт: вход не падает при подключённом Redis ───────────────
-async def test_lab_entry_survives_redis():
+# ── 1. Лабиринт: вход не падает, доходит до первой комнаты ───────────
+async def test_lab_entry_reaches_first_room():
+    """Забег теперь целиком в БД (players.lab_runs, atomic_start_lab_run) —
+    старый баг C1 (модульный redis=None вместо ctx.redis) структурно
+    невозможен: Лабиринт больше не трогает Redis вообще."""
     p = Player(user_id=1, exists=True, balance=1000, total_earned=1000, lab_depth=1)
-    ctx = make_ctx(p, redis=FakeRedis())
+    ctx = make_ctx(p)
     u, c = FakeUpdate("lab_enter_confirm"), FakeContext(ctx)
-    await bot.lab_enter_confirm(u, c)      # раньше: AttributeError на модульном redis=None
-    check(c.user_data.get("lab_room") == 1,
-          "вход в Лабиринт при подключённом Redis доходит до первой комнаты")
-    # Снапшот забега в ctx.redis.set(f"lab_state:{uid}", ...) удалён целиком:
-    # писался и НИКОГДА не читался обратно ни на восстановление после
-    # рестарта, ни где-либо ещё — мёртвая страховка, которая ничего не
-    # страховала. Проверяем, что она не вернулась случайно при правках рядом.
-    check(not ctx.redis.store,
-          "вход в Лабиринт больше не пишет мёртвый снапшот в Redis — "
-          "состояние только в context.user_data")
+    await bot.lab_enter_confirm(u, c)
+    check(c.user_data.get("lab_room") == 1 and c.user_data.get("lab_phase") == "active",
+          "вход в Лабиринт доходит до первой комнаты")
+    check(ctx.repo.lab_run is not None,
+          "забег сохранён как персистентный снимок (players.lab_runs), не только в context.user_data")
 
 
 # ── 2. Лабиринт: забег конечен (нет бесконечного фарма OAC) ──────────
 async def test_lab_run_is_bounded():
+    """«Бежать»/спец-действие раньше не тратили комнату → цикл был
+    бесконечным (C3). Новый турн-гард (lab_escape_{turn}, lab_special_{turn})
+    — дополнительный слой поверх той же гарантии: каждая кнопка одноразова."""
     p = Player(user_id=1, exists=True, balance=0, total_earned=0, lab_depth=1)
     ctx = make_ctx(p)
     c = FakeContext(ctx)
-    c.user_data.update({
-        "lab_hp": 100, "lab_max_hp": 100, "lab_focus": 0, "lab_room": 1,
-        "lab_total_rooms": 5, "lab_rewards": [],
-        "lab_current_room": bot.LABYRINTH_ROOMS[3],
-        "lab_msg_id": 1, "lab_chat_id": 1,
-    })
-    # «Бежать» лечит и раньше не тратил комнату → цикл был бесконечным.
+    await bot.lab_enter_confirm(FakeUpdate("lab_enter_confirm", uid=1), c)
     for _ in range(4):
-        c.user_data["lab_current_room"] = bot.LABYRINTH_ROOMS[3]
-        await bot.handle_lab_option(FakeUpdate("lab_escape"), c)
+        turn = c.user_data["lab_turn"]
+        await bot.handle_lab_option(FakeUpdate(f"lab_escape_{turn}", uid=1), c)
     check(c.user_data["lab_room"] == 5,
           "«Бежать» расходует комнату — счётчик дошёл 1→5 за 4 нажатия")
 
-    c2 = FakeContext(ctx)
-    c2.user_data.update({
-        "lab_hp": 100, "lab_max_hp": 100, "lab_focus": 0, "lab_room": 1,
-        "lab_total_rooms": 5, "lab_rewards": [],
-        "lab_current_room": bot.LABYRINTH_ROOMS[3],
-        "lab_msg_id": 1, "lab_chat_id": 1,
-    })
+    p2 = Player(user_id=2, exists=True, balance=0, total_earned=0, lab_depth=1)
+    ctx2 = make_ctx(p2)
+    c2 = FakeContext(ctx2)
+    await bot.lab_enter_confirm(FakeUpdate("lab_enter_confirm", uid=2), c2)
+    # Комната рандомизируется на каждое продвижение — форсим ту же безопасную
+    # комнату (спец-эффект "oac" без штрафа HP на провал), что и раньше,
+    # иначе тест был бы хрупким к случайному HP-уроvariance других комнат.
     for _ in range(4):
-        c2.user_data["lab_current_room"] = bot.LABYRINTH_ROOMS[3]
-        await bot.handle_lab_option(FakeUpdate("lab_special"), c2)
+        ctx2.repo.lab_run["lab_current_room"] = copy.deepcopy(bot.LABYRINTH_ROOMS[3])
+        turn = c2.user_data["lab_turn"]
+        await bot.handle_lab_option(FakeUpdate(f"lab_special_{turn}", uid=2), c2)
     check(c2.user_data["lab_room"] == 5,
           "спец-действие расходует комнату — бесконечная добыча OAC закрыта")
 
@@ -365,20 +429,16 @@ async def test_lab_room_stable_across_non_advancing_actions():
     бонус к следующей атаке и НЕ продвигает room_index (комната не покинута)
     — но экран после неё показывал уже другую комнату с другими шансами и
     наградой, чем ту, для которой игрок только что принял тактическое
-    решение. Единственная механика в игре с настоящим риск-менеджментом
-    (выбор тира атаки, трата HP/Фокуса) на ощущение играла как лотерея."""
+    решение. Новая архитектура создаёт комнату только в момент перехода
+    (_lab_advance_room) — здесь фиксируем, что это действительно так."""
     p = Player(user_id=1, exists=True, balance=0, total_earned=0, lab_depth=1)
     ctx = make_ctx(p)
     c = FakeContext(ctx)
-    c.user_data.update({
-        "lab_hp": 100, "lab_max_hp": 100, "lab_focus": 3, "lab_room": 1,
-        "lab_total_rooms": 5, "lab_rewards": [], "lab_depth": 1,
-        "lab_msg_id": 1, "lab_chat_id": 1,
-    })
-    await bot.show_lab_room(FakeUpdate("lab_noop", uid=1), c)
+    await bot.lab_enter_confirm(FakeUpdate("lab_enter_confirm", uid=1), c)
     room_before = c.user_data["lab_current_room"]["name"]
 
-    await bot.handle_lab_option(FakeUpdate("lab_focus_use", uid=1), c)
+    turn = c.user_data["lab_turn"]
+    await bot.handle_lab_option(FakeUpdate(f"lab_focus_use_{turn}", uid=1), c)
     check(c.user_data["lab_room"] == 1,
           "«Сконцентрироваться» не продвигает счётчик комнат")
     check(c.user_data["lab_current_room"]["name"] == room_before,
@@ -390,8 +450,9 @@ async def test_lab_room_stable_across_non_advancing_actions():
     check(c.user_data["lab_current_room"]["name"] == room_before,
           "и повторный рендер той же комнаты её не перевыбирает")
 
-    # Реальное продвижение (атака) — комната ДОЛЖНА смениться на новую.
-    await bot.handle_lab_option(FakeUpdate("lab_attack_0", uid=1), c)
+    # Реальное продвижение (атака низшего тира) — комната ДОЛЖНА смениться.
+    turn = c.user_data["lab_turn"]
+    await bot.handle_lab_option(FakeUpdate(f"lab_attack_{turn}_0", uid=1), c)
     check(c.user_data["lab_room"] == 2,
           "атака низшего тира продвигает забег на следующую комнату")
 
@@ -1427,9 +1488,9 @@ async def test_unregistered_stranger_gets_start_prompt():
           f"lab_enter отвечает незнакомцу приглашением /start, а не молчит: {_last_edit(upd4)!r}")
 
 
-# ── 27. Карта Фабрики: фог-заметка честно считает закрытые локации ───────
+# ── 27. Мир: фог-заметка честно считает закрытые локации ──────────────
 async def test_world_hub_fog_note_matches_locked_locations():
-    """world_hub (теперь «🗺️ Карта Фабрики») помечает закрытые локации
+    """world_hub («🏰 Главное Меню › 🌍 Мир») помечает закрытые локации
     «в тумане» вместо 🔒 и считает их число в заметке под картой — эта
     заметка не должна расходиться с тем, сколько кнопок реально в тумане."""
     # Низкий ранг: Питомец и Алтарь оба закрыты → 2 локации в тумане.
@@ -1447,7 +1508,7 @@ async def test_world_hub_fog_note_matches_locked_locations():
     upd2 = FakeUpdate("world_hub", uid=2)
     await bot.world_hub(upd2, FakeContext(ctx2))
     text2 = upd2.callback_query.message.edits[-1] if upd2.callback_query.message.edits else ""
-    check("Вся карта открыта" in text2, f"максимальный игрок видит честное «вся карта открыта»: {text2!r}")
+    check("Весь Мир открыт" in text2, f"максимальный игрок видит честное «весь мир открыт»: {text2!r}")
     check("туман" not in text2.split("</b>")[-1] or "🌫️" not in text2,
           "у максимального игрока нет тумана в заметке")
 
@@ -1833,7 +1894,7 @@ async def test_no_double_ctx_callsites():
 
 async def main():
     print("\nРегресс по находкам аудита SLAYER\n" + "─" * 46)
-    for fn in (test_lab_entry_survives_redis, test_lab_run_is_bounded,
+    for fn in (test_lab_entry_reaches_first_room, test_lab_run_is_bounded,
                test_lab_room_stable_across_non_advancing_actions,
                test_mines_cashout, test_mines_survive_redis_roundtrip,
                test_guild_join_requires_start,

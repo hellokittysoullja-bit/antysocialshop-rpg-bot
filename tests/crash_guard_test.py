@@ -173,10 +173,14 @@ def check_earnings_reach_status_ledger():
     tree = ast.parse(src)
     lines = src.splitlines()
 
+    # atomic_update — единая точка учёта заработка (repository.py: считает
+    # дельту баланса сама). atomic_finish_lab_run делает то же самое для
+    # Лабиринта (см. repository.py) — тот же контракт, другое имя метода.
+    DELTA_TRACKING_METHODS = {"atomic_update", "atomic_finish_lab_run"}
     atomic = set()
     for n in ast.walk(tree):
         if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-                and n.func.attr == "atomic_update"):
+                and n.func.attr in DELTA_TRACKING_METHODS):
             for a in n.args:
                 if isinstance(a, ast.Name):
                     atomic.add(a.id)

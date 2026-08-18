@@ -204,9 +204,9 @@ def test_pure(passed):
     # --- подсчёт прогресса квеста (условия видимости заданий) ---
     ch1 = QUEST_TEMPLATES["chapter1"]
     prog = {"farm": True, "craft": True}
-    # BLACK: farm,craft,smoke,ritual видимы (repent/pet отфильтрованы) → 2/4
-    assert _quest_progress_counts(ch1, prog, "BLACK", False, False) == (2, 4)
-    assert _quest_progress_counts(ch1, prog, "WHITE", False, False) == (2, 4)
+    # BLACK: farm,craft,smoke,mines,ritual видимы (repent/pet отфильтрованы) → 2/5
+    assert _quest_progress_counts(ch1, prog, "BLACK", False, False) == (2, 5)
+    assert _quest_progress_counts(ch1, prog, "WHITE", False, False) == (2, 5)
     assert _quest_progress_counts(None, {}, "BLACK", False, False) == (0, 0)
     passed.append("_quest_progress_counts: фильтрация по условиям")
 
