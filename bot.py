@@ -3842,9 +3842,10 @@ def _format_craft_menu_text(balance: int, blunts: int, craft_count: int,
         f"<b>💎 У тебя: {balance} OAC 🍬</b>\n\n"
         f"<b>🗞️ Блантов в свёртке: {blunts}</b>\n"
         f"<b>🎯 Крафтинг: {craft_count}/{target} | {medal_name}</b>\n"
-        f"<b>🌿 Блант — 15 OAC 🍬</b>\n\n"
+        f"<b>🌿 Блант — 15 OAC 🍬</b>\n"
+        f"<i>✨ 5% шанс скрутить второй обычный блант бесплатно</i>\n\n"
         f"<b>💍 Именной блант — 50 OAC 🍬</b>\n"
-        f"<b>Шансы:</b>\n" 
+        f"<b>Шансы редкости:</b>\n"
         f"<i>🟢 55% | 🔵 30% | 🟣 13% | 🟡 2%</i>"
     )
     if m_essence > 0:
@@ -3865,13 +3866,15 @@ def _build_craft_keyboard(m_essence: int) -> InlineKeyboardMarkup:
 
 
 def _format_normal_craft_message(medal_text: str, new_count: int, target: int,
-                                 blunts: int, new_balance: int) -> str:
+                                 blunts: int, new_balance: int, bonus_blunt: bool = False) -> str:
     """Сообщение после обычного крафта."""
     progress_bar_str = get_medal_progress(new_count, CRAFT_MEDALS, just_leveled=bool(medal_text))
+    bonus_line = "\n✨ <b>Идеальная скрутка:</b> Фабрика дала второй блант бесплатно!" if bonus_blunt else ""
     return (
         f"<b>🌿 БЛАНТ СКРУЧЕН!</b>\n\n"
         f"💎 Потрачено: <b>15 OAC 🍬</b>\n"
-        f"⚜️ У тебя: <b>{_fmt_oac(new_balance)} OAC 🍬</b>\n\n"
+        f"⚜️ У тебя: <b>{_fmt_oac(new_balance)} OAC 🍬</b>\n"
+        f"{bonus_line}\n\n"
         f"{medal_text}"
         f"🎯 Крафтинг: <b>{new_count} / {target}</b>\n"
         f"<b>{progress_bar_str}</b>\n\n"
@@ -3928,7 +3931,8 @@ async def handle_craft_normal_v2(update, context, ctx, player):
         p.daily_progress = p.daily_progress or {}
         p.daily_progress["craft"] = True
 
-        if random.random() < 0.05:
+        bonus_blunt = random.random() < 0.05
+        if bonus_blunt:
             p.blunts += 1
 
         p.balance += medal_bonus
@@ -3940,7 +3944,7 @@ async def handle_craft_normal_v2(update, context, ctx, player):
             except Exception:
                 logger.exception("War service error, proceeding without points")
 
-        return CraftStatus.OK, (medal_text, new_count, p.blunts, p.balance)
+        return CraftStatus.OK, (medal_text, new_count, p.blunts, p.balance, bonus_blunt)
 
     result = await ctx.repo.atomic_update(uid, _craft)
     if result is None:
@@ -3959,9 +3963,10 @@ async def handle_craft_normal_v2(update, context, ctx, player):
         )
         return
 
-    medal_text, new_count, blunts, new_balance = data
+    medal_text, new_count, blunts, new_balance, bonus_blunt = data
     target = get_medal_target(new_count, CRAFT_MEDALS)
-    text = _format_normal_craft_message(medal_text, new_count, target, blunts, new_balance)
+    text = _format_normal_craft_message(
+        medal_text, new_count, target, blunts, new_balance, bonus_blunt)
 
     # Тот же приём, что уже на экране фарма (см. farm_callback_v2): следующий
     # незакрытый шаг квеста — тихой строкой-футером, а не отдельным экраном.
@@ -4273,39 +4278,10 @@ async def handle_named_name(update, context):
             except Exception:
                 pass
 
-        # FOMO-бонус (без изменений)
-        async def fomo_reminder():
-            await asyncio.sleep(300)
-            player_check = await ctx.repo.get_by_id(uid)
-            if player_check:
-                inv_now = player_check.inventory or []
-                if any(it.get("id") == blunt_id for it in inv_now):
-                    try:
-                        await context.bot.send_message(uid, "⌛ Твой именной блантик всё ещё скучает. Подари или поделись им, пока не поздно!")
-                    except Exception:
-                        pass
-        asyncio.create_task(fomo_reminder())
-
+        # Дарение и публикация — социальный выбор, а не пяти­минутная гонка.
+        # Именной предмет остаётся ценным в любой момент; игрок сам решает,
+        # хочет ли сохранить его, показать миру или передать другому.
         await asyncio.sleep(0.5)
-        # Раньше — сырой context.bot.send_message без try/except (в отличие от
-        # соседнего fomo_reminder() выше, который уже защищён). Любая ошибка
-        # Telegram (Forbidden/BadRequest/сеть) роняла весь handle_named_name с
-        # необработанным исключением. safe_send_message даёт ретраи; try/except
-        # не даёт сбою здесь испортить уже успешный крафт бланта.
-        try:
-            bonus_msg = await safe_send_message(
-                context, uid,
-                "⚡ <b>БОНУС ЗА СКОРОСТЬ!</b>\n\n"
-                "Если ты <b>подаришь</b> или <b>поделишься</b> этим блантом за 5 минут, получишь <b>+10 OAC</b> на счёт.\n"
-                "Просто нажми одну из кнопок выше!",
-                parse_mode='HTML'
-            )
-            context.user_data['fomo_bonus_msg'] = bonus_msg.message_id
-            context.user_data['fomo_blunt_id'] = blunt_id
-            context.user_data['fomo_start'] = time.time()
-        except Exception:
-            logger.warning("FOMO-бонус: не удалось отправить сообщение uid=%d", uid)
-        
         # Оповещение о создании блантика в канал — уже покрыто активным вызовом
         # _safe_send_guild_message выше (rarity in legendary/epic); этот блок был
         # старым, мёртвым дублем той же логики (удалён, а не раскомментирован,
@@ -4473,7 +4449,12 @@ async def onboarding_reward(update, context, ctx, player):
         # переходит 2→-1 прямо перед вызовом этой функции, и путь сюда
         # (farm → craft_normal → reward) — тот самый обязательный, не
         # опциональный маршрут онбординга.
-        kb_rows = [[InlineKeyboardButton(cta, callback_data="daily_quest_hub")]]
+        kb_rows = [
+            [InlineKeyboardButton("💍 Коллекционер · создать историю", callback_data="choose_path_collector")],
+            [InlineKeyboardButton("🌱 Строитель · вырастить империю", callback_data="choose_path_builder")],
+            [InlineKeyboardButton("🏛️ Исследователь · бросить вызов глубине", callback_data="choose_path_explorer")],
+            [InlineKeyboardButton(cta, callback_data="daily_quest_hub")],
+        ]
         if not (player.referral_count or 0):
             kb_rows.append([InlineKeyboardButton(
                 "🎁 Подари другу лучший старт", callback_data="invite_friend")])
@@ -4482,11 +4463,64 @@ async def onboarding_reward(update, context, ctx, player):
             f"🎓 <b>Отныне Фабрика №9 признаёт тебя Странником.</b>\n\n"
             f"🎁 <b>Бонус за обучение: +30 OAC, +1 блант!</b>\n"
             f"💎 Баланс: {new_bal} OAC · 🗞️ Блантов: {new_blunts}\n\n"
+            "<b>Куда поведёшь историю сегодня?</b> Выбор лишь подскажет следующую цель — "
+            "путь можно сменить в любой момент.\n\n"
             f"{body}",
             reply_markup=InlineKeyboardMarkup(kb_rows),
             parse_mode='HTML'
         )
     
+@rate_limit(1)
+@game_handler
+async def choose_play_path(update, context, ctx, player):
+    """Запоминает добровольную ближайшую цель игрока после обучения.
+
+    Это не класс и не необратимый билд: выбранный путь только делает следующий
+    экран более личным. Игрок сохраняет доступ ко всем системам и может сменить
+    ориентир в любой момент, поэтому выбор поддерживает автономию, а не создаёт
+    новый гейт.
+    """
+    query = update.callback_query
+    await query.answer()
+    intent = query.data.removeprefix("choose_path_")
+    paths = {
+        "collector": (
+            "💍 <b>Путь Коллекционера выбран.</b>\n\n"
+            "Создай именной блант, дай ему историю и реши сам: оставить, показать или подарить.",
+            "💍 Создать именной блант", "craft_named",
+        ),
+        "builder": (
+            "🌱 <b>Путь Строителя выбран.</b>\n\n"
+            "Посади Плантацию: она растёт, пока тебя нет, и превращает короткие визиты в долгую империю.",
+            "🌱 Открыть Плантацию", "collect",
+        ),
+        "explorer": (
+            "🏛️ <b>Путь Исследователя выбран.</b>\n\n"
+            "Загляни в Лабиринт: там важны подготовка, решение и смелость, а не только число OAC.",
+            "🏛️ Открыть Лабиринт", "lab_start",
+        ),
+    }
+    if intent not in paths:
+        await query.answer("Этот путь уже растворился. Выбери один из доступных.", show_alert=True)
+        return
+
+    async def _save_intent(p, conn):
+        p.daily_progress = p.daily_progress or {}
+        p.daily_progress["play_intent"] = intent
+
+    await ctx.repo.atomic_update(query.from_user.id, _save_intent)
+    text, label, callback = paths[intent]
+    await query.message.edit_text(
+        text + "\n\n<i>Это ориентир, а не обязательство: в меню всегда доступны все пути.</i>",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton(label, callback_data=callback)],
+            [InlineKeyboardButton("📋 Продолжить Главу 1", callback_data="daily_quest_hub")],
+            [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
+        ]),
+    )
+
+
 # ====== ФУНКЦИЯ ПЕРЕДАЧИ БЛАНТА (АТОМАРНАЯ, БЕЗОПАСНАЯ) =====
 class TransferError(Exception):
     pass
@@ -4545,28 +4579,8 @@ async def gift_blunt_start(update, context, ctx, player):
             context.user_data.pop('gifting_blunt_id', None)
             context.user_data.pop('gifting_blunt_name', None)
 
-    # 2. FOMO-бонус (твой оригинальный блок без изменений)
-    fomo_blunt_id = context.user_data.get('fomo_blunt_id')
-    fomo_start = context.user_data.get('fomo_start')
-    if fomo_blunt_id == blunt_id:
-        context.user_data.pop('fomo_blunt_id', None)
-        context.user_data.pop('fomo_start', None)
-        bonus_msg_id = context.user_data.pop('fomo_bonus_msg', None)
-
-        elapsed = time.time() - (fomo_start or 0)
-        if elapsed <= 300:
-            async def _add_fomo_bonus(p, conn):
-                p.balance += 10
-                return p
-            await ctx.repo.atomic_update(uid, _add_fomo_bonus)
-            await context.bot.send_message(uid, "✅ Бонус +10 OAC за скорость начислен!")
-        if bonus_msg_id:
-            try:
-                await context.bot.delete_message(uid, bonus_msg_id)
-            except Exception:
-                pass
-
-    # 3. Проверка наличия бланта
+    # 2. Проверка наличия бланта. Дарение не имеет таймера и не даёт
+    # ситуативное преимущество за скорость: это осмысленное социальное действие.
     inv = player.inventory or []
     blunt = next((it for it in inv if it.get("id") == blunt_id and it.get("type") == "named"), None)
     if not blunt:
@@ -4624,7 +4638,17 @@ async def smoke_callback(update, context, ctx, player):
         await edit_or_reply(update, context, empty_text, reply_markup=empty_kb, parse_mode='HTML')
         return
 
-    main_text = f"<b>💨 ДУНУТЬ</b>\n\n🌿 Блантов в свёртке: <b>{player.blunts}</b>"
+    dry = int((player.daily_progress or {}).get("smoke_dry", 0) or 0)
+    left = max(0, SMOKE_PITY_THRESHOLD - dry)
+    safety = ("следующая тяга гарантированно даст улов" if dry >= SMOKE_PITY_THRESHOLD - 1
+              else f"ещё {left} сух. исхода до защищённой тяги")
+    main_text = (
+        f"<b>💨 ДУНУТЬ</b>\n\n"
+        f"🌿 Блантов в свёртке: <b>{player.blunts}</b>\n\n"
+        f"<b>Исходы:</b> 🟡 2% джекпот · 🟢 18% улов · ⚪ 55% штиль · 🔻 25% осечка\n"
+        f"🔥 <i>Защита серии: {safety}.</i>\n\n"
+        f"<i>Тяга — риск ради истории и медалей, а не гарантированный способ заработать OAC.</i>"
+    )
     main_kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("💨 Дунуть", callback_data="do_smoke")],
         [InlineKeyboardButton("🔙 Назад", callback_data="menu")]
@@ -4698,7 +4722,10 @@ async def do_smoke(update, context, ctx, player):
     left = SMOKE_PITY_THRESHOLD - dry
     if outcome in ("loss", "neutral") and left > 0:
         filled = "🔥" * dry + "▫️" * left
-        pity_line = f"\n{filled} <i>ещё {left} до гарантированного улова</i>"
+        if dry >= SMOKE_PITY_THRESHOLD - 1:
+            pity_line = f"\n{filled} <i>следующая тяга гарантированно даст улов</i>"
+        else:
+            pity_line = f"\n{filled} <i>ещё {left} сух. исхода до защищённой тяги</i>"
 
     text = (
         f"{effect}\n\n"
@@ -9158,6 +9185,12 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
             hint = "<b>💡 Твой первый шаг: нажми 🍬 Фармить и получи свои первые OAC!</b>"
         elif craft_count == 0:
             hint = "<b>💡 Попробуй 🌿 Крафт, чтобы создать свой первый Блант!</b>"
+        elif (player.daily_progress or {}).get("play_intent") == "collector" and len(named) <= 1:
+            hint = "💍 <b>Твой путь Коллекционера:</b> создай именной блант и оставь в мире собственный след."
+        elif (player.daily_progress or {}).get("play_intent") == "builder":
+            hint = "🌱 <b>Твой путь Строителя:</b> посади или укрепи Плантацию — твоя империя растёт и без тебя."
+        elif (player.daily_progress or {}).get("play_intent") == "explorer":
+            hint = "🏛️ <b>Твой путь Исследователя:</b> Лабиринт ждёт решения, которого не примет за тебя случайность."
         elif len(named) <= 1 and balance >= GAME_CONFIG["named_blunt_cost"]:
             hint = "<b>💡 Готов к большему? Создай свой первый 💍 Именной блант! (50 OAC)</b>"
         elif _altar_gate_open(player):
@@ -10864,6 +10897,7 @@ PREFIX_HANDLERS: Dict[str, Callable] = {
     "lab_special_": handle_lab_option,
     "lab_focus_use_": handle_lab_option,
     "lab_escape_": handle_lab_option,
+    "choose_path_": choose_play_path,
     "achievements_": achievements_callback,
     "quest_": handle_quest_action,
     "mines_open_": _mines_open_cell_wrapper,

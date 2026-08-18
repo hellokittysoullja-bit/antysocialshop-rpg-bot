@@ -38,3 +38,7 @@ jobs:
         run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt
       - name: Verify transactional state invariants
         run: python tests/state_integrity_test.py
+      - name: Verify ethical game-experience invariants
+        run: python tests/game_experience_test.py
+      - name: Verify progression content invariants
+        run: python tests/content_test.py
