@@ -262,6 +262,242 @@ class PlayerRepository:
                         await self.save(p, conn=conn)
                 return result
 
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=5))
+    async def atomic_enqueue_named_gift(self, from_uid: int, blunt_id: str,
+                                        username_lower: str = None,
+                                        target_user_id: int = None):
+        """Атомарно переносит именной предмет из инвентаря в очередь подарков.
+
+        Получатель может ещё не существовать в базе, поэтому обычный
+        ``atomic_pair_update`` здесь неприменим. Критично, чтобы изъятие
+        предмета у дарителя и INSERT в pending_gifts жили в ОДНОЙ транзакции:
+        иначе ошибка сети/БД между двумя независимыми шагами навсегда теряла
+        предмет игрока.
+        """
+        if not from_uid or from_uid <= 0:
+            raise ValueError("Некорректный from_uid для отложенного подарка")
+        if not blunt_id:
+            raise ValueError("Пустой blunt_id для отложенного подарка")
+        if not username_lower and not target_user_id:
+            raise ValueError("Для отложенного подарка нужен username или user_id")
+
+        async with self.db_pool.acquire() as conn:
+            async with conn.transaction():
+                columns = PLAYER_COLUMNS
+                cols_sql = ", ".join(f'"{c}"' for c in columns)
+                row = await conn.fetchrow(
+                    f"SELECT {cols_sql} FROM players WHERE user_id = $1 FOR UPDATE",
+                    from_uid,
+                )
+                if not row:
+                    return ("giver_missing", None)
+
+                raw_player = dict(row)
+                raw_player["inventory"] = _json_safe_load(raw_player.get("inventory"), [])
+                raw_player["profile_skins"] = _json_safe_load(raw_player.get("profile_skins"), {})
+                raw_player["pending_transfer"] = _json_safe_load(raw_player.get("pending_transfer"), None)
+                raw_player["daily_progress"] = _json_safe_load(raw_player.get("daily_progress"), {})
+                giver = Player(**raw_player)
+
+                item = next(
+                    (it for it in (giver.inventory or [])
+                     if it.get("id") == blunt_id and it.get("type") == "named"),
+                    None,
+                )
+                if item is None:
+                    return ("not_owned", None)
+
+                item = dict(item)
+                giver.inventory = [it for it in giver.inventory if it.get("id") != blunt_id]
+                await conn.execute(
+                    "INSERT INTO pending_gifts (username_lower, target_user_id, item, from_user_id) "
+                    "VALUES ($1, $2, $3, $4)",
+                    username_lower, target_user_id,
+                    json.dumps(item, separators=(",", ":"), default=str), from_uid,
+                )
+                await self.save(giver, conn=conn)
+                return ("ok", item)
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=5))
+    async def atomic_claim_pending_gifts(self, user_id: int, username: str = "") -> list[dict]:
+        """Атомарно зачисляет все ожидающие предметы и удаляет записи очереди.
+
+        Строка игрока и найденные подарки блокируются в одной транзакции. Если
+        сериализация инвентаря, его сохранение или DELETE очереди не проходят,
+        транзакция откатывается целиком: подарок остаётся в pending_gifts, а не
+        исчезает между ``DELETE`` и последующим ``save()``.
+        """
+        if not user_id or user_id <= 0:
+            raise ValueError("Некорректный user_id при выдаче отложенных подарков")
+
+        username_lower = (username or "").lower() or None
+        async with self.db_pool.acquire() as conn:
+            async with conn.transaction():
+                columns = PLAYER_COLUMNS
+                cols_sql = ", ".join(f'"{c}"' for c in columns)
+                row = await conn.fetchrow(
+                    f"SELECT {cols_sql} FROM players WHERE user_id = $1 FOR UPDATE",
+                    user_id,
+                )
+                if not row:
+                    return []
+
+                raw_player = dict(row)
+                raw_player["inventory"] = _json_safe_load(raw_player.get("inventory"), [])
+                raw_player["profile_skins"] = _json_safe_load(raw_player.get("profile_skins"), {})
+                raw_player["pending_transfer"] = _json_safe_load(raw_player.get("pending_transfer"), None)
+                raw_player["daily_progress"] = _json_safe_load(raw_player.get("daily_progress"), {})
+                receiver = Player(**raw_player)
+
+                rows = await conn.fetch(
+                    "SELECT id, item FROM pending_gifts "
+                    "WHERE target_user_id = $1 "
+                    "OR (username_lower = $2 AND username_lower IS NOT NULL) "
+                    "FOR UPDATE",
+                    user_id,
+                    username_lower,
+                )
+                if not rows:
+                    return []
+
+                items: list[dict] = []
+                ids: list[int] = []
+                for gift_row in rows:
+                    item = _json_safe_load(gift_row["item"], {})
+                    if isinstance(item, dict) and item:
+                        items.append(item)
+                        ids.append(gift_row["id"])
+                    else:
+                        logger.error("Повреждённый подарок id=%s оставлен в очереди для разбора", gift_row["id"])
+
+                if not items:
+                    return []
+
+                receiver.inventory = list(receiver.inventory or []) + items
+                await self.save(receiver, conn=conn)
+                await conn.execute("DELETE FROM pending_gifts WHERE id = ANY($1::int[])", ids)
+                return items
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=5))
+    async def get_lab_run(self, user_id: int) -> dict | None:
+        """Возвращает персистентный снимок активного забега Лабиринта."""
+        if not user_id or user_id <= 0:
+            raise ValueError("Некорректный user_id при чтении забега Лабиринта")
+        async with self.db_pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT state FROM lab_runs WHERE user_id=$1", user_id)
+        if not row:
+            return None
+        state = _json_safe_load(row["state"], None)
+        return state if isinstance(state, dict) else None
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=5))
+    async def atomic_start_lab_run(self, user_id: int, state: dict, update_player):
+        """Атомарно фиксирует списание попытки и создание нового забега.
+
+        Если процесс упадёт между кулдауном и записью состояния, транзакция
+        откатит оба шага. Повторное нажатие вместо второго забега возвращает
+        существующий снимок.
+        """
+        if not user_id or user_id <= 0:
+            raise ValueError("Некорректный user_id при старте Лабиринта")
+        async with self.db_pool.acquire() as conn:
+            async with conn.transaction():
+                columns = PLAYER_COLUMNS
+                cols_sql = ", ".join(f'"{c}"' for c in columns)
+                player_row = await conn.fetchrow(
+                    f"SELECT {cols_sql} FROM players WHERE user_id=$1 FOR UPDATE", user_id)
+                if not player_row:
+                    return ("player_missing", None)
+
+                existing = await conn.fetchrow(
+                    "SELECT state FROM lab_runs WHERE user_id=$1 FOR UPDATE", user_id)
+                if existing:
+                    current = _json_safe_load(existing["state"], {})
+                    return ("already_active", current if isinstance(current, dict) else {})
+
+                raw_player = dict(player_row)
+                raw_player["inventory"] = _json_safe_load(raw_player.get("inventory"), [])
+                raw_player["profile_skins"] = _json_safe_load(raw_player.get("profile_skins"), {})
+                raw_player["pending_transfer"] = _json_safe_load(raw_player.get("pending_transfer"), None)
+                raw_player["daily_progress"] = _json_safe_load(raw_player.get("daily_progress"), {})
+                player = Player(**raw_player)
+                result = await update_player(player, conn)
+                await self.save(player, conn=conn)
+                await conn.execute(
+                    "INSERT INTO lab_runs (user_id, state, started_at, updated_at) "
+                    "VALUES ($1, $2::jsonb, NOW(), NOW())",
+                    user_id, json.dumps(state, separators=(",", ":"), default=str),
+                )
+                return ("ok", result)
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=5))
+    async def atomic_mutate_lab_run(self, user_id: int, mutate):
+        """Сериализует изменение активного забега и сохраняет новый снимок.
+
+        Вызвавшая функция получает состояние только под блокировкой строки
+        ``lab_runs``. Два параллельных тапа не могут применить одну комнату или
+        один бонус дважды: второй увидит состояние после первого коммита.
+        """
+        if not user_id or user_id <= 0:
+            raise ValueError("Некорректный user_id при изменении Лабиринта")
+        async with self.db_pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    "SELECT state FROM lab_runs WHERE user_id=$1 FOR UPDATE", user_id)
+                if not row:
+                    return None
+                state = _json_safe_load(row["state"], {})
+                if not isinstance(state, dict):
+                    raise ValueError("Повреждённое состояние Лабиринта")
+                result = await mutate(state, conn)
+                await conn.execute(
+                    "UPDATE lab_runs SET state=$2::jsonb, updated_at=NOW() WHERE user_id=$1",
+                    user_id, json.dumps(state, separators=(",", ":"), default=str),
+                )
+                return result, state
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=5))
+    async def atomic_finish_lab_run(self, user_id: int, finalize):
+        """Атомарно применяет итог забега и удаляет его снимок.
+
+        Выплата, достижения и удаление забега являются одним коммитом. Это
+        исключает и потерю награды при рестарте, и повторную выплату от старой
+        кнопки после уже завершённой попытки.
+        """
+        if not user_id or user_id <= 0:
+            raise ValueError("Некорректный user_id при завершении Лабиринта")
+        async with self.db_pool.acquire() as conn:
+            async with conn.transaction():
+                columns = PLAYER_COLUMNS
+                cols_sql = ", ".join(f'"{c}"' for c in columns)
+                player_row = await conn.fetchrow(
+                    f"SELECT {cols_sql} FROM players WHERE user_id=$1 FOR UPDATE", user_id)
+                if not player_row:
+                    return None
+                run_row = await conn.fetchrow(
+                    "SELECT state FROM lab_runs WHERE user_id=$1 FOR UPDATE", user_id)
+                if not run_row:
+                    return None
+
+                raw_player = dict(player_row)
+                raw_player["inventory"] = _json_safe_load(raw_player.get("inventory"), [])
+                raw_player["profile_skins"] = _json_safe_load(raw_player.get("profile_skins"), {})
+                raw_player["pending_transfer"] = _json_safe_load(raw_player.get("pending_transfer"), None)
+                raw_player["daily_progress"] = _json_safe_load(raw_player.get("daily_progress"), {})
+                player = Player(**raw_player)
+                state = _json_safe_load(run_row["state"], {})
+                if not isinstance(state, dict):
+                    raise ValueError("Повреждённое состояние Лабиринта")
+
+                result = await finalize(player, state, conn)
+                # None означает, что состояние ещё не готово к завершению.
+                # В этом случае не меняем игрока и не удаляем снимок забега.
+                if result is None:
+                    return None
+                await self.save(player, conn=conn)
+                await conn.execute("DELETE FROM lab_runs WHERE user_id=$1", user_id)
+                return result
+
     async def _cache_put(self, user_id: int, player: Player):
         """Сохраняет игрока в Redis или in‑memory кэш."""
         try:

@@ -749,167 +749,136 @@ async def create_named_blunt(user_id: int, name: str, rarity: str = None, conn=N
     logger.info("Создан именной блант '%s' для игрока %d", clean_name, user_id)
     return item
 
-async def _award_achievement_rewards(user_id: int, player: Player, reward_text: str, context, ctx: AppContext) -> None:
-    """Выдаёт награды за достижения (использует репозиторий из ctx)."""
+def _apply_achievement_reward(player: Player, reward_text: str) -> None:
+    """Меняет награду на уже заблокированном объекте игрока без I/O.
+
+    Эта функция вызывается внутри ``repo.atomic_update``. Сохранение выполняет
+    сам репозиторий тем же соединением и той же транзакцией, поэтому запись о
+    достижении и его валюта/косметика не могут разъехаться.
+    """
     if not reward_text:
         return
-    
-    if isinstance(player, dict):
-        player = await ctx.repo.get_by_id(user_id)
-    if not player or not player.user_id:
-        return
-    
-    parts = [p.strip() for p in reward_text.split(",") if p.strip()]
-    for part in parts:
+
+    for part in (p.strip() for p in reward_text.split(",") if p.strip()):
         if part.startswith("+") and "OAC" in part:
-            clean = part.replace(" ", "")
-            m = re.search(r"\+(\d+)", clean)
-            if m:
-                _amt = int(m.group(1))
-                player.balance = (player.balance or 0) + _amt
-                # Этот путь сохраняется прямым save(), минуя учёт дельты в
-                # atomic_update. Без явного начисления награды достижений
-                # (до ~19 900 OAC суммарно) не двигали бы ни ранг, ни топ, ни
-                # «Полярную звезду» у любого игрока, который уже что-то тратил.
-                player.total_earned = (player.total_earned or 0) + _amt
+            match = re.search(r"\+(\d+)", part.replace(" ", ""))
+            if match:
+                player.balance = (player.balance or 0) + int(match.group(1))
+                # total_earned добавит atomic_update по фактической дельте
+                # баланса; вручную повышать его здесь означало бы двойной учёт.
         elif part.startswith("Титул "):
             title = part.replace("Титул ", "").strip()
-            if title:
-                titles = (player.titles or "").split()
-                if title not in titles:
-                    titles.append(title)
-                    player.titles = " ".join(titles).strip()
+            titles = (player.titles or "").split()
+            if title and title not in titles:
+                titles.append(title)
+                player.titles = " ".join(titles).strip()
         elif part.startswith("Фон "):
             bg = part.replace("Фон ", "").strip()
-            skins = player.profile_skins or {}
-            if not isinstance(skins, dict): skins = {}
+            skins = player.profile_skins if isinstance(player.profile_skins, dict) else {}
             unlocked = skins.get("unlocked_backgrounds", [])
-            if bg and bg not in unlocked: unlocked.append(bg)
+            if bg and bg not in unlocked:
+                unlocked.append(bg)
             skins["unlocked_backgrounds"] = unlocked
             player.profile_skins = skins
         elif part.startswith("Рамка "):
             frame = part.replace("Рамка ", "").strip()
-            skins = player.profile_skins or {}
-            if not isinstance(skins, dict): skins = {}
+            skins = player.profile_skins if isinstance(player.profile_skins, dict) else {}
             unlocked = skins.get("unlocked_frames", [])
-            if frame and frame not in unlocked: unlocked.append(frame)
+            if frame and frame not in unlocked:
+                unlocked.append(frame)
             skins["unlocked_frames"] = unlocked
-            player.profile_skins = skins
         else:
-            logger.warning(f"Неизвестный формат награды: {part} для пользователя {user_id}")
-    
-    await ctx.repo.save(player)
-    
+            logger.warning("Неизвестный формат награды: %s для пользователя %s", part, player.user_id)
+
+
 async def check_achievements(user_id: int, context, ctx: AppContext = None) -> None:
-    """Проверяет и выдаёт достижения (использует репозиторий из ctx)."""
+    """Атомарно проверяет и выдаёт достижения одного игрока.
+
+    Игрок блокируется строковым ``SELECT … FOR UPDATE`` внутри
+    ``repo.atomic_update``. Уникальность ``(user_id, ach_id)`` и
+    ``ON CONFLICT DO NOTHING`` делают вставки идемпотентными без глобального
+    ``LOCK TABLE``; независимые игроки больше не сериализуют всю игру.
+    """
     if ctx is None:
         ctx = context.bot_data.get("ctx")
     if not ctx:
         return
-    
-    player = await ctx.repo.get_by_id(user_id)
-    if not player or not player.user_id:
-        return
-    
-    awarded_key = f"ach:{user_id}"
-    awarded = set()
-    if ctx.redis:
-        try:
-            cached = await redis_breaker.call(ctx.redis.get, awarded_key)
-            if cached:
-                awarded = set(json.loads(cached))
-        except pybreaker.CircuitBreakerError:
-            pass
-    
-    if not awarded:
-        async with ctx.db_pool.acquire() as conn:
-            rows = await conn.fetch("SELECT ach_id FROM achievements_awarded WHERE user_id=$1", user_id)
-            awarded = {r["ach_id"] for r in rows}
-            if ctx.redis:
-                try:
-                    await redis_breaker.call(ctx.redis.setex, awarded_key, 60, json.dumps(list(awarded)))
-                except pybreaker.CircuitBreakerError:
-                    pass
-    
-    messages_to_send = []
-    async with ctx.db_pool.acquire() as conn:
-        async with conn.transaction():
-            await conn.execute("LOCK TABLE achievements_awarded IN EXCLUSIVE MODE")
-            rows = await conn.fetch("SELECT ach_id FROM achievements_awarded WHERE user_id=$1", user_id)
-            current_awarded = {r["ach_id"] for r in rows}
-    
-            for ach in ACHIEVEMENTS:
-                ach_id = ach["id"]
-                if ach_id == "lunar_lord":
-                    continue
-                cond = ACHIEVEMENT_CONDITIONS.get(ach_id)
-                if cond and ach_id not in current_awarded:
-                    field, threshold = cond
-                    if getattr(player, field, 0) >= threshold:
-                        await conn.execute(
-                            "INSERT INTO achievements_awarded(user_id, ach_id, awarded_at) VALUES($1, $2, NOW()) ON CONFLICT DO NOTHING",
-                            user_id, ach_id
-                        )
-                        await _award_achievement_rewards(user_id, player, ach.get("reward", ""), context, ctx)
-                        current_awarded.add(ach_id)
 
-                        if getattr(player, 'onboarding_step', -1) != -1:
-                            messages_to_send.append(
-                                f"<b>🏆 {ach['emoji']} «{ach['name']}»</b>\n"
-                                f"<i>— достижение разблокировано!</i>"
-                            )
-                        else:
-                            messages_to_send.append(
-                                f"<b>🕊️ СВИТОК ДОСТИЖЕНИЙ 🏆</b>\n\n"
-                                f"<b>🎉 Достижение разблокировано!💎</b>\n\n"
-                                f"<i>{ach['emoji']} «{ach['name']}» {ach['emoji']}</i>"
-                            )
-    
-            # lunar_lord
-            rows2 = await conn.fetch("SELECT ach_id FROM achievements_awarded WHERE user_id=$1", user_id)
-            awarded_ids = {r["ach_id"] for r in rows2}
-            all_other = {a["id"] for a in ACHIEVEMENTS if a["id"] != "lunar_lord"}
-            if "lunar_lord" not in awarded_ids and all_other.issubset(awarded_ids):
-                lunar = ACHIEVEMENTS_DICT["lunar_lord"]
-                await conn.execute(
-                    "INSERT INTO achievements_awarded(user_id, ach_id, awarded_at) VALUES($1, $2, NOW()) ON CONFLICT DO NOTHING",
-                    user_id, "lunar_lord"
+    async def _check(player, conn):
+        rows = await conn.fetch("SELECT ach_id FROM achievements_awarded WHERE user_id=$1", user_id)
+        awarded = {row["ach_id"] for row in rows}
+        messages = []
+
+        for achievement in ACHIEVEMENTS:
+            ach_id = achievement["id"]
+            if ach_id == "lunar_lord" or ach_id in awarded:
+                continue
+            condition = ACHIEVEMENT_CONDITIONS.get(ach_id)
+            if not condition:
+                continue
+            field, threshold = condition
+            if getattr(player, field, 0) < threshold:
+                continue
+            inserted = await conn.fetchval(
+                "INSERT INTO achievements_awarded(user_id, ach_id, awarded_at) "
+                "VALUES($1, $2, NOW()) ON CONFLICT DO NOTHING RETURNING ach_id",
+                user_id, ach_id,
+            )
+            if not inserted:
+                continue
+            _apply_achievement_reward(player, achievement.get("reward", ""))
+            awarded.add(ach_id)
+            if getattr(player, "onboarding_step", -1) != -1:
+                messages.append(
+                    f"<b>🏆 {achievement['emoji']} «{achievement['name']}»</b>\n"
+                    f"<i>— достижение разблокировано!</i>"
                 )
-                await _award_achievement_rewards(user_id, player, lunar.get("reward", ""), context, ctx)
-                messages_to_send.append(
+            else:
+                messages.append(
+                    f"<b>🕊️ СВИТОК ДОСТИЖЕНИЙ 🏆</b>\n\n"
+                    f"<b>🎉 Достижение разблокировано!💎</b>\n\n"
+                    f"<i>{achievement['emoji']} «{achievement['name']}» {achievement['emoji']}</i>"
+                )
+
+        all_other = {achievement["id"] for achievement in ACHIEVEMENTS if achievement["id"] != "lunar_lord"}
+        if "lunar_lord" not in awarded and all_other.issubset(awarded):
+            lunar = ACHIEVEMENTS_DICT["lunar_lord"]
+            inserted = await conn.fetchval(
+                "INSERT INTO achievements_awarded(user_id, ach_id, awarded_at) "
+                "VALUES($1, $2, NOW()) ON CONFLICT DO NOTHING RETURNING ach_id",
+                user_id, "lunar_lord",
+            )
+            if inserted:
+                _apply_achievement_reward(player, lunar.get("reward", ""))
+                messages.append(
                     f"<b>🕊️ СВИТОК ДОСТИЖЕНИЙ 🏆</b>\n\n"
                     f"<b>🎉 Достижение разблокировано!</b>\n\n"
                     f"<i>{lunar['emoji']} «{lunar['name']}» {lunar['emoji']}</i>\n\n"
                     f"<b>📜 Запись добавлена! 💎</b>"
                 )
-    
-            if ctx.redis:
-                try:
-                    await redis_breaker.call(ctx.redis.delete, awarded_key)
-                except pybreaker.CircuitBreakerError:
-                    pass
-    
-    if messages_to_send:
-        player = await ctx.repo.get_by_id(user_id)
-        if player and getattr(player, 'onboarding_step', -1) != -1:
-            # Красивое и компактное уведомление для новичков
-            for msg in messages_to_send:
-                try:
-                    await safe_send_message(
-                        context,
-                        user_id,
-                        msg,
-                        parse_mode='HTML'
-                    )
-                except Exception as e:
-                    logger.error(f"Achievement notify error: {e}")
-        else:
-            # Стандартный вывод после обучения
-            for msg in messages_to_send:
-                try:
-                    await context.bot.send_message(chat_id=user_id, text=msg, parse_mode='HTML')
-                except Exception as e:
-                    logger.error(f"Achievement notify error: {e}")
+        return messages
+
+    messages_to_send = await ctx.repo.atomic_update(user_id, _check)
+    if messages_to_send is None:
+        return
+
+    if ctx.redis:
+        try:
+            await redis_breaker.call(ctx.redis.delete, f"ach:{user_id}")
+        except (pybreaker.CircuitBreakerError, Exception):
+            pass
+
+    if not messages_to_send:
+        return
+    player = await ctx.repo.get_by_id(user_id)
+    for message in messages_to_send:
+        try:
+            if player and getattr(player, "onboarding_step", -1) != -1:
+                await safe_send_message(context, user_id, message, parse_mode="HTML")
+            else:
+                await context.bot.send_message(chat_id=user_id, text=message, parse_mode="HTML")
+        except Exception as exc:
+            logger.error("Achievement notify error: %s", exc)
                 
 def _build_ascension_card(rank_label, new_balance):
     """Карточка возвышения. Чистая функция → тестируется без БД.
@@ -1422,6 +1391,22 @@ async def _run_migrations(conn):
         "CREATE INDEX IF NOT EXISTS idx_pending_gifts_username ON pending_gifts(username_lower);")
     await conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_pending_gifts_target_id ON pending_gifts(target_user_id);")
+
+    # ── Активные забеги Лабиринта ────────────────────────────────────────
+    # Лабиринт оплачивается 12-часовой попыткой; его нельзя хранить только в
+    # context.user_data, потому что рестарт процесса тогда списывал попытку и
+    # стирал весь путь игрока. Одна строка на игрока гарантирует, что у него
+    # существует не более одного активного забега.
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS lab_runs (
+            user_id BIGINT PRIMARY KEY REFERENCES players(user_id) ON DELETE CASCADE,
+            state JSONB NOT NULL,
+            started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+    """)
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_lab_runs_updated_at ON lab_runs(updated_at);")
     
 # Ну тип жто БД длЯЯЯ daily_progress
     await conn.execute("""
@@ -7410,6 +7395,62 @@ async def check_blunt(update, context):
 # ============================================================
 
 
+# ─── ПЕРСИСТЕНТНОЕ СОСТОЯНИЕ ЛАБИРИНТА ───────────────────────────
+# Забег — ценный оплаченный контент, поэтому его состояние живёт в БД, а
+# context.user_data служит только быстрым представлением текущего снимка.
+LAB_STATE_KEYS = (
+    "lab_room", "lab_hp", "lab_max_hp", "lab_focus", "lab_rewards", "lab_depth",
+    "lab_total_rooms", "lab_attack_bonus", "lab_focused_attack", "lab_curse_rooms",
+    "lab_amulet", "lab_current_room", "lab_turn", "lab_phase", "lab_msg_id", "lab_chat_id",
+)
+
+
+def _lab_room_for_depth(depth: int) -> dict:
+    """Создаёт комнату в момент входа в неё, а не при каждом рендере."""
+    room = copy.deepcopy(random.choice(LABYRINTH_ROOMS))
+    risk_mult = 1.0 + (depth - 1) * 0.05
+    reward_mult = 1.0 + (depth - 1) * 0.10
+    attack = room["actions"]["attack"]
+    attack["risks"] = [min(0.95, risk * risk_mult) for risk in attack["risks"]]
+    attack["rewards"] = [
+        (int(low * reward_mult), int(high * reward_mult))
+        for low, high in attack["rewards"]
+    ]
+    return room
+
+
+def _lab_hydrate_context(context, state: dict) -> None:
+    """Копирует полный снимок БД в локальное представление текущего апдейта."""
+    for key in LAB_STATE_KEYS:
+        context.user_data.pop(key, None)
+    for key in LAB_STATE_KEYS:
+        if key in state:
+            context.user_data[key] = copy.deepcopy(state[key])
+
+
+def _lab_state_from_context(context) -> dict:
+    """Собирает сериализуемое игровое состояние без Telegram-объектов."""
+    return {
+        key: copy.deepcopy(context.user_data[key])
+        for key in LAB_STATE_KEYS
+        if key in context.user_data
+    }
+
+
+async def _lab_store_message_ref(ctx, uid: int, context) -> None:
+    """Сохраняет ссылку на активный экран, чтобы рестарт не плодил сообщения."""
+    snapshot = _lab_state_from_context(context)
+
+    async def _set_ref(state, conn):
+        state.update(snapshot)
+        return True
+
+    result = await ctx.repo.atomic_mutate_lab_run(uid, _set_ref)
+    if result:
+        _unused, state = result
+        _lab_hydrate_context(context, state)
+
+
 # ─── ВХОД В ЛАБИРИНТ ────────────────────────────────────────
 async def lab_enter(update, context):
     ctx = context.application.bot_data["ctx"]
@@ -7426,6 +7467,15 @@ async def lab_enter(update, context):
     if not player or not player.exists:
         await _notify_user(update, context, "Сначала активируйся: /start")
         return
+
+    # Активный забег имеет приоритет над кулдауном: попытка уже списана, а
+    # игрок должен продолжить ровно тот же путь после рестарта или возврата.
+    active_run = await ctx.repo.get_lab_run(uid)
+    if active_run:
+        _lab_hydrate_context(context, active_run)
+        await show_lab_room(update, context)
+        return
+
     depth = player.lab_depth or 1
     now = datetime.now()
     last = player.last_lab_attempt
@@ -7473,37 +7523,47 @@ async def lab_enter_confirm(update, context):
     await query.answer()
     uid = query.from_user.id
     player = await ctx.repo.get_by_id(uid)
-    depth = player.lab_depth or 1 if player else 1
+    if not player or not player.exists:
+        await query.answer("Сначала активируйся: /start", show_alert=True)
+        return
+
+    depth = player.lab_depth or 1
     total_rooms = 4 + depth
     now = datetime.now()
+    initial_state = {
+        "lab_room": 1,
+        "lab_hp": 100,
+        "lab_max_hp": 100,
+        "lab_focus": 3,
+        "lab_rewards": [],
+        "lab_depth": depth,
+        "lab_total_rooms": total_rooms,
+        "lab_attack_bonus": 0.0,
+        "lab_focused_attack": False,
+        "lab_curse_rooms": 0,
+        "lab_amulet": False,
+        "lab_current_room": _lab_room_for_depth(depth),
+        # Монотонный ход защищает от повторной доставки старой кнопки.
+        "lab_turn": 1,
+        "lab_phase": "active",
+    }
 
     async def _mark_lab(p, conn):
         p.last_lab_attempt = now
-        # Отмечаем задание квеста «Лабиринт» (раньше не трекалось → глава 2
-        # была непроходима)
         p.daily_progress = p.daily_progress or {}
         p.daily_progress["lab"] = True
         return True
-    await ctx.repo.atomic_update(uid, _mark_lab)
 
-    context.user_data["lab_room"] = 1
-    context.user_data["lab_hp"] = 100
-    context.user_data["lab_max_hp"] = 100
-    context.user_data["lab_focus"] = 3
-    context.user_data["lab_rewards"] = []
-    context.user_data["lab_depth"] = depth
-    context.user_data["lab_total_rooms"] = total_rooms
-    context.user_data["lab_attack_bonus"] = 0.0
-    context.user_data["lab_focused_attack"] = False
-    context.user_data["lab_curse_rooms"] = 0
+    status, payload = await ctx.repo.atomic_start_lab_run(uid, initial_state, _mark_lab)
+    if status == "player_missing":
+        await query.answer("Профиль не найден.", show_alert=True)
+        return
+    if status == "already_active":
+        _lab_hydrate_context(context, payload)
+        await show_lab_room(update, context)
+        return
 
-    # Снапшот забега в Redis отсюда убран: писался в lab_state:{uid} и
-    # НИГДЕ НИКОГДА не читался обратно — ни на восстановление после рестарта,
-    # ни где-либо ещё. Мёртвая страховка, которая ничего не страхует; рантайм
-    # и так читает состояние только из context.user_data.
-
-    room = random.choice(LABYRINTH_ROOMS)
-    context.user_data["lab_current_room"] = room
+    _lab_hydrate_context(context, initial_state)
     await show_lab_room(update, context)
 
 # ─── ОТОБРАЖЕНИЕ КОМНАТЫ ─────────────────────────────────────
@@ -7514,24 +7574,28 @@ async def show_lab_room(update, context):
     max_hp = context.user_data.get("lab_max_hp", 100)
     focus = context.user_data.get("lab_focus", 3)
     total_rooms = context.user_data.get("lab_total_rooms", 5)
-    depth = context.user_data.get("lab_depth", 1)
     attack_bonus = context.user_data.get("lab_attack_bonus", 0.0)
     focused = context.user_data.get("lab_focused_attack", False)
     curse = context.user_data.get("lab_curse_rooms", 0)
 
-    if room_index > total_rooms:
+    phase = context.user_data.get("lab_phase", "active")
+    if phase == "death":
+        await show_lab_death(update, context)
+        return
+    if phase == "final" or room_index > total_rooms:
         await show_lab_final(update, context)
         return
+    if phase != "active":
+        await _notify_user(update, context, "⚠️ Забег повреждён. Новая попытка не списана.")
+        return
 
-    # масштабирование комнаты под глубину
-    base_room = random.choice(LABYRINTH_ROOMS)
-    room = copy.deepcopy(base_room)
-    risk_mult = 1.0 + (depth - 1) * 0.05
-    reward_mult = 1.0 + (depth - 1) * 0.10
-    atk = room["actions"]["attack"]
-    atk["risks"] = [min(0.95, r * risk_mult) for r in atk["risks"]]
-    atk["rewards"] = [(int(lo * reward_mult), int(hi * reward_mult)) for lo, hi in atk["rewards"]]
-    context.user_data["lab_current_room"] = room
+    # Комната создаётся только в момент перехода. Повторный рендер не вправе
+    # менять описание, риски или награды уже начатой комнаты.
+    room = context.user_data.get("lab_current_room")
+    if not isinstance(room, dict):
+        await _notify_user(update, context, "⚠️ Забег повреждён. Мы не списали новую попытку — открой Лабиринт ещё раз.")
+        return
+    turn = int(context.user_data.get("lab_turn", 1) or 1)
 
     # прогресс-бар здоровья
     hp_percent = int(hp / max_hp * 10)
@@ -7562,17 +7626,17 @@ async def show_lab_room(update, context):
     kb_rows = []
     atk = room["actions"]["attack"]
     kb_rows.append([
-        InlineKeyboardButton(f"⚔️ 🟢 (-{atk['costs'][0]} hp)", callback_data="lab_attack_0"),
-        InlineKeyboardButton(f"⚔️ 🟡 (-{atk['costs'][1]} hp)", callback_data="lab_attack_1"),
-        InlineKeyboardButton(f"⚔️ 🔴 (-{atk['costs'][2]} hp)", callback_data="lab_attack_2")
+        InlineKeyboardButton(f"⚔️ 🟢 (-{atk['costs'][0]} hp)", callback_data=f"lab_attack_{turn}_0"),
+        InlineKeyboardButton(f"⚔️ 🟡 (-{atk['costs'][1]} hp)", callback_data=f"lab_attack_{turn}_1"),
+        InlineKeyboardButton(f"⚔️ 🔴 (-{atk['costs'][2]} hp)", callback_data=f"lab_attack_{turn}_2")
     ])
     sp = room["actions"]["special"]
-    kb_rows.append([InlineKeyboardButton(f"{sp['name']} (-{sp['cost']} hp)", callback_data="lab_special")])
+    kb_rows.append([InlineKeyboardButton(f"{sp['name']} (-{sp['cost']} hp)", callback_data=f"lab_special_{turn}")])
 
     if focus > 0 and not focused:
-        kb_rows.append([InlineKeyboardButton("🌀 Сконцентрироваться (1⚡)", callback_data="lab_focus_use")])
+        kb_rows.append([InlineKeyboardButton("🌀 Сконцентрироваться (1⚡)", callback_data=f"lab_focus_use_{turn}")])
 
-    kb_rows.append([InlineKeyboardButton("🏃 Бежать (бесплатно)", callback_data="lab_escape")])
+    kb_rows.append([InlineKeyboardButton("🏃 Бежать (бесплатно)", callback_data=f"lab_escape_{turn}")])
 
     chat_id = context.user_data.get("lab_chat_id")
     msg_id = context.user_data.get("lab_msg_id")
@@ -7587,214 +7651,236 @@ async def show_lab_room(update, context):
             query = update.callback_query
             if query:
                 await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
+                context.user_data["lab_msg_id"] = query.message.message_id
+                context.user_data["lab_chat_id"] = query.message.chat.id
+                await _lab_store_message_ref(ctx, update.effective_user.id, context)
     else:
         query = update.callback_query
+        if not query or not query.message:
+            await _notify_user(update, context, "⚠️ Не удалось открыть экран Лабиринта. Повтори вход — забег сохранён.")
+            return
         lab_msg = await query.message.reply_text(text, reply_markup=kb, parse_mode='HTML')
         context.user_data["lab_msg_id"] = lab_msg.message_id
         context.user_data["lab_chat_id"] = lab_msg.chat.id
+        await _lab_store_message_ref(ctx, update.effective_user.id, context)
 
 
 # ─── ОБРАБОТКА ДЕЙСТВИЙ ──────────────────────────────────────
+def _parse_lab_action(data: str):
+    """Разбирает одноразовую кнопку Лабиринта: (turn, action, level|None)."""
+    parts = (data or "").split("_")
+    try:
+        if len(parts) == 4 and parts[:2] == ["lab", "attack"]:
+            return int(parts[2]), "attack", int(parts[3])
+        if len(parts) == 3 and parts[:2] == ["lab", "special"]:
+            return int(parts[2]), "special", None
+        if len(parts) == 4 and parts[:3] == ["lab", "focus", "use"]:
+            return int(parts[3]), "focus", None
+        if len(parts) == 3 and parts[:2] == ["lab", "escape"]:
+            return int(parts[2]), "escape", None
+    except ValueError:
+        pass
+    return None
+
+
+def _lab_advance_room(state: dict) -> str:
+    """Завершает текущую комнату и создаёт следующую ровно один раз."""
+    state["lab_room"] = int(state.get("lab_room", 1) or 1) + 1
+    state["lab_turn"] = int(state.get("lab_turn", 1) or 1) + 1
+    if state["lab_room"] > int(state.get("lab_total_rooms", 0) or 0):
+        state["lab_phase"] = "final"
+        return "final"
+    state["lab_current_room"] = _lab_room_for_depth(int(state.get("lab_depth", 1) or 1))
+    return "active"
+
+
 async def handle_lab_option(update, context):
     query = update.callback_query
-    data = query.data
     await query.answer()
-
-    hp = context.user_data.get("lab_hp", 100)
-    focus = context.user_data.get("lab_focus", 3)
-    max_hp = context.user_data.get("lab_max_hp", 100)
-    room = context.user_data.get("lab_current_room")
-    if not room:
+    parsed = _parse_lab_action(query.data)
+    if not parsed:
+        await query.answer("Этот экран устарел. Открой Лабиринт ещё раз.", show_alert=True)
+        return
+    expected_turn, action, level = parsed
+    ctx = context.application.bot_data.get("ctx")
+    uid = query.from_user.id
+    if not ctx:
+        await query.answer("Бот инициализируется. Попробуй позже.", show_alert=True)
         return
 
-    # ─── КОНЦЕНТРАЦИЯ ───
-    if data == "lab_focus_use":
-        if focus <= 0:
-            await query.answer("Нет фокуса.", show_alert=True)
-            return
-        if context.user_data.get("lab_focused_attack", False):
-            await query.answer("Уже сконцентрированы.", show_alert=True)
-            return
-        context.user_data["lab_focus"] = focus - 1
-        context.user_data["lab_focused_attack"] = True
-        await query.answer("Концентрация! Следующая атака будет успешной.")
+    async def _apply(state, conn):
+        if state.get("lab_phase", "active") != "active":
+            return ("stale", "Забег уже завершён.")
+        if int(state.get("lab_turn", 1) or 1) != expected_turn:
+            return ("stale", "Эта кнопка уже отработала. Открой текущий экран.")
+
+        hp = int(state.get("lab_hp", 100) or 0)
+        max_hp = int(state.get("lab_max_hp", 100) or 100)
+        focus = int(state.get("lab_focus", 3) or 0)
+        room = state.get("lab_current_room")
+        if not isinstance(room, dict):
+            state["lab_phase"] = "corrupt"
+            return ("corrupt", "Состояние комнаты повреждено.")
+
+        if action == "focus":
+            if focus <= 0:
+                return ("blocked", "Нет фокуса.")
+            if state.get("lab_focused_attack", False):
+                return ("blocked", "Ты уже сконцентрирован.")
+            state["lab_focus"] = focus - 1
+            state["lab_focused_attack"] = True
+            state["lab_turn"] = expected_turn + 1
+            return ("active", "Концентрация! Следующая атака будет успешной.")
+
+        if action == "attack":
+            attack = room["actions"]["attack"]
+            if level not in (0, 1, 2):
+                return ("blocked", "Неизвестный уровень атаки.")
+            cost = int(attack["costs"][level])
+            if hp < cost:
+                return ("blocked", "Недостаточно HP.")
+            hp -= cost
+            risk = float(attack["risks"][level])
+            if hp < 30:
+                risk += 0.15
+            elif hp < 60:
+                risk += 0.05
+            curse = int(state.get("lab_curse_rooms", 0) or 0)
+            if curse > 0:
+                risk += 0.10
+                state["lab_curse_rooms"] = curse - 1
+            risk = min(0.98, risk)
+
+            if state.get("lab_focused_attack", False):
+                success = True
+                state["lab_focused_attack"] = False
+            else:
+                success = random.random() < risk
+
+            if success:
+                earned = random.randint(*attack["rewards"][level])
+                bonus = float(state.get("lab_attack_bonus", 0.0) or 0.0)
+                if bonus > 0:
+                    earned = int(earned * (1 + bonus))
+                    state["lab_attack_bonus"] = 0.0
+                state.setdefault("lab_rewards", []).append(earned)
+                message = f"Успех! +{earned} OAC"
+            elif state.get("lab_amulet", False):
+                state["lab_amulet"] = False
+                message = "Амулет защитил тебя! Урон не получен."
+            else:
+                extra = random.randint(5, 15)
+                hp -= extra
+                message = f"Провал! -{cost + extra} HP"
+
+            state["lab_hp"] = max(0, hp)
+            if hp <= 0:
+                state["lab_phase"] = "death"
+                state["lab_turn"] = expected_turn + 1
+                return ("death", message)
+            return (_lab_advance_room(state), message)
+
+        if action == "special":
+            special = room["actions"]["special"]
+            cost = int(special["cost"])
+            if hp < cost:
+                return ("blocked", "Недостаточно HP.")
+            hp -= cost
+            state["lab_hp"] = hp
+            effect = special["effect"]
+            success = random.random() < float(special["risk"])
+            message = ""
+
+            if effect == "focus":
+                if success:
+                    state["lab_focus"] = min(3, focus + int(special.get("value", 1)))
+                    message = "+1 Фокус!"
+                else:
+                    message = "Ничего не произошло."
+            elif effect == "heal":
+                if success:
+                    heal = int(special.get("value", 30))
+                    state["lab_hp"] = min(max_hp, hp + heal)
+                    message = f"+{heal} HP!"
+                else:
+                    state["lab_hp"] = max(0, hp - 10)
+                    message = "Проклятая кровь! -10 HP"
+            elif effect == "oac":
+                if success:
+                    earned = random.randint(*special["value"])
+                    state.setdefault("lab_rewards", []).append(earned)
+                    message = f"+{earned} OAC!"
+                else:
+                    message = "Тени отобрали твою находку."
+            elif effect == "next_boost":
+                state["lab_attack_bonus"] = float(special.get("value", 0.5)) if success else 0.0
+                message = "Следующая атака будет мощнее!" if success else "Сгусток рассеялся."
+            elif effect == "reveal":
+                left = int(state.get("lab_total_rooms", 5)) - int(state.get("lab_room", 1))
+                message = f"Осталось комнат: {left}"
+            elif effect == "mirror_hp":
+                if success:
+                    state["lab_hp"] = random.randint(20, 80)
+                    message = f"Отражение изменило тебя! HP = {state['lab_hp']}"
+                else:
+                    message = "Зеркало разбилось."
+            elif effect == "amulet":
+                state["lab_amulet"] = bool(success)
+                message = "Руны создали защитный амулет!" if success else "Руны погасли."
+            elif effect == "sacrifice_boost":
+                if success:
+                    state["lab_attack_bonus"] = float(special.get("value", 0.8))
+                    message = "Пламя принимает жертву! +80% к атаке."
+                else:
+                    extra = random.randint(10, 20)
+                    state["lab_hp"] = max(0, hp - extra)
+                    message = f"Огонь отверг тебя! -{extra} HP"
+            elif effect == "gamble":
+                outcome = random.choice([
+                    ("heal", 20), ("focus_gain", 1), ("oac_win", random.randint(30, 60)),
+                    ("damage", -15), ("curse", None),
+                ])
+                if outcome[0] == "heal":
+                    state["lab_hp"] = min(max_hp, hp + outcome[1]); message = f"Голос исцелил тебя! +{outcome[1]} HP"
+                elif outcome[0] == "focus_gain":
+                    state["lab_focus"] = min(3, focus + 1); message = "Голос дарует озарение! +1 Фокус"
+                elif outcome[0] == "oac_win":
+                    state.setdefault("lab_rewards", []).append(outcome[1]); message = f"Награда из темноты! +{outcome[1]} OAC"
+                elif outcome[0] == "damage":
+                    state["lab_hp"] = max(0, hp + outcome[1]); message = f"Проклятие! {outcome[1]} HP"
+                else:
+                    state["lab_curse_rooms"] = 2; message = "Голос наслал порчу... Риск повышен на 2 комнаты."
+
+            if int(state.get("lab_hp", 0) or 0) <= 0:
+                state["lab_hp"] = 0
+                state["lab_phase"] = "death"
+                state["lab_turn"] = expected_turn + 1
+                return ("death", message)
+            return (_lab_advance_room(state), message)
+
+        if action == "escape":
+            state["lab_hp"] = min(max_hp, hp + random.randint(15, 25))
+            return (_lab_advance_room(state), "Ты сбежал, восстановив немного HP.")
+
+        return ("blocked", "Действие не реализовано.")
+
+    result = await ctx.repo.atomic_mutate_lab_run(uid, _apply)
+    if result is None:
+        await query.answer("Забег не найден. Открой Лабиринт ещё раз.", show_alert=True)
+        return
+    (status, message), state = result
+    _lab_hydrate_context(context, state)
+    if status in ("stale", "blocked", "corrupt"):
+        await query.answer(message, show_alert=True)
+        return
+
+    await query.answer(message)
+    if status == "death":
+        await show_lab_death(update, context)
+    elif status == "final":
+        await show_lab_final(update, context)
+    else:
         await show_lab_room(update, context)
-        return
-
-    # ─── АТАКА ───
-    if data.startswith("lab_attack_"):
-        level = int(data.split("_")[-1])
-        atk = room["actions"]["attack"]
-        cost = atk["costs"][level]
-        risk = atk["risks"][level]
-        reward_range = atk["rewards"][level]
-
-        if hp < cost:
-            await query.answer("Недостаточно HP.", show_alert=True)
-            return
-
-        hp -= cost
-        context.user_data["lab_hp"] = hp
-
-        # штраф за низкое HP
-        if hp < 30:
-            risk += 0.15
-        elif hp < 60:
-            risk += 0.05
-        # учёт порчи
-        curse = context.user_data.get("lab_curse_rooms", 0)
-        if curse > 0:
-            risk += 0.10
-            context.user_data["lab_curse_rooms"] = curse - 1
-        risk = min(0.98, risk)
-
-        focused = context.user_data.get("lab_focused_attack", False)
-        if focused:
-            success = True
-            context.user_data["lab_focused_attack"] = False
-        else:
-            success = random.random() < risk
-
-        if success:
-            base_earned = random.randint(*reward_range)
-            bonus = context.user_data.get("lab_attack_bonus", 0.0)
-            if bonus > 0:
-                base_earned = int(base_earned * (1 + bonus))
-                context.user_data["lab_attack_bonus"] = 0.0
-            # амулет не расходуется при успехе
-            context.user_data.setdefault("lab_rewards", []).append(base_earned)
-            await query.answer(f"Успех! +{base_earned} OAC")
-        else:
-            # проверка амулета
-            if context.user_data.get("lab_amulet"):
-                context.user_data["lab_amulet"] = False
-                await query.answer("Амулет защитил тебя! Урон не получен.")
-            else:
-                extra_dmg = random.randint(5, 15)
-                hp -= extra_dmg
-                context.user_data["lab_hp"] = hp
-                await query.answer(f"Провал! -{cost+extra_dmg} HP")
-
-        if hp <= 0:
-            context.user_data["lab_hp"] = 0
-            await show_lab_death(update, context)
-            return
-
-        context.user_data["lab_room"] += 1
-        await show_lab_room(update, context)
-        return
-
-    # ─── УНИКАЛЬНОЕ ДЕЙСТВИЕ ───
-    elif data == "lab_special":
-        sp = room["actions"]["special"]
-        cost = sp["cost"]
-        if hp < cost:
-            await query.answer("Недостаточно HP.", show_alert=True)
-            return
-
-        hp -= cost
-        context.user_data["lab_hp"] = hp
-
-        effect = sp["effect"]
-        success = random.random() < sp["risk"]
-
-        if effect == "focus":
-            if success:
-                context.user_data["lab_focus"] = min(3, focus + sp.get("value", 1))
-                await query.answer("+1 Фокус!")
-            else:
-                await query.answer("Ничего не произошло.")
-        elif effect == "heal":
-            if success:
-                heal = sp.get("value", 30)
-                context.user_data["lab_hp"] = min(max_hp, hp + heal)
-                await query.answer(f"+{heal} HP!")
-            else:
-                context.user_data["lab_hp"] = max(0, hp - 10)
-                await query.answer("Проклятая кровь! -10 HP")
-        elif effect == "oac":
-            if success:
-                oac = random.randint(*sp["value"])
-                context.user_data.setdefault("lab_rewards", []).append(oac)
-                await query.answer(f"+{oac} OAC!")
-            else:
-                await query.answer("Тени отобрали твою находку.")
-        elif effect == "next_boost":
-            if success:
-                context.user_data["lab_attack_bonus"] = sp.get("value", 0.5)
-                await query.answer("Следующая атака будет мощнее!")
-            else:
-                await query.answer("Сгусток рассеялся.")
-        elif effect == "reveal":
-            await query.answer(f"Осталось комнат: {context.user_data.get('lab_total_rooms', 5) - context.user_data.get('lab_room', 1)}")
-        elif effect == "mirror_hp":
-            if success:
-                new_hp = random.randint(20, 80)
-                context.user_data["lab_hp"] = new_hp
-                await query.answer(f"Отражение изменило тебя! HP = {new_hp}")
-            else:
-                await query.answer("Зеркало разбилось.")
-        elif effect == "amulet":
-            if success:
-                context.user_data["lab_amulet"] = True
-                await query.answer("Руны создали защитный амулет!")
-            else:
-                await query.answer("Руны погасли.")
-        elif effect == "sacrifice_boost":
-            if success:
-                context.user_data["lab_attack_bonus"] = sp.get("value", 0.8)
-                await query.answer("Пламя принимает жертву! +80% к атаке.")
-            else:
-                extra_dmg = random.randint(10, 20)
-                context.user_data["lab_hp"] = max(0, hp - extra_dmg)
-                await query.answer(f"Огонь отверг тебя! -{extra_dmg} HP")
-        elif effect == "gamble":
-            outcomes = [
-                ("heal", 20),
-                ("focus_gain", 1),
-                ("oac_win", random.randint(30, 60)),
-                ("damage", -15),
-                ("curse", None)
-            ]
-            outcome = random.choice(outcomes)
-            if outcome[0] == "heal":
-                context.user_data["lab_hp"] = min(max_hp, hp + outcome[1])
-                await query.answer(f"Голос исцелил тебя! +{outcome[1]} HP")
-            elif outcome[0] == "focus_gain":
-                context.user_data["lab_focus"] = min(3, focus + 1)
-                await query.answer("Голос дарует озарение! +1 Фокус")
-            elif outcome[0] == "oac_win":
-                context.user_data.setdefault("lab_rewards", []).append(outcome[1])
-                await query.answer(f"Награда из темноты! +{outcome[1]} OAC")
-            elif outcome[0] == "damage":
-                context.user_data["lab_hp"] = max(0, hp + outcome[1])
-                await query.answer(f"Проклятие! {outcome[1]} HP")
-            elif outcome[0] == "curse":
-                context.user_data["lab_curse_rooms"] = 2
-                await query.answer("Голос наслал порчу... Риск повышен на 2 комнаты.")
-
-        # Спец-действие расходует комнату — как и атака. Раньше счётчик двигала
-        # ТОЛЬКО атака, поэтому «Бежать» (+15..25 HP бесплатно) и спец-действие
-        # «Сорвать камень» (−5 HP → +20..50 OAC с шансом 80%) складывались в
-        # бесконечный цикл: HP восстанавливалось быстрее, чем тратилось, комната
-        # не менялась, а lab_rewards рос неограниченно и целиком выплачивался в
-        # финальном сундуке. Один заход мог принести любую сумму OAC.
-        context.user_data["lab_room"] += 1
-        await show_lab_room(update, context)
-        return
-
-    # ─── БЕГСТВО ───
-    elif data == "lab_escape":
-        hp = min(max_hp, hp + random.randint(15, 25))
-        context.user_data["lab_hp"] = hp
-        # Бегство — тоже расход комнаты: ты покинул её, а не завис в ней. Без
-        # этого кнопка была бесплатной кнопкой «вылечиться», нажимаемой вечно.
-        context.user_data["lab_room"] += 1
-        await query.answer("Ты сбежал, восстановив немного HP.")
-        await show_lab_room(update, context)
-        return
-
-    await query.answer("Действие не реализовано")
 
 
 # ─── ФИНАЛЬНЫЙ СУНДУК ────────────────────────────────────────
@@ -7802,20 +7888,23 @@ async def show_lab_final(update, context):
     ctx = context.application.bot_data["ctx"]
     query = update.callback_query
     uid = query.from_user.id
-    player = await ctx.repo.get_by_id(uid)
-    if not player:
-        return
-    rewards = context.user_data.get("lab_rewards", [])
-    total_oac = sum(rewards) + 50
 
-    async def _lab_win(p, conn):
+    async def _lab_win(p, state, conn):
+        # Только машина состояний может перевести забег в финал. Прямой или
+        # устаревший вызов не трогает ни баланс, ни строку lab_runs.
+        if state.get("lab_phase") != "final":
+            return None
+        rewards = state.get("lab_rewards", [])
+        total_oac = sum(rewards) + 50
         p.balance += total_oac
         p.m_essence += 1
         p.lab_chests += 1
         p.lab_depth += 1
 
-        # Военный счёт
-        await ctx.war_service.add_score(uid, WarAction.LAB_WIN, conn)
+        # Военный счёт не должен отменять честно завершённый забег, если
+        # социальный сервис временно недоступен.
+        if ctx.war_service:
+            await ctx.war_service.add_score(uid, WarAction.LAB_WIN, conn)
 
         # Рекорд забега (peak-end триумф): личный лучший банк за один заход.
         # Раньше жил в Redis-ключе lab_best:{uid} отдельным round-trip'ом
@@ -7832,22 +7921,24 @@ async def show_lab_final(update, context):
             new_record = prev > 0  # первый-в-жизни рекорд не броадкастим (нет базы для «побил»)
         elif prev:
             record_line = f"\n📈 <i>Твой рекорд: {prev} OAC</i>"
-        return record_line, new_record
+        return (record_line, new_record, total_oac, p.lab_depth, p.username,
+                int(state.get("lab_total_rooms", 0) or 0))
 
-    record_line, new_record = await ctx.repo.atomic_update(uid, _lab_win)
+    result = await ctx.repo.atomic_finish_lab_run(uid, _lab_win)
+    if result is None:
+        await query.answer("Финал уже обработан или экран устарел.", show_alert=True)
+        return
+    record_line, new_record, total_oac, depth, username, total_rooms = result
 
-    total_rooms = context.user_data.get("lab_total_rooms", 0)
-
-    # очистка состояний
-    for key in ("lab_hp", "lab_focus", "lab_room", "lab_total_rooms", "lab_rewards"):
+    # Очищаем только локальное представление: запись в БД уже удалена ровно
+    # вместе с выплатой, поэтому рестарт больше не может выдать награду повторно.
+    for key in LAB_STATE_KEYS:
         context.user_data.pop(key, None)
-
-    depth = player.lab_depth + 1
 
     # Соц-доказательство/аспирация: рекордный забег — в гильдию (как джекпот
     # «Дунуть»). Естественно rate-limited 12-часовым кулдауном лабиринта → не спам.
     if new_record:
-        who = f"@{player.username}" if player.username else "Один из наших"
+        who = f"@{username}" if username else "Один из наших"
         asyncio.create_task(_safe_send_guild_message(
             ctx,
             f"🏛️ <b>{who}</b> вынес рекордные <b>{total_oac} OAC</b> из Лабиринта "
@@ -7882,24 +7973,24 @@ async def show_lab_death(update, context):
     ctx = context.application.bot_data["ctx"]
     query = update.callback_query
     uid = query.from_user.id
-    player = await ctx.repo.get_by_id(uid)
-    if not player:
-        return
-    depth = player.lab_depth or 1
-    # Читаем прогресс забега ДО очистки состояния (для peak-end признания пути).
-    reached = context.user_data.get("lab_room", 0)
-    total_rooms = context.user_data.get("lab_total_rooms", 0)
 
-    # атомарно начисляем утешительный приз и военные очки
-    async def _lab_die(p, conn):
+    async def _lab_die(p, state, conn):
+        if state.get("lab_phase") != "death":
+            return None
         p.balance += 50
         p.lab_deaths += 1
+        if ctx.war_service:
+            await ctx.war_service.add_score(uid, WarAction.LAB_DEATH, conn)
+        return (p.lab_depth or 1, int(state.get("lab_room", 0) or 0),
+                int(state.get("lab_total_rooms", 0) or 0))
 
-        await ctx.war_service.add_score(uid, WarAction.LAB_DEATH, conn)
+    result = await ctx.repo.atomic_finish_lab_run(uid, _lab_die)
+    if result is None:
+        await query.answer("Финал уже обработан или экран устарел.", show_alert=True)
+        return
+    depth, reached, total_rooms = result
 
-    await ctx.repo.atomic_update(uid, _lab_die)
-
-    for key in ("lab_hp", "lab_focus", "lab_room", "lab_total_rooms", "lab_rewards"):
+    for key in LAB_STATE_KEYS:
         context.user_data.pop(key, None)
 
     # Признание пройденного пути + форвард-фрейминг вместо наказующего регрета:
@@ -8127,74 +8218,19 @@ async def _transfer_named_item(ctx, from_uid: int, to_uid: int, blunt_id: str):
     return await ctx.repo.atomic_pair_update(from_uid, to_uid, _move)
 
 
-async def _take_named_item(ctx, uid: int, blunt_id: str) -> Optional[dict]:
-    """Атомарно изымает предмет из инвентаря игрока и возвращает его (или
-    None, если его там уже нет). Нужна для постановки подарка в очередь:
-    получателя нет в БД прямо сейчас, но предмет обязан покинуть дарителя В
-    ТОТ ЖЕ момент, иначе он мог бы подарить его повторно, пока первый подарок
-    ждёт своего адресата — и тогда получилась бы копия у двоих."""
-    async def _take(p, conn):
-        item = next((it for it in (p.inventory or [])
-                    if it.get("id") == blunt_id and it.get("type") == "named"), None)
-        if item is None:
-            return None
-        p.inventory = [it for it in p.inventory if it.get("id") != blunt_id]
-        return dict(item)
-    return await ctx.repo.atomic_update(uid, _take)
-
-
-async def _queue_pending_gift(ctx, from_uid: int, item: dict,
-                              username_lower: str = None, target_user_id: int = None):
-    """Ставит подарок в очередь, когда получателя нет в БД прямо сейчас.
-
-    Забирается автоматически при первом же /start подходящего человека — см.
-    _claim_pending_gifts. Именно эта очередь и есть ответ на «даже не
-    игрокам»: Telegram Bot API не умеет резолвить произвольный @username в
-    numeric user_id для бота, с которым человек не взаимодействовал — узнать
-    его id физически невозможно ДО того, как он сам напишет боту. Единственный
-    честный вариант — сохранить подарок и отдать в момент, когда id станет
-    известен (при /start).
-    """
-    async with ctx.db_pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO pending_gifts (username_lower, target_user_id, item, from_user_id) "
-            "VALUES ($1, $2, $3, $4)",
-            username_lower, target_user_id,
-            json.dumps(item, separators=(',', ':'), default=str), from_uid)
-
-
 async def _claim_pending_gifts(ctx, uid: int, username: str, context) -> None:
-    """Отдаёт все подарки, ждавшие этого user_id или этого username.
+    """Атомарно выдаёт все ожидающие подарки при первом подходящем /start.
 
-    Вызывается на КАЖДОМ /start (новый игрок и вернувшийся) — это покрывает
-    не только «подарили тому, кто ещё не заходил», но и «подарили по СТАРОМУ
-    @username, а человек его сменил»: как только он снова напишет /start,
-    _refresh_username обновит колонку, а эта функция подчистит очередь под
-    его актуальным именем при том же заходе.
+    Получатель, его инвентарь и строки очереди блокируются внутри репозитория
+    одной транзакцией. Поэтому сбой не может оставить предмет одновременно в
+    очереди и инвентаре либо удалить его из обоих мест.
     """
-    uname_l = (username or "").lower()
-    async with ctx.db_pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT id, item, from_user_id FROM pending_gifts "
-            "WHERE target_user_id = $1 OR (username_lower = $2 AND username_lower IS NOT NULL)",
-            uid, uname_l or None)
-        if not rows:
-            return
-        await conn.execute("DELETE FROM pending_gifts WHERE id = ANY($1::int[])", [r["id"] for r in rows])
-
-    items = [_json_safe_load(r["item"], {}) for r in rows]
-    items = [it for it in items if it]
-    if not items:
-        return
-
-    async def _apply(p, conn):
-        p.inventory = list(p.inventory or []) + items
-        return len(items)
-
     try:
-        await ctx.repo.atomic_update(uid, _apply)
+        items = await ctx.repo.atomic_claim_pending_gifts(uid, username)
     except Exception:
         logger.exception("Не удалось выдать отложенные подарки игроку %d", uid)
+        return
+    if not items:
         return
 
     names = ", ".join(f"«{it.get('name', '?')}»" for it in items)
@@ -8257,17 +8293,21 @@ async def handle_gift_username(update: Update, context: ContextTypes.DEFAULT_TYP
         else:
             status, item = "target_missing", None
         if status == "target_missing":
-            # Изымаем предмет АТОМАРНО — иначе блант оставался бы у дарителя
-            # одновременно с записью в очереди, и его можно было бы подарить
-            # ЕЩЁ раз, пока первый подарок ждёт адресата (копия у двоих).
-            taken = await _take_named_item(ctx, uid, blunt_id)
-            if taken is None:
+            # Изъятие у дарителя и запись в pending_gifts — единая транзакция.
+            # При сбое предмет остаётся у дарителя; при успехе он существует
+            # ровно в одной очереди и не может быть подарен повторно.
+            queued_status, queued_item = await ctx.repo.atomic_enqueue_named_gift(
+                uid, blunt_id, target_user_id=target_id)
+            if queued_status == "not_owned":
                 await update.message.reply_text("❌ Блант уже не в вашем инвентаре.", reply_markup=kb)
                 context.user_data.pop('gifting_blunt_id', None)
                 return
-            await _queue_pending_gift(ctx, uid, taken, target_user_id=target_id)
+            if queued_status != "ok":
+                await update.message.reply_text("❌ Не удалось поставить подарок в очередь. Блант остался у вас.", reply_markup=kb)
+                context.user_data.pop('gifting_blunt_id', None)
+                return
             await update.message.reply_text(
-                f"📮 Игрока с ID {target_id} пока нет в игре — блант «{taken.get('name')}» "
+                f"📮 Игрока с ID {target_id} пока нет в игре — блант «{queued_item.get('name')}» "
                 f"будет ждать его здесь и придёт автоматически, как только он зайдёт впервые.",
                 reply_markup=kb)
         elif status == "not_owned":
@@ -8311,19 +8351,21 @@ async def handle_gift_username(update: Update, context: ContextTypes.DEFAULT_TYP
         context.user_data.pop('gifting_blunt_id', None)
         return
 
-    # Не найден СЕЙЧАС — не отказ, а очередь. Работает и для настоящего
-    # игрока со сменившимся @username: как только он напишет /start под
-    # текущим ником, _claim_pending_gifts подхватит запись по этому же имени.
-    # Изымаем предмет атомарно (см. комментарий в ветке числового ID выше —
-    # та же причина: без изъятия блант можно было бы подарить дважды).
-    taken = await _take_named_item(ctx, uid, blunt_id)
-    if taken is None:
+    # Не найден СЕЙЧАС — не отказ, а очередь. Изъятие у дарителя и запись
+    # в pending_gifts выполняются одной транзакцией, поэтому сетевой сбой не
+    # способен молча уничтожить коллекционный предмет.
+    queued_status, queued_item = await ctx.repo.atomic_enqueue_named_gift(
+        uid, blunt_id, username_lower=raw.lower())
+    if queued_status == "not_owned":
         await update.message.reply_text("❌ Блант уже не в вашем инвентаре.", reply_markup=kb)
         context.user_data.pop('gifting_blunt_id', None)
         return
-    await _queue_pending_gift(ctx, uid, taken, username_lower=raw.lower())
+    if queued_status != "ok":
+        await update.message.reply_text("❌ Не удалось поставить подарок в очередь. Блант остался у вас.", reply_markup=kb)
+        context.user_data.pop('gifting_blunt_id', None)
+        return
     await update.message.reply_text(
-        f"📮 @{raw} пока не найден в игре — блант «{taken.get('name')}» "
+        f"📮 @{raw} пока не найден в игре — блант «{queued_item.get('name')}» "
         f"будет ждать его здесь и придёт автоматически, как только он зайдёт впервые "
         f"(или если это его нынешний @username, но он давно не заходил — тоже сработает).",
         reply_markup=kb)
@@ -10803,9 +10845,6 @@ CALLBACKS: Dict[str, Callable] = {
 }
 
 EXACT_HANDLERS: Dict[str, Callable] = {
-    "lab_special": handle_lab_option,
-    "lab_focus_use": handle_lab_option,
-    "lab_escape": handle_lab_option,
     "luck_wheel": luck_wheel_handler,
     "luck_mines": luck_mines_handler,
     "mines_cashout": _mines_cashout_wrapper,
@@ -10822,6 +10861,9 @@ PREFIX_HANDLERS: Dict[str, Callable] = {
     "set_title_": handle_set_title,
     "set_bg_": handle_set_bg,
     "lab_attack_": handle_lab_option,
+    "lab_special_": handle_lab_option,
+    "lab_focus_use_": handle_lab_option,
+    "lab_escape_": handle_lab_option,
     "achievements_": achievements_callback,
     "quest_": handle_quest_action,
     "mines_open_": _mines_open_cell_wrapper,
