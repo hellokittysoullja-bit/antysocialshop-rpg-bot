@@ -6,6 +6,7 @@
 """
 import os
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 
 os.environ.setdefault("TOKEN", "123456:game-experience-test-token")
@@ -49,6 +50,21 @@ def test_transparent_rewards():
           "защита от плохой серии объяснена игроку")
 
 
+def test_respectful_returns():
+    now = datetime(2026, 8, 19, 20, 0, 0)
+    message = bot._reengagement_text(
+        last_farm=now - timedelta(hours=2),
+        login_streak=5,
+        last_login_date=now.date() - timedelta(days=1),
+        now=now,
+        farm_cooldown=timedelta(minutes=30),
+    )
+    check("не отменяет твой остальной прогресс" in message,
+          "напоминание о серии уважает паузу и не угрожает потерей всего прогресса")
+    check("сгорит" not in message and "обошли в рейтинге" not in message,
+          "возврат не использует тревогу серии или соревновательное давление")
+
+
 def test_autonomy_and_no_fomo_pressure():
     source = Path(bot.__file__).read_text(encoding="utf-8")
     choice_slice = source[source.index("async def choose_play_path"):source.index("# ====== ФУНКЦИЯ ПЕРЕДАЧИ")]
@@ -62,6 +78,7 @@ def test_autonomy_and_no_fomo_pressure():
 def main():
     test_thematic_progression()
     test_transparent_rewards()
+    test_respectful_returns()
     test_autonomy_and_no_fomo_pressure()
     print(f"Game Experience quality gate пройден: {PASSED} проверок")
 

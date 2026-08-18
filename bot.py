@@ -11259,10 +11259,11 @@ def _is_dead_chat_error(status_code: int, body: str) -> bool:
 
 def _reengagement_text(last_farm, login_streak, last_login_date, now, farm_cooldown,
                        passive_level=0, passive_collected=None, rival_drop=None):
-    """Выбирает текст пуш-возврата (или None, если повода нет). Чистая функция.
+    """Выбирает уважительный текст пуш-возврата или None.
 
-    Каждый триггер — честная лосс-авёрсия (страх потерять конкретное):
-    плантация встала > серия под угрозой > обошли в рейтинге > созревший фарм.
+    Сообщение напоминает о готовой ценности, но не запугивает пропуском и не
+    превращает таблицу лидеров в давление. Один честный повод вернуться лучше
+    нескольких тревожных нуджей и оставляет решение за игроком.
     """
     streak = login_streak or 0
     logged_today = (last_login_date is not None
@@ -11273,26 +11274,24 @@ def _reengagement_text(last_farm, login_streak, last_login_date, now, farm_coold
     if passive_level and passive_collected:
         earned, _hrs, capped = _plant_pending(passive_level, passive_collected, now)
         if capped and earned > 0:
-            return (f"🌾 <b>Плантация достигла предела!</b>\n"
-                    f"<b>{earned} OAC</b> простаивают, а рост встал. Собери урожай — "
-                    f"и империя снова заработает на тебя.")
+            return (f"🌾 <b>Плантация накопила максимум.</b>\n"
+                    f"Тебя ждут <b>{earned} OAC</b>. Когда будет удобно, собери урожай — "
+                    f"и Плантация продолжит работать.")
 
-    # Приоритет 2: серия под угрозой (есть серия, сегодня не заходил, уже вечер)
+    # Приоритет 2: серия — это личная история, не долг. Никакой угрозы
+    # «сгорит в полночь»: игрок сам решает, хочет ли продолжить её сегодня.
     if streak >= 2 and not logged_today and now.hour >= 18:
-        return (f"🔥 <b>Твоя серия входов ({streak} дн.) сгорит в полночь!</b>\n"
-                f"Загляни в игру, чтобы сохранить её и забрать награду дня.")
+        return (f"🔥 <b>Твоя серия: {streak} дн.</b>\n"
+                f"Если захочешь продолжить её сегодня, тебя ждёт награда дня. "
+                f"Пауза не отменяет твой остальной прогресс.")
 
-    # Приоритет 3: тебя обошли в рейтинге (соц-статус — сильный возвратный крючок).
-    if rival_drop:
-        prev_r, cur_r = rival_drop
-        return (f"🏅 <b>Тебя обошли в рейтинге!</b>\n"
-                f"Ты был #{prev_r}, теперь #{cur_r}. Пока ты медлишь — соперники растут. "
-                f"Вернись и отбей своё место.")
+    # Рейтинг может быть интересен как добровольный статус, но не используется
+    # как пуш-триггер: сравнение с другими не должно возвращать через тревогу.
 
-    # Приоритет 4: фарм созрел
+    # Приоритет 3: фарм созрел
     if last_farm and (now - last_farm) >= farm_cooldown:
-        return ("🍬 <b>Грядка созрела!</b>\n"
-                "Твои OAC ждут сбора — вернись и продолжи путь. 🌿")
+        return ("🍬 <b>Грядка созрела.</b>\n"
+                "Когда захочешь сделать короткий заход, собери OAC и продолжи свой путь. 🌿")
     return None
 
 
@@ -11328,8 +11327,7 @@ async def reengagement_push(ctx: AppContext) -> None:
         async with ctx.db_pool.acquire() as conn:
             rows = await conn.fetch(
                 "SELECT user_id, last_farm, login_streak, last_login_date, "
-                "passive_level, passive_collected, last_known_rank, "
-                "last_reengagement_sent "
+                "passive_level, passive_collected, last_reengagement_sent "
                 "FROM players "
                 "WHERE last_farm IS NOT NULL AND last_farm BETWEEN $1 AND $2",
                 active_window, drift_min,
@@ -11337,19 +11335,6 @@ async def reengagement_push(ctx: AppContext) -> None:
     except Exception as e:
         logger.error(f"reengagement query error: {e}")
         return
-
-    # Снимок рангов по балансу (один запрос, дешёв с индексом) для детекции
-    # обгона: сравниваем текущий ранг с сохранённым прошлым (last_known_rank).
-    rank_map = {}
-    try:
-        async with ctx.db_pool.acquire() as conn:
-            brows = await conn.fetch(
-                'SELECT user_id FROM players WHERE COALESCE("exists", TRUE) '
-                'ORDER BY total_earned DESC')
-        for pos, br in enumerate(brows, 1):
-            rank_map[br["user_id"]] = pos
-    except Exception:
-        rank_map = {}
 
     token = ctx.settings.bot_token
     url = f"https://api.telegram.org/bot{token}/sendMessage"
@@ -11361,24 +11346,6 @@ async def reengagement_push(ctx: AppContext) -> None:
         for row in rows:
             uid = row["user_id"]
 
-            # Ранг: детекция обгона + всегда обновляем сохранённый ранг —
-            # ДЛЯ ВСЕХ кандидатов окна, даже тех, кто ниже сейчас пропустит
-            # отправку по guard'у (та же семантика, что была с Redis: ранг
-            # свежий к моменту, когда guard у игрока истечёт).
-            rival_drop = None
-            cur_rank = rank_map.get(uid)
-            if cur_rank:
-                prev_rank = row["last_known_rank"]
-                if prev_rank and cur_rank > prev_rank and cur_rank <= 20:
-                    rival_drop = (prev_rank, cur_rank)
-                try:
-                    async with ctx.db_pool.acquire() as conn:
-                        await conn.execute(
-                            "UPDATE players SET last_known_rank=$1 WHERE user_id=$2",
-                            cur_rank, uid)
-                except Exception:
-                    pass
-
             # Guard: не чаще раза в 20ч на игрока. TIMESTAMPTZ у asyncpg всегда
             # приходит tz-aware (UTC) — сравнение с aware now() без доп. возни.
             last_sent = row["last_reengagement_sent"]
@@ -11389,7 +11356,6 @@ async def reengagement_push(ctx: AppContext) -> None:
                 row["last_farm"], row["login_streak"],
                 row["last_login_date"], now, farm_cd,
                 row["passive_level"], row["passive_collected"],
-                rival_drop,
             )
             if not text:
                 continue
