@@ -4788,13 +4788,40 @@ async def do_smoke(update, context, ctx, player):
 
     status, data = result
     if status == SmokeStatus.NO_BLUNTS:
+        # Именно здесь игрок вероятнее всего уйдёт (бланты кончились посреди
+        # серии тяг) — и именно здесь Жар раньше был не виден совсем. Незакрытая
+        # петля должна оставаться на глазах ровно в момент прерывания (Зейгарник,
+        # 1927), иначе игрок физически не видит, что бросает.
+        heat = player.smoke_heat or 0
+        heat_line = ""
+        if heat > 0:
+            left = SMOKE_HEAT_MAX - heat
+            heat_line = (
+                f"\n\n{_smoke_heat_bar(heat)} <b>Жар {heat}/{SMOKE_HEAT_MAX}</b>\n"
+                f"<i>ещё {left} {_plural_ru(left, 'тяга', 'тяги', 'тяг')} до ЗАБОЯ — не дай ему остыть</i>"
+            )
+        text = (
+            "<b>💨 ДУНУТЬ</b>\n\n"
+            "<b>🍃 Свёрток пуст.</b> Один блант — и можно продолжать."
+            f"{heat_line}"
+        )
+        # Кнопка смотрит на реальный баланс: тот же переход к «Фармить», что уже
+        # стоит на экране нехватки OAC в крафте (handle_craft_normal_v2) — не
+        # новый паттерн, а переиспользование уже понятного игроку пути. Кнопка
+        # в меню крафта (именной блант/Пыль) убрана: рядом со «Скрутить блант»
+        # она читалась как второй похожий вариант, а не как отдельная функция
+        # (закон Хика — двусмысленный выбор тормозит решение); тот редкий
+        # сценарий по-прежнему в одном тапе через 🔙 В меню → 🌿 Крафт.
+        if (player.balance or 0) >= GAME_CONFIG['craft_cost']:
+            main_btn = _btn(f"🌿 Скрутить блант · {GAME_CONFIG['craft_cost']} OAC",
+                            callback_data="craft_normal", style="primary")
+        else:
+            main_btn = _btn("🍬 Фармить — не хватает на блант", callback_data="farm", style="primary")
         await query.message.edit_text(
-            "<b>💨 ДУНУТЬ</b>\n\n<b>🌿 Твой свёрток пуст</b>\n\n<i>🎈 Скрути новый блант</i>",
+            text,
             reply_markup=InlineKeyboardMarkup([
-                [_btn(f"🌿 Скрутить блант · {GAME_CONFIG['craft_cost']} OAC",
-                      callback_data="craft_normal", style="primary")],
-                [InlineKeyboardButton("🌿 Крафт", callback_data="craft"),
-                 InlineKeyboardButton("🔙 В меню", callback_data="menu")]
+                [main_btn],
+                [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
             ]),
             parse_mode='HTML'
         )
