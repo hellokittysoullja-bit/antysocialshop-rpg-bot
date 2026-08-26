@@ -143,6 +143,45 @@ def check_collection_not_flooded():
     assert cards_per_puff > 0.01, "карты выпадают слишком редко, чтобы быть крючком"
 
 
+def check_pick_no_repeat_edge_cases():
+    """_pick_no_repeat не падает на вырожденных пулах (0/1 элемент)."""
+    assert bot._pick_no_repeat([], "k", {}) is None
+    assert bot._pick_no_repeat(["only"], "k", {}) == "only"
+    progress = {"k": "only"}
+    assert bot._pick_no_repeat(["only"], "k", progress) == "only"
+
+
+def check_flavor_and_names_never_repeat_immediately():
+    """Ни флейвор тяги, ни имя карты из Забоя не повторяются два раза подряд
+    у одного игрока — точно тот же стимул подряд заметно слабее активирует
+    чувствительные к новизне зоны, чем новый (repetition suppression:
+    Grill-Spector, Henson & Martin, 2006), а на фиксированном пуле это
+    ускоряет привыкание (Brickman & Campbell, 1971). Слой чисто
+    декоративный — вероятность самого исхода не трогает (см.
+    calculate_smoke_reward, не затронут этой правкой)."""
+    for outcome, pool in bot.SMOKE_FLAVORS.items():
+        assert len(pool) >= 2, f"корзина {outcome} слишком мала для анти-повтора"
+        progress = {}
+        prev_name = None
+        seen = set()
+        for _ in range(500):
+            name, _text = bot._pick_smoke_flavor(outcome, progress)
+            assert name != prev_name, f"флейвор {outcome} повторился подряд: {name}"
+            seen.add(name)
+            prev_name = name
+        assert seen == {n for n, _t in pool}, f"{outcome}: не все флейворы достижимы, выпало {seen}"
+
+    progress = {}
+    prev = None
+    seen = set()
+    for _ in range(3000):
+        name = bot._pick_no_repeat(bot.SMOKE_BURST_BLUNT_NAMES, "last_burst_name", progress)
+        assert name != prev, f"имя карты Забоя повторилось подряд: {name}"
+        seen.add(name)
+        prev = name
+    assert seen == set(bot.SMOKE_BURST_BLUNT_NAMES), f"не все имена карт Забоя достижимы: {seen}"
+
+
 def main():
     random.seed(20260826)
     passed = []
@@ -156,6 +195,10 @@ def main():
     passed.append("шкала Жара честна и не ломается на границах")
     check_collection_not_flooded()
     passed.append("карты из Забоя — крючок, но легендарки остаются редкими")
+    check_pick_no_repeat_edge_cases()
+    passed.append("_pick_no_repeat не падает на вырожденных пулах")
+    check_flavor_and_names_never_repeat_immediately()
+    passed.append("флейворы тяги и имена карт Забоя не повторяются подряд, все достижимы")
     for name in passed:
         print(f"  OK  {name}")
     print(f"\nИнварианты Жара и Забоя пройдены: {len(passed)}/{len(passed)}")

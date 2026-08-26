@@ -210,6 +210,32 @@ def check_legendary_gets_suspense_others_dont():
     asyncio.run(_run())
 
 
+def check_legendary_pools_distinct_and_no_repeat():
+    """legendary_pool раньше был ОДНИМ списком из 3 имён на обе фракции — и
+    тем же самым, что уже отдаёт handle_use_dust при трате Пыли. Точно тот
+    же стимул подряд/из разных механик заметно слабее активирует
+    чувствительные к новизне зоны, чем новый (repetition suppression:
+    Grill-Spector, Henson & Martin, 2006) — на фиксированном пуле это
+    ускоряет привыкание (Brickman & Campbell, 1971). Теперь пулы раздельны
+    по фракции, а _pick_no_repeat не даёт двум подряд идущим легендаркам
+    совпасть внутри одного пула."""
+    black_pool = GUILD_ACTION_THEME["BLACK"]["legendary_pool"]
+    white_pool = GUILD_ACTION_THEME["WHITE"]["legendary_pool"]
+    assert not (set(black_pool) & set(white_pool)), (
+        f"легендарки BLACK и WHITE пересекаются: {set(black_pool) & set(white_pool)}")
+    for guild, pool in (("BLACK", black_pool), ("WHITE", white_pool)):
+        assert len(pool) >= 2, f"{guild}: пул легендарок слишком мал для анти-повтора"
+        progress = {}
+        prev = None
+        seen = set()
+        for _ in range(1000):
+            pick = bot._pick_no_repeat(pool, "last_legend_name", progress)
+            assert pick != prev, f"{guild}: легендарка повторилась подряд: {pick}"
+            seen.add(pick)
+            prev = pick
+        assert seen == set(pool), f"{guild}: не все легендарки достижимы, выпало {seen}"
+
+
 def main():
     passed = []
     check_tiers_are_shared_not_per_faction()
@@ -226,6 +252,8 @@ def main():
     passed.append("пикер называет процент на ОБЕИХ ветках — не читается как 'and' вместо 'or'")
     check_legendary_gets_suspense_others_dont()
     passed.append("suspense-ревил только на легендарке, не на частом пути (OAC/Пыль)")
+    check_legendary_pools_distinct_and_no_repeat()
+    passed.append("легендарки BLACK/WHITE не пересекаются и не повторяются подряд")
     for name in passed:
         print(f"  OK  {name}")
     print(f"\nИнварианты гильдейского действия пройдены: {len(passed)}/{len(passed)}")

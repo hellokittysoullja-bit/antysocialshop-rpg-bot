@@ -1075,10 +1075,51 @@ def _plural_steps(n: int) -> str:
 
 
 
-def build_smoke_effect(outcome, earned):
+def _pick_no_repeat(pool, key, progress):
+    """Выбирает случайный элемент пула, избегая точного повтора последнего
+    показанного под этим ключом. Точно такой же стимул подряд заметно
+    слабее активирует чувствительные к новизне зоны, чем новый (repetition
+    suppression: Grill-Spector, Henson & Martin, 2006) — на фиксированном
+    пуле это ускоряет привыкание (Brickman & Campbell, 1971). Слой чисто
+    декоративный: выбирает МЕЖДУ равнозначными вариантами одного и того же
+    исхода, вероятность самого исхода не трогает и не может.
+
+    progress — обычно p.daily_progress: тот же JSONB-словарь, что уже
+    сохраняется в одной транзакции с самим исходом, поэтому "последний
+    показанный" переживает рестарт процесса как любой другой прогресс.
+    """
+    if len(pool) <= 1:
+        return pool[0] if pool else None
+    last = progress.get(key)
+    candidates = [x for x in pool if x != last] or pool
+    pick = random.choice(candidates)
+    progress[key] = pick
+    return pick
+
+
+def _pick_smoke_flavor(outcome, progress):
+    """Как _pick_no_repeat, но для SMOKE_FLAVORS: элементы там — пары
+    (имя, текст), а не голые строки. JSONB-круг (сохранить → перечитать)
+    превращает кортеж в список, и сравнение "кортеж != список" было бы
+    ВСЕГДА истинным — та же ловушка, что уже один раз ловила _mines_positions
+    (JSON не знает кортежей). Сравниваем и храним только имя (строка,
+    JSON-круг не портит)."""
+    pool = SMOKE_FLAVORS.get(outcome, SMOKE_FLAVORS["neutral"])
+    if len(pool) <= 1:
+        return pool[0]
+    last_name = progress.get("last_smoke_flavor")
+    candidates = [item for item in pool if item[0] != last_name] or pool
+    pick = random.choice(candidates)
+    progress["last_smoke_flavor"] = pick[0]
+    return pick
+
+
+def build_smoke_effect(outcome, earned, flavor=None):
     """Собирает карточку исхода. Текст берётся из корзины, соответствующей
-    исходу (jackpot/big/win/neutral), поэтому подпись OAC всегда честна."""
-    name, flavor = random.choice(SMOKE_FLAVORS.get(outcome, SMOKE_FLAVORS["neutral"]))
+    исходу (jackpot/big/win/neutral), поэтому подпись OAC всегда честна.
+    flavor — опционально заранее выбранная (имя, текст) пара (см.
+    _pick_smoke_flavor); без неё просто берёт случайную из корзины, как раньше."""
+    name, flavor_text = flavor if flavor else random.choice(SMOKE_FLAVORS.get(outcome, SMOKE_FLAVORS["neutral"]))
     if outcome == "jackpot":
         header = "<b>🎰 ДЖЕКПОТ! ДЫМ ХЛЫНУЛ ЗОЛОТОМ</b>"
         earned_str = f"🎰 <b>+{earned} OAC</b>"
@@ -1094,7 +1135,7 @@ def build_smoke_effect(outcome, earned):
     return (
         f"{header}\n"
         f"– {name}\n"
-        f"– <i>{flavor}</i>\n\n"
+        f"– <i>{flavor_text}</i>\n\n"
         f"{earned_str}"
     )
 
@@ -4738,6 +4779,7 @@ async def do_smoke(update, context, ctx, player):
         _dry = p.daily_progress.get("smoke_dry", 0)
         earned, outcome = calculate_smoke_reward(
             p, happy_hour_active(ctx), dry_count=_dry)
+        flavor = _pick_smoke_flavor(outcome, p.daily_progress)
 
         old_count = p.smoke_count or 0
         new_count = old_count + 1
@@ -4776,7 +4818,7 @@ async def do_smoke(update, context, ctx, player):
             else:
                 # Карта в Кодекс — тот же путь, что у Пыли (handle_use_dust):
                 # create_named_blunt внутри транзакции, с уже загруженным p.
-                _name = random.choice(SMOKE_BURST_BLUNT_NAMES)
+                _name = _pick_no_repeat(SMOKE_BURST_BLUNT_NAMES, "last_burst_name", p.daily_progress)
                 _item = await create_named_blunt(uid, _name, conn=conn, ctx=ctx, player=p)
                 burst = ("card", None, _item)
         p.smoke_heat = heat
@@ -4788,7 +4830,7 @@ async def do_smoke(update, context, ctx, player):
                 logger.exception("War service error, proceeding without points")
 
         return SmokeStatus.OK, (earned, outcome, save, medal_text, new_count,
-                                p.blunts, p.balance, heat, burst)
+                                p.blunts, p.balance, heat, burst, flavor)
 
     result = await ctx.repo.atomic_update(uid, _smoke)
     if result is None:
@@ -4836,7 +4878,7 @@ async def do_smoke(update, context, ctx, player):
         )
         return
 
-    earned, outcome, save, medal_text, new_count, bl_left, new_balance, heat, burst = data
+    earned, outcome, save, medal_text, new_count, bl_left, new_balance, heat, burst, flavor = data
 
     # ── ЗАБОЙ: отдельный экран-пик ───────────────────────────────────
     # Peak-end rule (Kahneman и соавт.): впечатление от всей серии тяг
@@ -4910,7 +4952,7 @@ async def do_smoke(update, context, ctx, player):
         return
 
     # ── Обычный результат тяги ───────────────────────────────────────
-    effect = build_smoke_effect(outcome, earned)
+    effect = build_smoke_effect(outcome, earned, flavor)
 
     # Жар занял слот, где раньше стояла строка пити-гаранта: тот же визуальный
     # язык (🔥/▫️), но двигается на КАЖДОЙ тяге, а не только на сухой, и ведёт
@@ -5069,13 +5111,14 @@ async def _resolve_guild_action(update, context, ctx, guild: str, tier_key: str)
         if guild == "WHITE":
             p.blunts -= 1
 
+        p.daily_progress = p.daily_progress or {}
         lo, hi = tier["oac_range"]
         r = random.random()
         if r < tier["dust_chance"]:
             outcome_kind, reward, item_name = "dust", 0, None
             p.m_essence = (p.m_essence or 0) + 1
         elif r < tier["dust_chance"] + tier["legendary_chance"]:
-            item_name = random.choice(theme["legendary_pool"])
+            item_name = _pick_no_repeat(theme["legendary_pool"], "last_legend_name", p.daily_progress)
             outcome_kind, reward = "legendary", 0
             await create_named_blunt(uid, item_name, rarity="legendary", ctx=ctx, player=p, conn=conn)
         else:
