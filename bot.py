@@ -45,6 +45,7 @@ from game_content import (
     ACHIEVEMENTS, ACHIEVEMENTS_DICT, ACHIEVEMENT_CONDITIONS, SMOKE_FLAVORS,
     QUEST_TEMPLATES, BLUNTS_PER_PAGE, BLUNT_IMAGES, LUCK_CONFIG, LABYRINTH_ROOMS,
     SHOP_ITEMS, RANK_LORE, ALTAR_BASE_COST, ALTAR_TIERS,
+    SMOKE_HEAT_MAX, SMOKE_BURST_POOL, SMOKE_BURST_BLUNT_NAMES,
 )
 # Слой моделей
 from game_models import Player
@@ -655,6 +656,24 @@ def emoji_to_name(emoji: str) -> str:
 redis = None
 
 
+def _btn(text: str, callback_data: str, style: str | None = None) -> InlineKeyboardButton:
+    """InlineKeyboardButton с опциональным ЦВЕТОМ (Bot API 9.4: поле `style`,
+    одно из "danger" (красный) / "success" (зелёный) / "primary" (синий);
+    без него клиент рисует свой обычный стиль).
+
+    PTB 20.8 не знает этого поля нативно, но прокидывает произвольные ключи
+    через api_kwargs прямо в JSON запроса, поэтому апгрейд библиотеки не нужен.
+    Старые клиенты Telegram, не знающие 9.4, поле просто игнорируют и рисуют
+    обычную кнопку — деградация безопасная, ничего не ломается.
+
+    Правило использования (иначе цвет перестаёт быть сигналом): не больше
+    одной-двух цветных кнопок на экран, и только там, где цвет несёт смысл —
+    primary для главного действия экрана, success для безопасного/наградного,
+    danger для действительно рискованного выбора."""
+    return InlineKeyboardButton(text, callback_data=callback_data,
+                                api_kwargs=({"style": style} if style else None))
+
+
 
 async def _register_nft(ctx, conn, blunt_id: str, user_id: int, rarity: str,
                         rare_number: str, created_at: datetime) -> tuple[Optional[int], str]:
@@ -1057,17 +1076,17 @@ def _plural_steps(n: int) -> str:
 
 def build_smoke_effect(outcome, earned):
     """Собирает карточку исхода. Текст берётся из корзины, соответствующей
-    исходу (jackpot/win/loss/neutral), поэтому подпись OAC всегда честна."""
+    исходу (jackpot/big/win/neutral), поэтому подпись OAC всегда честна."""
     name, flavor = random.choice(SMOKE_FLAVORS.get(outcome, SMOKE_FLAVORS["neutral"]))
     if outcome == "jackpot":
         header = "<b>🎰 ДЖЕКПОТ! ДЫМ ХЛЫНУЛ ЗОЛОТОМ</b>"
         earned_str = f"🎰 <b>+{earned} OAC</b>"
+    elif outcome == "big":
+        header = "<b>🌠 ГУСТОЙ ДЫМ</b>"
+        earned_str = f"💰 <b>+{earned} OAC</b>"
     elif earned > 0:
         header = "<b>💨 ДЫМ РАССЕЯЛСЯ</b>"
         earned_str = f"🍬 <b>+{earned} OAC</b>"
-    elif earned < 0:
-        header = "<b>💨 ДЫМ РАССЕЯЛСЯ</b>"
-        earned_str = f"🕳️ <b>{earned} OAC</b>"
     else:
         header = "<b>💨 ДЫМ РАССЕЯЛСЯ</b>"
         earned_str = "<i>Ни капли OAC осело на дне…</i>"
@@ -1079,39 +1098,79 @@ def build_smoke_effect(outcome, earned):
     )
 
 # Пити-таймер гачи «Дунуть»: после SMOKE_PITY_THRESHOLD сухих тяг подряд
-# (нейтрал/минус) следующая гарантированно «выигрыш». Убивает фрустрацию серии
-# пустых тяг (80% исходов пусты) — честно, best-practice гача, не dark pattern
-# (реальный гарант, а не фейк-near-miss). Экономически мягко: гача остаётся нетто-
-# стоком, гарант лишь поднимает пол. Счётчик живёт в daily_progress (сброс/день).
+# следующая гарантированно «выигрыш» — страховка от засухи. С новым
+# распределением (50% попаданий вместо 27%) шесть пустых подряд выпадают
+# примерно в 1.6% случаев, так что гарант из основного механизма стал
+# редким предохранителем; видимую роль «чем полезна пустая тяга» теперь
+# несёт Жар (см. SMOKE_HEAT_MAX), который двигается на КАЖДОЙ тяге.
 SMOKE_PITY_THRESHOLD = 6
 
 
 def calculate_smoke_reward(p, happy_hour, dry_count=0):
     """Возвращает (earned, outcome). Одна руч­ка — и число, и флейвор.
 
-    Баланс смягчён: раньше 52% тяг отнимали −5 OAC («постоянное наказание»
-    ослабляет дофаминовую петлю — выученная беспомощность). Теперь потерь
-    вдвое меньше и они мягче (25% × −3), нейтралов больше (55%), а плюс чуть
-    вырос (2% джекпот + 18% выигрыш = 20%). Пик-момент (джекпот) сохранён.
+    Распределение переработано под два измеренных дефекта старого баланса:
+
+    1. ПУСТОТА. Раньше 73% тяг не давали ничего (50% нейтрал + 23% минус) —
+       игрок делал главный жест игры и в трёх случаях из четырёх не получал
+       никакого сигнала. Дофаминовый ответ на неопределённость максимален
+       около 50/50 и падает к обоим краям (Fiorillo, Tobler, Schultz,
+       Science, 2003), а 27% попаданий лежат глубоко в зоне «обычно ничего».
+       Теперь попаданий ~51% — механика поставлена в точку максимума, а не
+       рядом с ней.
+
+    2. ШТРАФ ПОВЕРХ ЦЕНЫ. Исход "loss" (−3 OAC, 23% тяг) убран целиком:
+       игрок уже заплатил 15 OAC за блант, и отнимать сверху — наказание за
+       главный глагол, которое ощущается примерно вдвое сильнее равного
+       выигрыша (Kahneman & Tversky, 1979). Флейворы «Кашель»/«Паранойя»
+       никуда не делись — переехали в нейтральную корзину, исчезло только
+       списание.
+
+    Добавлена средняя ступень "big" (7%): между мелочью и джекпотом раз в
+    50 тяг образовался провал, из-за которого у отдачи не было середины.
+
+    Экономический контракт НЕ ослаблен: EV тяги (~9 OAC) по-прежнему заметно
+    ниже цены крафта (15 OAC), поэтому цикл «скрутить → дунуть» остаётся
+    нетто-стоком и бесконечного принтера OAC не образует.
 
     dry_count — число сухих тяг подряд ДО этой. Если с текущей их стало бы
-    SMOKE_PITY_THRESHOLD, форсим «выигрыш» (пити-гарант): серия пустых тяг не
-    может тянуться бесконечно."""
+    SMOKE_PITY_THRESHOLD, форсим «выигрыш» (пити-гарант)."""
     r = random.random()
     if r < 0.02:
         earned, outcome = random.randint(80, 160), "jackpot"
-    elif r < 0.20:
-        earned, outcome = random.randint(15, 40), "win"
-    elif r < 0.45:
-        earned, outcome = -3, "loss"
+    elif r < 0.09:
+        earned, outcome = random.randint(35, 60), "big"
+    elif r < 0.50:
+        earned, outcome = random.randint(4, 12), "win"
     else:
         earned, outcome = 0, "neutral"
     # Пити-гарант: сухая тяга, добивающая серию до порога, превращается в выигрыш.
-    if outcome in ("loss", "neutral") and dry_count + 1 >= SMOKE_PITY_THRESHOLD:
-        earned, outcome = random.randint(15, 40), "win"
+    if outcome == "neutral" and dry_count + 1 >= SMOKE_PITY_THRESHOLD:
+        earned, outcome = random.randint(4, 12), "win"
     if happy_hour and earned > 0:
         earned *= HAPPY_HOUR_MULTIPLIER
     return earned, outcome
+
+
+def _smoke_heat_bar(heat: int) -> str:
+    """Шкала Жара в том же визуальном языке, что и прежняя строка пити-гаранта
+    (🔥 заполнено / ▫️ осталось) — механика выросла из неё, и игрок не должен
+    переучиваться читать новый символ."""
+    heat = max(0, min(SMOKE_HEAT_MAX, heat))
+    return "🔥" * heat + "▫️" * (SMOKE_HEAT_MAX - heat)
+
+
+def _roll_smoke_burst():
+    """Выбирает тип приза Забоя из SMOKE_BURST_POOL. Чистая функция —
+    возвращает (kind, amount); для "card" amount равен None."""
+    r = random.random()
+    acc = 0.0
+    for weight, kind, rng in SMOKE_BURST_POOL:
+        acc += weight
+        if r < acc:
+            return kind, (random.randint(*rng) if rng else None)
+    kind, rng = SMOKE_BURST_POOL[-1][1], SMOKE_BURST_POOL[-1][2]
+    return kind, (random.randint(*rng) if rng else None)
 
 class SmokeStatus(Enum):
     NO_BLUNTS = "no_blunts"
@@ -1249,6 +1308,12 @@ async def _run_migrations(conn):
                 WHERE table_name='players' AND column_name='mines_best_step'
             ) THEN
                 ALTER TABLE players ADD COLUMN mines_best_step INTEGER DEFAULT 0;
+            END IF;
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='players' AND column_name='smoke_heat'
+            ) THEN
+                ALTER TABLE players ADD COLUMN smoke_heat INTEGER DEFAULT 0;
             END IF;
             IF NOT EXISTS (
                 SELECT 1 FROM information_schema.columns
@@ -4675,11 +4740,37 @@ async def do_smoke(update, context, ctx, player):
         p.balance = (p.balance or 0) + earned + medal_bonus
         p.daily_progress["smoke"] = True
         # Пити-счётчик: растёт на сухих тягах, обнуляется на выигрыше/джекпоте.
-        if outcome in ("loss", "neutral"):
+        if outcome == "neutral":
             p.daily_progress["smoke_dry"] = _dry + 1
         else:
             p.daily_progress["smoke_dry"] = 0
         p.inhaled = 1
+
+        # ── ЖАР ──────────────────────────────────────────────────────
+        # Двигается на КАЖДОЙ тяге, включая пустую: именно это делает
+        # нулевой исход шагом к цели, а не «ничем». Джекпот даёт +3 —
+        # редкий пик заодно ощутимо приближает Забой.
+        heat = (p.smoke_heat or 0) + (3 if outcome == "jackpot" else 1)
+        burst = None
+        if heat >= SMOKE_HEAT_MAX:
+            # Забой. Приз выдаётся В ТОЙ ЖЕ транзакции, что и всё остальное
+            # состояние тяги: иначе краш между списанием бланта и выдачей
+            # приза оставил бы игрока без того и без другого.
+            heat = 0
+            kind, amount = _roll_smoke_burst()
+            if kind == "oac":
+                p.balance = (p.balance or 0) + amount
+                burst = ("oac", amount, None)
+            elif kind == "blunts":
+                p.blunts = (p.blunts or 0) + amount
+                burst = ("blunts", amount, None)
+            else:
+                # Карта в Кодекс — тот же путь, что у Пыли (handle_use_dust):
+                # create_named_blunt внутри транзакции, с уже загруженным p.
+                _name = random.choice(SMOKE_BURST_BLUNT_NAMES)
+                _item = await create_named_blunt(uid, _name, conn=conn, ctx=ctx, player=p)
+                burst = ("card", None, _item)
+        p.smoke_heat = heat
 
         if ctx.war_service:
             try:
@@ -4687,7 +4778,8 @@ async def do_smoke(update, context, ctx, player):
             except Exception:
                 logger.exception("War service error, proceeding without points")
 
-        return SmokeStatus.OK, (earned, outcome, save, medal_text, new_count, p.blunts, p.balance, p.daily_progress["smoke_dry"])
+        return SmokeStatus.OK, (earned, outcome, save, medal_text, new_count,
+                                p.blunts, p.balance, heat, burst)
 
     result = await ctx.repo.atomic_update(uid, _smoke)
     if result is None:
@@ -4699,30 +4791,104 @@ async def do_smoke(update, context, ctx, player):
         await query.message.edit_text(
             "<b>💨 ДУНУТЬ</b>\n\n<b>🌿 Твой свёрток пуст</b>\n\n<i>🎈 Скрути новый блант</i>",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🌿 Крафт", callback_data="craft")],
-                [InlineKeyboardButton("🔙 В меню", callback_data="menu")]
+                [_btn(f"🌿 Скрутить блант · {GAME_CONFIG['craft_cost']} OAC",
+                      callback_data="craft_normal", style="primary")],
+                [InlineKeyboardButton("🌿 В мастерскую", callback_data="craft"),
+                 InlineKeyboardButton("🔙 В меню", callback_data="menu")]
             ]),
             parse_mode='HTML'
         )
         return
 
-    earned, outcome, save, medal_text, new_count, bl_left, new_balance, dry = data
+    earned, outcome, save, medal_text, new_count, bl_left, new_balance, heat, burst = data
+
+    # ── ЗАБОЙ: отдельный экран-пик ───────────────────────────────────
+    # Peak-end rule (Kahneman и соавт.): впечатление от всей серии тяг
+    # определяется её самым сильным моментом, а не средним по серии.
+    # Поэтому Забой не дописывается строчкой к обычному результату, а
+    # получает собственный экран с подвеской — как джекпот.
+    if burst:
+        kind, amount, item = burst
+        try:
+            for frame in ("🔥 <b>Жар не помещается в лёгких…</b>",
+                          "🔥🔥 <b>Дым идёт стеной…</b>",
+                          "🔥🔥🔥 <b>З А Б О Й</b>"):
+                await query.message.edit_text(frame, parse_mode='HTML')
+                await asyncio.sleep(0.5)
+        except Exception:
+            pass
+
+        head = ("🔥🔥🔥  <b>З А Б О Й</b>  🔥🔥🔥\n\n"
+                "<i>Жар прорвался — Фабрика №9 отдаёт своё.</i>\n\n")
+        burst_kb = [
+            [_btn("🔥 Дунуть ещё", callback_data="do_smoke", style="primary") if bl_left >= 1
+             else _btn(f"🌿 Скрутить блант · {GAME_CONFIG['craft_cost']} OAC",
+                       callback_data="craft_normal", style="primary")],
+            [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
+        ]
+
+        if kind == "card":
+            _rar = (item or {}).get("rarity", "common")
+            _c = {"legendary": "🟡 ЛЕГЕНДА", "epic": "🟣 ЭПИК",
+                  "rare": "🔵 РЕДКИЙ"}.get(_rar, "🟢 ОБЫЧНЫЙ")
+            burst_text = (
+                f"{head}💍 <b>«{html.escape((item or {}).get('name', '?'))}»</b> · {_c}\n"
+                f"<i>Новая карта в твоём Кодексе — ни у кого нет такой же.</i>"
+            )
+            # Делиться стоит тем, что реально редко: обычной картой хвастаться
+            # нечем, и кнопка на каждой второй карте обесценила бы сам жест.
+            if _rar in ("epic", "legendary"):
+                try:
+                    burst_kb.insert(0, [await _win_share_button(
+                        context, uid,
+                        f"🔥 ЗАБОЙ! Мне выпала карта «{(item or {}).get('name','?')}» "
+                        f"в Antysocialshop!")])
+                except Exception:
+                    pass
+            _sent = await _send_blunt_card(
+                context, query.message.chat.id, item, player.username or "",
+                burst_text, InlineKeyboardMarkup(burst_kb), ctx=ctx, uid=uid)
+            if _sent:
+                # _send_blunt_card всегда шлёт НОВОЕ сообщение (фото) — убираем
+                # за собой прежний экран, как это делает invite_friend_handler.
+                try:
+                    await query.message.delete()
+                except Exception:
+                    pass
+            else:
+                await query.message.edit_text(
+                    burst_text, reply_markup=InlineKeyboardMarkup(burst_kb), parse_mode='HTML')
+        else:
+            if kind == "oac":
+                burst_text = (f"{head}🍬 <b>+{amount} OAC</b>\n"
+                              f"<i>Касса Фабрики открылась разом.</i>")
+            else:
+                burst_text = (f"{head}🍃 <b>+{amount} "
+                              f"{_plural_ru(amount, 'блант', 'бланта', 'блантов')}</b>\n"
+                              f"<i>Свёрток пополнен — Жар можно гнать дальше.</i>")
+            burst_text += f"\n\n🍃 <b>Блантов в свёртке:</b> <b>{bl_left}</b>"
+            await query.message.edit_text(
+                burst_text, reply_markup=InlineKeyboardMarkup(burst_kb), parse_mode='HTML')
+
+        asyncio.create_task(check_achievements(uid, context))
+        return
+
+    # ── Обычный результат тяги ───────────────────────────────────────
     effect = build_smoke_effect(outcome, earned)
 
-    # Пити-прогресс: сухая тяга перестаёт быть «ничем» — это шаг к гарантированному
-    # улову (anticipation + goal-gradient).
-    pity_line = ""
-    left = SMOKE_PITY_THRESHOLD - dry
-    if outcome in ("loss", "neutral") and left > 0:
-        filled = "🔥" * dry + "▫️" * left
-        pity_line = f"\n{filled} <i>ещё {left} до гарантированного улова</i>"
+    # Жар занял слот, где раньше стояла строка пити-гаранта: тот же визуальный
+    # язык (🔥/▫️), но двигается на КАЖДОЙ тяге, а не только на сухой, и ведёт
+    # к настоящему призу, а не просто к «гарантированному улову».
+    _left = SMOKE_HEAT_MAX - heat
+    heat_line = (f"\n{_smoke_heat_bar(heat)} <b>Жар {heat}/{SMOKE_HEAT_MAX}</b>"
+                 f"\n<i>ещё {_left} {_plural_ru(_left, 'тяга', 'тяги', 'тяг')} до ЗАБОЯ</i>")
 
     text = (
         f"{effect}\n\n"
         f"{medal_text}"
         f"<b>💨 Дым:</b> {new_count}/{get_medal_target(new_count, SMOKE_MEDALS)}\n"
         f"{get_medal_progress(new_count, SMOKE_MEDALS, just_leveled=bool(medal_text))}"
-        f"{pity_line}\n\n"
+        f"{heat_line}\n\n"
         f"<b>🍃 Блантов в свёртке:</b> <b>{bl_left}</b>"
     )
 
@@ -4735,14 +4901,23 @@ async def do_smoke(update, context, ctx, player):
     if save:
         text += "\n⚜️ <i>Светлая Гильдия сохранила твой Блант!</i>"
 
-    kb_rows = [
-        [InlineKeyboardButton("💨 Дунуть ещё", callback_data="do_smoke") if bl_left >= 1
-         else InlineKeyboardButton("🌿 Крафтить ещё", callback_data="craft")],
-        [InlineKeyboardButton("🔙 В меню", callback_data="menu")]
-    ]
+    # Кнопка меняется на пороге Забоя: самый сильный момент предвкушения во
+    # всей механике — когда до гарантированного приза остался ровно один тап.
+    # Зелёный (success), не красный: это обещание награды, а не риск; danger
+    # в этой игре зарезервирован за действительно опасным выбором (см. пресет
+    # «Безумный» в Минах), иначе цвет перестаёт что-либо значить.
+    if bl_left >= 1:
+        if _left == 1:
+            _main_btn = _btn("🔥 ЕЩЁ ОДНА — И ЗАБОЙ!", callback_data="do_smoke", style="success")
+        else:
+            _main_btn = _btn("💨 Дунуть ещё", callback_data="do_smoke", style="primary")
+    else:
+        _main_btn = _btn(f"🌿 Скрутить блант · {GAME_CONFIG['craft_cost']} OAC",
+                         callback_data="craft_normal", style="primary")
+    kb_rows = [[_main_btn], [InlineKeyboardButton("🔙 В меню", callback_data="menu")]]
     # Suspense-ревил ТОЛЬКО на джекпоте (2%): предвкушение поднимает дофаминовый
     # пик именно там, где он редкий и ценный (dopamine живёт на фазе ожидания).
-    # Обычные тяги (98%) не тормозим ни на миллисекунду — никакого минуса на
+    # Обычные тяги не тормозим ни на миллисекунду — никакого минуса на
     # массовом пути, апгрейд бьёт точечно в самый яркий момент.
     if outcome == "jackpot":
         try:
@@ -6898,16 +7073,6 @@ def _mines_next_risk_pct(mines_count: int, step: int) -> int:
     if remaining_cells <= 0:
         return 0
     return round(mines_count / remaining_cells * 100)
-
-
-def _btn(text: str, callback_data: str, style: str | None = None) -> InlineKeyboardButton:
-    """InlineKeyboardButton с опциональным цветом (Bot API 9.4: поле `style`,
-    danger/success/primary). PTB 20.8 не знает этого поля нативно, но
-    прокидывает произвольные ключи через api_kwargs прямо в JSON запроса —
-    старые клиенты Telegram, не знающие 9.4, просто игнорируют поле и рисуют
-    обычную кнопку, деградация безопасна."""
-    return InlineKeyboardButton(text, callback_data=callback_data,
-                                api_kwargs=({"style": style} if style else None))
 
 
 # Основная функция – замена _process_mines

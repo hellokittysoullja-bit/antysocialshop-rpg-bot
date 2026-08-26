@@ -59,25 +59,46 @@ def test_pure(passed):
         # число обязано соответствовать исходу — витрина честна
         if outcome == "jackpot":
             assert 80 <= val <= 160, f"джекпот вернул {val}"
+        elif outcome == "big":
+            assert 35 <= val <= 60, f"крупный вернул {val}"
         elif outcome == "win":
-            assert 15 <= val <= 40, f"выигрыш вернул {val}"
-        elif outcome == "loss":
-            # Баланс тяги смягчён (25% × −3 вместо 52% × −5), а тест остался на
-            # старом числе → сьют был красным и БОЛЬШЕ НЕ СТОРОЖИЛ ядро гачи.
-            assert val == -3, f"проигрыш вернул {val}"
+            assert 4 <= val <= 12, f"выигрыш вернул {val}"
         else:
             assert val == 0, f"пусто вернул {val}"
+        # ни один исход больше не отнимает OAC: игрок уже заплатил за блант,
+        # штраф сверху — наказание за главный глагол игры (см. calculate_smoke_reward)
+        assert val >= 0, f"исход {outcome} отнял OAC ({val}) — штраф вернулся"
         # флейвор не падает и рендерит знак корректно
         assert build_smoke_effect(outcome, val)
-    assert {"jackpot", "win", "loss", "neutral"} <= outcomes_seen, f"не все исходы: {outcomes_seen}"
+    assert {"jackpot", "big", "win", "neutral"} <= outcomes_seen, f"не все исходы: {outcomes_seen}"
+    assert "loss" not in outcomes_seen, "исход 'loss' должен быть убран целиком"
     # с happy hour положительный доход удваивается
     for _ in range(2000):
         val, outcome = calculate_smoke_reward(_P(), happy_hour=True)
         if outcome == "win":
-            assert 30 <= val <= 80, f"дунуть HH win вернул {val}"
+            assert 8 <= val <= 24, f"дунуть HH win вернул {val}"
+        elif outcome == "big":
+            assert 70 <= val <= 120, f"дунуть HH big вернул {val}"
         elif outcome == "jackpot":
             assert 160 <= val <= 320, f"дунуть HH jackpot вернул {val}"
     passed.append("calculate_smoke_reward: число всегда соответствует исходу (флейвор честен)")
+
+    # --- частота подкрепления: ~50% тяг дают хоть что-то ---
+    # Корневой дефект старого баланса: 73% тяг не давали НИЧЕГО. Дофаминовый
+    # ответ на неопределённость максимален около 50/50 и падает к краям
+    # (Fiorillo, Tobler, Schultz, Science, 2003) — 27% попаданий лежали
+    # глубоко в зоне «обычно ничего». Тест сторожит, чтобы правка не уползла.
+    _dry = 0
+    _hits = 0
+    _N = 200_000
+    for _ in range(_N):
+        v, o = calculate_smoke_reward(_P(), happy_hour=False, dry_count=_dry)
+        if v > 0:
+            _hits += 1
+        _dry = _dry + 1 if o == "neutral" else 0
+    _rate = _hits / _N
+    assert 0.45 <= _rate <= 0.56, f"частота попаданий уехала из зоны 50/50: {_rate:.1%}"
+    passed.append(f"Дунуть: частота подкрепления в зоне максимума дофамина ({_rate:.0%}, было 27%)")
 
     # --- стрик-награда: титулы детерминированы, доход не ниже базы×hot ---
     r5 = _calculate_reward(5, daily_config)

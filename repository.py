@@ -32,7 +32,7 @@ PLAYER_COLUMNS = (
     "lab_chests", "lab_deaths", "alchemy_count", "last_lab_attempt",
     "donated", "daily_progress", "pending_transfer", "lab_depth", "pet", "pet_name",
     "repent_count", "onboarding_step", "pet_hunger", "exists", "prestige",
-    "lab_best_oac", "mines_best_step",
+    "lab_best_oac", "mines_best_step", "smoke_heat",
 )
 # Не в PLAYER_COLUMNS намеренно: last_reengagement_sent, last_winback_sent,
 # last_known_rank, mines_state, mines_state_updated_at. Все пять пишутся

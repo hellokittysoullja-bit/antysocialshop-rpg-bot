@@ -59,6 +59,10 @@ class Player(BaseModel):
     # успешной партии) — тот же принцип, что у lab_best_oac: пишется в ТОЙ ЖЕ
     # транзакции, что баланс за партию, не отдельным round-trip.
     mines_best_step: int = 0
+    # Жар: накопитель тяг до Забоя (см. SMOKE_HEAT_MAX в game_content).
+    # Персистентный и НЕ сгорающий от простоя — шкала, начатая вчера,
+    # ждёт игрока сегодня (Зейгарник работает только на незакрытом).
+    smoke_heat: int = 0
     alchemy_count: int = 0
     last_lab_attempt: Optional[datetime] = None
     donated: int = 0
