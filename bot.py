@@ -46,6 +46,7 @@ from game_content import (
     QUEST_TEMPLATES, BLUNTS_PER_PAGE, BLUNT_IMAGES, LUCK_CONFIG, LABYRINTH_ROOMS,
     SHOP_ITEMS, RANK_LORE, ALTAR_BASE_COST, ALTAR_TIERS,
     SMOKE_HEAT_MAX, SMOKE_BURST_POOL, SMOKE_BURST_BLUNT_NAMES,
+    GUILD_ACTION_TIERS, GUILD_ACTION_THEME,
 )
 # Слой моделей
 from game_models import Player
@@ -4983,12 +4984,208 @@ async def do_smoke(update, context, ctx, player):
             f"<i>Фабрика №9 сегодня щедра. Кто следующий?</i>"
         ))
 
+# ============================================================
+# ГИЛЬДЕЙСКОЕ ДЕЙСТВИЕ: общая механика Ритуала (BLACK) и Исповеди (WHITE)
+# ============================================================
+# Раньше Ритуал был одним тапом на фиксированное число, Исповедь — одним
+# тапом на случайное число без всякого выбора. Ни одна из фракций не
+# принимала решения в своём главном действии — только в Лабиринте и Минах
+# у игрока вообще есть агентность (см. GUILD_ACTION_TIERS в game_content.py
+# для полного обоснования). Ниже — общая логика; тема (текст/эмодзи) берётся
+# из GUILD_ACTION_THEME[guild], сама механика для BLACK и WHITE идентична.
+
+def _guild_action_tier_for(key: str) -> dict:
+    return next(t for t in GUILD_ACTION_TIERS if t["key"] == key)
+
+
+def _guild_action_cooldown_hours(guild: str) -> int:
+    return GAME_CONFIG["ritual_cooldown_hours"] if guild == "BLACK" else GAME_CONFIG["repent_cooldown_hours"]
+
+
+async def _show_guild_action_picker(update, context, ctx, guild: str):
+    """Экран выбора профиля риска — общий для обеих фракций. Показывается
+    ПЕРЕД действием: игрок выбирает один из трёх профилей на каждое
+    действие заново, а не жмёт единственную доступную кнопку."""
+    query = update.callback_query
+    theme = GUILD_ACTION_THEME[guild]
+    lines = [f"<b>{theme['title']}</b>\n", f"<i>{theme['cta']}</i>\n"]
+    keyboard = []
+    for tier in GUILD_ACTION_TIERS:
+        lo, hi = tier["oac_range"]
+        avg = (lo + hi) // 2
+        name = theme["tier_names"][tier["key"]]
+        extra = ""
+        if tier["dust_chance"]:
+            extra = f" <i>· {int(tier['dust_chance']*100)}% шанс 💠 Пыли</i>"
+        elif tier["legendary_chance"]:
+            extra = f" <i>· {int(tier['legendary_chance']*100)}% шанс 🟡 Легендарки</i>"
+        lines.append(f"{name} — ~{avg} OAC{extra}")
+        keyboard.append([_btn(name, callback_data=f"guild_act_{guild}_{tier['key']}", style=tier["style"])])
+    keyboard.append([InlineKeyboardButton("🔙 В меню", callback_data="menu")])
+    text = "\n".join(lines)
+    await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
+
+
+async def _resolve_guild_action(update, context, ctx, guild: str, tier_key: str):
+    """Резолвит выбранный профиль риска. Общая логика для Ритуала/Исповеди —
+    различаются только полем кулдауна/счётчика, таблицей медалей и темой."""
+    query = update.callback_query
+    if query:
+        try:
+            await query.answer()
+        except Exception:
+            pass
+    user, msg = get_user_and_msg(update)
+    uid = user.id
+    now = datetime.now()
+    theme = GUILD_ACTION_THEME[guild]
+    tier = _guild_action_tier_for(tier_key)
+    cooldown_hours = _guild_action_cooldown_hours(guild)
+    medals = RITUAL_MEDALS if guild == "BLACK" else REPENT_MEDALS
+    count_field = "ritual_count" if guild == "BLACK" else "repent_count"
+    cooldown_field = "last_ritual" if guild == "BLACK" else "last_repent"
+
+    async def _act(p, conn):
+        if p.guild != guild:
+            return ("wrong_guild",)
+        last = getattr(p, cooldown_field)
+        if last and (now - last) < timedelta(hours=cooldown_hours):
+            remain = timedelta(hours=cooldown_hours) - (now - last)
+            hrs, rem = divmod(int(remain.total_seconds()), 3600)
+            return ("cooldown", hrs, rem // 60)
+        # Исповедь тратит блант при любом исходе (как и раньше); Ритуал —
+        # ничем не расходуется, кроме кулдауна (тоже как и раньше).
+        if guild == "WHITE" and (p.blunts or 0) < 1:
+            return ("no_blunts",)
+        if guild == "WHITE":
+            p.blunts -= 1
+
+        lo, hi = tier["oac_range"]
+        r = random.random()
+        if r < tier["dust_chance"]:
+            outcome_kind, reward, item_name = "dust", 0, None
+            p.m_essence = (p.m_essence or 0) + 1
+        elif r < tier["dust_chance"] + tier["legendary_chance"]:
+            item_name = random.choice(theme["legendary_pool"])
+            outcome_kind, reward = "legendary", 0
+            await create_named_blunt(uid, item_name, rarity="legendary", ctx=ctx, player=p, conn=conn)
+        else:
+            outcome_kind, item_name = "oac", None
+            reward = random.randint(lo, hi)
+            if happy_hour_active(ctx):
+                reward *= HAPPY_HOUR_MULTIPLIER
+            p.balance += reward
+
+        old_count = getattr(p, count_field) or 0
+        new_count = old_count + 1
+        medal_text, medal_bonus = get_medal_text_and_reward(old_count, new_count, medals)
+        # medal_bonus теперь начисляется ВСЕГДА, а не только когда исход этого
+        # конкретного тапа — OAC. Раньше (в исповеди) награда за медаль молча
+        # пропадала, если ровно на шаге ранг-апа медали выпадала пыль/легенда
+        # вместо OAC — два независимых события по ошибке делили один канал.
+        p.balance += medal_bonus
+        # Литеральная запись per-branch, не setattr(p, count_field, ...): статический
+        # страж (mechanics_test.py) построчно ищет "p.<поле> = " в исходнике, чтобы
+        # ловить достижения, чьё поле нигде не растёт (см. историю с alchemy_count в
+        # том же тесте) — динамическое имя поля для него невидимо, хотя рантайм
+        # был бы корректен. Дублирование здесь — цена этой защиты, не лишний код.
+        if guild == "BLACK":
+            p.ritual_count = new_count
+            p.last_ritual = now
+            p.daily_progress = p.daily_progress or {}
+            p.daily_progress["ritual"] = True
+        else:
+            p.repent_count = new_count
+            p.last_repent = now
+            p.daily_progress = p.daily_progress or {}
+            p.daily_progress["repent"] = True
+        p.daily_progress["guild_action"] = True
+
+        war_action = WarAction.RITUAL if guild == "BLACK" else WarAction.REPENT
+        await ctx.war_service.add_score(uid, war_action, conn)
+
+        return ("ok", outcome_kind, reward, medal_bonus, item_name, medal_text, new_count, p.balance)
+
+    result = await ctx.repo.atomic_update(uid, _act)
+    if result is None:
+        await msg.reply_text("Профиль не найден.")
+        return
+
+    status, *data = result
+    if status == "wrong_guild":
+        await send_whisper_dm(update, context, theme["wrong_guild_msg"])
+        return
+    if status == "no_blunts":
+        await send_whisper_dm(update, context, "❌ Нет блантов. Скрути!")
+        return
+    if status == "cooldown":
+        hrs, mins = data[0], data[1]
+        wait = f"{hrs} ч {mins} мин" if hrs else f"{mins} мин"
+        await edit_or_reply(update, context,
+            f"{theme['cooldown_line']}\n\n<b>🗝️ Жди {wait}</b>",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🍬 Фармить", callback_data="farm")],
+                [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
+            ]))
+        return
+
+    outcome_kind, reward, medal_bonus, item_name, medal_text, new_count, new_balance = data
+    tier_name = theme["tier_names"][tier_key]
+    target = get_medal_target(new_count, medals)
+    progress_bar_str = get_medal_progress(new_count, medals, just_leveled=bool(medal_text))
+
+    if outcome_kind == "oac":
+        result_line = f"{tier_name} принёс тебе <b>{reward + medal_bonus} OAC</b> 🍬"
+    elif outcome_kind == "dust":
+        result_line = f"{tier_name} обернулся 💠 <b>+1 Кристальной Пылью</b>"
+    else:
+        result_line = f"🌟 Чудо! {tier_name} подарил легендарный блант <b>«{item_name}»</b>"
+
+    text = (
+        f"<b>{theme['result_title']}</b>\n\n"
+        f"{result_line}\n"
+        f"<b>У тебя:</b> <b>{new_balance} OAC</b>\n\n"
+        f"{medal_text}"
+        f"<b>{theme['count_word']}:</b> {new_count}/{target}\n"
+        f"<b>{progress_bar_str}</b>"
+    )
+    kb_rows = [
+        [InlineKeyboardButton("🏛️ Храм", callback_data="guild_shrine"),
+         InlineKeyboardButton("🏰 Гильдия", callback_data="guild_info")],
+        [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
+    ]
+    # Легендарка — тот же класс пика, что джекпот/Забой/рангап: игрок должен
+    # мочь поделиться СВОЕЙ победой за пределами официального гильд-чата.
+    if outcome_kind == "legendary":
+        try:
+            kb_rows.insert(0, [await _win_share_button(
+                context, uid, f"🌟 {tier_name} подарил мне легендарку «{item_name}» в Antysocialshop!")])
+        except Exception:
+            pass
+
+    kb = InlineKeyboardMarkup(kb_rows)
+    anim_title = "🕯️ Ритуал проводится..." if guild == "BLACK" else "🕊️ Исповедь..."
+    anim_msg = await animate_progress_bar(update, context, title=anim_title, in_place=True)
+    if anim_msg is not None:
+        await anim_msg.edit_text(text, parse_mode='HTML', reply_markup=kb)
+    else:
+        await safe_send_message(context, update.effective_chat.id, text,
+                                parse_mode='HTML', reply_markup=kb)
+
+    await check_achievements(uid, context)
+
+
+async def _guild_action_pick_wrapper(update, context):
+    """Клик по одному из трёх профилей риска: callback_data =
+    'guild_act_{BLACK|WHITE}_{safe|balanced|risky}'."""
+    ctx = context.bot_data.get("ctx")
+    parts = update.callback_query.data.split("_")
+    guild, tier_key = parts[2], parts[3]
+    await _resolve_guild_action(update, context, ctx, guild, tier_key)
+
+
 @rate_limit(3)
 async def ritual_callback(update, context):
-    # Баг: успешный путь рендерится через animate_progress_bar → edit_text
-    # напрямую, минуя edit_or_reply — там query.answer() тоже никогда не
-    # звался. Отвечаем сразу на входе, до любых веток (та же схема, что уже
-    # в _process_mines этого файла).
     if update.callback_query:
         try:
             await update.callback_query.answer()
@@ -5001,82 +5198,28 @@ async def ritual_callback(update, context):
 
     user, msg = get_user_and_msg(update)
     uid = user.id
+    player = await ctx.repo.get_by_id(uid)
+    if not player or not player.exists:
+        await send_whisper_dm(update, context, "Сначала активируйся: /start")
+        return
+    theme = GUILD_ACTION_THEME["BLACK"]
+    if player.guild != "BLACK":
+        await send_whisper_dm(update, context, theme["wrong_guild_msg"])
+        return
     now = datetime.now()
-
-    async def _ritual(player, conn):
-        if player.guild != "BLACK":
-            return ("wrong_guild",)
-        if player.last_ritual and (now - player.last_ritual) < timedelta(hours=GAME_CONFIG["ritual_cooldown_hours"]):
-            remain = timedelta(hours=GAME_CONFIG["ritual_cooldown_hours"]) - (now - player.last_ritual)
-            hrs, rem = divmod(int(remain.total_seconds()), 3600)
-            return ("cooldown", hrs, rem // 60)
-
-        reward = 150
-        if happy_hour_active(ctx):
-            reward *= HAPPY_HOUR_MULTIPLIER
-        extra = 15 if random.random() < 0.1 else 0
-
-        old_count = player.ritual_count
-        new_count = old_count + 1
-        medal_text, medal_bonus = get_medal_text_and_reward(old_count, new_count, RITUAL_MEDALS)
-
-        player.balance += reward + extra + medal_bonus
-        player.daily_progress = player.daily_progress or {}
-        player.daily_progress["guild_action"] = True
-        player.daily_progress["ritual"] = True
-        player.ritual_count = new_count
-        player.last_ritual = now
-
-        await ctx.war_service.add_score(uid, WarAction.RITUAL, conn)
-        return ("ok", reward, extra, medal_text, new_count, player.balance)
-
-    result = await ctx.repo.atomic_update(uid, _ritual)
-    if result is None:
-        await msg.reply_text("Профиль не найден.")
-        return
-
-    status, *data = result
-    if status == "wrong_guild":
-        await send_whisper_dm(update, context, "❌ Только Тёмная Гильдия.")
-        return
-    if status == "cooldown":
-        hrs, mins = data[0], data[1]
-        wait = f"{hrs} ч {mins} мин" if hrs else f"{mins} мин"
-        # Единый живой экран: кулдаун заменяет текущий экран, не плодит новый.
+    cooldown_hours = _guild_action_cooldown_hours("BLACK")
+    if player.last_ritual and (now - player.last_ritual) < timedelta(hours=cooldown_hours):
+        remain = timedelta(hours=cooldown_hours) - (now - player.last_ritual)
+        hrs, rem = divmod(int(remain.total_seconds()), 3600)
+        wait = f"{hrs} ч {rem // 60} мин" if hrs else f"{rem // 60} мин"
         await edit_or_reply(update, context,
-            f"<b>🕯️ Тёмный алтарь истощён 🌙</b>\n\n<b>🗝️ Жди {wait}</b>",
+            f"{theme['cooldown_line']}\n\n<b>🗝️ Жди {wait}</b>",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🍬 Фармить", callback_data="farm")],
                 [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
             ]))
         return
-
-    reward, extra, medal_text, new_count, new_balance = data
-    target = get_medal_target(new_count, RITUAL_MEDALS)
-    progress_bar_str = get_medal_progress(new_count, RITUAL_MEDALS, just_leveled=bool(medal_text))
-
-    text = (
-        f"<b>🕯️ РИТУАЛ ЗАВЕРШЁН 🎉</b>\n\n"
-        f"Ритуал принёс тебе <b>{reward} OAC</b> 🍬\n"
-        f"<b>⚜️ У тебя:</b> <b>{new_balance} OAC 🪽</b>\n\n"
-        f"{medal_text}"
-        f"<b>🕯️ Ритуалы:</b> {new_count}/{target}\n"
-        f"<b>{progress_bar_str}</b>"
-    )
-    # Единый живой экран: результат ритуала заменяет экран и несёт навигацию.
-    ritual_kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🏛️ Храм", callback_data="guild_shrine"),
-         InlineKeyboardButton("🏰 Гильдия", callback_data="guild_info")],
-        [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
-    ])
-    anim_msg = await animate_progress_bar(update, context, title="🕯️ Ритуал проводится...", in_place=True)
-    if anim_msg is not None:
-        await anim_msg.edit_text(text, parse_mode='HTML', reply_markup=ritual_kb)
-    else:
-        await safe_send_message(context, update.effective_chat.id, text,
-                                parse_mode='HTML', reply_markup=ritual_kb)
-
-    await check_achievements(uid, context)
+    await _show_guild_action_picker(update, context, ctx, "BLACK")
 
 # ============================================================
 # ПЛАНТАЦИЯ (idle-система: владение + апгрейды + лимит накопления)
@@ -6532,115 +6675,31 @@ async def repent_callback(update, context, ctx):
         await query.answer()
     user, _msg = get_user_and_msg(update)
     uid = user.id
-
-    async def _repent(p, conn):
-        now = datetime.now()
-        cooldown_hours = GAME_CONFIG.get("repent_cooldown_hours", 12)
-        if p.last_repent and (now - p.last_repent) < timedelta(hours=cooldown_hours):
-            remain = timedelta(hours=cooldown_hours) - (now - p.last_repent)
-            hrs, rem = divmod(int(remain.total_seconds()), 3600)
-            mins = rem // 60
-            return ("cooldown", f"⏳ Исповедь через {hrs} ч {mins} мин")
-
-        if p.guild != "WHITE":
-            return ("wrong_guild", "❌ Только Светлая Гильдия.")
-        if (p.blunts or 0) < 1:
-            return ("no_blunts", "❌ Нет блантов. Скрути!")
-
-        # === ДОБАВЛЕНО: Счётчик исповедей (пункт 2) ===
-        p.blunts -= 1
-        p.last_repent = now
-        p.daily_progress = p.daily_progress or {}
-        p.repent_count = (p.repent_count or 0) + 1
-        # Исповедь СОСТОЯЛАСЬ (блант потрачен, кулдаун 12ч запущен) — квест
-        # обязан засчитаться при ЛЮБОМ исходе. Раньше отметка стояла только в
-        # ветке награды (70%): при удаче на эссенцию/легендарку задание не
-        # тикало, а повторить нельзя 12ч → Светлая гильдия застревала в главе.
-        p.daily_progress["repent"] = True
-        p.daily_progress["guild_action"] = True
-
-        # === ДОБАВЛЕНО: Медали и прогресс (пункты 3 и 4) ===
-        old_count = p.repent_count - 1
-        new_count = p.repent_count
-        medal_text, medal_bonus = get_medal_text_and_reward(old_count, new_count, REPENT_MEDALS)
-
-        # Случайный исход
-        r = random.random()
-        reward = 0
-        result_line = ""
-
-        if r < 0.70:
-            reward = random.randint(100, 200)
-            p.balance += reward + medal_bonus  # ← добавили medal_bonus
-            result_line = f"Исповедь принесла тебе <b>{reward} OAC</b> 🍬"
-        elif r < 0.95:
-            p.m_essence = (p.m_essence or 0) + 1
-            result_line = "Ты получил 💠 <b>+1 Кристальную Пыль</b>"
-        else:
-            name = random.choice(["Крик Бездны", "Пепел Короля", "Шёпот Склепа"])
-            await create_named_blunt(uid, name, rarity="legendary", ctx=ctx, player=p, conn=conn)
-            result_line = f"🌟 Чудо! Легендарный блант <b>«{name}»</b>"
-
-        # === ДОБАВЛЕНО: Прогресс-бар (пункт 4) ===
-        target = get_medal_target(new_count, REPENT_MEDALS)
-        progress_bar_str = get_medal_progress(new_count, REPENT_MEDALS, just_leveled=bool(medal_text))
-
-        # === ДОБАВЛЕНО: Красивый текст с цитатой (пункт 9) ===
-        full_text = (
-            f"<b>⚜️ ИСПОВЕДЬ ПРИНЯТА🎉</b>\n\n"
-            f"{result_line}\n"
-            f"<b>⚜️ У тебя:</b> <b>{p.balance} OAC 🕊️</b>\n\n"
-            f"<i>«Твоя душа очистилась...»</i>\n"
-            f"{medal_text}\n"
-            f"<b>🕊️ Исповеди:</b> {new_count}/{target}\n"
-            f"<b>{progress_bar_str}</b>"
-        )
-
-        return ("ok", full_text)
-
-    result = await ctx.repo.atomic_update(uid, _repent)
-
-    if result is None:
-        await query.message.edit_text(
-            "❌ Профиль не найден. Напиши /start",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 В меню", callback_data="menu")]])
-        )
+    player = await ctx.repo.get_by_id(uid)
+    theme = GUILD_ACTION_THEME["WHITE"]
+    if not player or not player.exists:
+        await send_whisper_dm(update, context, "Сначала активируйся: /start")
         return
-
-    status, data = result[0], result[1] if len(result) > 1 else ""
-
-    if status == "ok":
-        # Единый живой экран: исповедь анимируется и завершается на месте.
-        repent_kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🏛️ Храм", callback_data="guild_shrine"),
-             InlineKeyboardButton("🏰 Гильдия", callback_data="guild_info")],
-            [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
-        ])
-        anim_msg = await animate_progress_bar(update, context, title="🕊️ Исповедь...", duration=0.6, steps=4, in_place=True)
-        if anim_msg is not None:
-            await anim_msg.edit_text(
-                data,
-                reply_markup=repent_kb,
-                parse_mode='HTML'
-            )
-        else:
-            # Если анимация не удалась – отправляем новое сообщение
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=data,
-                reply_markup=repent_kb,
-                parse_mode='HTML'
-            )
-    else:
-        # Ошибки (кулдаун/не та гильдия/нет блантов) — тоже на месте.
-        await edit_or_reply(
-            update, context, data,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="guild_info")]]),
-            parse_mode='HTML'
-        )
-
-    if status == "ok":
-        await check_achievements(uid, context)
+    if player.guild != "WHITE":
+        await send_whisper_dm(update, context, theme["wrong_guild_msg"])
+        return
+    now = datetime.now()
+    cooldown_hours = _guild_action_cooldown_hours("WHITE")
+    if player.last_repent and (now - player.last_repent) < timedelta(hours=cooldown_hours):
+        remain = timedelta(hours=cooldown_hours) - (now - player.last_repent)
+        hrs, rem = divmod(int(remain.total_seconds()), 3600)
+        wait = f"{hrs} ч {rem // 60} мин" if hrs else f"{rem // 60} мин"
+        await edit_or_reply(update, context,
+            f"{theme['cooldown_line']}\n\n<b>🗝️ Жди {wait}</b>",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🍬 Фармить", callback_data="farm")],
+                [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
+            ]))
+        return
+    if (player.blunts or 0) < 1:
+        await send_whisper_dm(update, context, "❌ Нет блантов. Скрути!")
+        return
+    await _show_guild_action_picker(update, context, ctx, "WHITE")
 
 async def rules_callback(update, context):
     user, msg = get_user_and_msg(update)
@@ -11377,6 +11436,7 @@ PREFIX_HANDLERS: Dict[str, Callable] = {
     "mines_open_": _mines_open_cell_wrapper,
     "mines_bet_": _mines_bet_wrapper,
     "mines_preset_": _mines_preset_wrapper,
+    "guild_act_": _guild_action_pick_wrapper,
     "shop_buy_": shop_buy_callback,
 }
 
