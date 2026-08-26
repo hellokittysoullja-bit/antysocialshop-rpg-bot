@@ -120,6 +120,96 @@ def check_medal_bonus_never_lost():
     asyncio.run(_run())
 
 
+def check_picker_text_states_both_branches_explicitly():
+    """Пикер обязан называть процент на КАЖДОЙ ветке для тиров с редким
+    предметом, а не только на редкой — "~95 OAC · 25% шанс Пыли" читается
+    неоднозначно (можно понять как OAC И бонус сверху, хотя ветки взаимо-
+    исключающие: or, не and). Тот же класс ошибки чтения вероятностных
+    формулировок — Tversky & Kahneman, 1983, "conjunction fallacy"."""
+    import asyncio
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import audit_regression_test as t
+    from bot import Player
+
+    async def _run():
+        for guild in ("BLACK", "WHITE"):
+            p = Player(user_id=1, exists=True, balance=1000, total_earned=1000,
+                      blunts=5, guild=guild)
+            ctx = t.make_ctx(p)
+            fn = bot.ritual_callback if guild == "BLACK" else bot.repent_callback
+            u = t.FakeUpdate("x", uid=1)
+            await fn(u, t.FakeContext(ctx))
+            text = u.callback_query.message.edit_calls[-1][0]
+            for tier in GUILD_ACTION_TIERS:
+                rare = tier["dust_chance"] + tier["legendary_chance"]
+                name = GUILD_ACTION_THEME[guild]["tier_names"][tier["key"]]
+                if rare:
+                    oac_pct = int(round((1 - rare) * 100))
+                    rare_pct = int(round(rare * 100))
+                    assert f"{oac_pct}%" in text and f"{rare_pct}%" in text, (
+                        f"{guild}/{tier['key']}: не обе ветки названы процентом — {text!r}")
+                    # "или", а не только точка-разделитель — грамматика тоже
+                    # обязана сообщать взаимоисключение, не только цифры.
+                    idx = text.find(name)
+                    assert "или" in text[idx:idx + 120], (
+                        f"{guild}/{tier['key']}: нет слова 'или' между взаимоисключающими ветками")
+
+    asyncio.run(_run())
+
+
+def check_legendary_gets_suspense_others_dont():
+    """Suspense-ревил обязан включаться ТОЛЬКО на легендарке (редкий пик,
+    Berridge & Robinson 1998 — предвкушение важнее самого раскрытия) и НЕ
+    включаться на OAC/Пыли (частый путь — задержка там была бы чистым
+    раздражением без выигрыша, тот же принцип, что уже в do_smoke для
+    джекпота).
+
+    Метрика — не число кадров (у animate_progress_bar их и так больше, это
+    просто более мелкая нарезка полосы заполнения за то же ~0.6с), а факт,
+    что легендарка проходит через ИМЕННО НАРРАТИВНЫЕ кадры (см. frames в
+    _resolve_guild_action) и суммарно тратит на предвкушение БОЛЬШЕ времени
+    (3 кадра × 0.6с = 1.8с) — что и есть содержательный смысл suspense-ревила,
+    а не сырое количество edit_text-вызовов."""
+    import asyncio
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import audit_regression_test as t
+    from bot import Player
+
+    BLACK_NARRATIVE = ("Тьма сгущается", "Кровь на камне", "ЧУДО СВЕРШИЛОСЬ")
+
+    async def _run():
+        frames_legendary = frames_other = None
+        for seed in range(1, 400):
+            random.seed(seed)
+            p = Player(user_id=1, exists=True, balance=1000, total_earned=1000,
+                      blunts=5, guild="BLACK")
+            ctx = t.make_ctx(p)
+            u = t.FakeUpdate("guild_act_BLACK_risky", uid=1)
+            await bot._guild_action_pick_wrapper(u, t.FakeContext(ctx))
+            frames = [txt for txt, _ in u.callback_query.message.edit_calls]
+            is_legendary = any("ЧУДО" in f for f in frames)
+            if is_legendary and frames_legendary is None:
+                frames_legendary = frames
+            elif not is_legendary and frames_other is None:
+                frames_other = frames
+            if frames_legendary is not None and frames_other is not None:
+                break
+        assert frames_legendary is not None and frames_other is not None, (
+            "не удалось поймать оба исхода (легендарка/не-легендарка) за 400 сидов")
+        # На легендарке — ровно нарративные кадры суспенса, по одному на каждую
+        # фразу, ПЕРЕД финальным результатом.
+        for phrase in BLACK_NARRATIVE:
+            assert any(phrase in f for f in frames_legendary), (
+                f"кадр с фразой {phrase!r} не найден в легендарной последовательности: {frames_legendary}")
+        # На обычном исходе — ни один из нарративных кадров суспенса не всплывает
+        # (общий прогресс-бар — другой текст, "░"/"▓"-полоса, не эти фразы).
+        for phrase in BLACK_NARRATIVE:
+            assert not any(phrase in f for f in frames_other), (
+                f"нарративный кадр {phrase!r} просочился на обычный (не-легендарный) путь")
+
+    asyncio.run(_run())
+
+
 def main():
     passed = []
     check_tiers_are_shared_not_per_faction()
@@ -132,6 +222,10 @@ def main():
     passed.append("'рискованный' профиль даёт не меньше легенды, чем старая Исповедь (~30%)")
     check_medal_bonus_never_lost()
     passed.append("бонус за медаль применяется независимо от исхода (регресс на найденный баг)")
+    check_picker_text_states_both_branches_explicitly()
+    passed.append("пикер называет процент на ОБЕИХ ветках — не читается как 'and' вместо 'or'")
+    check_legendary_gets_suspense_others_dont()
+    passed.append("suspense-ревил только на легендарке, не на частом пути (OAC/Пыль)")
     for name in passed:
         print(f"  OK  {name}")
     print(f"\nИнварианты гильдейского действия пройдены: {len(passed)}/{len(passed)}")

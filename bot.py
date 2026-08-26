@@ -5014,12 +5014,21 @@ async def _show_guild_action_picker(update, context, ctx, guild: str):
         lo, hi = tier["oac_range"]
         avg = (lo + hi) // 2
         name = theme["tier_names"][tier["key"]]
-        extra = ""
-        if tier["dust_chance"]:
-            extra = f" <i>· {int(tier['dust_chance']*100)}% шанс 💠 Пыли</i>"
-        elif tier["legendary_chance"]:
-            extra = f" <i>· {int(tier['legendary_chance']*100)}% шанс 🟡 Легендарки</i>"
-        lines.append(f"{name} — ~{avg} OAC{extra}")
+        rare_chance = tier["dust_chance"] + tier["legendary_chance"]
+        # Явный процент на ОБЕИХ ветках, а не только на редкой: "~95 OAC ·
+        # 25% шанс Пыли" читается неоднозначно — можно понять как "OAC И
+        # ещё бонусный шанс сверху", хотя ветки взаимоисключающие (or, не
+        # and). Та же ошибка чтения вероятностных формулировок разобрана в
+        # Tversky & Kahneman, 1983 ("conjunction fallacy") — лечится тем же,
+        # чем и в Минах: числом на каждой стороне, а не на одной.
+        if rare_chance:
+            oac_pct = int(round((1 - rare_chance) * 100))
+            rare_pct = int(round(rare_chance * 100))
+            rare_label = "💠 Пыль" if tier["dust_chance"] else "🟡 Легендарка"
+            line = f"{name} — {oac_pct}% · ~{avg} OAC, или {rare_pct}% · {rare_label}"
+        else:
+            line = f"{name} — стабильно ~{avg} OAC"
+        lines.append(line)
         keyboard.append([_btn(name, callback_data=f"guild_act_{guild}_{tier['key']}", style=tier["style"])])
     keyboard.append([InlineKeyboardButton("🔙 В меню", callback_data="menu")])
     text = "\n".join(lines)
@@ -5164,13 +5173,35 @@ async def _resolve_guild_action(update, context, ctx, guild: str, tier_key: str)
             pass
 
     kb = InlineKeyboardMarkup(kb_rows)
-    anim_title = "🕯️ Ритуал проводится..." if guild == "BLACK" else "🕊️ Исповедь..."
-    anim_msg = await animate_progress_bar(update, context, title=anim_title, in_place=True)
-    if anim_msg is not None:
-        await anim_msg.edit_text(text, parse_mode='HTML', reply_markup=kb)
+    if outcome_kind == "legendary" and query and query.message:
+        # Suspense-ревил ТОЛЬКО на легендарке — тот же принцип, что уже у
+        # джекпота в do_smoke и у Забоя: предвкушение поднимает дофаминовый
+        # пик именно там, где он редкий и ценный (Berridge & Robinson, 1998,
+        # incentive salience — «wanting» строится на фазе ожидания, не на
+        # самом раскрытии). OAC/Пыль (подавляющее большинство тапов) не
+        # тормозим НИ НА МИЛЛИСЕКУНДУ — апгрейд бьёт точечно, без цены на
+        # массовом пути.
+        frames = (
+            ["🕯️ Тьма сгущается вокруг алтаря…", "🩸 Кровь на камне закипает…", "🌟 ЧУДО СВЕРШИЛОСЬ"]
+            if guild == "BLACK" else
+            ["⚜️ Свет над алтарём разгорается…", "🕊️ Голоса небес шепчут твоё имя…", "🌟 ЧУДО СВЕРШИЛОСЬ"]
+        )
+        try:
+            for frame in frames:
+                await query.message.edit_text(f"<b>{frame}</b>", parse_mode='HTML')
+                await asyncio.sleep(0.6)
+            await query.message.edit_text(text, parse_mode='HTML', reply_markup=kb)
+        except Exception:
+            await safe_send_message(context, update.effective_chat.id, text,
+                                    parse_mode='HTML', reply_markup=kb)
     else:
-        await safe_send_message(context, update.effective_chat.id, text,
-                                parse_mode='HTML', reply_markup=kb)
+        anim_title = "🕯️ Ритуал проводится..." if guild == "BLACK" else "🕊️ Исповедь..."
+        anim_msg = await animate_progress_bar(update, context, title=anim_title, in_place=True)
+        if anim_msg is not None:
+            await anim_msg.edit_text(text, parse_mode='HTML', reply_markup=kb)
+        else:
+            await safe_send_message(context, update.effective_chat.id, text,
+                                    parse_mode='HTML', reply_markup=kb)
 
     await check_achievements(uid, context)
 
