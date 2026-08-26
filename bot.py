@@ -4793,7 +4793,7 @@ async def do_smoke(update, context, ctx, player):
             reply_markup=InlineKeyboardMarkup([
                 [_btn(f"🌿 Скрутить блант · {GAME_CONFIG['craft_cost']} OAC",
                       callback_data="craft_normal", style="primary")],
-                [InlineKeyboardButton("🌿 В мастерскую", callback_data="craft"),
+                [InlineKeyboardButton("🌿 Крафт", callback_data="craft"),
                  InlineKeyboardButton("🔙 В меню", callback_data="menu")]
             ]),
             parse_mode='HTML'
