@@ -3818,7 +3818,9 @@ async def farm_callback_v2(update, context, ctx, player):
                  f"{int(FARM_COOLDOWN_HOURS*60)} мин. А пока — в дело:</i>")
         result_kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("🌿 Крафт", callback_data="craft"),
-             InlineKeyboardButton("💨 Дунуть", callback_data="smoke")],
+             # do_smoke, не "smoke" (smoke_callback) — та же правка, что и
+             # ниже в handle_craft_normal_v2: см. комментарий там.
+             InlineKeyboardButton("💨 Дунуть", callback_data="do_smoke")],
             [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
         ])
     # Juice ТОЛЬКО на mega-крит ×10 (1% фармов) — единственный сегмент, где по
@@ -4048,7 +4050,13 @@ async def handle_craft_normal_v2(update, context, ctx, player):
 
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🌿 Скрафтить ещё", callback_data="craft_normal"),
-         InlineKeyboardButton("💨 Дунуть", callback_data="smoke")],
+         # Баг, который поймал сам игрок: "smoke" вёл на старый экран-прокладку
+         # smoke_callback («Блантов в свёртке: N» + ещё один тап «Дунуть»)
+         # вместо прямого броска — ровно то, что build_main_menu уже избегает
+         # («Гача-цикл должен начинаться с первого тапа», см. её комментарий).
+         # После крафта это особенно чувствительно: Жар держится на
+         # моментальности следующего тапа, лишний экран рвёт именно её.
+         InlineKeyboardButton("💨 Дунуть", callback_data="do_smoke")],
         [InlineKeyboardButton("🔙 В меню", callback_data="menu")]
     ])
 
