@@ -103,23 +103,40 @@ def test_pure(passed):
             assert _fld in _pf, f"стрик выдал несуществующее поле {_fld}"
     passed.append("Стрик: все предметные бонусы ложатся на реальные поля Player (не фантом)")
 
-    # --- множитель мин: 1.0 → 3.0, монотонно, границы точные ---
-    assert _calc_multiplier(0) == 1.0
-    assert _calc_multiplier(22) == 3.0
-    prev = -1.0
-    for step in range(0, 23):
-        m = _calc_multiplier(step)
-        assert 1.0 <= m <= 3.0 and m >= prev, f"множитель не монотонен на шаге {step}"
-        prev = m
-    passed.append("_calc_multiplier: 1.0→3.0, монотонно")
+    # --- честный множитель мин: rtp/P(дожить), монотонно, границы точные ---
+    # Раньше множитель рос линейно (1.0→3.0) НЕЗАВИСИМО от реальной
+    # вероятности — ожидаемая отдача (multiplier × P(дожить)) падала с
+    # каждым шагом. Теперь она обязана быть постоянной (тот же rtp) на
+    # любом шаге и для любого числа мин — это и есть «честная игра».
+    for mines_count in (1, 3, 5, 10):
+        assert _calc_multiplier(mines_count, 0) == 1.0
+        total_safe = 25 - mines_count
+        prev = -1.0
+        for step in range(0, total_safe + 1):
+            m = _calc_multiplier(mines_count, step)
+            assert m >= prev, f"множитель не монотонен на шаге {step} ({mines_count} мин)"
+            prev = m
+            p_survive = bot._mines_survival_prob(mines_count, step)
+            if step > 0:
+                expected_rtp = round(m * p_survive, 2)
+                assert abs(expected_rtp - 0.97) < 0.01, (
+                    f"ожидаемая отдача съехала с RTP на шаге {step} "
+                    f"({mines_count} мин): {expected_rtp}")
+    passed.append("_calc_multiplier: честная отдача (RTP постоянен) на любом шаге и числе мин")
 
-    # --- поле мин: 5x5, ровно 3 мины, координаты валидны ---
-    for _ in range(500):
-        field, mines = _generate_mines_field()
-        assert len(field) == 5 and all(len(row) == 5 for row in field)
-        assert len(mines) == 3
-        assert all(0 <= r <= 4 and 0 <= c <= 4 for r, c in mines)
-    passed.append("_generate_mines_field: 5x5, ровно 3 мины")
+    # --- шанс взрыва на следующем шаге: 3 мины / 25 клеток на старте = 12% ---
+    assert bot._mines_next_risk_pct(3, 0) == 12
+    assert bot._mines_next_risk_pct(3, 22) == 100  # последняя безопасная клетка гарантированно последняя
+    passed.append("_mines_next_risk_pct: честный процент риска на следующем шаге")
+
+    # --- поле мин: 5x5, ровно N мин (по выбранному пресету), координаты валидны ---
+    for mines_count in (1, 3, 5, 10):
+        for _ in range(200):
+            field, mines = _generate_mines_field(mines_count)
+            assert len(field) == 5 and all(len(row) == 5 for row in field)
+            assert len(mines) == mines_count
+            assert all(0 <= r <= 4 and 0 <= c <= 4 for r, c in mines)
+    passed.append("_generate_mines_field: 5x5, ровно N мин по пресету")
 
     # --- цель медали: следующий порог / максимум ---
     assert get_medal_target(0, FARM_MEDALS) == 1

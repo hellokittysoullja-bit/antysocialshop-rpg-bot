@@ -1246,6 +1246,12 @@ async def _run_migrations(conn):
             END IF;
             IF NOT EXISTS (
                 SELECT 1 FROM information_schema.columns
+                WHERE table_name='players' AND column_name='mines_best_step'
+            ) THEN
+                ALTER TABLE players ADD COLUMN mines_best_step INTEGER DEFAULT 0;
+            END IF;
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
                 WHERE table_name='players' AND column_name='last_activation_push_sent'
             ) THEN
                 ALTER TABLE players ADD COLUMN last_activation_push_sent TIMESTAMPTZ DEFAULT NULL;
@@ -6820,20 +6826,89 @@ import random
 from typing import Optional, Tuple, Set, List
 
 # Вспомогательная функция для генерации поля (чистая)
-def _generate_mines_field() -> Tuple[List[List[int]], Set[Tuple[int, int]]]:
-    """Создаёт поле 5x5 и расставляет 3 мины. Возвращает (поле, координаты мин)."""
-    size = 5
+MINES_GRID_SIZE = 5
+MINES_TOTAL_CELLS = MINES_GRID_SIZE * MINES_GRID_SIZE  # 25
+# RTP по умолчанию — единый источник в LUCK_CONFIG (game_content.py), см.
+# комментарий там про честную кривую. Читается один раз при импорте; функции
+# ниже всё равно принимают rtp параметром, чтобы оставаться чистыми и
+# тестируемыми без обращения к глобальному конфигу.
+MINES_RTP = LUCK_CONFIG["mines"]["rtp"]
+# Зона «настоящей неопределённости» для паузы-предвкушения перед раскрытием
+# клетки (см. _mines_open_cell) — шанс дожить рядом с 50/50, где по Fiorillo,
+# Tobler, Schultz (Science, 2003) дофаминовый ответ на неопределённость
+# максимален. Вне этой зоны исход и так предсказуем — тормозить незачем.
+MINES_TENSION_LOW = 0.35
+MINES_TENSION_HIGH = 0.65
+MINES_SUSPENSE_DELAY = 0.4
+
+
+def _mines_preset_for(mines_count: int) -> dict:
+    """Пресет интенсивности по числу мин на поле. Фолбэк на «Обычный» —
+    защита от рассинхрона данных, реально не должна срабатывать."""
+    presets = LUCK_CONFIG["mines"]["presets"]
+    return next((p for p in presets if p["mines"] == mines_count), presets[1])
+
+
+def _generate_mines_field(mines_count: int) -> Tuple[List[List[int]], Set[Tuple[int, int]]]:
+    """Создаёт поле 5×5 и расставляет `mines_count` мин. Возвращает (поле, координаты мин)."""
+    size = MINES_GRID_SIZE
     field = [[0]*size for _ in range(size)]
-    # Все координаты
     all_cells = [(r, c) for r in range(size) for c in range(size)]
-    mines = set(random.sample(all_cells, 3))  # 3 мины
+    mines = set(random.sample(all_cells, mines_count))
     return field, mines
 
-# Вспомогательная функция для расчёта множителя
-def _calc_multiplier(step: int) -> float:
-    """Множитель от 1.0 до 3.0, линейно растёт с каждым шагом."""
-    max_step = 22  # всего безопасных клеток (25-3)
-    return round(1.0 + (step / max_step) * 2.0, 2)
+
+def _mines_survival_prob(mines_count: int, step: int) -> float:
+    """Вероятность дожить (не задеть мину) на первых `step` открытых клетках
+    подряд. Чистая комбинаторика: на каждом шаге безопасных клеток на одну
+    меньше, мин — столько же, сколько было (мины убывают только при попадании)."""
+    total_safe = MINES_TOTAL_CELLS - mines_count
+    if step <= 0:
+        return 1.0
+    if step > total_safe:
+        return 0.0
+    p = 1.0
+    for i in range(step):
+        p *= (total_safe - i) / (MINES_TOTAL_CELLS - i)
+    return p
+
+
+def _calc_multiplier(mines_count: int, step: int, rtp: float = MINES_RTP) -> float:
+    """Честный множитель: rtp / P(дожить). Раньше множитель рос линейно
+    (1.0→3.0) независимо от реальной вероятности — ожидаемая отдача падала с
+    каждым шагом, и уйти глубже было математически ВСЕГДА невыгоднее, чем
+    забрать раньше. Здесь ожидаемая отдача постоянна на любом шаге (честная
+    игра с фиксированным хаус-эджем rtp), риск глубже оплачивается растущим
+    призом, а не штрафуется — near-miss на экране проигрыша перестаёт быть
+    обманом (см. _mines_show_field)."""
+    if step <= 0:
+        return 1.0
+    p = _mines_survival_prob(mines_count, step)
+    if p <= 0:
+        return 0.0
+    return round(rtp / p, 2)
+
+
+def _mines_next_risk_pct(mines_count: int, step: int) -> int:
+    """Шанс подорваться НА СЛЕДУЮЩЕМ клике, целыми процентами. Показывается
+    игроку в открытую — прозрачность не убивает азарт (исход всё равно
+    неизвестен до самого клика), но даёт честное основание для решения
+    «забрать или продолжить», а не догадки на пустом месте."""
+    remaining_cells = MINES_TOTAL_CELLS - step
+    if remaining_cells <= 0:
+        return 0
+    return round(mines_count / remaining_cells * 100)
+
+
+def _btn(text: str, callback_data: str, style: str | None = None) -> InlineKeyboardButton:
+    """InlineKeyboardButton с опциональным цветом (Bot API 9.4: поле `style`,
+    danger/success/primary). PTB 20.8 не знает этого поля нативно, но
+    прокидывает произвольные ключи через api_kwargs прямо в JSON запроса —
+    старые клиенты Telegram, не знающие 9.4, просто игнорируют поле и рисуют
+    обычную кнопку, деградация безопасна."""
+    return InlineKeyboardButton(text, callback_data=callback_data,
+                                api_kwargs=({"style": style} if style else None))
+
 
 # Основная функция – замена _process_mines
 async def _mines_state_get(ctx, uid):
@@ -6885,25 +6960,26 @@ async def _mines_state_set(ctx, uid, state):
 
 async def _process_mines(update, context, uid, player, cfg, ctx):
     """
-    Запускает игру «Мины» (вместо Берсерка).
+    Запускает игру «Мины».
     Обрабатывает все состояния: начало, открытие клетки, кэшаут, завершение.
     """
     query = update.callback_query
     if query:
         await query.answer()
 
-    # --- 1. Проверяем доступность (баланс, кулдаун) ---
+    # --- 1. Проверяем доступность (баланс) ---
     min_bet = min(cfg["mines"]["bet_options"])
     if player.balance < min_bet:
         await _notify_user(update, context, f"💣 Недостаточно OAC. Минимальная ставка: {min_bet} OAC.")
         return
 
-    # --- 2. Загружаем или создаём состояние игры (Redis или in-memory) ---
+    # --- 2. Загружаем или создаём состояние игры (Postgres) ---
     redis_key = f"mines_game:{uid}"
     state = await _mines_state_get(ctx, uid)
     if not state:
-        # Если игра не начата – показываем меню выбора ставки
-        await _show_mines_bet_menu(update, context, player, cfg)
+        # Если игра не начата – выбор интенсивности первым шагом, не ставки
+        # напрямую: игрок сам решает, какой кривой риска играть.
+        await _show_mines_preset_menu(update, context, player)
         return
 
     # --- 3. Обработка действий в зависимости от состояния ---
@@ -6919,10 +6995,15 @@ async def _process_mines(update, context, uid, player, cfg, ctx):
         await _mines_cashout(update, context, state, redis_key, uid, ctx)
         return
 
-    # Если действие – начать новую игру (выбрана ставка)
+    # Если действие – начать новую игру (выбраны интенсивность и ставка)
     if action and action.startswith("mines_bet_"):
-        bet = int(action.split("_")[-1])
-        await _mines_start_game(update, context, uid, bet, ctx)
+        try:
+            parts = action.split("_")
+            mines_count, bet = int(parts[-2]), int(parts[-1])
+        except (ValueError, IndexError):
+            await query.answer("Некорректная ставка", show_alert=True)
+            return
+        await _mines_start_game(update, context, uid, mines_count, bet, ctx)
         return
 
     # Если действие – "назад" или "меню" – просто показываем меню удачи
@@ -6932,41 +7013,81 @@ async def _process_mines(update, context, uid, player, cfg, ctx):
 
     # Если никакое действие не подошло – показываем текущее поле
     await _mines_show_field(update, context, state, redis_key, uid, ctx)
-    
-async def _show_mines_bet_menu(update, context, player, cfg):
-    """Показывает меню выбора ставки."""
+
+
+async def _show_mines_preset_menu(update, context, player):
+    """Первый экран Мин: выбор интенсивности (числа мин на поле). Игрок сам
+    решает кривую риска — осторожный получает пологий рост, азартный более
+    крутой (тот же принцип выбора риска, что в жанре в целом)."""
     query = update.callback_query
     if not query:
         return
-    # Было parse_mode='Markdown' (легаси-режим Telegram) с "**жирным**" —
-    # легаси-Markdown Telegram понимает только ОДИНАРНЫЕ звёздочки для
-    # жирного; двойные — не его синтаксис вообще (это MarkdownV2/CommonMark).
-    # На практике это либо съедало звёздочки без жирности (два пустых
-    # bold-спана подряд), либо визуально ломало экран — единственный во всей
-    # игре очаг парсинга, отличный от HTML, которым размечено абсолютно всё
-    # остальное. Мины — доступная с самого начала механика в хабе Удачи,
-    # рядом с уже дожатыми в этой сессии Колесом/Алхимией.
+    presets = LUCK_CONFIG["mines"]["presets"]
+    lines = [
+        "💣 <b>МИНЫ</b>\n",
+        "Выбери интенсивность — от неё зависит, как быстро",
+        "растёт куш и как быстро растёт риск.\n",
+    ]
+    for p in presets:
+        survive_pct = round((1 - p["mines"] / MINES_TOTAL_CELLS) * 100)
+        lines.append(
+            f"{p['emoji']} <b>{p['name']}</b> · {p['mines']} "
+            f"{_plural_ru(p['mines'], 'мина', 'мины', 'мин')} на поле · "
+            f"пережить 1-й тап: {survive_pct}%"
+        )
+    text = "\n".join(lines)
+    best = player.mines_best_step or 0
+    if best:
+        text += f"\n\n🏅 Твой рекорд глубины: {best} клеток"
+    text += f"\n💰 Баланс: {player.balance} OAC"
+
+    keyboard = [
+        [_btn(f"{presets[0]['emoji']} {presets[0]['name']}", callback_data=f"mines_preset_{presets[0]['mines']}", style=presets[0]["style"]),
+         _btn(f"{presets[1]['emoji']} {presets[1]['name']}", callback_data=f"mines_preset_{presets[1]['mines']}", style=presets[1]["style"])],
+        [_btn(f"{presets[2]['emoji']} {presets[2]['name']}", callback_data=f"mines_preset_{presets[2]['mines']}", style=presets[2]["style"]),
+         _btn(f"{presets[3]['emoji']} {presets[3]['name']}", callback_data=f"mines_preset_{presets[3]['mines']}", style=presets[3]["style"])],
+        [InlineKeyboardButton("🔙 Назад", callback_data="luck")],
+    ]
+    await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
+
+
+async def _show_mines_bet_menu(update, context, player, mines_count):
+    """Второй экран: выбор ставки для уже выбранной интенсивности."""
+    query = update.callback_query
+    if not query:
+        return
+    preset = _mines_preset_for(mines_count)
     text = (
-        "💣 <b>МИНЫ</b>\n\n"
-        "Выбери ставку и начни игру.\n"
-        "Поле 5×5, спрятано 3 мины.\n"
-        "Открывай клетки, множитель растёт!\n"
-        "Можешь в любой момент забрать выигрыш.\n\n"
-        f"💰 Твой баланс: {player.balance} OAC"
+        f"💣 <b>МИНЫ</b> · {preset['emoji']} {preset['name']}\n\n"
+        f"Поле 5×5, спрятано {mines_count} "
+        f"{_plural_ru(mines_count, 'мина', 'мины', 'мин')}.\n"
+        f"Множитель честный: одинаковая ожидаемая отдача на каждом шаге.\n"
+        f"Забрать выигрыш можно в любой момент.\n\n"
+        f"💰 Баланс: {player.balance} OAC"
     )
-    keyboard = []
-    for bet in cfg["mines"]["bet_options"]:
-        keyboard.append([InlineKeyboardButton(f"{bet} OAC", callback_data=f"mines_bet_{bet}")])
+    bets = LUCK_CONFIG["mines"]["bet_options"]
+    keyboard, row = [], []
+    for bet in bets:
+        row.append(InlineKeyboardButton(f"{bet} OAC", callback_data=f"mines_bet_{mines_count}_{bet}"))
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    keyboard.append([InlineKeyboardButton("🎚 Другая интенсивность", callback_data="mines_preset_menu")])
     keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="luck")])
     await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
 
-async def _mines_start_game(update, context, uid, bet, ctx):
+
+async def _mines_start_game(update, context, uid, mines_count, bet, ctx):
     """Создаёт новую игру, списывает ставку и показывает поле."""
     query = update.callback_query
     if not query:
         return
-    # Проверка баланса
     player = await ctx.repo.get_by_id(uid)
+    if not player or not player.exists:
+        await query.answer("Профиль не найден.", show_alert=True)
+        return
     if player.balance < bet:
         await query.answer("Недостаточно OAC!", show_alert=True)
         return
@@ -6992,7 +7113,7 @@ async def _mines_start_game(update, context, uid, bet, ctx):
         return
 
     # Генерируем поле и мины
-    field, mines = _generate_mines_field()
+    field, mines = _generate_mines_field(mines_count)
     state = {
         "field": field,
         "mines": list(mines),  # для сериализации
@@ -7000,11 +7121,17 @@ async def _mines_start_game(update, context, uid, bet, ctx):
         "step": 0,
         "multiplier": 1.0,
         "status": "playing",
-        "created_at": time.time()
+        "created_at": time.time(),
+        # Захвачен на старте партии — рендер поля не должен ходить в БД за
+        # игроком на каждый клик ради одной цифры; сравнение «побит ли
+        # рекорд» и запись новой в players.mines_best_step происходят только
+        # один раз, на завершающем экране партии (см. _win/_cash/_record).
+        "best_step": player.mines_best_step or 0,
     }
     redis_key = f"mines_game:{uid}"
     await _mines_state_set(ctx, uid, state)
     await _mines_show_field(update, context, state, redis_key, uid, ctx)
+
 
 async def _mines_show_field(update, context, state, redis_key, uid, ctx):
     """Отображает текущее состояние поля."""
@@ -7012,84 +7139,141 @@ async def _mines_show_field(update, context, state, redis_key, uid, ctx):
     if not query:
         return
     field = state["field"]
-    # (множество мин здесь не нужно — поле рисуется по уже открытым клеткам)
     bet = state["bet"]
     step = state["step"]
     multiplier = state["multiplier"]
     status = state["status"]
-
-    # Строим визуальное поле
-    size = 5
-    lines = []
-    for r in range(size):
-        row_cells = []
-        for c in range(size):
-            val = field[r][c]
-            if val == 0:
-                row_cells.append("?")
-            elif val == 1:
-                row_cells.append("💎")
-            elif val == 2:
-                row_cells.append("💀")
-        lines.append("│ " + " │ ".join(row_cells) + " │")
-    field_str = "┌───┬───┬───┬───┬───┐\n" + "\n├───┼───┼───┼───┼───┤\n".join(lines) + "\n└───┴───┴───┴───┴───┘"
+    mines_count = len(state.get("mines") or [])
+    total_safe = MINES_TOTAL_CELLS - mines_count
+    preset = _mines_preset_for(mines_count)
+    best = state.get("best_step", 0)
+    size = MINES_GRID_SIZE
 
     # Было: `int(bet * multiplier) if status == "playing" else 0` — то есть на
     # экранах «ПОБЕДА» и «Ты забрал выигрыш» печаталось «Выигрыш: 0 OAC», хотя
-    # баланс начислялся верно. Пик механики обнулялся на витрине, а экран
-    # проигрыша при этом честно показывал «ты мог забрать N» — проигрыш звучал
-    # весомее победы. Ноль уместен только там, где ставка действительно сгорела.
+    # баланс начислялся верно. Ноль уместен только там, где ставка реально сгорела.
     win = 0 if status == "lost" else int(bet * multiplier)
 
-    # Было parse_mode='Markdown' (легаси) с "**жирным**" — не синтаксис
-    # легаси-Markdown Telegram вообще (только одинарные звёздочки); см. тот
-    # же фикс в _show_mines_bet_menu. Тройные бэктики (код-блок для ASCII-поля)
-    # заменены на <pre> — прямой эквивалент в HTML, без изменения того, что
-    # видит игрок (моноширинный блок никуда не делся).
-    text = (
-        f"💣 <b>МИНЫ</b>\n\n"
-        f"💰 Ставка: {bet} OAC\n"
-        f"🏆 Множитель: x{multiplier:.2f}\n"
-        f"📊 Прогресс: {step}/22 клеток\n"
-    )
-
-    if status == "playing":
-        text += f"💰 Возможный выигрыш: {win} OAC\n\n"
-        text += f"<pre>{field_str}</pre>\n"
-        # Клавиатура с клетками
-        keyboard = []
+    # Сетка — единственный источник правды: эмодзи прямо на кнопках (Bot API
+    # с 2022 умеет эмодзи-текст на inline-кнопках), без отдельного ASCII-поля
+    # текстом рядом. Раньше это были два независимых изображения одного и
+    # того же состояния — лишняя когнитивная нагрузка на сверку (Sweller,
+    # 1988) без единой практической пользы.
+    def _build_grid():
+        rows = []
         for r in range(size):
             row_btns = []
             for c in range(size):
-                if field[r][c] == 0:
+                val = field[r][c]
+                if val == 0:
                     row_btns.append(InlineKeyboardButton("▪️", callback_data=f"mines_open_{r}_{c}"))
+                elif val == 1:
+                    row_btns.append(InlineKeyboardButton("💎", callback_data="noop"))
                 else:
-                    row_btns.append(InlineKeyboardButton("  ", callback_data="noop"))
-            keyboard.append(row_btns)
-        keyboard.append([InlineKeyboardButton(f"🏆 Забрать {win} OAC", callback_data="mines_cashout")])
+                    row_btns.append(InlineKeyboardButton("💀", callback_data="noop"))
+            rows.append(row_btns)
+        return rows
+
+    if status == "playing":
+        risk_pct = _mines_next_risk_pct(mines_count, step)
+        filled = min(10, risk_pct // 10)
+        risk_bar = "▓" * filled + "░" * (10 - filled)
+        record_line = ""
+        if step > 0:
+            if step > best:
+                record_line = "\n🏅 <b>Новый рекорд прямо сейчас!</b>"
+            elif best:
+                record_line = f"\n🏅 Рекорд: {best} · до него {best - step} клет."
+        text = (
+            f"💣 <b>МИНЫ</b> · {preset['emoji']} {preset['name']}\n\n"
+            f"💰 Ставка: {bet} OAC\n"
+            f"📊 Открыто: {step} / {total_safe}\n"
+            f"🏆 Множитель: ×{multiplier:.2f}\n"
+            f"💎 Заберёшь сейчас: {win} OAC\n\n"
+            f"⚠️ Шанс взрыва на след. шаге: {risk_pct}%\n"
+            f"{risk_bar} риск"
+            f"{record_line}"
+        )
+        keyboard = _build_grid()
+        keyboard.append([_btn(f"🏆 Забрать {win} OAC", callback_data="mines_cashout", style="success")])
         keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="luck")])
+
     elif status == "won":
-        text += f"🎉 <b>ПОБЕДА!</b> Ты открыл все клетки!\n"
-        text += f"💰 Выигрыш: {win} OAC\n\n<pre>{field_str}</pre>"
-        keyboard = [[InlineKeyboardButton("💣 Новая игра", callback_data="mines_bet_50")],
-                    [InlineKeyboardButton("🔙 Назад", callback_data="luck")]]
+        text = (
+            f"💣 <b>МИНЫ</b> · {preset['emoji']} {preset['name']}\n\n"
+            f"🎉 <b>ПОБЕДА! Поле зачищено полностью!</b>\n"
+            f"💰 Ставка: {bet} OAC · ×{multiplier:.2f}\n"
+            f"💰 Выигрыш: <b>{win} OAC</b>\n\n"
+            f"🏅 Новый рекорд глубины: {step} клеток!"
+        )
+        keyboard = [
+            [_btn(f"🔥 Ещё раз · {bet} OAC", callback_data=f"mines_bet_{mines_count}_{bet}", style="primary")],
+            [InlineKeyboardButton("🎚 Другая интенсивность", callback_data="mines_preset_menu")],
+            [InlineKeyboardButton("🔙 Назад", callback_data="luck")],
+        ]
+
     elif status == "lost":
-        text += f"💥 <b>ВЗРЫВ!</b> Ты попал на мину!\n"
+        # Раскрываем ВСЕ мины на проигрыше — честное закрытие партии: игрок
+        # видит расклад целиком, а не только точку смерти.
+        for (mr, mc) in _mines_positions(state):
+            if field[mr][mc] == 0:
+                field[mr][mc] = 2
+
         if step >= 1:
             almost = int(bet * multiplier)
-            text += f"😱 Так близко! Открыто {step}/22 — ты мог забрать {almost} OAC (x{multiplier:.2f}).\n"
-            text += f"💰 Ставка сгорела. Ещё один шаг — и куш был бы твой.\n\n<pre>{field_str}</pre>"
+            next_mult = _calc_multiplier(mines_count, step + 1)
+            next_win = int(bet * next_mult) if step + 1 <= total_safe else None
+            near_miss = (
+                f"😱 <b>ТАК БЛИЗКО!</b> 😱\n\n"
+                f"💎 У тебя на руках было ×{multiplier:.2f} → <b>{almost} OAC</b>\n"
+            )
+            if next_win is not None:
+                near_miss += f"🔥 Ещё один шаг — и ×{next_mult:.2f} → <b>{next_win} OAC</b>\n"
+            near_miss += "💣 Мина ждала ровно там. Ставка сгорела."
         else:
-            text += f"💰 Ты потерял ставку.\n\n<pre>{field_str}</pre>"
-        keyboard = [[InlineKeyboardButton("💣 Попробовать снова", callback_data="mines_bet_50")],
-                    [InlineKeyboardButton("🔙 Назад", callback_data="luck")]]
+            # Практически недостижимо (первый клик партии гарантированно
+            # безопасен, см. _mines_open_cell) — оставлено как честный фолбэк.
+            near_miss = "💰 Ты потерял ставку."
+
+        if best > step:
+            gap = best - step
+            pct = int(step / best * 100) if best else 0
+            bar = "▓" * (pct // 10) + "░" * (10 - pct // 10)
+            record_line = f"\n\n🏅 Рекорд: {best} клеток · сейчас {step}\n{bar} до рекорда — {gap} клет."
+        else:
+            record_line = f"\n\n🏅 <b>Новый рекорд! Было {best}, стало {step}</b>"
+
+        text = f"💥💥💥 <b>ВЗРЫВ</b> 💥💥💥\n\n{near_miss}{record_line}"
+        keyboard = [
+            [_btn(f"🔥 Ещё раз · {bet} OAC", callback_data=f"mines_bet_{mines_count}_{bet}", style="primary")],
+            [InlineKeyboardButton("🎚 Другая интенсивность", callback_data="mines_preset_menu")],
+            [InlineKeyboardButton("🔙 Назад", callback_data="luck")],
+        ]
+
     else:  # cashed_out
-        text += f"✅ <b>Ты забрал выигрыш!</b>\n"
-        text += f"💰 Выигрыш: {win} OAC\n\n<pre>{field_str}</pre>"
-        keyboard = [[InlineKeyboardButton("💣 Новая игра", callback_data="mines_bet_50")],
-                    [InlineKeyboardButton("🔙 Назад", callback_data="luck")]]
+        if step > best:
+            record_line = f"🏅 <b>Новый рекорд! Было {best} → стало {step}</b>"
+        elif best:
+            gap = best - step
+            pct = int(step / best * 100) if best else 0
+            bar = "▓" * (pct // 10) + "░" * (10 - pct // 10)
+            record_line = f"🏅 Рекорд остаётся {best}\n{bar} до него — {gap} клет."
+        else:
+            record_line = ""
+        text = (
+            f"✅ <b>ЗАБРАЛ</b>\n\n"
+            f"💰 <b>+{win} OAC</b> · {step} "
+            f"{_plural_ru(step, 'клетка', 'клетки', 'клеток')} · ×{multiplier:.2f}\n\n"
+            f"{record_line}"
+        )
+        keyboard = [
+            [_btn(f"🔥 Ещё раз · {bet} OAC", callback_data=f"mines_bet_{mines_count}_{bet}", style="primary")],
+            [InlineKeyboardButton("🎚 Другая интенсивность", callback_data="mines_preset_menu")],
+            [InlineKeyboardButton("🔙 Назад", callback_data="luck")],
+        ]
 
     await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
+
 
 async def _mines_open_cell(update, context, state, redis_key, uid, ctx):
     """Открывает клетку, проверяет мину, обновляет состояние."""
@@ -7108,7 +7292,39 @@ async def _mines_open_cell(update, context, state, redis_key, uid, ctx):
         await query.answer("Эта клетка уже открыта", show_alert=True)
         return
 
+    mines_count = len(state.get("mines") or [])
     mines = _mines_positions(state)
+
+    # Гарантия первого клика: первый тап в партии никогда не мина (конвенция
+    # Сапёра). Это не подкрутка последующих шансов — мина переносится на
+    # случайную ДРУГУЮ ещё закрытую клетку ровно один раз, только пока не
+    # открыто ни одной клетки; дальше игра идёт по тем же честным шансам без
+    # исключений. Устраняет худший возможный первый опыт с новой механикой
+    # (мгновенная потеря до единого сигнала обратной связи) — эффект
+    # первичности делает такой опыт непропорционально вредным для отношения
+    # к механике в целом (Asch, 1946).
+    if state["step"] == 0 and (row, col) in mines:
+        candidates = [(r, c) for r in range(MINES_GRID_SIZE) for c in range(MINES_GRID_SIZE)
+                     if (r, c) != (row, col) and (r, c) not in mines]
+        mines.discard((row, col))
+        mines.add(random.choice(candidates))
+        state["mines"] = list(mines)
+
+    # Пауза-предвкушение — только в зоне настоящей неопределённости (шанс
+    # дожить в диапазоне 35–65%, где дофаминовый ответ на риск максимален,
+    # см. MINES_TENSION_LOW/HIGH выше). На безопасных и на почти безнадёжных
+    # клетках тормозить незачем — там и так всё ясно, задержка была бы
+    # пустым раздражением, не саспенсом (тот же принцип уже применён к
+    # suspense-ревилу джекпота в do_smoke — там тоже только на редком пике).
+    remaining_before = MINES_TOTAL_CELLS - state["step"]
+    survive_chance = (1 - mines_count / remaining_before) if remaining_before > 0 else 0
+    if MINES_TENSION_LOW <= survive_chance <= MINES_TENSION_HIGH:
+        try:
+            await query.message.edit_text(
+                "💣 <b>МИНЫ</b>\n\n🕳️ <i>Тянешься к клетке…</i>", parse_mode='HTML')
+            await asyncio.sleep(MINES_SUSPENSE_DELAY)
+        except Exception:
+            pass
 
     # Проверяем мину
     if (row, col) in mines:
@@ -7117,15 +7333,24 @@ async def _mines_open_cell(update, context, state, redis_key, uid, ctx):
         # Ставка уже списана, ничего не возвращаем
         await _mines_state_set(ctx, uid, state)
         await _mines_show_field(update, context, state, redis_key, uid, ctx)
+        if state["step"] > (state.get("best_step") or 0):
+            async def _record(p, conn):
+                if state["step"] > (p.mines_best_step or 0):
+                    p.mines_best_step = state["step"]
+                return p.mines_best_step
+            try:
+                await ctx.repo.atomic_update(uid, _record)
+            except Exception:
+                logger.exception("Не удалось обновить mines_best_step для %d", uid)
         return
 
     # Безопасная клетка
     field[row][col] = 1
     state["step"] += 1
-    state["multiplier"] = _calc_multiplier(state["step"])
+    state["multiplier"] = _calc_multiplier(mines_count, state["step"])
 
-    # Проверяем победу (все 22 клетки открыты)
-    if state["step"] == 22:
+    total_safe = MINES_TOTAL_CELLS - mines_count
+    if state["step"] == total_safe:
         state["status"] = "won"
         bet = state["bet"]
         win = int(bet * state["multiplier"])
@@ -7145,6 +7370,8 @@ async def _mines_open_cell(update, context, state, redis_key, uid, ctx):
             # слэк (total_earned − balance) на этот момент уже ≥ bet — просадки
             # ниже баланса не будет, независимый пол в repository.save() не сработает.
             p.total_earned = max(0, (p.total_earned or 0) - bet)
+            if state["step"] > (p.mines_best_step or 0):
+                p.mines_best_step = state["step"]
             return p.balance
         try:
             await ctx.repo.atomic_update(uid, _win)
@@ -7159,6 +7386,7 @@ async def _mines_open_cell(update, context, state, redis_key, uid, ctx):
     # Игра продолжается
     await _mines_state_set(ctx, uid, state)
     await _mines_show_field(update, context, state, redis_key, uid, ctx)
+
 
 async def _mines_cashout(update, context, state, redis_key, uid, ctx):
     """Забирает текущий выигрыш."""
@@ -7188,6 +7416,8 @@ async def _mines_cashout(update, context, state, redis_key, uid, ctx):
         # См. подробный комментарий в _win (та же правка, та же причина C10):
         # засчитываем в total_earned net-прибыль (win − bet), а не всю выплату.
         p.total_earned = max(0, (p.total_earned or 0) - bet)
+        if state["step"] > (p.mines_best_step or 0):
+            p.mines_best_step = state["step"]
         return p.balance
     try:
         await ctx.repo.atomic_update(uid, _cash)
@@ -7237,22 +7467,50 @@ async def _mines_cashout_wrapper(update, context):
     await _mines_cashout(update, context, state, redis_key, uid, ctx)
 
 
-async def _mines_bet_wrapper(update, context):
-    """Клик по кнопке ставки в минах: списывает ставку и стартует игру.
-
-    Раньше callback 'mines_bet_<n>' не был зарегистрирован ни в одном реестре,
-    поэтому выбор ставки выдавал «Неизвестная команда» и мины были непроходимы.
-    """
+async def _mines_preset_wrapper(update, context):
+    """Клик по кнопке интенсивности: показывает выбор ставки для неё."""
     query = update.callback_query
     await query.answer()
     ctx = context.bot_data.get("ctx")
     uid = query.from_user.id
     try:
-        bet = int(query.data.split("_")[-1])
+        mines_count = int(query.data.split("_")[-1])
     except (ValueError, AttributeError):
+        await query.answer("Некорректная интенсивность", show_alert=True)
+        return
+    player = await ctx.repo.get_by_id(uid)
+    if not player or not player.exists:
+        await query.answer("Профиль не найден.", show_alert=True)
+        return
+    await _show_mines_bet_menu(update, context, player, mines_count)
+
+
+async def _mines_preset_menu_wrapper(update, context):
+    """Кнопка «Другая интенсивность»: возврат к выбору из четырёх пресетов."""
+    query = update.callback_query
+    await query.answer()
+    ctx = context.bot_data.get("ctx")
+    uid = query.from_user.id
+    player = await ctx.repo.get_by_id(uid)
+    if not player or not player.exists:
+        await query.answer("Профиль не найден.", show_alert=True)
+        return
+    await _show_mines_preset_menu(update, context, player)
+
+
+async def _mines_bet_wrapper(update, context):
+    """Клик по кнопке ставки в минах: списывает ставку и стартует игру."""
+    query = update.callback_query
+    await query.answer()
+    ctx = context.bot_data.get("ctx")
+    uid = query.from_user.id
+    try:
+        parts = query.data.split("_")
+        mines_count, bet = int(parts[-2]), int(parts[-1])
+    except (ValueError, AttributeError, IndexError):
         await query.answer("Некорректная ставка", show_alert=True)
         return
-    await _mines_start_game(update, context, uid, bet, ctx)
+    await _mines_start_game(update, context, uid, mines_count, bet, ctx)
 
 # ── Алхимия (начало) ────────────────────────────────────────
 async def _process_alchemy_start(update, context, player, cfg):
@@ -10897,6 +11155,7 @@ EXACT_HANDLERS: Dict[str, Callable] = {
     "luck_wheel": luck_wheel_handler,
     "luck_mines": luck_mines_handler,
     "mines_cashout": _mines_cashout_wrapper,
+    "mines_preset_menu": _mines_preset_menu_wrapper,
     "alchemy_start": alchemy_start_handler,
     "alchemy_confirm": alchemy_confirm_handler,
 }
@@ -10917,6 +11176,7 @@ PREFIX_HANDLERS: Dict[str, Callable] = {
     "quest_": handle_quest_action,
     "mines_open_": _mines_open_cell_wrapper,
     "mines_bet_": _mines_bet_wrapper,
+    "mines_preset_": _mines_preset_wrapper,
     "shop_buy_": shop_buy_callback,
 }
 

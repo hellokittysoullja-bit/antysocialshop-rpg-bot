@@ -55,6 +55,10 @@ class Player(BaseModel):
     # Поле на игроке пишется в ТОЙ ЖЕ транзакции, что баланс и награда за
     # забег, — не отдельным round-trip после, как было с Redis.
     lab_best_oac: int = 0
+    # Личный рекорд глубины в «Минах» (сколько клеток подряд открыто в самой
+    # успешной партии) — тот же принцип, что у lab_best_oac: пишется в ТОЙ ЖЕ
+    # транзакции, что баланс за партию, не отдельным round-trip.
+    mines_best_step: int = 0
     alchemy_count: int = 0
     last_lab_attempt: Optional[datetime] = None
     donated: int = 0

@@ -496,7 +496,7 @@ async def test_mines_survive_redis_roundtrip():
     ctx = make_ctx(p, redis=FakeRedis(), pool=FakeMinesPool())
     c = FakeContext(ctx)
 
-    await bot._mines_start_game(FakeUpdate("mines_bet_100", uid=3), c, 3, 100, ctx)
+    await bot._mines_start_game(FakeUpdate("mines_bet_3_100", uid=3), c, 3, 3, 100, ctx)
     state = await bot._mines_state_get(ctx, 3)
     check(state is not None and isinstance(state["mines"][0], list),
           "состояние партии прошло через JSON (координаты стали списками)")
@@ -1677,7 +1677,11 @@ async def test_mines_screens_use_html_not_broken_markdown():
     легаси-режим Telegram понимает только ОДИНАРНЫЕ звёздочки для жирного;
     "**двойные**", которыми был размечен весь экран, вообще не его синтаксис
     (это MarkdownV2/CommonMark) — либо съедались без жирности, либо ломали
-    рендер. Код-блоки на тройных бэктиках заменены на HTML <pre>."""
+    рендер. Позже код-блоки на тройных бэктиках были заменены на HTML <pre>
+    для ASCII-поля; сейчас ASCII-поле убрано вовсе (эмодзи прямо на кнопках
+    сетки, единый источник правды вместо двух — см. _mines_show_field), так
+    что <pre> здесь больше не ожидается — важен сам факт отсутствия сломанного
+    Markdown, а не конкретная HTML-обёртка поля."""
     p = Player(user_id=1, exists=True, balance=1000, total_earned=1000)
     ctx = make_ctx(p, redis=FakeRedis(), pool=FakeMinesPool())
 
@@ -1695,8 +1699,7 @@ async def test_mines_screens_use_html_not_broken_markdown():
     await bot._mines_cashout_wrapper(upd2, FakeContext(ctx))
     text2, kw2 = upd2.callback_query.message.edit_calls[-1]
     check(kw2.get("parse_mode") == "HTML", "экран результата Мин размечен HTML, не Markdown")
-    check("<pre>" in text2 and "```" not in text2,
-          "игровое поле — HTML <pre>, не markdown-код-блок")
+    check("```" not in text2, "на экране результата нет markdown-код-блоков")
     check("**" not in text2, "на экране результата не осталось сломанных двойных звёздочек")
 
 
@@ -1727,8 +1730,8 @@ async def test_mines_is_reachable_from_quest_and_marks_progress():
     # Сам запуск партии (реальный выбор ставки) отмечает шаг квеста — тот же
     # принцип, что у входа в Лабиринт (_mark_lab): считается знакомство с
     # механикой, а не конкретный исход партии.
-    upd2 = FakeUpdate("mines_bet_50", uid=1)
-    await bot._mines_start_game(upd2, FakeContext(ctx), 1, 50, ctx)
+    upd2 = FakeUpdate("mines_bet_3_50", uid=1)
+    await bot._mines_start_game(upd2, FakeContext(ctx), 1, 3, 50, ctx)
     check(p.daily_progress.get("mines") is True,
           "старт партии Мин отмечает задание квеста")
 
