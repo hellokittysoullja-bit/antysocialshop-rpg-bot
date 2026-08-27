@@ -174,7 +174,7 @@ def game_handler(func):
                 try:
                     if update.effective_message:
                         await update.effective_message.reply_text(
-                            "⚠️ Ваш профиль не обнаружен. Пожалуйста, нажмите /start для создания."
+                            "⚠️ Твой профиль не обнаружен. Нажми /start, чтобы создать его."
                         )
                 except Exception:
                     pass
@@ -2508,8 +2508,12 @@ async def world_hub(update, context, ctx):
     kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="menu")])
 
     fogged = sum(1 for row in kb_rows for btn in row if "туман" in btn.text)
+    # Согласуется и существительное, и глагол: было «1 локация ещё скрыты» —
+    # _plural_ru склонял только существительное, а «скрыты» стояло намертво во
+    # множественном числе (а туманная локация чаще всего ровно одна).
     map_note = (f"<i>{fogged} {_plural_ru(fogged, 'локация', 'локации', 'локаций')} ещё "
-                f"скрыты туманом Искажения — путь к ним открывается с ростом.</i>"
+                f"{_plural_ru(fogged, 'скрыта', 'скрыты', 'скрыто')} "
+                f"туманом Искажения — путь к ним открывается с ростом.</i>"
                 if fogged else "<i>Весь Мир открыт — ты повидал каждый уголок Искажения.</i>")
 
     kb = InlineKeyboardMarkup(kb_rows)
@@ -3284,7 +3288,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             # Возврат после паузы: оживляем МЁРТВЫЙ welcome-back момент. Флаг
             # return_after_pause раньше только читался в build_main_menu, но нигде
-            # не выставлялся — фича «🎁 Пока вас не было…» не срабатывала никогда.
+            # не выставлялся — фича «🎁 Пока тебя не было…» не срабатывала никогда.
             # Порог ≥2 дней: дневных игроков (gap=1, у них штатная daily-карточка)
             # не трогаем; почти-ушедший лапс-игрок получает тёплый win-back.
             # last_login_date берём из уже загруженного player — ДО фонового
@@ -6614,7 +6618,9 @@ async def guild_info_callback(update, context):
     # Твой статус в гильдии
     if guild:
         g_emoji = "🕯️" if guild == "BLACK" else "⚜️"
-        g_name = "Тёмная" if guild == "BLACK" else "Светлая"
+        # Предложный падеж: «состоишь в Тёмной Гильдии», а не «в Тёмная Гильдии» —
+        # раньше сюда подставлялась именительная форма из заголовков списка выше.
+        g_name = "Тёмной" if guild == "BLACK" else "Светлой"
         text += f"✨ Ты состоишь в {g_emoji} <b>{g_name} Гильдии</b>.\n"
     else:
         text += "🔮 <i>Ты пока не в Гильдии. Выбери сторону!</i>\n"
@@ -6633,9 +6639,15 @@ async def guild_info_callback(update, context):
                     diff = timedelta(hours=cooldown_hours) - (datetime.now() - lt)
                     hrs, rem = divmod(int(diff.total_seconds()), 3600)
                     wait = f"{hrs} ч {rem // 60} мин" if hrs else f"{rem // 60} мин"
-                    return InlineKeyboardButton(f"{base_label} ({wait})", callback_data=cb)
-            return InlineKeyboardButton(base_label, callback_data=cb)
+                    # «›» и на кулдауне: тап всё равно ведёт на экран (там будет
+                    # видно, сколько ждать), поведение кнопки от таймера не меняется.
+                    return InlineKeyboardButton(f"{base_label} ({wait}) ›", callback_data=cb)
+            return InlineKeyboardButton(f"{base_label} ›", callback_data=cb)
 
+        # «›» здесь обязательна ровно по той же причине, что и на главном экране:
+        # это ОДНА И ТА ЖЕ кнопка, ведущая на один и тот же экран выбора профиля
+        # риска. Разные подписи у одного пункта в двух местах — это два разных
+        # обещания об одном действии (Nielsen, consistency & standards).
         if guild == "BLACK":
             kb_rows.append([_action_label("🕯️ Ритуал", player.last_ritual,
                             GAME_CONFIG["ritual_cooldown_hours"], "ritual")])
@@ -7062,7 +7074,11 @@ async def luck_callback(update, context, action=None):
         "<i>🌀 «Испытай свою удачу и выиграй OAC 🍬 и редкие эксклюзивные вещи!» 🪽</i>\n\n"
         "🎡 <b>Крутить Колесо</b> — ежедневный выигрыш 🎉\n"
         "🎰 <b>Мины</b> — рискни ставкой ради множителя 💣\n"
-        "⚗️ <b>Алхимия</b> — древнее искусство, магия для достойных 🔮"
+        # 🔮, а не ⚗️: этой же строкой ниже стоит КНОПКА «🔮 Алхимия», и один
+        # пункт на одном экране был помечен двумя разными значками сразу
+        # (⚗️ в описании, 🔮 на кнопке) — глаз ищет соответствие описания кнопке
+        # по значку. Трейлинг-🔮 убран, чтобы значок не двоился уже внутри строки.
+        "🔮 <b>Алхимия</b> — древнее искусство, магия для достойных"
     )
     kb_rows = _build_luck_keyboard(now, player, cfg, wheel_ok, mines_ok, alchemy_ok)
     kb = InlineKeyboardMarkup(kb_rows)
@@ -8240,7 +8256,7 @@ async def show_lab_room(update, context):
     if curse > 0:
         text += f"\n🌑 <b>Порча:</b> риск повышен (ещё {curse} комн.)"
     if hp < 30:
-        text += "\n⚠️ <b>Вы тяжело ранены! Действия опаснее</b>"
+        text += "\n⚠️ <b>Ты тяжело ранен! Действия опаснее</b>"
 
     # кнопки
     kb_rows = []
@@ -8889,7 +8905,7 @@ async def handle_gift_username(update: Update, context: ContextTypes.DEFAULT_TYP
         context.user_data.pop('gifting_blunt_id', None)
         return
     if not any(it.get("id") == blunt_id for it in (player.inventory or [])):
-        await update.message.reply_text("❌ Блант уже не в вашем инвентаре.")
+        await update.message.reply_text("❌ Бланта уже нет в твоём инвентаре.")
         context.user_data.pop('gifting_blunt_id', None)
         return
 
@@ -8919,7 +8935,7 @@ async def handle_gift_username(update: Update, context: ContextTypes.DEFAULT_TYP
             queued_status, queued_item = await ctx.repo.atomic_enqueue_named_gift(
                 uid, blunt_id, target_user_id=target_id)
             if queued_status == "not_owned":
-                await update.message.reply_text("❌ Блант уже не в вашем инвентаре.", reply_markup=kb)
+                await update.message.reply_text("❌ Бланта уже нет в твоём инвентаре.", reply_markup=kb)
                 context.user_data.pop('gifting_blunt_id', None)
                 return
             if queued_status != "ok":
@@ -8931,7 +8947,7 @@ async def handle_gift_username(update: Update, context: ContextTypes.DEFAULT_TYP
                 f"будет ждать его здесь и придёт автоматически, как только он зайдёт впервые.",
                 reply_markup=kb)
         elif status == "not_owned":
-            await update.message.reply_text("❌ Блант уже не в вашем инвентаре.", reply_markup=kb)
+            await update.message.reply_text("❌ Бланта уже нет в твоём инвентаре.", reply_markup=kb)
         elif status == "ok":
             await update.message.reply_text(
                 f"✅ Блант «{item.get('name')}» подарен игроку ID {target_id}!", reply_markup=kb)
@@ -8962,7 +8978,7 @@ async def handle_gift_username(update: Update, context: ContextTypes.DEFAULT_TYP
             return
         status, item = await _transfer_named_item(ctx, uid, target_id, blunt_id)
         if status == "not_owned":
-            await update.message.reply_text("❌ Блант уже не в вашем инвентаре.", reply_markup=kb)
+            await update.message.reply_text("❌ Бланта уже нет в твоём инвентаре.", reply_markup=kb)
         elif status == "ok":
             await update.message.reply_text(
                 f"✅ Блант «{item.get('name')}» подарен @{raw}!", reply_markup=kb)
@@ -8977,7 +8993,7 @@ async def handle_gift_username(update: Update, context: ContextTypes.DEFAULT_TYP
     queued_status, queued_item = await ctx.repo.atomic_enqueue_named_gift(
         uid, blunt_id, username_lower=raw.lower())
     if queued_status == "not_owned":
-        await update.message.reply_text("❌ Блант уже не в вашем инвентаре.", reply_markup=kb)
+        await update.message.reply_text("❌ Бланта уже нет в твоём инвентаре.", reply_markup=kb)
         context.user_data.pop('gifting_blunt_id', None)
         return
     if queued_status != "ok":
@@ -9828,9 +9844,9 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
     if _has_pause and _has_streak:
         _fz = player.streak_freezes or 0
         _fz_note = f" · ❄️{_fz}" if _fz > 0 else ""
-        lines.append(f"🎁 Пока вас не было: готова награда · 🔥 серия {_streak} дн.{_fz_note} держится!")
+        lines.append(f"🎁 Пока тебя не было: готова награда · 🔥 серия {_streak} дн.{_fz_note} держится!")
     elif _has_pause:
-        lines.append("🎁 Пока вас не было: накопились задания и <b>готова награда</b>")
+        lines.append("🎁 Пока тебя не было: накопились задания и <b>готова награда</b>")
     elif _has_streak:
         _fz = player.streak_freezes or 0
         _fz_note = f" · ❄️{_fz}" if _fz > 0 else ""
@@ -10226,7 +10242,7 @@ async def progress_hub_handler(update, context, ctx):
             comparison_lines.append(f"⬆️ <b>Выше вас: {name}</b> (нужно {gap} OAC для обгона)")
 
         if not comparison_lines:
-            comparison_lines.append("🏅 Вы единственный в рейтинге!")
+            comparison_lines.append("🏅 Ты пока единственный в рейтинге!")
 
         if in_top10:
             comparison_lines.append(f"🎯 <b>Позиция в топе: #{position}</b>")

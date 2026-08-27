@@ -217,6 +217,66 @@ def check_whispers_never_point_at_locked_content():
     asyncio.run(_run())
 
 
+def check_same_destination_same_label():
+    """Одна и та же кнопка называется одинаково везде, где встречается.
+
+    Ритуал/Исповедь живут и в главном меню, и на экране Гильдии, и ведут на
+    один и тот же экран выбора профиля риска. Когда «›» добавили только в
+    меню, один пункт стал давать два разных обещания в двух местах.
+    Кулдаун-суффикс «(3 ч 20 мин)» — легитимная разница состояния, а не имени,
+    поэтому сравниваем базовую часть подписи.
+    """
+    async def _run():
+        now = datetime.now()
+        for guild, cb in (("BLACK", "ritual"), ("WHITE", "repent")):
+            kw = dict(exists=True, balance=6000, total_earned=9000,
+                      onboarding_step=-1, guild=guild, blunts=4,
+                      last_farm=now - timedelta(hours=9), passive_collected=now,
+                      passive_level=3)
+            menu = [b for b in await _main_menu_buttons(kw) if b.callback_data == cb]
+            p = Player(user_id=1, **kw)
+            ctx = t.make_ctx(p)
+            u, c = t.FakeUpdate("guild_info", uid=1), t.FakeContext(ctx)
+            await bot.guild_info_callback(u, c)
+            _txt, mk = u.callback_query.message.edit_calls[-1]
+            gi = [b for row in mk["reply_markup"].inline_keyboard for b in row
+                  if b.callback_data == cb]
+            assert menu and gi, f"{cb}: кнопка найдена не на обоих экранах"
+
+            def base(x):           # отрезаем суффикс состояния «(N ч M мин)»
+                return x.split("(")[0].strip().rstrip("›").strip()
+            assert base(menu[0].text) == base(gi[0].text), (
+                f"{cb}: в меню {menu[0].text!r}, в Гильдии {gi[0].text!r}")
+            assert gi[0].text.rstrip().endswith("›"), (
+                f"{cb} на экране Гильдии открывает экран, но подпись без «›»: "
+                f"{gi[0].text!r}")
+    asyncio.run(_run())
+
+
+def check_player_addressed_informally_everywhere():
+    """Игра обращается к игроку на «ты» — без срывов в официальное «Вы».
+
+    Игра целиком построена на «ты» («Странник», «твой путь»), но в десяти
+    местах — включая главное меню («Пока вас не было») и пик Лабиринта
+    («Вы тяжело ранены») — обращение срывалось на официальное. Смена
+    регистра посреди опыта рвёт то самое второе лицо, на котором держится
+    отождествление игрока с персонажем.
+
+    «вы оба» (игрок + приглашённый друг) — законное множественное, не
+    обращение, поэтому исключено явно.
+    """
+    import re
+    src = open(os.path.join(ROOT, "bot.py"), encoding="utf-8").read()
+    # [^"\n]* — без переводов строки: иначе «строка» склеивается через несколько
+    # строк кода и в неё попадают комментарии, которые игроку не показываются
+    # (ровно так этот тест сначала и упал — на комментарии про «Пока вас не было»).
+    formal = re.compile(r'"[^"\n]*(?:\bВы\b|\bВас\b|\bВаш|\bвашем\b|\bвашу\b|\bвашего\b'
+                        r'|\bвас не было\b)[^"\n]*"')
+    hits = [m.group(0) for m in formal.finditer(src) if "вы оба" not in m.group(0)]
+    assert not hits, ("официальное обращение вернулось в текст игры "
+                      f"({len(hits)} шт.): {hits[:5]}")
+
+
 def check_rank_promises_match_real_gates():
     """Полярная звезда не обещает того, что уже доступно бесплатно.
 
@@ -258,6 +318,10 @@ def main():
     passed.append("кнопка урожая реально собирает урожай одним тапом")
     check_whispers_never_point_at_locked_content()
     passed.append("шёпот не зовёт в закрытый контент и не повторяется подряд")
+    check_same_destination_same_label()
+    passed.append("одна кнопка называется одинаково на всех экранах")
+    check_player_addressed_informally_everywhere()
+    passed.append("обращение к игроку везде на «ты», без срывов в «Вы»")
     check_rank_promises_match_real_gates()
     passed.append("обещания рангов совпадают с реальными гейтами")
     for name in passed:
