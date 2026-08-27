@@ -154,7 +154,7 @@ def game_handler(func):
         if (needs_ctx or needs_player) and not ctx:
             try:
                 if update.effective_message:
-                    await update.effective_message.reply_text("⚠️ Бот инициализируется, попробуйте позже.")
+                    await update.effective_message.reply_text("⚠️ Бот инициализируется, попробуй позже.")
             except Exception:
                 pass
             return
@@ -299,7 +299,7 @@ def _create_wrapper(func, show_alert_on_error):
             logger.error("AppContext not found in bot_data")
             # 🔥 АБСОЛЮТНАЯ СИММЕТРИЯ с game_handler – игрок всегда видит ответ
             if query:
-                await query.answer("⚠️ Бот инициализируется, попробуйте позже.", show_alert=True)
+                await query.answer("⚠️ Бот инициализируется, попробуй позже.", show_alert=True)
             return
 
         try:
@@ -3235,7 +3235,7 @@ async def _notify_referral_pending(context, creator_id, new_username=None):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ctx = context.bot_data.get("ctx")
     if not ctx:
-        await update.effective_message.reply_text("⚠️ Бот инициализируется, попробуйте позже.")
+        await update.effective_message.reply_text("⚠️ Бот инициализируется, попробуй позже.")
         return
     try:
         user, msg = get_user_and_msg(update)
@@ -5287,7 +5287,7 @@ async def ritual_callback(update, context):
             pass
     ctx = context.bot_data.get("ctx")
     if not ctx:
-        await update.effective_message.reply_text("⚠️ Бот инициализируется, попробуйте позже.")
+        await update.effective_message.reply_text("⚠️ Бот инициализируется, попробуй позже.")
         return
 
     user, msg = get_user_and_msg(update)
@@ -5654,7 +5654,7 @@ async def collect_callback(update, context):
     """Вход в Плантацию (эволюция старого «кустика»/collect)."""
     ctx = context.bot_data.get("ctx")
     if not ctx:
-        await update.effective_message.reply_text("⚠️ Бот инициализируется, попробуйте позже.")
+        await update.effective_message.reply_text("⚠️ Бот инициализируется, попробуй позже.")
         return
     user, msg = get_user_and_msg(update)
     player = await ctx.repo.get_by_id(user.id)
@@ -6286,7 +6286,7 @@ async def my_blunts_callback(update, context, ctx, player, page=0):
 async def achievements_callback(update, context, page=0):
     ctx = context.bot_data.get("ctx")
     if not ctx:
-        await update.callback_query.answer("⚠️ Бот инициализируется, попробуйте позже.")
+        await update.callback_query.answer("⚠️ Бот инициализируется, попробуй позже.")
         return
 
     query = update.callback_query
@@ -6393,7 +6393,20 @@ async def top_callback(update, context, ctx, player):
     top = [dict(r) for r in rows]
 
     if not top:
-        await edit_or_reply(update, context, "🏆 Топ-10 пока пуст.")
+        # Раньше эта ветка отдавала голый текст БЕЗ КЛАВИАТУРЫ — единственный
+        # настоящий тупик в игре: «🏅 Лидеры ›» стоит на главном экране, и
+        # игрок, попавший сюда, не мог вернуться ничем, кроме /menu (то есть
+        # должен был знать команду, которой на экране нет). Пустой рейтинг —
+        # это ещё и ровно та ситуация, которую чинит приглашение друга,
+        # поэтому пустое состояние не извиняется, а предлагает выход.
+        await edit_or_reply(update, context,
+            "<b>💎 ТОП-10 ИГРОКОВ 🏆</b>\n\n"
+            "<i>Рейтинг пока пуст — трон никем не занят.</i>\n\n"
+            "🥇 Позови друга: соперничество начинается со второго игрока.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔗 Позвать друга", callback_data="invite_friend")],
+                [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
+            ]), parse_mode="HTML")
         return
 
     first_balance = top[0]["balance"]
@@ -6542,7 +6555,7 @@ async def top_scout_callback(update, context, ctx):
 async def guild_info_callback(update, context):
     ctx = context.bot_data.get("ctx")
     if not ctx:
-        await update.effective_message.reply_text("⚠️ Бот инициализируется, попробуйте позже.")
+        await update.effective_message.reply_text("⚠️ Бот инициализируется, попробуй позже.")
         return
 
     user, msg = get_user_and_msg(update)
@@ -7041,7 +7054,7 @@ def _format_remaining(td):
 async def luck_callback(update, context, action=None):
     ctx = context.bot_data.get("ctx")
     if not ctx:
-        await update.effective_message.reply_text("⚠️ Бот инициализируется, попробуйте позже.")
+        await update.effective_message.reply_text("⚠️ Бот инициализируется, попробуй позже.")
         return
     user, msg = get_user_and_msg(update)
     uid = user.id
@@ -7987,7 +8000,7 @@ async def check_blunt(update, context):
             await update.message.reply_text("🕳️ Блант с таким серийным номером не найден.")
             return
         if len(rows) > 1:
-            await update.message.reply_text("⚠️ Найдено несколько блантов с таким номером, обратитесь к администратору.")
+            await update.message.reply_text("⚠️ Найдено несколько блантов с таким номером, напиши администратору.")
             return
         row = rows[0]
     blunt_id, creator_id, serial, rare_number = row["blunt_id"], row["created_by"], row["serial"], row["rare_number"]
@@ -9131,7 +9144,7 @@ async def pet_name_skip_handler(update, context, ctx):
 async def handle_pet_name(update, context):
     ctx = context.bot_data.get("ctx")
     if not ctx:
-        await update.message.reply_text("⚠️ Игра инициализируется (отсуствие контекста ctx), попробуйте позже.")
+        await update.message.reply_text("⚠️ Игра инициализируется (отсуствие контекста ctx), попробуй позже.")
         return
     name = update.message.text.strip()[:PET_CONFIG["dog"]["max_name_len"]]
     if not name:

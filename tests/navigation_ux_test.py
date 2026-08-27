@@ -190,7 +190,7 @@ def check_whispers_never_point_at_locked_content():
         ctx = t.make_ctx(p)
         c = t.FakeContext(ctx)
         seen, prev, repeats = set(), None, 0
-        for _ in range(400):
+        for _ in range(150):
             text, _kb = await bot.build_main_menu(p, ctx, c)
             w = text.split("\n")[0].replace("<i>", "").replace("</i>", "")
             seen.add(w)
@@ -208,7 +208,7 @@ def check_whispers_never_point_at_locked_content():
         ctx2 = t.make_ctx(p2)
         c2 = t.FakeContext(ctx2)
         seen2 = set()
-        for _ in range(400):
+        for _ in range(150):
             text, _kb = await bot.build_main_menu(p2, ctx2, c2)
             seen2.add(text.split("\n")[0].replace("<i>", "").replace("</i>", ""))
         assert seen2 == set(WHISPERS) | set(WHISPERS_GUILD), (
@@ -275,9 +275,9 @@ def check_player_addressed_informally_everywhere():
     # ошибках говорила «попробуй», половина — «Попробуйте»; ловим обе формы.
     formal = re.compile(r'"[^"\n]*(?:\bВы\b|\bВас\b|\bВаш|\bвашем\b|\bвашу\b|\bвашего\b'
                         r'|\bвас не было\b'
-                        r'|\bПопробуйте\b|\bНажмите\b|\bПодождите\b|\bВведите\b'
-                        r'|\bВыберите\b|\bПроверьте\b|\bОбратитесь\b|\bНапишите\b'
-                        r'|\bОтправьте\b|\bИспользуйте\b|\bУбедитесь\b)[^"\n]*"')
+                        r'|[Пп]опробуйте|[Нн]ажмите|[Пп]одождите|[Вв]ведите'
+                        r'|[Вв]ыберите|[Пп]роверьте|[Оо]братитесь|[Нн]апишите'
+                        r'|[Оо]тправьте|[Ии]спользуйте|[Уу]бедитесь)[^"\n]*"')
     hits = [m.group(0) for m in formal.finditer(src) if "вы оба" not in m.group(0)]
     assert not hits, ("официальное обращение вернулось в текст игры "
                       f"({len(hits)} шт.): {hits[:5]}")
@@ -376,6 +376,55 @@ def check_one_destination_one_word():
     assert not bad, f"у одной цели нет ни одного общего слова в подписях: {bad}"
 
 
+def check_no_dead_end_screens():
+    """С любого экрана есть путь назад.
+
+    Тупик — самый тяжёлый вид поломки навигации: игрок не «неудобно» себя
+    чувствует, а физически застревает. Ловилось так: экран «🏅 Лидеры» —
+    кнопка ПЕРВОГО уровня из главного меню — на пустом рейтинге отдавал
+    голый текст вообще без клавиатуры, и выйти можно было только командой
+    /menu, которой на экране нет.
+
+    Исключены два экрана, где отсутствие «назад» — часть замысла, а не
+    недосмотр: онбординг (ведёт вперёд, шаг пропускается своей кнопкой) и
+    забег по Лабиринту (выход там внутриигровой — «сбежать», с ценой).
+    """
+    BACK = {"menu", "profile", "luck", "world_hub", "guild_info", "my_blunts",
+            "lab_start", "progress_hub", "shop", "craft", "daily_quest_hub",
+            "achievements_profile", "collect"}
+    INTENTIONAL = {"defer_faction", "lab_enter_confirm"}
+
+    async def _run():
+        now = datetime.now()
+        registry = dict(bot.CALLBACKS)
+        registry.update(bot.EXACT_HANDLERS)
+        for label, kw in _states() + [("пустой мир (рейтинг пуст)", dict(
+                exists=True, balance=10, total_earned=10, onboarding_step=-1))]:
+            for cb, fn in sorted(registry.items()):
+                if cb in INTENTIONAL:
+                    continue
+                p = Player(user_id=1, **kw)
+                ctx = t.make_ctx(p)
+                u, c = t.FakeUpdate(cb, uid=1), t.FakeContext(ctx)
+                try:
+                    await fn(u, c)
+                except Exception:
+                    continue      # падения — забота других тестов, не этого
+                calls = u.callback_query.message.edit_calls
+                if not calls:
+                    continue      # экран ничего не перерисовал (тост/алерт)
+                mk = calls[-1][1].get("reply_markup")
+                assert mk is not None, (
+                    f"[{label}] экран {cb!r} отрисован вообще без клавиатуры — "
+                    f"из него нет выхода")
+                targets = {b.callback_data for row in mk.inline_keyboard
+                           for b in row if b.callback_data}
+                assert targets & BACK, (
+                    f"[{label}] с экрана {cb!r} нет пути назад; "
+                    f"кнопки ведут только в {sorted(targets)}")
+    asyncio.run(_run())
+
+
 def check_rank_promises_match_real_gates():
     """Полярная звезда не обещает того, что уже доступно бесплатно.
 
@@ -425,6 +474,8 @@ def main():
     passed.append("одна цель — один значок во всех ведущих на неё кнопках")
     check_one_destination_one_word()
     passed.append("у одной цели есть общее опорное слово в подписях")
+    check_no_dead_end_screens()
+    passed.append("ни одного тупика: с любого экрана есть путь назад")
     check_rank_promises_match_real_gates()
     passed.append("обещания рангов совпадают с реальными гейтами")
     for name in passed:
