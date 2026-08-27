@@ -1,0 +1,611 @@
+"""Страж классов прод-крашей, которые уже кусали живую игру.
+
+Каждая проверка здесь — не абстрактная гигиена, а защёлка против КОНКРЕТНОГО
+бага, что реально ломал бота в проде и был найден вручную/случайно. Тест
+превращает такой тихий класс в громкий фейл на CI.
+
+    python tests/crash_guard_test.py
+
+БД/Redis не нужны — только AST-разбор исходников.
+"""
+import ast
+import os
+import re
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+MODULES = ["bot.py", "game_content.py", "game_models.py", "services.py",
+           "config.py", "repository.py", "infra.py", "main.py"]
+
+
+def check_duplicate_dict_keys():
+    """Дубль ключа в dict-литерале: второй молча затирает первый.
+
+    Ровно это убило весь хаб «Удача»: LUCK_CONFIG["mines"] был объявлен дважды,
+    второй словарь потерял поле "cost" → KeyError на каждый тап, хаб мёртв.
+    Python не предупреждает о таком — только этот тест.
+    """
+    bad = []
+    for mod in MODULES:
+        path = os.path.join(ROOT, mod)
+        tree = ast.parse(open(path, encoding="utf-8").read())
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Dict):
+                continue
+            seen = {}
+            for k in node.keys:
+                if k is None:  # {**spread}
+                    continue
+                try:
+                    key = ast.literal_eval(k)
+                except Exception:
+                    continue  # динамический ключ — пропускаем
+                if isinstance(key, (str, int, float, bool, tuple)):
+                    if key in seen:
+                        bad.append(f"{mod}:{k.lineno} дубль ключа {key!r} "
+                                   f"(первый на :{seen[key]})")
+                    seen[key] = k.lineno
+    assert not bad, "Дубли ключей в словарях (второй затирает первый):\n  " + "\n  ".join(bad)
+
+
+def check_conn_used_after_async_with():
+    """'conn'/'conn2' используется вне ЛЮБОГО связывающего его `async with`.
+
+    Ровно это роняло progress_hub_handler: запрос conn.fetchrow(...) стоял ПОСЛЕ
+    закрытия `async with ctx.db_pool.acquire() as conn` → "connection has been
+    released back to the pool" для любого игрока не из топ-10.
+
+    Исключаем ложные срабатывания: имя, которое является параметром какой-либо
+    (в т.ч. вложенной) функции — это чужое соединение, переданное снаружи.
+    """
+    NAMES = {"conn", "conn2"}
+    bad = []
+    src = open(os.path.join(ROOT, "bot.py"), encoding="utf-8").read()
+    tree = ast.parse(src)
+
+    def line_range(n):
+        los = [x.lineno for x in ast.walk(n) if hasattr(x, "lineno")]
+        return (min(los), max(los))
+
+    for fn in [n for n in ast.walk(tree)
+               if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef))]:
+        # имена-параметры всех функций в этом поддереве (свои и вложенные)
+        params = set()
+        for sub in ast.walk(fn):
+            if isinstance(sub, (ast.AsyncFunctionDef, ast.FunctionDef)):
+                for a in sub.args.args + sub.args.kwonlyargs:
+                    params.add(a.arg)
+        # диапазоны with-блоков, связывающих conn/conn2
+        with_ranges = []
+        for node in ast.walk(fn):
+            if isinstance(node, ast.AsyncWith):
+                for item in node.items:
+                    if isinstance(item.optional_vars, ast.Name) and item.optional_vars.id in NAMES:
+                        with_ranges.append((item.optional_vars.id, *line_range(node)))
+        if not with_ranges:
+            continue
+        for u in ast.walk(fn):
+            if isinstance(u, ast.Name) and u.id in NAMES and isinstance(u.ctx, ast.Load):
+                if u.id in params:
+                    continue  # это параметр (чужое соединение) — легитимно
+                inside = any(nm == u.id and lo <= u.lineno <= hi for (nm, lo, hi) in with_ranges)
+                if not inside:
+                    bad.append(f"bot.py:{u.lineno} '{u.id}' используется вне своего `async with`")
+    assert not bad, "Соединение используется после возврата в пул:\n  " + "\n  ".join(bad)
+
+
+def check_achievement_rewards_parseable():
+    """Каждая награда достижения должна полностью распарситься reward-DSL.
+
+    Баг «Лунный лорд»: reward="Уникальный фон 🌀" начиналось с «Уникальный», а не
+    «Фон » → парсер (_award_achievement_rewards / _give_reward) молча ронял её в
+    else-ветку, и высший completionist-приз (закрыть ВСЕ достижения) не давал
+    ничего. DSL допускает ровно: '+N OAC', 'Титул X', 'Фон X', 'Рамка X'
+    (через запятую). Любая иная формулировка = тихо потерянная награда → тут
+    падаем громко.
+    """
+    os.environ.setdefault("TOKEN", "1")
+    os.environ.setdefault("DATABASE_URL_AIVEN", "postgresql://x:y@127.0.0.1:5432/z")
+    os.environ.setdefault("REDIS_URL", "")
+    os.environ.setdefault("ADMIN_ID", "0")
+    os.environ.setdefault("RENDER_URL", "")
+    sys.path.insert(0, ROOT)
+    import re
+    from game_content import ACHIEVEMENTS
+
+    def part_ok(part):
+        if part.startswith("+") and "OAC" in part:
+            return re.search(r"\+(\d+)", part.replace(" ", "")) is not None
+        return part.startswith(("Титул ", "Фон ", "Рамка "))
+
+    bad = []
+    for a in ACHIEVEMENTS:
+        reward = a.get("reward", "")
+        if not reward:
+            continue
+        for part in (p.strip() for p in reward.split(",") if p.strip()):
+            if not part_ok(part):
+                bad.append(f"[{a['id']}] непарсибельная часть награды: {part!r}")
+    assert not bad, ("Награды достижений, которые парсер молча теряет:\n  "
+                     + "\n  ".join(bad))
+
+
+
+def check_war_actions_exist():
+    """Каждое WarAction.X, упомянутое в bot.py, обязано существовать и иметь цену.
+
+    Страж бага «тяга не приносит очков»: do_smoke вызывал WarAction.SMOKE,
+    которого в enum не было. AttributeError ловился общим `except Exception`
+    и уходил в лог — механика молча не работала месяцами, а второе по частоте
+    действие игры не давало гильдии ничего.
+    """
+    import re
+    from services import WarAction, WarConfig
+    src = open(os.path.join(ROOT, "bot.py"), encoding="utf-8").read()
+    used = set(re.findall(r"WarAction\.([A-Z_]+)", src))
+    # Членство в enum проверяем ДО WarConfig(): если действие пропало из enum,
+    # но осталось в таблице очков, конструктор упадёт первым и спрячет причину.
+    missing = sorted(n for n in used if not hasattr(WarAction, n))
+    assert not missing, ("bot.py ссылается на несуществующие WarAction: "
+                         + ", ".join(missing))
+    points = WarConfig().points
+    priceless = sorted(n for n in used if WarAction[n] not in points)
+    assert not priceless, ("У этих WarAction нет цены в WarConfig (add_score "
+                           "бросит UnknownWarActionError): " + ", ".join(priceless))
+
+
+
+def check_earnings_reach_status_ledger():
+    """Любое начисление OAC обязано попасть в total_earned.
+
+    Статус (ранг, топ, «Полярная звезда», гейты) живёт на total_earned.
+    Дельту автоматически ловит repository.atomic_update, но пути, которые
+    сохраняются прямым save(), проходят мимо — и награда двигала бы кошелёк,
+    не двигая ранг. Так тихо потерялись бы награды достижений (~19 900 OAC
+    суммарно) и бонус за выбор стороны у любого, кто уже что-то тратил.
+
+    Правило: если начисление баланса живёт ВНЕ замыкания, переданного в
+    atomic_update, рядом обязано быть явное начисление total_earned.
+    """
+    import ast
+    path = os.path.join(ROOT, "bot.py")
+    src = open(path, encoding="utf-8").read()
+    tree = ast.parse(src)
+    lines = src.splitlines()
+
+    # atomic_update — единая точка учёта заработка (repository.py: считает
+    # дельту баланса сама). atomic_finish_lab_run делает то же самое для
+    # Лабиринта (см. repository.py) — тот же контракт, другое имя метода.
+    DELTA_TRACKING_METHODS = {"atomic_update", "atomic_finish_lab_run"}
+    atomic = set()
+    for n in ast.walk(tree):
+        if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                and n.func.attr in DELTA_TRACKING_METHODS):
+            for a in n.args:
+                if isinstance(a, ast.Name):
+                    atomic.add(a.id)
+
+    funcs = []
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            end = max(getattr(x, "lineno", n.lineno) for x in ast.walk(n))
+            funcs.append((n.name, n.lineno, end))
+
+    def owner(ln):
+        best = None
+        for name, s, e in funcs:
+            if s <= ln <= e and (best is None or s > best[1]):
+                best = (name, s, e)
+        return best[0] if best else "?"
+
+    bad = []
+    for i, line in enumerate(lines, 1):
+        s = line.strip()
+        if s.startswith("#"):
+            continue
+        credits = ".balance +=" in s or (".balance = " in s and "or 0) +" in s)
+        if not credits:
+            continue
+        if owner(i) in atomic:
+            continue                      # дельту поймает atomic_update
+        # Окно широкое: между начислением и учётом статуса часто стоит
+        # объяснительный комментарий.
+        window = "\n".join(lines[i - 1:i + 9])
+        if "total_earned" not in window:
+            bad.append(f"bot.py:{i} в {owner(i)}(): {s[:70]}")
+    assert not bad, ("Начисление OAC вне транзакции без учёта в total_earned "
+                     "(кошелёк вырастет, ранг — нет):\n  " + "\n  ".join(bad))
+
+
+def check_webhook_url_no_double_slash():
+    """RENDER_URL со слэшем на конце не должен ломать вебхук.
+
+    Реальный инцидент: RENDER_URL был задан как «https://…onrender.com/»
+    (с завершающим слэшем — частая опечатка при ручном вводе в Render
+    Dashboard). webhook_url строился конкатенацией без нормализации →
+    «…onrender.com//webhook». Telegram принял такой URL на setWebhook (200
+    OK — синтаксически валиден), но aiohttp-роут зарегистрирован ровно на
+    «/webhook» и с ним не совпадал → КАЖДЫЙ входящий апдейт получал 404,
+    молча, без единого исключения где-либо. Деплой выглядел полностью
+    штатным (webhook «успешно» установлен, /healthz отвечает 200), бот не
+    отвечал НИКОМУ. Тот же класс бага, что уже дважды кусал этот проект: код
+    технически не падает, поэтому ничего не сигналит, что он не работает.
+
+    Требует TOKEN/DATABASE_URL_AIVEN в окружении — только для того, чтобы
+    Settings() из config.py вообще создался (pydantic валидирует поля при
+    инициализации); реальные БД/Redis не открываются.
+    """
+    os.environ.setdefault("TOKEN", "123:DUMMY")
+    os.environ.setdefault("DATABASE_URL_AIVEN", "postgresql://u:p@127.0.0.1:5432/db")
+    sys.path.insert(0, ROOT)
+    import config as _config
+
+    for trailing in ("https://example.onrender.com/", "https://example.onrender.com"):
+        s = _config.Settings(TOKEN="123:DUMMY",
+                             DATABASE_URL_AIVEN="postgresql://u:p@127.0.0.1:5432/db",
+                             RENDER_URL=trailing)
+        assert s.webhook_url == "https://example.onrender.com/webhook", (
+            f"RENDER_URL={trailing!r} дал webhook_url={s.webhook_url!r} — "
+            f"лишний слэш ломает совпадение с зарегистрированным aiohttp-роутом")
+
+
+def check_onboarding_messages_reply_in_invoking_chat():
+    """Онбординг-сообщения обязаны отвечать в чат нажатия, не в ЛС игрока.
+
+    Реальный инцидент: несколько онбординг-переходных сообщений (после
+    первого фарма/крафта/выбора гильдии/тренировки) были жёстко зашиты на
+    safe_send_message(context, uid, ...) — личное сообщение конкретному
+    user_id, а не в чат, откуда пришло нажатие. С тех пор как бот перестал
+    быть немым при добавлении в группу (welcome_new_member,
+    _announce_bot_added_to_chat) и /start в группе создаёт игрока прямо
+    там, farm/train/craft/guild_join стали регулярно нажиматься из
+    ГРУППОВОГО чата людьми, ни разу не открывавшими ЛС с ботом. Telegram
+    на такой безусловный ЛС отвечает `403 Forbidden: bot can't initiate
+    conversation with a user` — необработанное исключение в
+    @game_handler-обёрнутых farm_callback_v2/train_callback долетало до
+    админа как «🚨 Ошибка в farm_callback_v2» на каждое такое нажатие.
+
+    Проверяем статически: ни один из этих хендлеров не зовёт
+    safe_send_message с `context, uid`/`context, user_id` — только с
+    вычисленным chat_id текущего апдейта (update.effective_chat.id,
+    query.message.chat.id или локальная переменная chat_id).
+    """
+    src = open(os.path.join(ROOT, "bot.py"), encoding="utf-8").read()
+    bad_pattern = re.compile(r"safe_send_message\(\s*context,\s*(uid|user_id)\b")
+
+    spans = {
+        "farm_callback_v2": ("async def farm_callback_v2(update, context, ctx, player):",
+                             "async def craft_callback_v2(update, context, ctx, player):"),
+        "handle_craft_normal_v2": ("async def handle_craft_normal_v2(update, context, ctx, player):",
+                                   "async def handle_craft_named(update, context, ctx, player):"),
+        "skip_onboarding_handler": ("async def skip_onboarding_handler(update, context):",
+                                    "async def train_callback(update, context, ctx, player):"),
+        "train_callback": ("async def train_callback(update, context, ctx, player):",
+                           "async def handle_quest_action(update, context):"),
+        "guild_join_handler": ("async def guild_join_handler(update, context, ctx):",
+                               "async def luck_wheel_handler(update, context):"),
+    }
+    for name, (start_marker, end_marker) in spans.items():
+        start = src.index(start_marker)
+        end = src.index(end_marker, start)
+        body = src[start:end]
+        assert not bad_pattern.search(body), (
+            f"{name}: safe_send_message(context, uid/user_id, ...) — личное "
+            f"сообщение вместо ответа в чат нажатия, упадёт 'Forbidden: bot "
+            f"can't initiate conversation' для тех, кто нажал из группы")
+
+
+def check_profile_navigation_stays_in_invoking_chat():
+    """Три жалобы пользователя на один и тот же корень: профиль с аватаркой
+    Telegram уходил ФОТО-сообщением (голый context.bot.send_photo), а фото
+    нельзя отредактировать в текст — вся навигация ИЗ профиля либо
+    ломалась, либо открывалась не в том чате:
+      1) «Все именные бланты» открывались в ЛС игрока, а не в чате нажатия
+         (группа) — _send_collection_wall слала send_photo(chat_id=uid).
+      2) любая кнопка из профиля вечно плодила новое сообщение вместо
+         редактирования — фото нельзя отредактировать в текст.
+      3) «🏰 В меню» вообще не отвечала — menu_handler звал edit_text без
+         фолбэка, падал на фото-сообщении молча.
+
+    Дальше выяснилось: раз оба экрана (аватарка профиля и витрина «Мои
+    бланты») — РЕАЛЬНОЕ фото, переход между ними можно редактировать на
+    месте через editMessageMedia (то самое «изменено» у полированных
+    ботов), а не слать новое каждый раз — см. edit_or_send_photo. Профиль
+    и витрина обязаны идти через этот безопасный хелпер, а не звать голый
+    context.bot.send_photo(...) напрямую (тот регресс вернул бы все три
+    жалобы разом — неправильный чат, спам, молчащую кнопку).
+    """
+    src = open(os.path.join(ROOT, "bot.py"), encoding="utf-8").read()
+
+    profile_start = src.index("async def profile_callback(update, context, ctx, player):")
+    profile_end = src.index("async def _send_collection_wall(", profile_start)
+    profile_body = src[profile_start:profile_end]
+    assert "context.bot.send_photo" not in profile_body, (
+        "profile_callback снова шлёт аватарку голым context.bot.send_photo — "
+        "вернёт баг «вечный спам новых сообщений + молчащая кнопка В меню»")
+    assert "edit_or_send_photo" in profile_body, (
+        "profile_callback должна отправлять аватарку через edit_or_send_photo "
+        "(редактирует на месте, если пришли из фото-экрана вроде витрины)")
+
+    wall_start = src.index("async def _send_collection_wall(")
+    wall_end = src.index("\nasync def achievements_callback(", wall_start)
+    wall_body = src[wall_start:wall_end]
+    assert "context.bot.send_photo" not in wall_body, (
+        "_send_collection_wall снова шлёт витрину голым context.bot.send_photo "
+        "— теряет и правильный чат нажатия, и редактирование на месте")
+    assert "edit_or_send_photo" in wall_body, (
+        "_send_collection_wall должна отправлять витрину через edit_or_send_photo")
+
+    helper_start = src.index("async def edit_or_send_photo(")
+    helper_end = src.index("\nasync def animate_progress_bar(", helper_start)
+    helper_body = src[helper_start:helper_end]
+    assert "chat_id=uid" not in helper_body, (
+        "edit_or_send_photo не должна слать фото в ЛС конкретного uid — "
+        "только в update.effective_chat.id (чат нажатия)")
+    assert "update.effective_chat.id" in helper_body, (
+        "edit_or_send_photo должна слать/редактировать фото в чат нажатия "
+        "(update.effective_chat.id), не в личку игрока")
+
+
+def check_edit_or_reply_cleans_up_dangling_messages():
+    """edit_or_reply — общий примитив «покажи этот экран», 33 вызова по
+    игре. Раньше при неудачном редактировании слал новое сообщение, но
+    никогда не убирал старое — единый живой экран копил мусор из мёртвых
+    предыдущих экранов на КАЖДОМ таком переходе, не только в профиле
+    (skins_menu_handler из фото-профиля бил в тот же баг). Проверяем
+    статически: сам хелпер убирает своё сообщение при фолбэке, а
+    skins_menu_handler и invite_friend_handler (прямые соседи профиля,
+    оба реально ловили этот баг) идут безопасным путём — не голым
+    edit_text/_send_blunt_card без уборки."""
+    src = open(os.path.join(ROOT, "bot.py"), encoding="utf-8").read()
+
+    reply_start = src.index("async def edit_or_reply(")
+    reply_end = src.index("\nasync def edit_or_send_photo(", reply_start)
+    reply_body = src[reply_start:reply_end]
+    assert "message.delete()" in reply_body, (
+        "edit_or_reply должна убирать своё сообщение при фолбэке на новое — "
+        "иначе на каждый нередактируемый переход по всей игре копится мусор")
+    assert "is_own_message" in reply_body, (
+        "edit_or_reply обязана отличать своё сообщение (можно убрать) от "
+        "сообщения игрока, пришедшего из команды (трогать нельзя)")
+
+    skins_start = src.index("async def skins_menu_handler(")
+    skins_end = src.index("\n@cb\nasync def choose_title_handler(", skins_start)
+    skins_body = src[skins_start:skins_end]
+    assert "edit_or_reply" in skins_body, (
+        "skins_menu_handler должна идти через edit_or_reply — прямой сосед "
+        "профиля (кнопка «🎨 Кастомизация»), голый edit_text без уборки "
+        "оставляет мусор при заходе из фото-профиля")
+
+    invite_start = src.index("async def invite_friend_handler(")
+    invite_end = src.index("\n# ========== ЕДИНЫЙ РЕЕСТР КОМАНД", invite_start)
+    invite_body = src[invite_start:invite_end]
+    assert "query.message.delete()" in invite_body, (
+        "invite_friend_handler шлёт карточку бланта НОВЫМ сообщением — "
+        "обязана убирать предыдущий экран профиля за собой")
+
+
+def check_no_calls_to_undefined_names():
+    """Вызов имени, которого нигде нет в модуле, — гарантированный NameError.
+
+    Ровно это молчало 20 дней: `_send_http_message` вызывалась в 4 местах
+    (джекпот, ранг-ап, итоги войны, Час Удачи) и не была определена НИГДЕ —
+    ни как функция, ни как импорт. try/except вокруг каждого вызова глотал
+    исключение молча, поэтому ни разработка, ни прод-логи не подняли тревогу:
+    весь публичный социальный слой игры не работал, а выглядело всё исправным.
+
+    Проверка — over-approximation: «определено» значит «есть как def функции/
+    класса, импорт, module-level присваивание, ИЛИ используется как параметр/
+    локальная переменная где угодно в файле». Это специально мягче честного
+    scope-анализа — чтобы не поднимать шум на легальных локальных именах,
+    ценой пропуска экзотических случаев. Ловит именно этот класс бага: имя,
+    которого в файле нет вообще ни в какой роли.
+    """
+    import builtins as _builtins
+
+    bad = []
+    for mod in MODULES:
+        path = os.path.join(ROOT, mod)
+        src = open(path, encoding="utf-8").read()
+        tree = ast.parse(src)
+
+        defined = set(dir(_builtins))
+        called = []  # (lineno, name)
+
+        # Исключение — УЗКОЕ НАМЕРЕННО: только буквальный `except NameError`,
+        # идиом «вызови, если функция вообще существует» (см. repository.py:
+        # invalidate_menu_cache — зарезервированный хук на будущее).
+        #
+        # `except Exception` / голый `except:` НЕ исключаем, хотя они тоже
+        # технически глотают NameError, — потому что ЭТО и есть форма, в которой
+        # настоящий баг прятался 20 дней (_send_http_message падала внутри
+        # `except Exception` в happy_hour_trigger и _safe_send_guild_message, и
+        # ни разу не всплыла). Если разрешить широкий except гасить проверку,
+        # страж перестаёт ловить ровно тот баг, ради которого написан.
+        guarded_call_ids = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Try):
+                continue
+            catches_name_error = any(
+                (isinstance(h.type, ast.Name) and h.type.id == "NameError")
+                or (isinstance(h.type, ast.Tuple) and any(
+                    isinstance(e, ast.Name) and e.id == "NameError" for e in h.type.elts))
+                for h in node.handlers
+            )
+            if catches_name_error:
+                for n in node.body:
+                    for c in ast.walk(n):
+                        if isinstance(c, ast.Call):
+                            guarded_call_ids.add(id(c))
+
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                defined.add(node.name)
+            elif isinstance(node, ast.Assign):
+                for t in node.targets:
+                    if isinstance(t, ast.Name):
+                        defined.add(t.id)
+            elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)):
+                t = node.target
+                if isinstance(t, ast.Name):
+                    defined.add(t.id)
+            elif isinstance(node, ast.Import):
+                for a in node.names:
+                    defined.add((a.asname or a.name).split(".")[0])
+            elif isinstance(node, ast.ImportFrom):
+                for a in node.names:
+                    defined.add(a.asname or a.name)
+            elif isinstance(node, ast.arg):
+                defined.add(node.arg)
+            elif isinstance(node, (ast.For, ast.comprehension)):
+                target = node.target if isinstance(node, ast.For) else node.target
+                for n in ast.walk(target):
+                    if isinstance(n, ast.Name):
+                        defined.add(n.id)
+            elif isinstance(node, ast.withitem) and node.optional_vars:
+                for n in ast.walk(node.optional_vars):
+                    if isinstance(n, ast.Name):
+                        defined.add(n.id)
+            elif isinstance(node, ast.ExceptHandler) and node.name:
+                defined.add(node.name)
+            elif isinstance(node, ast.Global) or isinstance(node, ast.Nonlocal):
+                defined.update(node.names)
+            elif isinstance(node, ast.Lambda):
+                for a in node.args.args + node.args.posonlyargs + node.args.kwonlyargs:
+                    defined.add(a.arg)
+            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                if id(node) not in guarded_call_ids:
+                    called.append((node.lineno, node.func.id))
+
+        for lineno, name in called:
+            if name not in defined:
+                bad.append(f"{mod}:{lineno}: вызов неопределённого имени `{name}`")
+
+    assert not bad, ("Вызов имени, которого нет в файле, — гарантированный "
+                     "NameError в рантайме:\n  " + "\n  ".join(bad))
+
+
+def check_named_blunt_calls_pass_ctx():
+    """`create_named_blunt` без ctx — гарантированный ValueError, съедающий транзакцию.
+
+    Функция первым же действием делает `if ctx is None: raise ValueError`. Все её
+    вызовы сидят внутри `atomic_update`, поэтому исключение не просто теряет
+    блант — оно откатывает ВСЮ транзакцию вокруг. Так молча не работали два
+    приза сразу: легендарка за реферал (реферер терял ещё и +50 OAC, титул и
+    связку с приглашённым) и «Философский Камень» — джекпот алхимии, у которого
+    откат съедал списанные бланты и попытку.
+
+    Обе копии выглядели правдоподобно и жили рядом с корректными вызовами —
+    глазами такое не ловится, поэтому проверка статическая.
+    """
+    path = os.path.join(ROOT, "bot.py")
+    src = open(path, encoding="utf-8").read()
+    tree = ast.parse(src)
+    bad = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        name = fn.id if isinstance(fn, ast.Name) else getattr(fn, "attr", None)
+        if name != "create_named_blunt":
+            continue
+        kwargs = {k.arg for k in node.keywords if k.arg}
+        # ctx может прийти и как **kwargs — такой вызов не считаем дефектным
+        has_splat = any(k.arg is None for k in node.keywords)
+        if "ctx" not in kwargs and not has_splat:
+            bad.append(f"bot.py:{node.lineno}")
+    assert not bad, (
+        "create_named_blunt вызывается без ctx → ValueError и откат транзакции "
+        "(приз не выдаётся, потраченное не возвращается):\n  " + "\n  ".join(bad))
+
+
+def check_advertised_odds_match_real_roll():
+    """Шанс, показанный игроку, обязан совпадать с шансом в коде.
+
+    Продукт запрещает фейковый дефицит. Нарушение уже жило в проде: экран крафта
+    сообщал «Обнаружен у 3.5% игроков» при фактических 55%, а легендарку объявлял
+    «0.17%» при реальных 2% — в 12 раз реже правды. Числа были захардкожены и
+    поданы как статистика, то есть как факт о мире.
+
+    Расхождение такого рода не ловится ни компилятором, ни ревью: обе части
+    выглядят правдоподобно и лежат в разных концах файла. Поэтому сверяем их
+    машинно — пороги ролла из create_named_blunt против таблицы, которую видит
+    игрок. Разъедутся при любой правке баланса → тест упадёт, и подкрутить
+    вероятность молча, забыв про текст, станет невозможно.
+    """
+    src = open(os.path.join(ROOT, "bot.py"), encoding="utf-8").read()
+
+    # пороги ролла: `if r < 0.02: rarity = "legendary"` и т.д.
+    thresholds = {}
+    for m in re.finditer(r"r\s*<\s*([0-9.]+)\s*:\s*rarity\s*=\s*[\"'](\w+)[\"']", src):
+        thresholds[m.group(2)] = float(m.group(1))
+    assert thresholds, "не найдены пороги ролла редкости в create_named_blunt"
+
+    # кумулятивные пороги → вероятность каждого тира
+    order = sorted(thresholds.items(), key=lambda kv: kv[1])
+    real, prev = {}, 0.0
+    for name, th in order:
+        real[name] = th - prev
+        prev = th
+    real["common"] = round(1.0 - prev, 10)
+
+    # то, что видит игрок: ("ЛЕГЕНДАРНЫЙ", "2%") и хвостовой common в .get(...)
+    shown = {r: int(p) for r, p in
+             re.findall(r"[\"'](\w+)[\"']:\s*\(\s*[\"'][^\"']+[\"']\s*,\s*[\"'](\d+)%[\"']\s*\)", src)}
+    m_common = re.search(r"\.get\(rarity,\s*\(\s*[\"'][^\"']+[\"']\s*,\s*[\"'](\d+)%[\"']\s*\)\)", src)
+    if m_common:
+        shown["common"] = int(m_common.group(1))
+    # Fail closed — намеренно. Если таблицу не удалось разобрать, значит экран
+    # крафта переписали в другой форме, и сверить показанное с реальным больше
+    # нечем. Молчаливый пропуск здесь означал бы, что запрет на фейковый дефицит
+    # снова держится на честном слове, — поэтому неразобранная форма считается
+    # провалом, а не «нечего проверять». Переписал экран → почини и эту сверку.
+    assert shown, (
+        "не удалось разобрать таблицу шансов на экране крафта: сверка с реальным "
+        "роллом невозможна. Если формат вывода менялся — обнови разбор здесь, "
+        "иначе запрет на фейковый дефицит перестаёт проверяться.")
+
+    bad = []
+    for tier, pct in shown.items():
+        expected = round(real.get(tier, -1) * 100)
+        if expected != pct:
+            bad.append(f"{tier}: игроку показано {pct}%, реальный шанс {expected}%")
+    assert not bad, ("Заявленный шанс расходится с реальным (фейковый дефицит):\n  "
+                     + "\n  ".join(bad))
+
+
+def main():
+    passed = []
+    check_webhook_url_no_double_slash()
+    passed.append("RENDER_URL со слэшем на конце не ломает вебхук (страж «бот молчал всем»)")
+    check_onboarding_messages_reply_in_invoking_chat()
+    passed.append("онбординг-сообщения отвечают в чат нажатия, не в ЛС (страж «Forbidden: can't initiate conversation»)")
+    check_profile_navigation_stays_in_invoking_chat()
+    passed.append("навигация из профиля не плодит фото-спам и не открывается в чужом чате")
+    check_edit_or_reply_cleans_up_dangling_messages()
+    passed.append("edit_or_reply убирает мёртвые экраны, соседи профиля не плодят мусор")
+    check_no_calls_to_undefined_names()
+    passed.append("нет вызовов неопределённых имён (страж «_send_http_message 20 дней молчала»)")
+    check_duplicate_dict_keys()
+    passed.append("нет дублей ключей в словарях (страж бага «мёртвая Удача»)")
+    check_conn_used_after_async_with()
+    passed.append("нет 'conn' вне своего async with (страж бага progress_hub)")
+    check_achievement_rewards_parseable()
+    passed.append("все награды достижений парсятся DSL (страж бага «Уникальный фон»)")
+    check_war_actions_exist()
+    passed.append("все WarAction из bot.py существуют и имеют цену (страж «тяга без очков»)")
+    check_earnings_reach_status_ledger()
+    passed.append("все начисления OAC доходят до total_earned (страж «ранг не растёт»)")
+    check_named_blunt_calls_pass_ctx()
+    passed.append("create_named_blunt везде получает ctx (страж «приз не выдался, транзакция откатилась»)")
+    check_advertised_odds_match_real_roll()
+    passed.append("показанный шанс равен реальному роллу (страж фейкового дефицита)")
+
+    for name in passed:
+        print(f"  OK  {name}")
+    print(f"\nКрэш-страж пройден: {len(passed)}/{len(passed)}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

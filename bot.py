@@ -8,7 +8,7 @@ def log_uncaught(exc_type, exc_value, exc_tb):
     time.sleep(2)   # даём время Render прочитать
     sys.__excepthook__(exc_type, exc_value, exc_tb)
 sys.excepthook = log_uncaught
-import asyncio, json, logging, os, sys, time, random, re, hashlib, html, enum, copy, math
+import asyncio, json, logging, os, sys, time, random, re, hashlib, html, enum, copy, math, io
 from datetime import datetime, timedelta, date, timezone
 from typing import Optional, List, Any, Dict, Tuple, NamedTuple, Callable
 from dataclasses import dataclass, field  
@@ -20,11 +20,13 @@ from tenacity import (
 )
 from pydantic import BaseModel, ConfigDict, Field
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
+from telegram.constants import ChatMemberStatus
 from telegram.ext import ContextTypes
 from telegram.error import BadRequest, Forbidden, RetryAfter
 
 import redis.asyncio as aioredis
+import functools
 from functools import wraps
 
 try:
@@ -39,10 +41,12 @@ import httpx
 # Статический игровой контент/константы вынесены в отдельный модуль (слой данных)
 from game_content import (
     FARM_MEDALS, CRAFT_MEDALS, SMOKE_MEDALS, RITUAL_MEDALS, REPENT_MEDALS,
-    WHISPERS, NEURO_STATUSES, FUNNY_REACTIONS, RANKS,
+    WHISPERS, WHISPERS_GUILD, NEURO_STATUSES, FUNNY_REACTIONS, RANKS,
     ACHIEVEMENTS, ACHIEVEMENTS_DICT, ACHIEVEMENT_CONDITIONS, SMOKE_FLAVORS,
     QUEST_TEMPLATES, BLUNTS_PER_PAGE, BLUNT_IMAGES, LUCK_CONFIG, LABYRINTH_ROOMS,
-    SHOP_ITEMS, RANK_LORE,
+    SHOP_ITEMS, RANK_LORE, ALTAR_BASE_COST, ALTAR_TIERS,
+    SMOKE_HEAT_MAX, SMOKE_BURST_POOL, SMOKE_BURST_BLUNT_NAMES,
+    GUILD_ACTION_TIERS, GUILD_ACTION_THEME,
 )
 # Слой моделей
 from game_models import Player
@@ -59,6 +63,19 @@ from services import (
     GuildWarService, AlchemyResult, PetService,
 )
 from enum import Enum, auto  # для SmokeStatus/CraftStatus ниже
+
+# Процедурный рендер коллекционной карточки бланта. Мягкая деградация: если
+# Pillow не установлен или модуль сломан — карточки просто не рисуются, а весь
+# путь блантов остаётся текстовым (украшение, не критичный путь).
+try:
+    from blunt_art import (render_blunt_card, render_collection_wall,
+                           ART_VERSION as BLUNT_ART_VERSION)
+    import blunt_art as blunt_forms
+except Exception:  # pragma: no cover
+    render_blunt_card = None
+    render_collection_wall = None
+    blunt_forms = None
+    BLUNT_ART_VERSION = 0
 
 # ============================================================
 # ДЕКОРАТОРЫ
@@ -86,6 +103,28 @@ def rate_limit(seconds: int = 2):
     return decorator
     
     
+def _is_expected_telegram_noise(e: Exception) -> bool:
+    """Отличает «код сломан, чинить админу» от «Telegram так себя ведёт,
+    когда бот активно используется» — ни то, ни другое не баг, оба
+    ожидаемы и не требуют вмешательства человека:
+
+    * RetryAfter (flood control) — Telegram лимитирует частоту сообщений В
+      ОДИН чат. Пока бот жил только в личках, один чат = один активный
+      игрок, лимит почти недостижим. С тех пор как групповой канал роста
+      заработал, много игроков жмут кнопки в ОДНОМ групповом чате —
+      совокупная частота ответов бота в этот чат легко превышает лимит.
+      Это перегрузка конкретного чата в моменте, а не поломка кода.
+    * Forbidden (bot can't initiate conversation / bot was blocked) —
+      получатель недостижим, тот же класс, что blocked/dead-chat в
+      пуш-джобах (см. _is_dead_chat_error) — нечего чинить в коде.
+
+    Раньше оба класса шли в админа как «🚨 Ошибка в X» неотличимо от
+    настоящего бага — на активном групповом чате это залп из десятков
+    одинаковых алертов ни о чём вместо сигнала о реальной проблеме.
+    """
+    return isinstance(e, (RetryAfter, Forbidden))
+
+
 def game_handler(func):
     """Абсолютный декоратор: гарантированная идемпотентность, атомарный контекст, умная загрузка игрока."""
     import inspect
@@ -115,7 +154,7 @@ def game_handler(func):
         if (needs_ctx or needs_player) and not ctx:
             try:
                 if update.effective_message:
-                    await update.effective_message.reply_text("⚠️ Бот инициализируется, попробуйте позже.")
+                    await update.effective_message.reply_text("⚠️ Бот инициализируется, попробуй позже.")
             except Exception:
                 pass
             return
@@ -135,11 +174,25 @@ def game_handler(func):
                 try:
                     if update.effective_message:
                         await update.effective_message.reply_text(
-                            "⚠️ Ваш профиль не обнаружен. Пожалуйста, нажмите /start для создания."
+                            "⚠️ Твой профиль не обнаружен. Нажми /start, чтобы создать его."
                         )
                 except Exception:
                     pass
                 return
+
+            # Дневной hook на возврат (стрик, заморозка, превью завтрашней
+            # награды) раньше запускался ТОЛЬКО из ветки /start для старых
+            # игроков — обычные действия (фарм/крафт/что угодно) через этот
+            # же декоратор его никогда не задевали, а именно так обычно и
+            # играют (жмут старые кнопки в чате, а не перепечатывают /start).
+            # onboarding_step == -1: гейт «онбординг пройден» (тот же, что и
+            # в build_main_menu, bot.py:8698) — без него карточка выстрелила
+            # бы посреди choreographed онбординг-сообщений у новичка.
+            # last_login_date уже лежит в этом же player — сравнение
+            # бесплатно, идемпотентность гонок закрывает сама process_daily_login.
+            if (player.onboarding_step == -1
+                    and _parse_last_login_date(player.last_login_date) != date.today()):
+                asyncio.create_task(process_daily_login(uid, context))
 
         # === СБОР АРГУМЕНТОВ ===
         new_kwargs = {**kwargs}
@@ -154,15 +207,48 @@ def game_handler(func):
         except asyncio.CancelledError:
             raise   # не глушим, чтобы корректно работала отмена задач
         except Exception as e:
-            logger.error(f"Unhandled error in {func.__name__}:", exc_info=True)
+            noisy = _is_expected_telegram_noise(e)
+            if noisy:
+                logger.warning(f"Ожидаемый шум Telegram в {func.__name__}: {e}")
+            else:
+                logger.error(f"Unhandled error in {func.__name__}:", exc_info=True)
             # Сохраняем уникальную логику из старого error_handler
             if 'awaiting_named_blunt' in context.user_data:
                 context.user_data['awaiting_named_blunt'] = False
-            if update.callback_query:
-                await update.callback_query.answer("⚠️ Внутренняя ошибка. Админ уже в курсе.", show_alert=True)
-            elif update.effective_message:
-                await update.effective_message.reply_text("⚠️ Что-то пошло не так. Попробуйте позже.")
-            if settings.admin_id:
+            user_text = ("⏳ Слишком много запросов в этом чате — попробуй через "
+                        "пару секунд." if isinstance(e, RetryAfter) else
+                        "⚠️ Внутренняя ошибка. Админ уже в курсе." if not noisy else
+                        "⚠️ Не получилось. Попробуй ещё раз.")
+            # query.answer()/reply_text() сами способны бросить исключение
+            # (например, "Query is too old" — сообщение о живом callback_query
+            # само устарело, пока мы ждали ретраев RetryAfter выше) — обёрнуты,
+            # чтобы отчёт об ошибке не порождал вторую необработанную ошибку.
+            try:
+                if update.callback_query:
+                    await update.callback_query.answer(user_text, show_alert=True)
+                elif update.effective_message:
+                    await update.effective_message.reply_text("⚠️ Что-то пошло не так. Попробуй позже.")
+            except Exception:
+                pass
+            # Алерт на callback_query — не гарантированная доставка: CallbackQuery
+            # объекты в PTB имеют __slots__ (нельзя пометить «уже отвечен» на самом
+            # объекте), а сам хендлер мог УЖЕ успешно ответить на этот же
+            # callback_query до падения (обычная практика — answer() в первой
+            # строке). Telegram либо тихо игнорирует повторный answer(), либо
+            # отвечает ошибкой — в обоих случаях игрок не видит вообще никакого
+            # сигнала о реальном сбое, просто «ничего не произошло». Дублируем
+            # предупреждение постоянным сообщением в чат — канал, не зависящий
+            # от состояния уже отвеченного callback_query. Только для настоящих
+            # багов (not noisy): на RetryAfter/Forbidden хватает alert'а, не
+            # спамим чат сообщением на каждый flood-control.
+            if not noisy and update.callback_query:
+                try:
+                    await context.bot.send_message(
+                        chat_id=update.effective_chat.id,
+                        text="⚠️ Что-то пошло не так. Админ уже в курсе — попробуй ещё раз.")
+                except Exception:
+                    pass
+            if settings.admin_id and not noisy:
                 try:
                     err_msg = f"🚨 <b>Ошибка в {func.__name__}</b>\n<code>{html.escape(str(e))}</code>"
                     await context.bot.send_message(chat_id=settings.admin_id, text=err_msg, parse_mode='HTML')
@@ -213,7 +299,7 @@ def _create_wrapper(func, show_alert_on_error):
             logger.error("AppContext not found in bot_data")
             # 🔥 АБСОЛЮТНАЯ СИММЕТРИЯ с game_handler – игрок всегда видит ответ
             if query:
-                await query.answer("⚠️ Бот инициализируется, попробуйте позже.", show_alert=True)
+                await query.answer("⚠️ Бот инициализируется, попробуй позже.", show_alert=True)
             return
 
         try:
@@ -223,9 +309,21 @@ def _create_wrapper(func, show_alert_on_error):
         except asyncio.CancelledError:
             raise   # Пробрасываем, не глушим отмену
         except Exception as e:
-            logger.error(f"Callback error in {func.__name__}: {e}", exc_info=True)
+            # RetryAfter/Forbidden — ожидаемый шум перегруженного чата или
+            # недостижимого адресата, не баг; см. _is_expected_telegram_noise
+            # (тот же принцип, что в game_handler). query.answer() ниже сам
+            # способен бросить "Query is too old" (callback_query устарел,
+            # пока func() ждал ретраев выше) — обёрнут, чтобы отчёт об ошибке
+            # не порождал вторую необработанную ошибку до global_error_handler.
+            if _is_expected_telegram_noise(e):
+                logger.warning(f"Ожидаемый шум Telegram в {func.__name__}: {e}")
+            else:
+                logger.error(f"Callback error in {func.__name__}: {e}", exc_info=True)
             if query and show_alert_on_error:
-                await query.answer(f"❌ Ошибка: {e}", show_alert=True)
+                try:
+                    await query.answer(f"❌ Ошибка: {e}", show_alert=True)
+                except Exception:
+                    pass
     return wrapper
 
 # НАСТРОЙКИ через пидантик
@@ -249,7 +347,10 @@ logging.basicConfig(level=logging.INFO, handlers=[handler])
 logger = logging.getLogger(__name__)
 
 # ── Хелперы ──
-def has_rank(balance: int, rank_name: str = "Ветеран") -> bool:
+def has_rank(earned: int, rank_name: str = "Ветеран") -> bool:
+    """Достигнут ли ранг. На вход — total_earned (заработано за всё время),
+    НЕ текущий баланс: иначе покупка отбирала бы уже открытый доступ."""
+    balance = earned
     thresholds = {
         "Ветеран": GAME_CONFIG["veteran_threshold"],
         "Призрак": GAME_CONFIG["phantom_threshold"],
@@ -260,8 +361,55 @@ def has_rank(balance: int, rank_name: str = "Ветеран") -> bool:
     
 from urllib.parse import quote
 
-def build_share_url(share_text: str) -> str:
-    return f"https://t.me/share/url?text={quote(share_text, safe='')}"
+def build_share_url(url: str, text: str = "") -> str:
+    """Диплинк на нативный шер-пикер Telegram («выбери, кому переслать»).
+
+    Параметр url ОБЯЗАТЕЛЕН: без него t.me/share/url не открывает пикер
+    выбора получателя вообще — просто резолвится в мёртвую веб-страницу
+    (в приложении открывается системный браузер поверх Telegram, в браузере
+    — пустая/нерабочая страница). Раньше сюда передавался только text (со
+    ссылкой, зашитой ВНУТРИ текста) — выглядело как рабочая ссылка на шер,
+    по факту КАЖДАЯ кнопка «Поделиться»/«Отправить другу» в игре вела в
+    тупик: ни один игрок не мог переслать реферальную ссылку ни одному
+    другу — единственный настоящий вирусный канал был сломан с самого
+    своего появления."""
+    parts = [f"url={quote(url, safe='')}"]
+    if text:
+        parts.append(f"text={quote(text, safe='')}")
+    return "https://t.me/share/url?" + "&".join(parts)
+
+
+async def _win_share_button(context, uid: int, win_line: str) -> InlineKeyboardButton:
+    """Кнопка «Поделиться» на пике позитивной эмоции — общая для трёх редких
+    моментов: возвышение ранга, джекпот «Дунуть», рекорд Лабиринта.
+
+    Все три уже транслировались в @guild_antysocial (соц-доказательство для
+    ЧУЖИХ), но ДОСТИГШИЙ игрок не получал способа поделиться СВОЕЙ победой ни
+    с кем за пределами официального чата. Peak-end rule + идентити-элевация:
+    именно в момент личного триумфа склонность поделиться выше всего за всю
+    сессию — просить в этот момент дешевле, чем в холодном профиле.
+
+    win_line — уже готовая строка о конкретной победе (без ссылки); ссылка и
+    приглашение приклеиваются здесь одинаково для всех трёх мест.
+    """
+    bot_username = (await context.bot.get_me()).username
+    ref_link = f"https://t.me/{bot_username}?start=ref_{uid}"
+    # Соц-доказательство в самом приглашении, не только в приветствии тем, кто
+    # уже вступил в чат — тот же сдвиг, что в invite_friend_handler. Хелпер
+    # раньше не трогал bot_data вообще — getattr, а не прямой доступ, чтобы
+    # не заводить новую жёсткую зависимость там, где раньше её не было.
+    ctx = getattr(context, "bot_data", None) and context.bot_data.get("ctx")
+    proof = ""
+    if ctx:
+        new_players = await count_new_players_week(ctx)
+        if new_players:
+            proof = f"\n👥 {new_players} новых Странников за эту неделю."
+    # Ссылка НЕ дублируется в тексте — build_share_url несёт её отдельным
+    # параметром url=, Telegram сам покажет её получателю (с превью).
+    # Повторение той же ссылки текстом внутри text= давало на экране друга
+    # одну и ту же голую ссылку дважды подряд.
+    share_text = f"{win_line}{proof}\n\n🎁 Заходи по ссылке — +100 OAC на старт:"
+    return InlineKeyboardButton("📤 Поделиться победой", url=build_share_url(ref_link, share_text))
 
 # ── Исключения ──────────────────────────────────────────────
         
@@ -366,6 +514,9 @@ class AchievementService:
                 if m:
                     amount = int(m.group(1))
                     player.balance = (player.balance or 0) + amount
+                    # см. _award_achievement_rewards: прямой save() не проходит
+                    # через учёт дельты, начисляем статус явно
+                    player.total_earned = (player.total_earned or 0) + amount
             elif part.startswith("Титул "):
                 title = part.replace("Титул ", "").strip()
                 if title:
@@ -397,6 +548,9 @@ class AchievementService:
         
 class AppContext:
     def __init__(self, db_pool, redis_client, cache, settings, repo, war_service, pet_service, achievement_service):
+        # Дедлайн Часа Удачи живёт на самом контексте, а не в TTLCache(ttl=600):
+        # иначе 30-минутный Час умирал на 10-й минуте (см. happy_hour_active).
+        self.happy_hour_end = None
         self.db_pool = db_pool
         self.redis = redis_client
         self.cache = cache
@@ -503,204 +657,254 @@ def emoji_to_name(emoji: str) -> str:
 redis = None
 
 
+def _btn(text: str, callback_data: str, style: str | None = None) -> InlineKeyboardButton:
+    """InlineKeyboardButton с опциональным ЦВЕТОМ (Bot API 9.4: поле `style`,
+    одно из "danger" (красный) / "success" (зелёный) / "primary" (синий);
+    без него клиент рисует свой обычный стиль).
+
+    PTB 20.8 не знает этого поля нативно, но прокидывает произвольные ключи
+    через api_kwargs прямо в JSON запроса, поэтому апгрейд библиотеки не нужен.
+    Старые клиенты Telegram, не знающие 9.4, поле просто игнорируют и рисуют
+    обычную кнопку — деградация безопасная, ничего не ломается.
+
+    Правило использования (иначе цвет перестаёт быть сигналом): не больше
+    одной-двух цветных кнопок на экран, и только там, где цвет несёт смысл —
+    primary для главного действия экрана, success для безопасного/наградного,
+    danger для действительно рискованного выбора."""
+    return InlineKeyboardButton(text, callback_data=callback_data,
+                                api_kwargs=({"style": style} if style else None))
+
+
+
+async def _register_nft(ctx, conn, blunt_id: str, user_id: int, rarity: str,
+                        rare_number: str, created_at: datetime) -> tuple[Optional[int], str]:
+    """Пишет блант в nft_registry, возвращает (serial, rare_number).
+
+    rare_number собирается из ОДНОЙ буквы редкости + 4 случайные цифры — всего
+    9000 слотов на редкость, и с ростом коллекции коллизии по дню рождения
+    неизбежны. Раньше UNIQUE-ограничение на rare_number существовало только на
+    бумаге (в таблицу никто не писал), поэтому коллизий никто не видел. Теперь,
+    когда реестр реально заполняется, коллизию нужно не поймать исключением,
+    а разрешить: перегенерировать номер и повторить вставку (до 5 попыток —
+    вероятность стольких подряд коллизий пренебрежимо мала).
+    """
+    # nft_registry.created_at — TIMESTAMP без TZ; asyncpg отказывается неявно
+    # конвертировать tz-aware datetime («can't subtract offset-naive and
+    # offset-aware datetimes»). Снимаем tzinfo — created_at уже приведён к UTC
+    # вызывающим кодом, поэтому значения остаются сравнимыми и честными.
+    naive_created_at = created_at.replace(tzinfo=None) if created_at.tzinfo else created_at
+
+    async def _insert(c, rn):
+        return await c.fetchrow(
+            "INSERT INTO nft_registry (blunt_id, created_by, rarity, rare_number, created_at) "
+            "VALUES ($1,$2,$3,$4,$5) ON CONFLICT (blunt_id) DO NOTHING RETURNING serial, rare_number",
+            blunt_id, user_id, rarity, rn, naive_created_at)
+
+    async def _run(c):
+        rn = rare_number
+        for _ in range(5):
+            try:
+                row = await _insert(c, rn)
+                if row:
+                    return row["serial"], row["rare_number"]
+                return None, rn  # blunt_id уже был в реестре (повторный вызов) — не наш случай, но не падаем
+            except asyncpg.exceptions.UniqueViolationError:
+                rn = f"{rarity[0].upper()}-{random.randint(1000, 9999)}"
+        logger.warning("Не удалось подобрать свободный rare_number для %s после 5 попыток", blunt_id)
+        return None, rn
+
+    if conn is not None:
+        return await _run(conn)
+    async with ctx.db_pool.acquire() as c:
+        return await _run(c)
+
 
 async def create_named_blunt(user_id: int, name: str, rarity: str = None, conn=None, ctx: AppContext = None, player: Player = None) -> dict:
     """Создаёт именной блант (использует репозиторий из ctx)."""
     if ctx is None:
         raise ValueError("AppContext is required")
-    
+
     if rarity not in ("common", "rare", "epic", "legendary"):
         r = random.random()
         if r < 0.02: rarity = "legendary"
         elif r < 0.15: rarity = "epic"
         elif r < 0.45: rarity = "rare"
         else: rarity = "common"
-    
+
     clean_name = str(name or "").strip()[:28] or "Безымянный"
     reaction = random.choice(FUNNY_REACTIONS)
     blunt_id = f"blunt_{user_id}_{int(datetime.now(timezone.utc).timestamp())}_{random.randint(1000,9999)}"
     hash_code = "0x" + hashlib.sha256((blunt_id + ":hash").encode()).hexdigest()[:16]
     rare_number = f"{rarity[0].upper()}-{random.randint(1000,9999)}"
-    
+    created_at = datetime.now(timezone.utc)
+
+    # Реестр — единственный источник, через который живёт /check (и, через
+    # check_count, достижение check_10 → «🌀 Лунный лорд»). Раньше сюда никто не
+    # писал: /check всегда отвечал «не найден», а высшая цель игры (закрыть ВСЕ
+    # достижения) была недостижима навсегда. Сбой реестра не должен рушить
+    # крафт — блант создаётся в любом случае, просто без серийника/непроверяемым.
+    serial = None
+    try:
+        serial, rare_number = await _register_nft(
+            ctx, conn, blunt_id, user_id, rarity, rare_number, created_at)
+    except Exception:
+        logger.warning("nft_registry: не удалось зарегистрировать %s", blunt_id)
+
     item = {
         "id": blunt_id, "type": "named", "name": clean_name, "rarity": rarity,
-        "serial": None, "rare_number": rare_number, "hash": hash_code,
-        "reaction": reaction, "created_at": datetime.now(timezone.utc).isoformat(),
-        "owner_history": [{"user_id": str(user_id), "since": datetime.now(timezone.utc).isoformat()}],
+        "serial": serial, "rare_number": rare_number, "hash": hash_code,
+        "reaction": reaction, "created_at": created_at.isoformat(),
+        "owner_history": [{"user_id": str(user_id), "since": created_at.isoformat()}],
     }
-    
+
     # Загружаем игрока только если не передан готовый
     if player is None:
         player = await ctx.repo.get_by_id(user_id)
     if not player or not player.exists:
         player = Player(user_id=user_id)
-    
+
     player.inventory = _json_safe_load(player.inventory, [])
     player.inventory.append(item)
     await ctx.repo.save(player, conn=conn)
     logger.info("Создан именной блант '%s' для игрока %d", clean_name, user_id)
     return item
 
-async def _award_achievement_rewards(user_id: int, player: Player, reward_text: str, context, ctx: AppContext) -> None:
-    """Выдаёт награды за достижения (использует репозиторий из ctx)."""
+def _apply_achievement_reward(player: Player, reward_text: str) -> None:
+    """Меняет награду на уже заблокированном объекте игрока без I/O.
+
+    Эта функция вызывается внутри ``repo.atomic_update``. Сохранение выполняет
+    сам репозиторий тем же соединением и той же транзакцией, поэтому запись о
+    достижении и его валюта/косметика не могут разъехаться.
+    """
     if not reward_text:
         return
-    
-    if isinstance(player, dict):
-        player = await ctx.repo.get_by_id(user_id)
-    if not player or not player.user_id:
-        return
-    
-    parts = [p.strip() for p in reward_text.split(",") if p.strip()]
-    for part in parts:
+
+    for part in (p.strip() for p in reward_text.split(",") if p.strip()):
         if part.startswith("+") and "OAC" in part:
-            clean = part.replace(" ", "")
-            m = re.search(r"\+(\d+)", clean)
-            if m:
-                player.balance = (player.balance or 0) + int(m.group(1))
+            match = re.search(r"\+(\d+)", part.replace(" ", ""))
+            if match:
+                player.balance = (player.balance or 0) + int(match.group(1))
+                # total_earned добавит atomic_update по фактической дельте
+                # баланса; вручную повышать его здесь означало бы двойной учёт.
         elif part.startswith("Титул "):
             title = part.replace("Титул ", "").strip()
-            if title:
-                titles = (player.titles or "").split()
-                if title not in titles:
-                    titles.append(title)
-                    player.titles = " ".join(titles).strip()
+            titles = (player.titles or "").split()
+            if title and title not in titles:
+                titles.append(title)
+                player.titles = " ".join(titles).strip()
         elif part.startswith("Фон "):
             bg = part.replace("Фон ", "").strip()
-            skins = player.profile_skins or {}
-            if not isinstance(skins, dict): skins = {}
+            skins = player.profile_skins if isinstance(player.profile_skins, dict) else {}
             unlocked = skins.get("unlocked_backgrounds", [])
-            if bg and bg not in unlocked: unlocked.append(bg)
+            if bg and bg not in unlocked:
+                unlocked.append(bg)
             skins["unlocked_backgrounds"] = unlocked
             player.profile_skins = skins
         elif part.startswith("Рамка "):
             frame = part.replace("Рамка ", "").strip()
-            skins = player.profile_skins or {}
-            if not isinstance(skins, dict): skins = {}
+            skins = player.profile_skins if isinstance(player.profile_skins, dict) else {}
             unlocked = skins.get("unlocked_frames", [])
-            if frame and frame not in unlocked: unlocked.append(frame)
+            if frame and frame not in unlocked:
+                unlocked.append(frame)
             skins["unlocked_frames"] = unlocked
-            player.profile_skins = skins
         else:
-            logger.warning(f"Неизвестный формат награды: {part} для пользователя {user_id}")
-    
-    await ctx.repo.save(player)
-    
+            logger.warning("Неизвестный формат награды: %s для пользователя %s", part, player.user_id)
+
+
 async def check_achievements(user_id: int, context, ctx: AppContext = None) -> None:
-    """Проверяет и выдаёт достижения (использует репозиторий из ctx)."""
+    """Атомарно проверяет и выдаёт достижения одного игрока.
+
+    Игрок блокируется строковым ``SELECT … FOR UPDATE`` внутри
+    ``repo.atomic_update``. Уникальность ``(user_id, ach_id)`` и
+    ``ON CONFLICT DO NOTHING`` делают вставки идемпотентными без глобального
+    ``LOCK TABLE``; независимые игроки больше не сериализуют всю игру.
+    """
     if ctx is None:
         ctx = context.bot_data.get("ctx")
     if not ctx:
         return
-    
-    player = await ctx.repo.get_by_id(user_id)
-    if not player or not player.user_id:
-        return
-    
-    awarded_key = f"ach:{user_id}"
-    awarded = set()
-    if ctx.redis:
-        try:
-            cached = await redis_breaker.call(ctx.redis.get, awarded_key)
-            if cached:
-                awarded = set(json.loads(cached))
-        except pybreaker.CircuitBreakerError:
-            pass
-    
-    if not awarded:
-        async with ctx.db_pool.acquire() as conn:
-            rows = await conn.fetch("SELECT ach_id FROM achievements_awarded WHERE user_id=$1", user_id)
-            awarded = {r["ach_id"] for r in rows}
-            if ctx.redis:
-                try:
-                    await redis_breaker.call(ctx.redis.setex, awarded_key, 60, json.dumps(list(awarded)))
-                except pybreaker.CircuitBreakerError:
-                    pass
-    
-    messages_to_send = []
-    async with ctx.db_pool.acquire() as conn:
-        async with conn.transaction():
-            await conn.execute("LOCK TABLE achievements_awarded IN EXCLUSIVE MODE")
-            rows = await conn.fetch("SELECT ach_id FROM achievements_awarded WHERE user_id=$1", user_id)
-            current_awarded = {r["ach_id"] for r in rows}
-    
-            for ach in ACHIEVEMENTS:
-                ach_id = ach["id"]
-                if ach_id == "lunar_lord":
-                    continue
-                cond = ACHIEVEMENT_CONDITIONS.get(ach_id)
-                if cond and ach_id not in current_awarded:
-                    field, threshold = cond
-                    if getattr(player, field, 0) >= threshold:
-                        await conn.execute(
-                            "INSERT INTO achievements_awarded(user_id, ach_id, awarded_at) VALUES($1, $2, NOW()) ON CONFLICT DO NOTHING",
-                            user_id, ach_id
-                        )
-                        await _award_achievement_rewards(user_id, player, ach.get("reward", ""), context, ctx)
-                        current_awarded.add(ach_id)
 
-                        if getattr(player, 'onboarding_step', -1) != -1:
-                            messages_to_send.append(
-                                f"<b>🏆 {ach['emoji']} «{ach['name']}»</b>\n"
-                                f"<i>— достижение разблокировано!</i>"
-                            )
-                        else:
-                            messages_to_send.append(
-                                f"<b>🕊️ СВИТОК ДОСТИЖЕНИЙ 🏆</b>\n\n"
-                                f"<b>🎉 Достижение разблокировано!💎</b>\n\n"
-                                f"<i>{ach['emoji']} «{ach['name']}» {ach['emoji']}</i>"
-                            )
-    
-            # lunar_lord
-            rows2 = await conn.fetch("SELECT ach_id FROM achievements_awarded WHERE user_id=$1", user_id)
-            awarded_ids = {r["ach_id"] for r in rows2}
-            all_other = {a["id"] for a in ACHIEVEMENTS if a["id"] != "lunar_lord"}
-            if "lunar_lord" not in awarded_ids and all_other.issubset(awarded_ids):
-                lunar = ACHIEVEMENTS_DICT["lunar_lord"]
-                await conn.execute(
-                    "INSERT INTO achievements_awarded(user_id, ach_id, awarded_at) VALUES($1, $2, NOW()) ON CONFLICT DO NOTHING",
-                    user_id, "lunar_lord"
+    async def _check(player, conn):
+        rows = await conn.fetch("SELECT ach_id FROM achievements_awarded WHERE user_id=$1", user_id)
+        awarded = {row["ach_id"] for row in rows}
+        messages = []
+
+        for achievement in ACHIEVEMENTS:
+            ach_id = achievement["id"]
+            if ach_id == "lunar_lord" or ach_id in awarded:
+                continue
+            condition = ACHIEVEMENT_CONDITIONS.get(ach_id)
+            if not condition:
+                continue
+            field, threshold = condition
+            if getattr(player, field, 0) < threshold:
+                continue
+            inserted = await conn.fetchval(
+                "INSERT INTO achievements_awarded(user_id, ach_id, awarded_at) "
+                "VALUES($1, $2, NOW()) ON CONFLICT DO NOTHING RETURNING ach_id",
+                user_id, ach_id,
+            )
+            if not inserted:
+                continue
+            _apply_achievement_reward(player, achievement.get("reward", ""))
+            awarded.add(ach_id)
+            if getattr(player, "onboarding_step", -1) != -1:
+                messages.append(
+                    f"<b>🏆 {achievement['emoji']} «{achievement['name']}»</b>\n"
+                    f"<i>— достижение разблокировано!</i>"
                 )
-                await _award_achievement_rewards(user_id, player, lunar.get("reward", ""), context, ctx)
-                messages_to_send.append(
+            else:
+                messages.append(
+                    f"<b>🕊️ СВИТОК ДОСТИЖЕНИЙ 🏆</b>\n\n"
+                    f"<b>🎉 Достижение разблокировано!💎</b>\n\n"
+                    f"<i>{achievement['emoji']} «{achievement['name']}» {achievement['emoji']}</i>"
+                )
+
+        all_other = {achievement["id"] for achievement in ACHIEVEMENTS if achievement["id"] != "lunar_lord"}
+        if "lunar_lord" not in awarded and all_other.issubset(awarded):
+            lunar = ACHIEVEMENTS_DICT["lunar_lord"]
+            inserted = await conn.fetchval(
+                "INSERT INTO achievements_awarded(user_id, ach_id, awarded_at) "
+                "VALUES($1, $2, NOW()) ON CONFLICT DO NOTHING RETURNING ach_id",
+                user_id, "lunar_lord",
+            )
+            if inserted:
+                _apply_achievement_reward(player, lunar.get("reward", ""))
+                messages.append(
                     f"<b>🕊️ СВИТОК ДОСТИЖЕНИЙ 🏆</b>\n\n"
                     f"<b>🎉 Достижение разблокировано!</b>\n\n"
                     f"<i>{lunar['emoji']} «{lunar['name']}» {lunar['emoji']}</i>\n\n"
                     f"<b>📜 Запись добавлена! 💎</b>"
                 )
-    
-            if ctx.redis:
-                try:
-                    await redis_breaker.call(ctx.redis.delete, awarded_key)
-                except pybreaker.CircuitBreakerError:
-                    pass
-    
-    if messages_to_send:
-        player = await ctx.repo.get_by_id(user_id)
-        if player and getattr(player, 'onboarding_step', -1) != -1:
-            # Красивое и компактное уведомление для новичков
-            for msg in messages_to_send:
-                try:
-                    await safe_send_message(
-                        context,
-                        user_id,
-                        msg,
-                        parse_mode='HTML'
-                    )
-                except Exception as e:
-                    logger.error(f"Achievement notify error: {e}")
-        else:
-            # Стандартный вывод после обучения
-            for msg in messages_to_send:
-                try:
-                    await context.bot.send_message(chat_id=user_id, text=msg, parse_mode='HTML')
-                except Exception as e:
-                    logger.error(f"Achievement notify error: {e}")
+        return messages
+
+    messages_to_send = await ctx.repo.atomic_update(user_id, _check)
+    if messages_to_send is None:
+        return
+
+    if ctx.redis:
+        try:
+            await redis_breaker.call(ctx.redis.delete, f"ach:{user_id}")
+        except (pybreaker.CircuitBreakerError, Exception):
+            pass
+
+    if not messages_to_send:
+        return
+    player = await ctx.repo.get_by_id(user_id)
+    for message in messages_to_send:
+        try:
+            if player and getattr(player, "onboarding_step", -1) != -1:
+                await safe_send_message(context, user_id, message, parse_mode="HTML")
+            else:
+                await context.bot.send_message(chat_id=user_id, text=message, parse_mode="HTML")
+        except Exception as exc:
+            logger.error("Achievement notify error: %s", exc)
                 
 def _build_ascension_card(rank_label, new_balance):
     """Карточка возвышения. Чистая функция → тестируется без БД.
 
-    rank_label = строка ранга из RANKS[i][0] (напр. '⚔️ Ветеран')."""
+    rank_label = строка ранга из RANKS[i][0] (напр. '⚔️ Ветеран').
+    new_balance = total_earned (заработано за всё время) — ось ранга."""
     emoji, _, name = rank_label.partition(" ")
     lore = RANK_LORE.get(rank_label, {})
     lines = [
@@ -714,7 +918,7 @@ def _build_ascension_card(rank_label, new_balance):
         lines.append(f"<i>{lore['line']}</i>")
     if lore.get("unlock"):
         lines.append(f"\n🔓 <b>Открыто:</b> {lore['unlock']}")
-    lines.append(f"\n💰 <b>Баланс:</b> {new_balance} OAC 🍬")
+    lines.append(f"\n💰 <b>Заработано за всё время:</b> {new_balance} OAC 🍬")
     # goal-gradient: показать следующую ступень и дистанцию до неё
     for e, th, nm in RANKS:
         if th > new_balance:
@@ -726,6 +930,8 @@ def _build_ascension_card(rank_label, new_balance):
 
 
 async def check_rank_up(context, user_id, username, old_balance, new_balance):
+    """Ранг-ап по ЗАРАБОТАННОМУ за всё время (old/new total_earned).
+    Величина только растёт → «понижения ранга» не существует by design."""
     old_idx = 0
     new_idx = 0
     for i, (_, threshold, _) in enumerate(RANKS):
@@ -737,17 +943,29 @@ async def check_rank_up(context, user_id, username, old_balance, new_balance):
         return
     rank_label = RANKS[new_idx][0]
     ctx = context.bot_data.get("ctx")
+    # Единственный личный триумф в игре, у которого не было ВООБЩЕ ни одной
+    # кнопки — карточка приходила и молча повисала. Пик идентити-элевации:
+    # именно здесь просьба поделиться дешевле всего за всю сессию.
+    ascension_kb = None
+    try:
+        share_btn = await _win_share_button(
+            context, user_id, f"⚡ Я достиг ранга {rank_label} в Antysocialshop!")
+        ascension_kb = InlineKeyboardMarkup([[share_btn]])
+    except Exception:
+        pass
     try:
         # мини-предвкушение: вспышка перед раскрытием ранга
         msg = await context.bot.send_message(
             chat_id=user_id, text="🌑 <i>Что-то меняется в тебе…</i>", parse_mode='HTML')
         await asyncio.sleep(1.1)
-        await msg.edit_text(_build_ascension_card(rank_label, new_balance), parse_mode='HTML')
+        await msg.edit_text(_build_ascension_card(rank_label, new_balance),
+                            parse_mode='HTML', reply_markup=ascension_kb)
     except Exception:
         try:
             await context.bot.send_message(
                 chat_id=user_id,
-                text=_build_ascension_card(rank_label, new_balance), parse_mode='HTML')
+                text=_build_ascension_card(rank_label, new_balance),
+                parse_mode='HTML', reply_markup=ascension_kb)
         except Exception:
             pass
     # аспирационные ранги — анонс в гильдию (социальное доказательство + FOMO)
@@ -763,6 +981,9 @@ async def check_rank_up(context, user_id, username, old_balance, new_balance):
 
 def compute_rank_info(balance: int):
     """Чистая функция: разбирает RANKS и возвращает данные о ранге.
+
+    ВАЖНО: на вход подаётся total_earned (заработано за всё время), а не
+    текущий кошелёк. Ранг — это память о пути, а не снимок кассы.
 
     Единый источник вычисления ранга (раньше этот блок был скопирован
     в build_main_menu и progress_hub_handler).
@@ -804,6 +1025,13 @@ async def ensure_daily_progress(player, ctx) -> dict:
         current_quest = progress.get("quest_id", "chapter1")
         progress = {"reset_date": today, "quest_id": current_quest, "reward_claimed": False}
         player.daily_progress = progress
+        # Голод питомца: −25 за новый день. Раньше pet_hunger нигде не убывал —
+        # шкала сытости всегда стояла на 100 и была бутафорией, а «Покормить»
+        # ничего не значило. Теперь care-петля честная: кормление (ставит 100)
+        # реально нужно. Без штрафов — голодный пёс лишь грустит на своём экране.
+        if getattr(player, 'pet', ''):
+            _h = player.pet_hunger if player.pet_hunger is not None else 100
+            player.pet_hunger = max(0, _h - 25)
         await ctx.repo.save(player)
     return progress
 
@@ -815,6 +1043,7 @@ def _quest_progress_counts(template, progress, guild, is_veteran, has_pet):
     conditions = {
         "guild_black": guild == "BLACK",
         "guild_white": guild == "WHITE",
+        "has_guild": bool(guild),
         "is_veteran_and_has_pet": is_veteran and has_pet,
     }
     tasks = [t for t in template.get("tasks", [])
@@ -823,63 +1052,167 @@ def _quest_progress_counts(template, progress, guild, is_veteran, has_pet):
     return (done, len(tasks))
 
 
-def _plural_steps(n: int) -> str:
-    """Русское склонение слова «шаг» для числа n."""
+def _plural_ru(n: int, one: str, few: str, many: str) -> str:
+    """Русское склонение существительного по трём формам (1 форма / 2-4 / 5-20).
+    one="шаг", few="шага", many="шагов" — вызывающий передаёт свою тройку."""
     n = abs(n) % 100
     if 11 <= n <= 14:
-        return "шагов"
+        return many
     d = n % 10
     if d == 1:
-        return "шаг"
+        return one
     if 2 <= d <= 4:
-        return "шага"
-    return "шагов"
+        return few
+    return many
+
+
+def _plural_steps(n: int) -> str:
+    """Русское склонение слова «шаг» для числа n."""
+    return _plural_ru(n, "шаг", "шага", "шагов")
 
 
 
 
 
 
-def build_smoke_effect(outcome, earned):
+def _pick_no_repeat(pool, key, progress):
+    """Выбирает случайный элемент пула, избегая точного повтора последнего
+    показанного под этим ключом. Точно такой же стимул подряд заметно
+    слабее активирует чувствительные к новизне зоны, чем новый (repetition
+    suppression: Grill-Spector, Henson & Martin, 2006) — на фиксированном
+    пуле это ускоряет привыкание (Brickman & Campbell, 1971). Слой чисто
+    декоративный: выбирает МЕЖДУ равнозначными вариантами одного и того же
+    исхода, вероятность самого исхода не трогает и не может.
+
+    progress — обычно p.daily_progress: тот же JSONB-словарь, что уже
+    сохраняется в одной транзакции с самим исходом, поэтому "последний
+    показанный" переживает рестарт процесса как любой другой прогресс.
+    """
+    if len(pool) <= 1:
+        return pool[0] if pool else None
+    last = progress.get(key)
+    candidates = [x for x in pool if x != last] or pool
+    pick = random.choice(candidates)
+    progress[key] = pick
+    return pick
+
+
+def _pick_smoke_flavor(outcome, progress):
+    """Как _pick_no_repeat, но для SMOKE_FLAVORS: элементы там — пары
+    (имя, текст), а не голые строки. JSONB-круг (сохранить → перечитать)
+    превращает кортеж в список, и сравнение "кортеж != список" было бы
+    ВСЕГДА истинным — та же ловушка, что уже один раз ловила _mines_positions
+    (JSON не знает кортежей). Сравниваем и храним только имя (строка,
+    JSON-круг не портит)."""
+    pool = SMOKE_FLAVORS.get(outcome, SMOKE_FLAVORS["neutral"])
+    if len(pool) <= 1:
+        return pool[0]
+    last_name = progress.get("last_smoke_flavor")
+    candidates = [item for item in pool if item[0] != last_name] or pool
+    pick = random.choice(candidates)
+    progress["last_smoke_flavor"] = pick[0]
+    return pick
+
+
+def build_smoke_effect(outcome, earned, flavor=None):
     """Собирает карточку исхода. Текст берётся из корзины, соответствующей
-    исходу (jackpot/win/loss/neutral), поэтому подпись OAC всегда честна."""
-    name, flavor = random.choice(SMOKE_FLAVORS.get(outcome, SMOKE_FLAVORS["neutral"]))
+    исходу (jackpot/big/win/neutral), поэтому подпись OAC всегда честна.
+    flavor — опционально заранее выбранная (имя, текст) пара (см.
+    _pick_smoke_flavor); без неё просто берёт случайную из корзины, как раньше."""
+    name, flavor_text = flavor if flavor else random.choice(SMOKE_FLAVORS.get(outcome, SMOKE_FLAVORS["neutral"]))
     if outcome == "jackpot":
         header = "<b>🎰 ДЖЕКПОТ! ДЫМ ХЛЫНУЛ ЗОЛОТОМ</b>"
         earned_str = f"🎰 <b>+{earned} OAC</b>"
+    elif outcome == "big":
+        header = "<b>🌠 ГУСТОЙ ДЫМ</b>"
+        earned_str = f"💰 <b>+{earned} OAC</b>"
     elif earned > 0:
         header = "<b>💨 ДЫМ РАССЕЯЛСЯ</b>"
         earned_str = f"🍬 <b>+{earned} OAC</b>"
-    elif earned < 0:
-        header = "<b>💨 ДЫМ РАССЕЯЛСЯ</b>"
-        earned_str = f"🕳️ <b>{earned} OAC</b>"
     else:
         header = "<b>💨 ДЫМ РАССЕЯЛСЯ</b>"
         earned_str = "<i>Ни капли OAC осело на дне…</i>"
     return (
         f"{header}\n"
         f"– {name}\n"
-        f"– <i>{flavor}</i>\n\n"
+        f"– <i>{flavor_text}</i>\n\n"
         f"{earned_str}"
     )
 
-def calculate_smoke_reward(p, happy_hour):
+# Пити-таймер гачи «Дунуть»: после SMOKE_PITY_THRESHOLD сухих тяг подряд
+# следующая гарантированно «выигрыш» — страховка от засухи. С новым
+# распределением (50% попаданий вместо 27%) шесть пустых подряд выпадают
+# примерно в 1.6% случаев, так что гарант из основного механизма стал
+# редким предохранителем; видимую роль «чем полезна пустая тяга» теперь
+# несёт Жар (см. SMOKE_HEAT_MAX), который двигается на КАЖДОЙ тяге.
+SMOKE_PITY_THRESHOLD = 6
+
+
+def calculate_smoke_reward(p, happy_hour, dry_count=0):
     """Возвращает (earned, outcome). Одна руч­ка — и число, и флейвор.
-    Раньше число и текст брались из двух разных бросков и противоречили друг
-    другу. Джекпот (2%) вырезан из доли выигрыша — суммарный шанс плюса тот же
-    (18%), но у него есть дофаминовый пик."""
+
+    Распределение переработано под два измеренных дефекта старого баланса:
+
+    1. ПУСТОТА. Раньше 73% тяг не давали ничего (50% нейтрал + 23% минус) —
+       игрок делал главный жест игры и в трёх случаях из четырёх не получал
+       никакого сигнала. Дофаминовый ответ на неопределённость максимален
+       около 50/50 и падает к обоим краям (Fiorillo, Tobler, Schultz,
+       Science, 2003), а 27% попаданий лежат глубоко в зоне «обычно ничего».
+       Теперь попаданий ~51% — механика поставлена в точку максимума, а не
+       рядом с ней.
+
+    2. ШТРАФ ПОВЕРХ ЦЕНЫ. Исход "loss" (−3 OAC, 23% тяг) убран целиком:
+       игрок уже заплатил 15 OAC за блант, и отнимать сверху — наказание за
+       главный глагол, которое ощущается примерно вдвое сильнее равного
+       выигрыша (Kahneman & Tversky, 1979). Флейворы «Кашель»/«Паранойя»
+       никуда не делись — переехали в нейтральную корзину, исчезло только
+       списание.
+
+    Добавлена средняя ступень "big" (7%): между мелочью и джекпотом раз в
+    50 тяг образовался провал, из-за которого у отдачи не было середины.
+
+    Экономический контракт НЕ ослаблен: EV тяги (~9 OAC) по-прежнему заметно
+    ниже цены крафта (15 OAC), поэтому цикл «скрутить → дунуть» остаётся
+    нетто-стоком и бесконечного принтера OAC не образует.
+
+    dry_count — число сухих тяг подряд ДО этой. Если с текущей их стало бы
+    SMOKE_PITY_THRESHOLD, форсим «выигрыш» (пити-гарант)."""
     r = random.random()
     if r < 0.02:
         earned, outcome = random.randint(80, 160), "jackpot"
-    elif r < 0.18:
-        earned, outcome = random.randint(15, 40), "win"
-    elif r < 0.70:
-        earned, outcome = -5, "loss"
+    elif r < 0.09:
+        earned, outcome = random.randint(35, 60), "big"
+    elif r < 0.50:
+        earned, outcome = random.randint(4, 12), "win"
     else:
         earned, outcome = 0, "neutral"
+    # Пити-гарант: сухая тяга, добивающая серию до порога, превращается в выигрыш.
+    if outcome == "neutral" and dry_count + 1 >= SMOKE_PITY_THRESHOLD:
+        earned, outcome = random.randint(4, 12), "win"
     if happy_hour and earned > 0:
         earned *= HAPPY_HOUR_MULTIPLIER
     return earned, outcome
+
+
+def _smoke_heat_bar(heat: int) -> str:
+    """Шкала Жара в том же визуальном языке, что и прежняя строка пити-гаранта
+    (🔥 заполнено / ▫️ осталось) — механика выросла из неё, и игрок не должен
+    переучиваться читать новый символ."""
+    heat = max(0, min(SMOKE_HEAT_MAX, heat))
+    return "🔥" * heat + "▫️" * (SMOKE_HEAT_MAX - heat)
+
+
+def _roll_smoke_burst():
+    """Выбирает тип приза Забоя из SMOKE_BURST_POOL. Чистая функция —
+    возвращает (kind, amount); для "card" amount равен None."""
+    r = random.random()
+    acc = 0.0
+    for weight, kind, rng in SMOKE_BURST_POOL:
+        acc += weight
+        if r < acc:
+            return kind, (random.randint(*rng) if rng else None)
+    kind, rng = SMOKE_BURST_POOL[-1][1], SMOKE_BURST_POOL[-1][2]
+    return kind, (random.randint(*rng) if rng else None)
 
 class SmokeStatus(Enum):
     NO_BLUNTS = "no_blunts"
@@ -927,6 +1260,144 @@ async def _run_migrations(conn):
                 WHERE table_name='players' AND column_name='lab_depth'
             ) THEN
                 ALTER TABLE players ADD COLUMN lab_depth INTEGER DEFAULT 1;
+            END IF;
+        END $$;
+    """)
+
+    # Добавление streak_freezes в players (заморозки серии). Дефолт 1 —
+    # существующие игроки тоже получают одну заморозку (чистый бонус игроку).
+    await conn.execute("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='players' AND column_name='streak_freezes'
+            ) THEN
+                ALTER TABLE players ADD COLUMN streak_freezes INTEGER DEFAULT 1;
+            END IF;
+        END $$;
+    """)
+
+    # Добавление created_at в players — момента регистрации не было ВООБЩЕ
+    # ни в одной колонке, поэтому «новых игроков за неделю» посчитать было
+    # нечем. DEFAULT now() честен только для игроков, которых заведёт эта
+    # миграция и всё, что после нее; УЖЕ существующие игроки на момент
+    # применения получат now() как created_at — не настоящую дату регистрации.
+    # /growth_stats учитывает это и предупреждает, если похоже, что это первая
+    # неделя после деплоя (см. комментарий в growth_stats_command).
+    await conn.execute("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='players' AND column_name='created_at'
+            ) THEN
+                ALTER TABLE players ADD COLUMN created_at TIMESTAMPTZ DEFAULT now();
+            END IF;
+        END $$;
+    """)
+
+    # ===== Redis перестаёт быть обязательным: переносим то немногое, что без
+    # него ЛОМАЛОСЬ (а не просто дорожало), в Postgres =====
+    #
+    # Аудит всех 38 мест, где код трогал ctx.redis, показал: почти везде уже
+    # был честный фолбэк («Приложение по дизайну работает и без Redis» —
+    # комментарий из самого кода). Не деградировали, а НЕ РАБОТАЛИ ВООБЩЕ
+    # только пять вещей — их и переносим. Остальное (кэш ачивок, счётчиков
+    # гильдий, юзернейма, рейт-лимиты, витрина коллекции) как было — Redis для
+    # них остаётся опциональным ускорителем, трогать незачем.
+    await conn.execute("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='players' AND column_name='last_reengagement_sent'
+            ) THEN
+                ALTER TABLE players ADD COLUMN last_reengagement_sent TIMESTAMPTZ DEFAULT NULL;
+            END IF;
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='players' AND column_name='last_winback_sent'
+            ) THEN
+                ALTER TABLE players ADD COLUMN last_winback_sent TIMESTAMPTZ DEFAULT NULL;
+            END IF;
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='players' AND column_name='last_known_rank'
+            ) THEN
+                ALTER TABLE players ADD COLUMN last_known_rank INTEGER DEFAULT NULL;
+            END IF;
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='players' AND column_name='mines_state'
+            ) THEN
+                ALTER TABLE players ADD COLUMN mines_state JSONB DEFAULT NULL;
+            END IF;
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='players' AND column_name='mines_state_updated_at'
+            ) THEN
+                ALTER TABLE players ADD COLUMN mines_state_updated_at TIMESTAMPTZ DEFAULT NULL;
+            END IF;
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='players' AND column_name='lab_best_oac'
+            ) THEN
+                ALTER TABLE players ADD COLUMN lab_best_oac INTEGER DEFAULT 0;
+            END IF;
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='players' AND column_name='mines_best_step'
+            ) THEN
+                ALTER TABLE players ADD COLUMN mines_best_step INTEGER DEFAULT 0;
+            END IF;
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='players' AND column_name='smoke_heat'
+            ) THEN
+                ALTER TABLE players ADD COLUMN smoke_heat INTEGER DEFAULT 0;
+            END IF;
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='players' AND column_name='last_activation_push_sent'
+            ) THEN
+                ALTER TABLE players ADD COLUMN last_activation_push_sent TIMESTAMPTZ DEFAULT NULL;
+            END IF;
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='players' AND column_name='activation_push_count'
+            ) THEN
+                ALTER TABLE players ADD COLUMN activation_push_count INTEGER DEFAULT 0;
+            END IF;
+        END $$;
+    """)
+    # Диагностика /growth (здоровье джоб, возраст процесса) — раньше жила в
+    # Redis-ключах без TTL/с TTL, здесь один маленький стол на все метки сразу.
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS job_health (
+            job TEXT PRIMARY KEY,
+            last_run TIMESTAMPTZ NOT NULL,
+            sent INTEGER DEFAULT 0,
+            candidates INTEGER DEFAULT 0
+        )
+    """)
+    # blocked/failed отдельно от sent: "отправлено 0 из 9" раньше не отличало
+    # «все заблокировали бота» (ожидаемо, чинить нечего) от «все упали с
+    # реальной ошибкой» (баг) — обе причины выглядели одинаково в /growth.
+    await conn.execute("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='job_health' AND column_name='blocked'
+            ) THEN
+                ALTER TABLE job_health ADD COLUMN blocked INTEGER DEFAULT 0;
+            END IF;
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='job_health' AND column_name='failed'
+            ) THEN
+                ALTER TABLE job_health ADD COLUMN failed INTEGER DEFAULT 0;
             END IF;
         END $$;
     """)
@@ -1007,6 +1478,48 @@ async def _run_migrations(conn):
             value TEXT NOT NULL
         );
     """)
+
+    # ── Отложенные подарки: дарение тому, кого ещё нет в БД ──────────────
+    # Раньше дарение по @username работало «русской рулеткой»: колонка
+    # players.username пишется ОДИН раз при регистрации и никогда не
+    # обновляется, поэтому смена Telegram-ника ломала поиск НАВСЕГДА для уже
+    # существующего игрока, а получатель, вообще не запускавший бота, всегда
+    # получал «игрок не найден» — хотя у Telegram-бота физически нет способа
+    # узнать numeric user_id человека, который с ним не взаимодействовал.
+    # Решение: если получатель не находится СЕЙЧАС, блант не «пропадает» и не
+    # отклоняется — он ставится в очередь по нормализованному username (или по
+    # user_id, если даритель ввёл числовой ID) и забирается автоматически при
+    # первом же /start подходящего человека (см. _claim_pending_gifts).
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS pending_gifts (
+            id SERIAL PRIMARY KEY,
+            username_lower TEXT,
+            target_user_id BIGINT,
+            item JSONB NOT NULL,
+            from_user_id BIGINT NOT NULL,
+            created_at TIMESTAMP NOT NULL DEFAULT NOW()
+        );
+    """)
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pending_gifts_username ON pending_gifts(username_lower);")
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pending_gifts_target_id ON pending_gifts(target_user_id);")
+
+    # ── Активные забеги Лабиринта ────────────────────────────────────────
+    # Лабиринт оплачивается 12-часовой попыткой; его нельзя хранить только в
+    # context.user_data, потому что рестарт процесса тогда списывал попытку и
+    # стирал весь путь игрока. Одна строка на игрока гарантирует, что у него
+    # существует не более одного активного забега.
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS lab_runs (
+            user_id BIGINT PRIMARY KEY REFERENCES players(user_id) ON DELETE CASCADE,
+            state JSONB NOT NULL,
+            started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+    """)
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_lab_runs_updated_at ON lab_runs(updated_at);")
     
 # Ну тип жто БД длЯЯЯ daily_progress
     await conn.execute("""
@@ -1082,6 +1595,88 @@ async def _run_migrations(conn):
     """)
     await conn.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS last_mines TIMESTAMP;")
 
+    # ── total_earned: разделение «кошелёк» и «статус» ──
+    # Ранг, топ, гейты и скидка Прилавка раньше читали balance — то есть трата
+    # молча ОТБИРАЛА ранг и привилегии (купил питомца за 3000 на пороге
+    # Ветерана 5000 → мгновенно перестал быть Ветераном и потерял алхимию).
+    # Теперь статус живёт на total_earned, который только растёт.
+    # Бэкфилл = текущий balance: ни один существующий игрок не теряет ранг
+    # при выкатке (у всех статус ровно тот, что был вчера), а дальше
+    # заработок копится честно.
+    await conn.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS total_earned BIGINT DEFAULT 0;")
+    await conn.execute(
+        "UPDATE players SET total_earned = balance "
+        "WHERE total_earned IS NULL OR total_earned < balance;")
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_players_total_earned ON players(total_earned DESC);")
+
+    # ── prestige: Алтарь Вечности (эндгейм-сток, см. game_content.py) ──
+    await conn.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS prestige BIGINT DEFAULT 0;")
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_players_prestige ON players(prestige DESC);")
+
+    # ── blocked_at: момент реальной блокировки бота игроком ──
+    # Раньше блокировка обнаруживалась только реактивно: push-джоба сама
+    # пыталась написать игроку и ловила 403 — /growth видел агрегат
+    # «заблокировали: N», но не момент блокировки. «Заблокировал сразу
+    # после /start» (проблема первого впечатления) и «заблокировал спустя
+    # недели дрейфа» (обычный отток) выглядели в этой метрике одинаково.
+    # my_chat_member — нативный сигнал Telegram о смене статуса чата,
+    # приходит независимо от того, пытались ли мы вообще что-то слать —
+    # см. track_chat_member_update.
+    await conn.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS blocked_at TIMESTAMPTZ DEFAULT NULL;")
+
+    # ── Бэкфилл nft_registry: реестр начал реально заполняться (см.
+    # create_named_blunt/_register_nft), но уже созданные до этой правки
+    # именные бланты в него не попали — /check и достижение check_10 (а через
+    # него «🌀 Лунный лорд») были бы недостижимы для игроков, у которых
+    # коллекция уже собрана. Разбираем инвентарь каждого игрока и регистрируем
+    # то, чего в реестре ещё нет. Идемпотентно (ON CONFLICT DO NOTHING),
+    # безопасно перезапускать на каждом деплое — после первого прогона просто
+    # ничего не делает.
+    try:
+        rows = await conn.fetch(
+            "SELECT user_id, inventory FROM players WHERE inventory IS NOT NULL AND inventory != '[]'")
+        registered = 0
+        for row in rows:
+            inv = _json_safe_load(row["inventory"], [])
+            player_changed = False
+            for it in inv:
+                # Уже зарегистрирован (в т.ч. прошлым прогоном этой же миграции) —
+                # пропускаем без похода в БД, иначе каждый деплой заново
+                # перезаписывал бы JSON инвентаря всем игрокам без единой правки.
+                if it.get("type") != "named" or not it.get("id") or it.get("serial") is not None:
+                    continue
+                created_raw = it.get("created_at")
+                try:
+                    created_dt = datetime.fromisoformat(created_raw).replace(tzinfo=None) if created_raw else datetime.now()
+                except Exception:
+                    created_dt = datetime.now()
+                try:
+                    result = await conn.fetchrow(
+                        "INSERT INTO nft_registry (blunt_id, created_by, rarity, rare_number, created_at) "
+                        "VALUES ($1,$2,$3,$4,$5) ON CONFLICT (blunt_id) DO NOTHING RETURNING serial",
+                        it["id"], row["user_id"], it.get("rarity", "common"),
+                        it.get("rare_number") or f"{it.get('rarity','common')[0].upper()}-{random.randint(1000,9999)}",
+                        created_dt)
+                except asyncpg.exceptions.UniqueViolationError:
+                    # Историческая коллизия rare_number (UNIQUE ввели только сейчас,
+                    # раньше её никто не проверял) — этот старый дубль останется
+                    # непроверяемым через /check, сам предмет в инвентаре не трогаем.
+                    continue
+                if result:
+                    it["serial"] = result["serial"]
+                    player_changed = True
+                    registered += 1
+            if player_changed:
+                await conn.execute(
+                    "UPDATE players SET inventory = $1 WHERE user_id = $2",
+                    json.dumps(inv, separators=(',', ':'), default=str), row["user_id"])
+        if registered:
+            logger.info("nft_registry backfill: зарегистрировано %d существующих блантов", registered)
+    except Exception:
+        logger.exception("nft_registry backfill не удался — /check продолжит работать для новых блантов")
+
 # ===== ОПТИМИЗАЦИЯ ХРАНЕНИЯ (Render Free Tier) =====
     # JSONB поля — сжатие + хранение вне таблицы при размере > 2KB
     # Индекс под рейтинг (снимок лидерборда + топ-10). Ускоряет сортировку по
@@ -1115,6 +1710,7 @@ async def create_tables(conn):
             user_id BIGINT PRIMARY KEY,
             username TEXT,
             balance INTEGER DEFAULT 0,
+            total_earned BIGINT DEFAULT 0,
             blunts INTEGER DEFAULT 0,
             guild TEXT DEFAULT NULL,
             last_farm TIMESTAMP,
@@ -1317,6 +1913,50 @@ async def count_guilds(ctx: AppContext) -> dict:
     )
 
 
+async def get_guild_war_scores(ctx: AppContext) -> dict:
+    """Текущий счёт войны гильдий этой недели — кэш 60с (счёт не обязан быть
+    посекундно точным, только видимым между сбросами). Раньше guild_weekly
+    читался ровно один раз в неделю, в момент подведения итогов —
+    compulsion loop без видимого промежуточного счёта работает вхолостую;
+    см. использование в _format_farm_message."""
+    week_start = datetime.now().date() - timedelta(days=datetime.now().weekday())
+    return await perfected_cache.fetch(
+        redis_client=ctx.redis,
+        db_pool=ctx.db_pool,
+        cache_key="guild_war_scores",
+        query="SELECT guild, total_score FROM guild_weekly WHERE week_start = $1",
+        params=(week_start,),
+        ttl=60,
+        adapter=lambda rows: {"BLACK": 0, "WHITE": 0} | {r["guild"]: r["total_score"] for r in rows},
+        fallback={"BLACK": 0, "WHITE": 0}
+    )
+
+
+async def count_new_players_week(ctx: AppContext) -> int:
+    """Новых игроков за 7 дней — соц-доказательство в реферальных текстах
+    (invite_friend_handler/_win_share_button): решение принимается ДО клика
+    другом, а не после — число должно быть в тексте приглашения, не только
+    в приветствии тем, кто уже вступил в чат.
+
+    Было: общий тотал игроков. Red Team на этой же находке (см. отчёт):
+    небольшое АБСОЛЮТНОЕ число (172 при текущем масштабе) в исследованиях
+    про social proof читается как сигнал «здесь мало кто есть», а не «здесь
+    многие есть» — тот самый эффект, ради обхода которого число вообще
+    добавлялось, работал бы против цели. Темп роста («N новых за неделю»)
+    звучит как momentum независимо от абсолютного размера базы — тот же
+    /growth уже считает это число (new_week), просто не в этом тексте.
+    """
+    return await perfected_cache.fetch(
+        redis_client=ctx.redis,
+        db_pool=ctx.db_pool,
+        cache_key="new_players_week_count",
+        query="SELECT COUNT(*) as cnt FROM players WHERE created_at >= now() - interval '7 days'",
+        ttl=300,
+        adapter=lambda rows: rows[0]["cnt"] if rows else 0,
+        fallback=0
+    )
+
+
 
 async def set_setting(key: str, value: str, ctx: AppContext = None) -> None:
     if ctx is None:
@@ -1427,7 +2067,10 @@ async def _reset_and_notify_broken_id(rarity: str, context):
     except Exception as ex:
         logger.error("Ошибка очистки file_id в БД: %s", ex)
     if settings.admin_id:
-        await _safe_send_message(
+        # _safe_send_message (с подчёркиванием) нигде не существовал — админ
+        # никогда не узнавал о протухшем file_id картинки бланта. Тот же баг
+        # нашли и починили параллельно в двух независимых сессиях.
+        await safe_send_message(
             context, settings.admin_id,
             f"⚠️ Изображение для {rarity} недействительно. Обновите: /setbluntpic {rarity}"
         )
@@ -1479,12 +2122,130 @@ async def safe_send_blunt_image(context, chat_id, rarity, caption, reply_markup)
             await safe_send_message(context, chat_id, "⚠️ Произошла ошибка при отправке изображения.", parse_mode=None)
         return False
 
-async def send_whisper_dm(update, context, text):
+# Потолок одновременных рендеров карточки. Рендер стоит ~220 МБ пикового RSS и
+# ~2с CPU, а уходил он в ДЕФОЛТНЫЙ executor — то есть до 8 воркеров на 4 ядрах,
+# без всякого ограничителя: восемь одновременных просмотров ≈ 1.8 ГБ и почти
+# гарантированный OOM на инстансе 512 МБ. Semaphore(150) в main.py от этого не
+# защищает — он пропускает 150 апдейтов, то есть усиливает, а не сдерживает.
+#
+# До сих пор от перегрузки случайно защищал кэш file_id (рендеров почти не было).
+# Как только появилась инвалидация по версии арта, эта защита исчезает: у всех
+# существующих игроков карты разом становятся холодными. Поэтому ограничитель —
+# не «на будущее», а обязательное условие самой инвалидации.
+# Дефолт 1, а не 2, по замеру: один рендер даёт ~220 МБ пика, база бота с
+# кэшами и пулом — ~180 МБ. Два параллельных (≈620 МБ) уже не влезают в
+# инстанс 512 МБ, ради которого ограничитель и вводится. На инстансе покрупнее
+# поднимается переменной окружения без правки кода.
+BLUNT_RENDER_CONCURRENCY = max(1, int(os.getenv("BLUNT_RENDER_CONCURRENCY", "1")))
+# Длина очереди, дальше которой ждать бессмысленно: игрок не будет смотреть на
+# «часики» 20 секунд. Сбрасываем нагрузку в текстовый путь — он уже есть и
+# корректен, просто никогда не был подключён к перегрузке.
+BLUNT_RENDER_MAX_QUEUE = 8
+_blunt_render_sem: Optional[asyncio.Semaphore] = None
+
+
+def _get_blunt_render_sem() -> asyncio.Semaphore:
+    """Семафор создаётся лениво: на момент импорта модуля event loop ещё нет."""
+    global _blunt_render_sem
+    if _blunt_render_sem is None:
+        _blunt_render_sem = asyncio.Semaphore(BLUNT_RENDER_CONCURRENCY)
+    return _blunt_render_sem
+
+
+async def _persist_blunt_image(ctx, uid, blunt_id, file_id):
+    """Кэшируем сгенерированный Telegram file_id прямо на предмете инвентаря →
+    карточка рисуется ОДИН раз, дальше переиспользуется (без пере-рендера).
+
+    Вместе с file_id пишем версию визуала: без неё кэш становится вечным и
+    правки рендера не доходят до уже выданных предметов."""
+    async def _set(p, conn):
+        for it in (p.inventory or []):
+            if it.get("id") == blunt_id:
+                it["image_file_id"] = file_id
+                it["art_version"] = BLUNT_ART_VERSION
+                return True
+        return False
+    try:
+        await ctx.repo.atomic_update(uid, _set)
+    except Exception:
+        logger.warning("Не удалось сохранить image_file_id для бланта %s", blunt_id)
+
+
+async def _send_blunt_card(context, chat_id, item, owner_name, caption, reply_markup,
+                           ctx=None, uid=None):
+    """Шлёт коллекционную карточку бланта фото-сообщением. True при успехе.
+
+    Порядок: (1) готовый кэш file_id → мгновенная отправка; (2) иначе рендерим
+    уникальную карточку (в executor, чтобы не блокировать loop), шлём, ловим
+    file_id и кэшируем на предмете. Любая осечка → False, вызывающий откатится
+    на текст (карточка — украшение, не критичный путь)."""
+    # Кэш годен, только если он нарисован ТЕКУЩЕЙ версией визуала. Предметы,
+    # созданные до появления счётчика, версии не имеют → считаются устаревшими
+    # и перерисуются при первом показе.
+    fid = item.get("image_file_id")
+    if fid and item.get("art_version") == BLUNT_ART_VERSION:
+        try:
+            await _send_photo_with_retry(context, chat_id, fid, caption=caption, reply_markup=reply_markup)
+            return True
+        except Exception:
+            pass  # протух file_id — перегенерим ниже
+
+    if render_blunt_card is None:
+        return False
+
+    # Некэшированный рендер занимает заметное время — нативный индикатор
+    # Telegram («отправляет фото…») говорит игроку «тап сработал, жди»,
+    # вместо замершего экрана без единого сигнала.
+    try:
+        await context.bot.send_chat_action(chat_id=chat_id, action="upload_photo")
+    except Exception:
+        pass
+
+    # Перегрузка: ждать в длинной очереди хуже, чем показать текстовый вариант
+    # сразу. Отказ здесь не теряет карточку — предмет перерисуется при следующем
+    # заходе, когда очередь рассосётся.
+    sem = _get_blunt_render_sem()
+    if sem.locked() and len(getattr(sem, "_waiters", None) or ()) >= BLUNT_RENDER_MAX_QUEUE:
+        logger.warning("Очередь рендера карточек переполнена — отдаём текстовый путь")
+        return False
+    try:
+        async with sem:
+            png = await asyncio.get_event_loop().run_in_executor(
+                None, render_blunt_card, item, owner_name or "")
+    except Exception:
+        logger.exception("Рендер карточки бланта не удался")
+        return False
+    try:
+        msg = await _send_photo_with_retry(
+            context, chat_id, io.BytesIO(png), caption=caption, reply_markup=reply_markup)
+        new_fid = None
+        if msg and getattr(msg, "photo", None):
+            new_fid = msg.photo[-1].file_id
+        if new_fid and ctx and uid and item.get("id"):
+            item["image_file_id"] = new_fid
+            item["art_version"] = BLUNT_ART_VERSION
+            await _persist_blunt_image(ctx, uid, item.get("id"), new_fid)
+        return True
+    except Exception:
+        logger.exception("Отправка карточки бланта не удалась")
+        return False
+
+
+async def send_whisper_dm(update, context, text, reply_markup=None):
+    # Тот же баг, что в edit_or_reply (см. её комментарий) — плюс отдельный
+    # тупик: раньше сообщение всегда уходило БЕЗ клавиатуры, так что тап по
+    # «Ритуалу» не в той гильдии или донат в Храм (после реального списания
+    # OAC) оставлял игрока без единой кнопки — пришлось бы печатать /menu.
     if update.callback_query:
+        try:
+            await update.callback_query.answer()
+        except Exception:
+            pass
         chat_id = update.callback_query.message.chat.id
     else:
         chat_id = update.effective_chat.id
-    await safe_send_message(context, chat_id, text, parse_mode='HTML')
+    await safe_send_message(context, chat_id, text, parse_mode='HTML',
+                            reply_markup=reply_markup or get_back_to_menu_keyboard())
 
 def format_date(iso_string):
     try:
@@ -1513,13 +2274,33 @@ def get_medal_text_and_reward(old_count, new_count, medals_list):
     for threshold, medal_name, reward in medals_list:
         if old_count < threshold <= new_count:
             bonus += reward
-            text += f"🎉 <b>Твой ранг повышен до {medal_name}!</b> (+{reward} OAC)\n"
+            # Label-style "Новый уровень: X", не "повышен до X" — старые
+            # тематические названия (Бронза/Серебро/...) случайно совпадали
+            # с нужным падежом ("до Бронзы" — нет, на самом деле уже было
+            # неверно грамматически); новые многословные титулы («Хозяин
+            # Урожая», «Заклинатель» и т.п.) делают несклоняемую вставку
+            # обязательной, не косметической. Тот же приём уже используется
+            # в get_rank_progress («⚜️ Ранг: X → Y») — не новый голос, а
+            # уже принятый в игре паттерн.
+            text += f"🎉 <b>Новый уровень: {medal_name}!</b> (+{reward} OAC)\n"
     return text, bonus
 
 def progress_bar(percent):
     filled = int(percent / 10)
     empty = 10 - filled
     return "▓" * filled + "░" * empty
+
+
+def _fmt_oac(n) -> str:
+    """Разделитель разрядов на крупных числах OAC (пробел — привычная для
+    рус. текста форма, «50 000», не «50,000»). Пороги рангов и Алтаря
+    доходят до десятков тысяч — на экранах, где решение принимается по
+    цифре (Алтарь — необратимый донат всего баланса), читаемость числа
+    не мелочь."""
+    try:
+        return f"{int(n):,}".replace(",", " ")
+    except (TypeError, ValueError):
+        return str(n)
 
 
 async def process_daily_login(user_id: int, context) -> None:
@@ -1535,8 +2316,22 @@ async def process_daily_login(user_id: int, context) -> None:
     if last == today:
         return
 
-    streak = (player.login_streak or 0) + 1 if last and (today - last).days == 1 else 1
+    # Streak-freeze (механика удержания №1 у Duolingo): пропуск РОВНО одного дня
+    # не рвёт серию, если есть заморозка. Снимает тревогу «сорвётся серия» →
+    # убивает «what-the-hell effect» (бросить совсем после одного пропуска).
+    gap = (today - last).days if last else None
+    freezes_available = player.streak_freezes or 0
+    used_freeze = False
+    if gap == 1:
+        streak = (player.login_streak or 0) + 1
+    elif gap == 2 and freezes_available > 0:
+        streak = (player.login_streak or 0) + 1
+        used_freeze = True
+    else:
+        streak = 1
     reward = _calculate_reward(streak, daily_config)
+
+    freeze_info = {}
 
     # Атомарно применяем награду с повторной проверкой даты после блокировки
     async def _apply_daily(p, conn):
@@ -1547,6 +2342,17 @@ async def process_daily_login(user_id: int, context) -> None:
         p.balance += reward.total_oac
         p.login_streak = streak
         p.last_login_date = today
+
+        # Тратим заморозку, если она спасла серию.
+        if used_freeze and (p.streak_freezes or 0) > 0:
+            p.streak_freezes = (p.streak_freezes or 0) - 1
+        # Начисляем заморозку за верность: каждые 7 дней серии (кап 3).
+        granted_freeze = streak > 0 and streak % 7 == 0
+        if granted_freeze:
+            p.streak_freezes = min(3, (p.streak_freezes or 0) + 1)
+        freeze_info["used"] = used_freeze
+        freeze_info["granted"] = granted_freeze
+        freeze_info["count"] = p.streak_freezes or 0
 
         # Начисление титула
         if reward.title:
@@ -1582,7 +2388,28 @@ async def process_daily_login(user_id: int, context) -> None:
 
     try:
         text = _build_daily_message(streak, reward, daily_config)
-        await safe_send_message(context, user_id, text, parse_mode='HTML')
+        # Прозрачно сообщаем про заморозку — именно ЗНАНИЕ о сети безопасности
+        # снимает тревогу разрыва и работает на удержание.
+        if freeze_info.get("used"):
+            text += f"\n\n❄️ <b>Заморозка спасла твою серию!</b> Осталось: {freeze_info.get('count', 0)} ❄️"
+        elif freeze_info.get("granted"):
+            text += f"\n\n❄️ <b>+1 Заморозка серии за верность!</b> Всего: {freeze_info.get('count', 0)} ❄️"
+        # Два кадра, не один: антиципация даёт больше дофамина, чем голое
+        # получение — reward prediction error выше, когда перед раскрытием
+        # есть доля секунды ожидания. Кривая наград D1-D14 детерминирована
+        # (её можно выучить наизусть за неделю), это единственный дешёвый
+        # способ вернуть в неё элемент сюрприза без изменения самих чисел.
+        # Тот же приём (send → sleep → edit_text), что уже работает в
+        # check_rank_up, применён к самому частому push-сообщению в игре.
+        msg = await safe_send_message(
+            context, user_id, f"🕯️ <i>День {streak} — открываем…</i>", parse_mode='HTML')
+        await asyncio.sleep(0.5)
+        try:
+            await msg.edit_text(text, parse_mode='HTML')
+        except Exception:
+            # Сообщение исчезло/не редактируется — награда всё равно должна
+            # дойти, анимация тут декоративна, а не критична.
+            await safe_send_message(context, user_id, text, parse_mode='HTML')
     except Exception as e:
         logger.error("Failed to send daily login msg", extra={"user_id": user_id}, exc_info=True)
 
@@ -1624,7 +2451,7 @@ MAIN_MENU_COOLDOWNS = {
 
 
 def get_back_to_menu_keyboard():
-    return InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 В меню", callback_data="menu")]])
 
 @cb
 async def world_hub(update, context, ctx):
@@ -1635,42 +2462,84 @@ async def world_hub(update, context, ctx):
         return
 
     balance = player.balance or 0
-    is_veteran = balance >= 5000
+    # Гейты контента — по заработанному за всё время, не по остатку в кошельке.
+    is_veteran = has_rank(player.total_earned or 0, "Ветеран")
     has_pet = bool(player.pet)
 
     kb_rows = []
 
-    # Путь к власти — north-star «кем ты становишься» (смысл/фантазия)
-    kb_rows.append([InlineKeyboardButton("🎯 Твой Путь к власти", callback_data="destiny_hub")])
-
+    # «Путь к власти» переехал в 📊 Прогресс (там теперь живёт вся статус-линия:
+    # лестница рангов + легенда). «Мир» — это МЕСТА, а не прогресс.
     # Плантация — idle-крючок «зайди собрать». Кнопка живая: показывает
     # созревший урожай (goal-gradient тянет вернуться) или зовёт посадить.
     plant_lvl = player.passive_level or 0
-    _pending, _h, _c = _plant_pending(plant_lvl, player.passive_collected, datetime.now())
+    _pending, _h, _c = _plant_pending_player(player, datetime.now())
+    # «готово N», а не «собрать N»: «Мир» — хаб МЕСТ, каждая его кнопка ведёт на
+    # экран, поэтому подпись здесь читается как показание статуса, а не как
+    # команда. Глагол «собрать» обещал бы сбор по тапу — этим занята отдельная
+    # кнопка на главном экране (callback_data="plant_harvest"), и два разных
+    # поведения под одним словом путали бы.
+    # ── РАСКЛАДКА: три пары вместо шести кнопок в столбик ──────────────
+    # Было: шесть локаций, каждая полноширинной кнопкой в своём ряду. Полная
+    # ширина в Telegram — сильнейший визуальный вес, и когда его получают ВСЕ
+    # шесть пунктов подряд, иерархии не остаётся: экран читается как ровный
+    # список, где глазу не за что зацепиться, и приходится перебирать все
+    # шесть вариантов. Именно этот случай и описывает закон Хика — время
+    # решения растёт с числом РАВНОЗНАЧНЫХ альтернатив; лечится он не
+    # выкидыванием пунктов, а разбиением на группы, внутри которых выбор
+    # мельче (Miller 1956 — чанкинг; Gestalt — близость и сходство).
+    #
+    # Пары не произвольные, у каждой свой смысл, поэтому ненужный ряд можно
+    # пропустить целиком, не читая обе подписи:
+    #   1) ХОЗЯЙСТВО — растёт и живёт само, требует захода (Плантация, Питомец)
+    #   2) РИСК      — ставка ради награды (Зал Удачи, Лабиринт)
+    #   3) ТРАТА OAC — куда деть накопленное (Лавка, Алтарь)
+    #
+    # Подписи ужаты под половину ширины: на половине ряда помещается ~20
+    # символов, длиннее — перенос на вторую строку, и ряд разъезжается.
+    # Ужимаются только служебные слова, число (goal-gradient) остаётся.
     if plant_lvl <= 0:
-        plant_label = "🪴 Плантация · посадить 🌱"
+        plant_label = "🪴 Плантация · посадить ›"
     elif _pending > 0:
-        plant_label = f"🪴 Плантация · собрать {_pending} 🌾"
+        plant_label = f"🪴 Плантация · {_pending} 🌾 ›"
     else:
-        plant_label = "🪴 Плантация"
-    kb_rows.append([InlineKeyboardButton(plant_label, callback_data="collect")])
+        plant_label = "🪴 Плантация ›"
 
-    # Питомец – виден всем
     if is_veteran and has_pet:
-        kb_rows.append([InlineKeyboardButton("🐾 Питомец", callback_data="pet_preview")])
+        pet_btn = InlineKeyboardButton("🐾 Питомец ›", callback_data="pet_preview")
     elif is_veteran and not has_pet:
-        kb_rows.append([InlineKeyboardButton("🐾 Питомец (купить)", callback_data="pet_preview")])
+        pet_btn = InlineKeyboardButton("🐾 Питомец · купить ›", callback_data="pet_preview")
     else:
-        kb_rows.append([InlineKeyboardButton("🐾 Питомец 🔒", callback_data="pet_locked")])
+        pet_btn = InlineKeyboardButton("🌫️ Питомец (в тумане) ›", callback_data="pet_locked")
 
-    kb_rows.append([InlineKeyboardButton("🎲 Удача ›", callback_data="luck")])
-    kb_rows.append([InlineKeyboardButton("🏛️ Лабиринт ›", callback_data="lab_start")])
-    kb_rows.append([InlineKeyboardButton("🛒 Магазин ›", callback_data="shop")])
+    # Алтарь Вечности — виден всем (интрига «что это»), но открыт только на
+    # вершине вертикали (Некромант / макс-плантация) — ровно где по аудиту
+    # начинается валютная пустота.
+    altar_btn = (InlineKeyboardButton("🕯️ Алтарь Вечности ›", callback_data="altar_hub")
+                 if _altar_gate_open(player)
+                 else InlineKeyboardButton("🌫️ Алтарь (в тумане) ›", callback_data="altar_hub"))
+
+    kb_rows.append([InlineKeyboardButton(plant_label, callback_data="collect"), pet_btn])
+    kb_rows.append([InlineKeyboardButton("🎲 Зал Удачи ›", callback_data="luck"),
+                    InlineKeyboardButton("🏛️ Лабиринт ›", callback_data="lab_start")])
+    kb_rows.append([InlineKeyboardButton("🛒 Лавка Фабрики ›", callback_data="shop"), altar_btn])
     kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="menu")])
+
+    fogged = sum(1 for row in kb_rows for btn in row if "туман" in btn.text)
+    # Согласуется и существительное, и глагол: было «1 локация ещё скрыты» —
+    # _plural_ru склонял только существительное, а «скрыты» стояло намертво во
+    # множественном числе (а туманная локация чаще всего ровно одна).
+    map_note = (f"<i>{fogged} {_plural_ru(fogged, 'локация', 'локации', 'локаций')} ещё "
+                f"{_plural_ru(fogged, 'скрыта', 'скрыты', 'скрыто')} "
+                f"туманом Искажения — путь к ним открывается с ростом.</i>"
+                if fogged else "<i>Весь Мир открыт — ты повидал каждый уголок Искажения.</i>")
 
     kb = InlineKeyboardMarkup(kb_rows)
     await query.message.edit_text(
-            "<b>🏰 Главное Меню › 🌍 Мир</b>\n\n<i>Древние земли ждут своего исследователя.</i>",
+            f"<b>🏰 Главное Меню › 🌍 Мир</b>\n\n"
+            f"<i>Древние земли ждут своего исследователя.</i>\n"
+            f"<i>Ты стоишь на распутье. Выбери, куда лежит путь.</i>\n\n"
+            f"{map_note}",
         reply_markup=kb, parse_mode='HTML'
     )
 
@@ -1686,7 +2555,9 @@ async def destiny_hub(update, context, ctx):
         await query.answer("Профиль не найден", show_alert=True)
         return
 
-    balance = player.balance or 0
+    # Лестница ранга читается по заработанному за всё время: ступень, на
+    # которую ты однажды поднялся, не может отобраться покупкой.
+    balance = player.total_earned or 0
     _re, _rn, _ne, _nn, next_th, _pt = compute_rank_info(balance)
 
     # Лестница восхождения: пройденное ✅, следующее ➡️, заблокированное 🔒
@@ -1719,8 +2590,8 @@ async def destiny_hub(update, context, ctx):
         "<i>Каждый фарм, каждый блант, каждая победа гильдии — шаг к власти.</i>"
     )
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🪴 Растить империю", callback_data="collect"),
-         InlineKeyboardButton("💍 Крафт", callback_data="craft")],
+        [InlineKeyboardButton("🪴 Плантация ›", callback_data="collect"),
+         InlineKeyboardButton("🌿 Крафт ›", callback_data="craft")],
         [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
     ])
     await edit_or_reply(update, context, text, reply_markup=kb, parse_mode='HTML')
@@ -1753,30 +2624,118 @@ async def safe_edit(message, text, **kwargs):
 #короче тут у нас этот ёбаный эдит
 
 async def edit_or_reply(update, context, text, reply_markup=None, parse_mode='HTML', disable_web_page_preview=True):
+    # Баг: добрая половина экранов игры рендерится через edit_or_reply и
+    # больше НИЧЕГО не отвечает на callback_query. Telegram-клиент держит
+    # кнопку в состоянии загрузки до собственного таймаута — на самых частых
+    # экранах (Правила, Топ, Колесо, Алхимия, Каталог…) это читается как
+    # «бот завис», хотя ответ отрисовался. Двойной answer() безопасен —
+    # тот же приём уже используется в _mines_bet_wrapper этого файла.
+    if update.callback_query:
+        try:
+            await update.callback_query.answer()
+        except Exception:
+            pass
     chat_id = update.effective_chat.id
+    # Своё сообщение (бот сам его отправил раньше) можно чистить за собой,
+    # если редактировать не вышло. Сообщение игрока (пришли из команды типа
+    # /rules, а не из нажатия кнопки) — трогать нельзя: удалять чужой ввод
+    # без спроса неожиданно для игрока, да и у бота не всегда есть на это
+    # права в группе.
+    is_own_message = bool(update.callback_query)
     message = update.callback_query.message if update.callback_query else update.message
     try:
         if message and message.text:
             await safe_edit(message, text, reply_markup=reply_markup,
                             parse_mode=parse_mode, disable_web_page_preview=disable_web_page_preview)
-        else:
-            raise BadRequest("no text to edit")
+            return
+        raise BadRequest("no text to edit")
     except (BadRequest, Forbidden) as e:
-        err_msg = str(e).lower()
-        if "message is not modified" in err_msg:
+        if "message is not modified" in str(e).lower():
             return
         logger.warning("edit_or_reply fallback to safe_send: %s", e, extra={"chat_id": chat_id})
-        try:
-            await safe_send(context, chat_id, text, reply_markup=reply_markup,
-                            parse_mode=parse_mode, disable_web_page_preview=disable_web_page_preview)
-        except Exception as send_error:
-            logger.error("safe_send also failed: %s", send_error, exc_info=True)
-    except Exception as e:
+    except Exception:
         logger.exception("Unexpected error in edit_or_reply")
+
+    # Фолбэк: редактировать не вышло (не текст — фото/устарело/недоступно) —
+    # шлём новое и убираем старое СВОЁ сообщение, тот же принцип, что и в
+    # edit_or_send_photo: единый живой экран не должен копить мусор из
+    # мёртвых предыдущих экранов только потому, что конкретно ЭТОТ переход
+    # нельзя было отредактировать на месте.
+    try:
+        await safe_send(context, chat_id, text, reply_markup=reply_markup,
+                        parse_mode=parse_mode, disable_web_page_preview=disable_web_page_preview)
+    except Exception as send_error:
+        logger.error("safe_send also failed: %s", send_error, exc_info=True)
+        return
+    if is_own_message and message:
         try:
-            await safe_send(context, chat_id, text)
+            await message.delete()
         except Exception:
             pass
+
+
+async def edit_or_send_photo(update, context, photo, caption, reply_markup=None, parse_mode='HTML'):
+    """Фото-аналог edit_or_reply. Если текущее сообщение УЖЕ фото —
+    редактирует его на месте через editMessageMedia (меняет и картинку, и
+    подпись одним вызовом — Telegram покажет «изменено», ни одного нового
+    сообщения). Это единственный способ добиться «того же самого
+    сообщения» в паре экранов, которые оба несут реальное фото (аватарка
+    профиля ↔ витрина коллекции) — editMessageText для такого не подходит,
+    у фото-сообщения caption, а не text.
+
+    Если текущее сообщение текстовое — Telegram НЕ даёт превратить текст в
+    фото ни одним методом API, это не ограничение реализации. Тогда шлём
+    новое фото-сообщение и убираем старое (не оставляем мусор из мёртвых
+    экранов) — тот же принцип, что и в edit_or_reply для обратного случая.
+
+    Возвращает итоговое Message (для кэширования file_id) или None.
+    """
+    query = update.callback_query
+    message = query.message if query else None
+    chat_id = update.effective_chat.id
+
+    if message and getattr(message, "photo", None):
+        # Рендер+отправка фото ощутимо дольше правки текста — быстрый
+        # двойной тап (листание витрины «Далее»/«Далее») легко успевает
+        # запустить ВТОРОЙ editMessageMedia на то же message_id, пока первый
+        # ещё не долетел: гонка двух правок одного сообщения, непредсказуемый
+        # порядок применения. Обычный rate_limit(N сек) на хендлере не
+        # спасает — рендер иногда дольше окна лимита. Лок по конкретному
+        # сообщению (не по игроку/функции) — держит ровно то время, что
+        # реально идёт запрос, а не фиксированную догадку в секундах;
+        # повторный тап по ТОМУ ЖЕ сообщению, пока первый ещё в полёте,
+        # тихо игнорируется вместо гонки.
+        lock_key = f"photo_edit_inflight:{chat_id}:{message.message_id}"
+        if context.user_data.get(lock_key):
+            return message
+        context.user_data[lock_key] = True
+        try:
+            return await context.bot.edit_message_media(
+                chat_id=chat_id, message_id=message.message_id,
+                media=InputMediaPhoto(photo, caption=caption, parse_mode=parse_mode),
+                reply_markup=reply_markup)
+        except (BadRequest, Forbidden) as e:
+            if "message is not modified" in str(e).lower():
+                return message
+            logger.warning("edit_or_send_photo: editMessageMedia не удался, фолбэк на новое: %s", e)
+        except Exception as e:
+            logger.warning("edit_or_send_photo: editMessageMedia не удался, фолбэк на новое: %s", e)
+        finally:
+            context.user_data.pop(lock_key, None)
+
+    try:
+        msg = await context.bot.send_photo(chat_id=chat_id, photo=photo, caption=caption,
+                                           reply_markup=reply_markup, parse_mode=parse_mode)
+    except Exception:
+        logger.exception("edit_or_send_photo: не удалось отправить фото")
+        return None
+    if message:
+        try:
+            await message.delete()
+        except Exception:
+            pass
+    return msg
+
 
 async def animate_progress_bar(update, context, title="", duration=0.6, steps=4, in_place=False):
     """
@@ -1834,8 +2793,26 @@ def get_medal_target(count, medals_list):
             return th
     return medals_list[-1][0]  # максимум
 
-def get_medal_progress(new_count, medals_list):
-    """Возвращает строку с прогресс-баром и названиями медалей (жирными)."""
+def get_medal_progress(new_count, medals_list, just_leveled=False):
+    """Возвращает строку с прогресс-баром и названиями медалей (жирными).
+
+    just_leveled=True — медаль взята ЭТИМ ЖЕ действием (medal_text от
+    get_medal_text_and_reward непустой). Раньше в этот момент бар мгновенно
+    показывал «0%» прогресса к СЛЕДУЮЩЕЙ медали — в одном сообщении с «🎉 Твой
+    ранг повышен!» стояла визуально пустая шкала: пик гасился в ту же секунду,
+    в которую случался. Здесь вместо этого — залитый бар только что взятой
+    медали (как рангап в большинстве AAA-прогрессий: сначала долив до 100%,
+    чистый старт следующего тира — только на следующем действии).
+    """
+    if just_leveled:
+        just_medal = medals_list[0][1]
+        for th, name, _ in medals_list:
+            if new_count >= th:
+                just_medal = name
+            else:
+                break
+        return f"{'▓' * 10} 100%\n<b>{just_medal}</b> — получено! 🎉"
+
     cur_medal = medals_list[0][1]
     cur_th = medals_list[0][0]
     next_th = medals_list[1][0] if len(medals_list) > 1 else None
@@ -1857,13 +2834,32 @@ def get_medal_progress(new_count, medals_list):
         progress = int((new_count - cur_th) / (next_th - cur_th) * 100) if next_th != cur_th else 100
         bar = "▓" * (progress // 10) + "░" * (10 - progress // 10)
         goal_str = f"<b>{cur_medal}</b> → <b>{next_medal}</b>"
+        # Goal-gradient: на последних 1–3 шагах до медали — явный крючок близости
+        # к цели (дофаминовый пик предвкушения тем сильнее, чем ближе награда).
+        # Label-style "Ещё N: X", не "N до X" — та же причина, что в
+        # get_medal_text_and_reward (см. комментарий там): "до X" требует
+        # родительного падежа, который новые тематические названия не
+        # выдерживают без отдельной словоформы на каждое.
+        remaining = next_th - new_count
+        if 1 <= remaining <= 3:
+            goal_str += f"\n🔥 <b>Ещё {remaining} до цели: {next_medal}!</b>"
     return f"{bar} {progress}%\n{goal_str}"
 
-def get_rank_progress(balance):
-    """Возвращает прогресс ранга с жирным "Ранг:" и жирным прогресс-баром."""
+def get_rank_progress(balance, compact=False):
+    """Возвращает прогресс ранга с жирным "Ранг:" и жирным прогресс-баром.
+
+    На вход — total_earned: шкала ранга не должна пятиться от трат.
+
+    compact=True — 1 строка вместо 3, без жирного (SLAYER Red Team A₄/A₅:
+    экран фарма стекует до ~10 жирных блоков разом, "жирное везде" гасит
+    само себя как сигнал). Профиль (единственный второй вызывающий) не
+    трогаем — там подробная разбивка уместна, это выделенный экран статуса,
+    а не быстрый результат действия."""
     if balance >= RANKS[-1][1]:
         emoji = RANKS[-1][0]
         name = emoji.split(' ',1)[1]
+        if compact:
+            return f"⚜️ {emoji} {name} — максимум"
         return f"<b>⚜️ Ранг:</b> {emoji} {name} (Максимум)\n<b>▓▓▓▓▓▓▓▓▓▓ 100%</b>"
     for i in range(len(RANKS)-1):
         curr_emoji, curr_th, _ = RANKS[i]
@@ -1872,6 +2868,8 @@ def get_rank_progress(balance):
             curr_name = curr_emoji.split(' ',1)[1] if ' ' in curr_emoji else curr_emoji
             progress = int((balance - curr_th) / (next_th - curr_th) * 100)
             bar = "▓" * (progress // 10) + "░" * (10 - progress // 10)
+            if compact:
+                return f"⚜️ {curr_emoji}→{next_emoji} {bar} {progress}% · {balance}/{next_th} OAC"
             return (
                 f"<b>⚜️ Ранг: {curr_emoji} → {next_emoji}</b>\n"
                 f"🎯 <b>{bar} {progress}%</b>\n"
@@ -1918,7 +2916,14 @@ async def _handle_referral(update, context, uid, player):
         p.balance = (p.balance or 0) + 50
         p.referral_count = (p.referral_count or 0) + 1
         name = random.choice(["Крик Бездны","Пепел Короля","Шёпот Склепа"])
-        await create_named_blunt(creator_id, name, rarity="legendary", conn=conn)
+        # ctx обязателен: без него create_named_blunt сразу бросает ValueError
+        # («AppContext is required»), исключение выходит из atomic_update и
+        # откатывает ВСЮ транзакцию — реферер терял и легендарку, и +50 OAC, и
+        # титул, и связку с приглашённым. Награда за реферал не выдавалась ни разу.
+        # player=p передаём намеренно: предмет кладётся в того же игрока, которого
+        # atomic_update уже держит и сохранит, без повторной загрузки поверх.
+        await create_named_blunt(creator_id, name, rarity="legendary",
+                                 conn=conn, ctx=ctx, player=p)
         if "🩸" not in (p.titles or ""):
             p.titles = f"{p.titles or ''} 🩸".strip()
         # Связываем реферала с создателем
@@ -1949,6 +2954,9 @@ async def _create_new_player(update, context, uid, username, invited_by=None,
     async with ctx.db_pool.acquire() as conn:
         async with conn.transaction():
             player = Player(user_id=uid, username=username, balance=start_balance)
+            # Стартовый дар засчитывается и в «заработано за всё время» —
+            # иначе первая же трата уводила бы статус в минус относительно старта.
+            player.total_earned = start_balance
             player.invited_by = invited_by
             # Установка daily_progress ДО сохранения
             player.daily_progress = {
@@ -1956,6 +2964,11 @@ async def _create_new_player(update, context, uid, username, invited_by=None,
                 "quest_id": "chapter1",
                 "reward_claimed": False
             }
+            # Онбординг стартует сразу с шага 1 (фарм), не с шага 0 (выбор
+            # фракции) — см. причину ниже, у welcome_text. defer_faction_handler
+            # раньше делал этот же переход 0→1 как опциональный «отложить»;
+            # теперь это дефолт, а не побочная дверь.
+            player.onboarding_step = 1
             await ctx.repo.save(player, conn=conn)
             await create_named_blunt(uid, new_name, ctx=ctx, conn=conn)
 
@@ -1970,42 +2983,49 @@ async def _create_new_player(update, context, uid, username, invited_by=None,
             blunt_line = (f"💍 Блант, что привёл тебя сюда: {c} "
                           f"<b>«{html.escape(shared_blunt['name'])}»</b>\n")
         ref_bonus_line = (
-            f"🤝 <b>{friend} позвал тебя в Гильдию</b> — он уже здесь.\n"
+            f"🤝 <b>{friend} позвал тебя в Гильдию</b> — он уже здесь. "
+            f"За это тебе <b>+100 OAC</b> сверху.\n"
             f"{blunt_line}"
-            f"🎁 <b>Дар за приход: +100 OAC 🍬</b> и твой первый именной блант — уже в свёртке!\n\n"
         )
     else:
         ref_bonus_line = ""
+    # Раньше первое сообщение новичку было стеной из лора + требованием
+    # выбрать фракцию ДО единого реального действия в игре — 2 тапа и 2
+    # экрана текста до первой награды (выбор/отложить → «2/3, жми фарм» →
+    # фарм). На холодном трафике (не личное приглашение друга, а человек
+    # из чата) это и есть точка, где терялось больше половины: слишком
+    # много решения и чтения до первого дофамина. Экономика выбора
+    # фракции (+50 OAC) не теряется — она просто больше не блокирует
+    # первый тап, доступна в любой момент через кнопку «🏰 Гильдия» в меню
+    # (см. guild_join_handler: награда даётся один раз, независимо от
+    # момента выбора).
+    # Две строки атмосферы ПЕРЕД наградой, не отдельный экран/тап — иначе это
+    # ровно та же ошибка, что описана в комментарии выше (стена лора + шаг
+    # решения ДО первого действия). Narrative Transportation (Green & Brock)
+    # и context effects (Schwarz & Clore): фрейминг ДО опыта меняет то, как
+    # воспринимается сам опыт, сильнее, чем фрейминг после — но здесь это
+    # именно 2 коротких строки внутри ТОГО ЖЕ сообщения, ноль лишних тапов.
     welcome_text = (
-        "<b>🎉 Добро пожаловать в Гильдию Antysocialshop!</b>\n"
-        "<i>Здесь курят бланты, поклоняются древним богам и воюют за OAC.</i>\n\n"
-        "🩸 <b>Твой путь:</b> <i>от нищего 🪓 Рекрута до 🪬 Некроманта Искажения — "
-        "скрути легендарные бланты, вырасти империю-плантацию и приведи гильдию к власти "
-        "над обоими мирами.</i>\n\n"
+        "<i>🕯️⚜️ Фабрика №9 давно ждала того, кто впишет новое имя в её "
+        "летопись.</i>\n<i>Сегодня это ты.</i>\n\n"
+        "<b>🎉 Добро пожаловать в Antysocialshop!</b>\n\n"
         f"{ref_bonus_line}"
-        f"🎁 <b>Смотритель дарует тебе</b> <code>{start_balance}</code> 🍬 <b>и твой первый именной блант!</b>\n\n"
-        "<b>🎓 ОБУЧЕНИЕ [▓░░░] 1/3</b>\n\n"
-        "⚔️ <b>ВЫБЕРИ ФРАКЦИЮ — ПОЛУЧИ +50 OAC СРАЗУ!</b>\n\n"
-        "🕯️ <b>Тёмная Гильдия</b>\n"
-        "• Особое умение: Ритуал 🔮\n"
-        "• Стабильность и тёмная магия\n\n"
-        "⚜️ <b>Светлая Гильдия</b>\n"
-        "• Особое умение: Исповедь 🪽\n"
-        "• Азарт и благосклонность удачи\n\n"
-        "👉 <i>Твой выбор определит твои возможности.</i>"
+        f"🎁 Тебе подарили <code>{start_balance}</code> 🍬 OAC и первый именной блант.\n\n"
+        "👉 <b>Жми — сделай свой первый фарм прямо сейчас:</b>"
     )
-    
-    guild_kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🕯️ Тёмная Гильдия (+50 🍬)", callback_data="guild_join_BLACK"),
-         InlineKeyboardButton("⚜️ Светлая Гильдия (+50 🍬)", callback_data="guild_join_WHITE")],
-        # Крючок перед коммитом: дать сначала попробовать петлю (дофамин от
-        # фарма), выбор стороны — позже, когда он осмыслен. +50 не теряется.
-        [InlineKeyboardButton("🍬 Позже — сначала играть →", callback_data="defer_faction")],
+
+    # «Фармить», а не «Собрать первый урожай»: это САМАЯ ПЕРВАЯ кнопка в игре,
+    # и она задаёт игроку словарь. Механика называется «фарм» во всех остальных
+    # местах (главное меню, задания, прогресс), а «собрать урожай» — это глагол
+    # ДРУГОЙ механики, Плантации. Обучение выдавало игроку слово, которое потом
+    # означает не то, чему его учили.
+    farm_kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🍬 Фармить", callback_data="farm")],
     ])
 
     await update.effective_message.reply_text(
         welcome_text,
-        reply_markup=guild_kb,
+        reply_markup=farm_kb,
         parse_mode='HTML'
     )
 
@@ -2031,7 +3051,11 @@ async def defer_faction_handler(update, context):
     ])
     try:
         await query.message.edit_text(
-            "<b>🎓 ОБУЧЕНИЕ [▓░░░] 1/3</b>\n\n"
+            # 2/3, а не 1/3 — тот же самый следующий шаг («иди фарми»), что и
+            # в guild_join_handler после прямого выбора фракции, там он тоже
+            # 2/3. Раньше два пути к ОДНОМУ И ТОМУ ЖЕ действию показывали
+            # разный номер шага — расходящийся счётчик для идентичного экрана.
+            "<b>🎓 ОБУЧЕНИЕ [▓▓░] 2/3</b>\n\n"
             "<b>🍬 Твой первый шаг — фарм!</b>\n"
             "Нажми кнопку ниже и получи первые <b>OAC</b> — прямо сейчас.\n\n"
             "<i>💡 OAC — главная валюта. Сторону Гильдии выберешь позже, "
@@ -2042,55 +3066,103 @@ async def defer_faction_handler(update, context):
             "<b>🍬 Твой первый шаг — фарм!</b> Жми «Фармить».",
             reply_markup=kb, parse_mode='HTML')
     
-def get_next_action(player, exclude_callback: str = None) -> tuple[str, str, str]:
+# Подсказки под каждый шаг квеста — одна таблица, единый источник копирайта.
+QUEST_STEP_ADVICE = {
+    "farm":   "🍬 Фарм — основа роста. Заполни шкалу!",
+    "craft":  "🌿 Скрути блант — получишь случайный эффект!",
+    "smoke":  "🧿 Испытай удачу — выкури блант!",
+    "mines":  "🎲 Здесь решаешь ты: какую клетку открыть, когда забрать выигрыш!",
+    "ritual": "🕯️ Тёмная магия ждёт тебя!",
+    "repent": "🪽 Светлая удача улыбнётся тебе!",
+    "lab":    "🏛️ Глубины Лабиринта полны сокровищ!",
+    "donate": "💎 Укрепи гильдию пожертвованием!",
+    "pet":    "🐾 Твой питомец проголодался — покорми его!",
+    "train":  "⚔️ Закали себя в тренировке!",
+}
+
+
+def next_quest_step(player, exclude_key: str = None):
+    """Единый источник «следующего шага дня».
+
+    Берёт незакрытые шаги ИЗ ТОГО ЖЕ шаблона квеста, что и прогресс-бар меню
+    (одна модель истины вместо параллельной, которую вёл старый get_next_action —
+    та врала числом «+50» и вела в profile). Возвращает (label, callback, advice)
+    для кнопки или None, если предлагать нечего.
+
+    callback = f"quest_{key}" → нажатие выполняет само действие и отмечает шаг
+    (через handle_quest_action). Когда все видимые шаги закрыты, а награда не
+    забрана — предлагает «Забрать награду» с ЧЕСТНЫМ числом из шаблона.
+    """
     progress = getattr(player, 'daily_progress', {}) or {}
+    if progress.get("reward_claimed"):
+        return None
+    quest_id = progress.get("quest_id", "chapter1")
+    template = QUEST_TEMPLATES.get(quest_id)
+    if not template:
+        return None
+
     balance = getattr(player, 'balance', 0) or 0
-    guild = getattr(player, 'guild', None)
-    has_pet = bool(getattr(player, 'pet', ''))
-    is_veteran = balance >= 5000
+    conditions = {
+        "guild_black": getattr(player, 'guild', None) == "BLACK",
+        "guild_white": getattr(player, 'guild', None) == "WHITE",
+        "has_guild": bool(getattr(player, 'guild', None)),
+        "is_veteran_and_has_pet": (has_rank(getattr(player, 'total_earned', 0) or 0, "Ветеран")
+                                   and bool(getattr(player, 'pet', ''))),
+    }
 
-    # Динамический тотал действий
-    total_actions = 5 if (is_veteran and has_pet) else 4
-    done = sum(1 for k in ["farm", "craft", "smoke", "guild_action"] if progress.get(k))
-    if is_veteran and has_pet and progress.get("pet"):
-        done += 1
+    next_step = None
+    all_done = True
+    for task in template.get("tasks", []):
+        cond = task.get("condition")
+        if cond and not conditions.get(cond, False):
+            continue
+        key = task["key"]
+        if progress.get(key, False):
+            continue
+        all_done = False
+        if key != exclude_key and next_step is None:
+            advice = QUEST_STEP_ADVICE.get(key, "Заверши шаг квеста — и ближе к награде!")
+            next_step = (task.get("label", "Играть"), f"quest_{key}", advice)
 
-    # Приоритет №1: Гильдия
-    if not guild and exclude_callback != "guild_info":
-        return ("🕋 Выбрать Гильдию", "guild_info", "Выбери собственную Гильдию, и открой Войну ⚔️ Гильдий, Ритуалы 🔮 или Исповеди! 🪽")
-
-    # Приоритет №2: Всё готово
-    if done == total_actions:
-        return ("🎁 ЗАБРАТЬ +50 OAC", "profile", "🎉 Всё готово! Награда ждёт тебя в профиле!")
-
-    # Приоритет №3: Незавершённые дела
-    if not progress.get("farm") and exclude_callback != "farm":
-        return ("🍬 Фармить", "farm", "🍬 Фарм — основа роста. Заполни шкалу!")
-    if not progress.get("craft") and exclude_callback != "craft":
-        return ("🌿 Крафтить", "craft", "🌿 Скрути блант — получишь случайный эффект!")
-    if not progress.get("smoke") and exclude_callback != "smoke":
-        return ("💨 Дунуть", "smoke", "🧿 Испытай удачу — выкури блант!")
-    if guild and not progress.get("guild_action") and exclude_callback != "guild_action":
-        if guild == "BLACK":
-            return ("🕯️ Ритуал", "ritual", "🕯️ Тёмная магия ждёт тебя!")
-        elif guild == "WHITE":
-            return ("⚜️ Исповедь", "repent", "🪽 Светлая удача улыбнётся тебе!")
-    if is_veteran and has_pet and not progress.get("pet") and exclude_callback != "pet_preview":
-        return ("🐾 Покормить питомца", "pet_preview", "Твой питомец проголодался! Покорми его.")
-
-    return ("🏰 В меню", "menu", "Все дела пока недоступны. Загляни позже!")
+    if next_step:
+        return next_step
+    if all_done:
+        # Главы с выбором архетипа (choices) завершаются НЕ через claim_reward, а
+        # через выбор в хабе заданий. Если увести их в claim_reward — игрок теряет
+        # награду выбора (OAC/титул/предмет) и сага не продвигается. Ведём в хаб,
+        # где живут кнопки выбора.
+        if template.get("choices"):
+            return ("🎁 Заверши главу — сделай выбор ›", "daily_quest_hub",
+                    "Все шаги готовы — тебя ждёт судьбоносный выбор!")
+        reward = template.get("reward_oac", 0)
+        label = f"🎁 Забрать награду (+{reward} OAC)" if reward > 0 else "🎁 Забрать награду"
+        return (label, "claim_reward", "🎉 Все задания выполнены — забери награду!")
+    return None
 
 
 def _resolve_referrer(args, uid):
-    """Из реф-ссылки blunt_... достаёт creator_id. Чистая функция, без БД.
+    """Из реф-ссылки достаёт creator_id. Чистая функция, без БД.
 
-    Создатель зашит в самом blunt_id (blunt_{creator}_{ts}_{rand}), поэтому
-    скан таблицы не нужен — это O(1) и масштабируется. start-параметр =
-    "blunt_" + blunt_id. Возвращает creator_id (int) или None.
+    Два формата:
+    * "ref_{uid}" — постоянная персональная ссылка, доступна с профиля с первой
+      минуты в игре, ничем не гейтится. Основной путь: до неё раньше просто не
+      было ссылки, которую можно дать другу, не потратив 50 OAC на крафт.
+    * "blunt_{creator}_{ts}_{rand}" — прежний формат, привязан к конкретному
+      предмету (создатель зашит в самом blunt_id) — держим ради уже разошедшихся
+      по чатам старых ссылок и для тёплого «блант, что привёл тебя сюда».
+
+    Оба — O(1), без скана таблицы. Возвращает creator_id (int) или None.
     """
-    if not args or not str(args[0]).startswith("blunt_"):
+    if not args:
         return None
-    blunt_id = str(args[0])[len("blunt_"):]     # снимаем ведущий префикс
+    raw = str(args[0])
+    if raw.startswith("ref_"):
+        tail = raw[len("ref_"):]
+        creator_id = int(tail) if tail.isdigit() else None
+        return creator_id if creator_id and creator_id != uid else None
+    if not raw.startswith("blunt_"):
+        return None
+    blunt_id = raw[len("blunt_"):]     # снимаем ведущий префикс
     parts = blunt_id.split("_")
     if len(parts) < 2 or not parts[1].isdigit():
         return None
@@ -2110,13 +3182,16 @@ def _shared_blunt_info(ref_player, args):
     return None
 
 
-async def _reward_referrer(ctx, context, creator_id):
+async def _reward_referrer(ctx, context, creator_id, new_username=None):
     """Награда рефереру: +50 OAC, счётчик, легендарный блант, метка 🩸 + уведомление."""
+    creator_username = {}
+
     async def _reward(p, conn):
         p.balance = (p.balance or 0) + 50
         p.referral_count = (p.referral_count or 0) + 1
         if "🩸" not in (p.titles or ""):
             p.titles = f"{p.titles or ''} 🩸".strip()
+        creator_username["value"] = p.username
         return p.referral_count
     count = await ctx.repo.atomic_update(creator_id, _reward)
     if count is None:
@@ -2137,18 +3212,55 @@ async def _reward_referrer(ctx, context, creator_id):
             parse_mode='HTML')
     except Exception:
         pass
+    # Оповещение в публичный чат гильдии — раньше существовало только как
+    # закомментированный блок в мёртвой _handle_referral (нигде не вызывалась,
+    # эффекта не имела). Реальный путь реферала — этот, здесь. Соц-доказательство
+    # («кто-то уже пришёл по приглашению») работает только там, где его видят
+    # посторонние, не только сам приглашённый и его друг лично — используем тот
+    # же проверенный канал/хелпер и тот же грациозный фолбэк без @username, что
+    # и check_rank_up (bot.py ~974: "Один из наших", когда юзернейма нет).
+    ref_username = creator_username.get("value")
+    who_new = f"@{html.escape(new_username)}" if new_username else "Один Странник"
+    who_ref = f"@{html.escape(ref_username)}" if ref_username else "одного из Странников"
+    await _safe_send_guild_message(
+        ctx,
+        f"<b><i>🩸 ЭХО ИСКАЖЕНИЯ</i></b>\n\n"
+        f"⚜️ <b>{who_new}</b> был призван нитью <b>{who_ref}</b>.\n"
+        f"🕸️ Искажение становится плотнее...")
+    # referral_count растёт именно тут — «referral_1»/«referral_5» раньше
+    # ждали случайного следующего фарма/крафта РЕФЕРЕРА вместо срабатывания
+    # в момент, когда он реально видит «пришёл новый Странник».
+    await check_achievements(creator_id, context, ctx=ctx)
+
+
+async def _notify_referral_pending(context, creator_id, new_username=None):
+    """Лёгкое уведомление сразу на /start по ссылке: «друг зашёл» — без
+    начисления награды. Награда (см. _reward_referrer) приходит позже, когда
+    приглашённый реально пройдёт/пропустит обучение — тут только держим
+    открытой петлю ожидания (Zeigarnik: незакрытое действие тянет внимание
+    сильнее закрытого), не давая ей провиснуть до этого момента."""
+    who_new = f"@{html.escape(new_username)}" if new_username else "Один Странник"
+    try:
+        await safe_send_message(
+            context, creator_id,
+            f"🩸 <b>По твоей ссылке зашёл {who_new}!</b>\n"
+            "🎁 Награда откроется, как только он освоится в игре.",
+            parse_mode='HTML')
+    except Exception:
+        pass
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ctx = context.bot_data.get("ctx")
     if not ctx:
-        await update.effective_message.reply_text("⚠️ Бот инициализируется, попробуйте позже.")
+        await update.effective_message.reply_text("⚠️ Бот инициализируется, попробуй позже.")
         return
     try:
         user, msg = get_user_and_msg(update)
         uid = user.id
         username = user.username or user.first_name or "Странник"
         player = await ctx.repo.get_by_id(uid)
+
         if not player or not player.exists:
             # Реферал применяется только к НОВЫМ игрокам (анти-фарм)
             creator_id = _resolve_referrer(context.args, uid)
@@ -2164,8 +3276,50 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _create_new_player(update, context, uid, username, invited_by=creator_id,
                                      inviter_name=inviter_name, shared_blunt=shared_blunt)
             if creator_id:
-                await _reward_referrer(ctx, context, creator_id)
+                # Полная награда (SLAYER Red Team, A₂ Behavioral Econ/Ethics: E3/E5)
+                # больше НЕ выдаётся здесь. Раньше она начислялась мгновенно на
+                # голый /start по чужой ссылке — фармабельно пустыми аккаунтами,
+                # которые ни разу не сыграли: создал N ботов-аккаунтов, тапнул
+                # ссылку N раз, собрал N легендарок и +50N OAC рефереру без
+                # единого реального игрока на том конце. Реальная награда теперь
+                # в _reward_referrer, вызывается из handle_craft_normal_v2 и
+                # skip_onboarding_handler — оба места, где приглашённый реально
+                # прошёл (или осознанно пропустил) обучение, т.е. точно открыл
+                # игру и что-то в ней сделал. Здесь — только лёгкое уведомление,
+                # чтобы открытая петля ожидания (Zeigarnik) не терялась впустую.
+                await _notify_referral_pending(context, creator_id, new_username=username)
+            # _create_new_player уже создал строку с АКТУАЛЬНЫМ username
+            # (это и есть `username` переменная выше) — отдельный рефреш здесь
+            # не нужен. Разбираем только очередь подарков.
+            await _claim_pending_gifts(ctx, uid, user.username or "", context)
         else:
+            # Синхронизируем колонку username с текущим Telegram-ником — она
+            # писалась ОДИН раз при регистрации и никогда не обновлялась,
+            # из-за чего смена @username делала игрока ненаходимым для дарения
+            # навсегда (см. _refresh_username). Тут же разбираем очередь
+            # подарков, ждавших этот user_id или этот username.
+            if user.username:
+                await _refresh_username(ctx, uid, user.username)
+                # ВАЖНО: обновляем и in-memory объект, не только колонку в БД.
+                # Ниже по этому же запросу build_main_menu → ensure_daily_progress
+                # может сделать свой save(player) поверх ЭТОГО объекта — без
+                # этой строки такой save() затирал бы username назад на старое
+                # значение из уже загруженного (устаревшего) снимка, и рефреш
+                # выше был бы отменён в ту же секунду, в которую произошёл.
+                player.username = user.username
+            await _claim_pending_gifts(ctx, uid, user.username or "", context)
+
+            # Возврат после паузы: оживляем МЁРТВЫЙ welcome-back момент. Флаг
+            # return_after_pause раньше только читался в build_main_menu, но нигде
+            # не выставлялся — фича «🎁 Пока тебя не было…» не срабатывала никогда.
+            # Порог ≥2 дней: дневных игроков (gap=1, у них штатная daily-карточка)
+            # не трогаем; почти-ушедший лапс-игрок получает тёплый win-back.
+            # last_login_date берём из уже загруженного player — ДО фонового
+            # process_daily_login, который обновит дату на сегодня.
+            _last = _parse_last_login_date(player.last_login_date)
+            if _last and (date.today() - _last).days >= 2:
+                context.user_data["return_after_pause"] = True
+
             # Запускаем ежедневный бонус в фоне, чтобы меню появилось мгновенно:
             asyncio.create_task(process_daily_login(uid, context))
 
@@ -2174,15 +3328,25 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.effective_message.reply_text(text, reply_markup=kb, parse_mode='HTML')
     except Exception as e:
         logger.exception("start failed")
-        await update.effective_message.reply_text("⚠️ Произошла ошибка. Попробуйте позже.")
+        await update.effective_message.reply_text("⚠️ Произошла ошибка. Попробуй позже.")
 
 # Конфигурация (все правила в одном месте)
 @dataclass(frozen=True)
 class StreakConfig:
+    # Эскалирующая кривая с недельными пиками (peak-end + loss-aversion «серия
+    # растёт — не рви»). Раньше D1–D7 давали 10–50 OAC — НИЖЕ одного фарма
+    # (45–100): главный рычаг D1-ретеншна был эмоционально мёртв в самом важном
+    # окне формирования привычки. Кривая монотонна (каждый день ≥ вчера → возврат
+    # никогда не ощущается как нёрф), с пиками-скачками на D7 и D14. Инфляция
+    # ничтожна: даже D14 ниже дневного дохода активного игрока.
     base_rewards: Dict[int, int] = field(default_factory=lambda: {
-        1: 10, 2: 15, 3: 20, 4: 25, 5: 30, 6: 35, 7: 50,
-        8: 55, 9: 60, 10: 65, 11: 70, 12: 75, 13: 80, 14: 100
+        1: 50, 2: 80, 3: 120, 4: 160, 5: 200, 6: 250, 7: 500,
+        8: 530, 9: 570, 10: 620, 11: 690, 12: 780, 13: 880, 14: 1000
     })
+    # Плато после D14: сохранившим серию >2 недель не даём провалиться к жалким
+    # 100 (это карало бы самых лояльных — cliff после пика). Держим достойный
+    # устойчивый уровень ниже пикового приза D14.
+    plateau_reward: int = 400
     max_streak_display: int = 14
     hot_streak_threshold: int = 3
     hot_streak_multiplier: float = 1.1
@@ -2228,7 +3392,7 @@ class RewardResult(NamedTuple):
 # Расчёт награды (чистая функция)
 
 def _calculate_reward(streak: int, config: StreakConfig) -> RewardResult:
-    base = config.base_rewards.get(streak, 100)
+    base = config.base_rewards.get(streak, config.plateau_reward)
 
     title = config.title_rewards.get(streak)
 
@@ -2257,6 +3421,38 @@ def _calculate_reward(streak: int, config: StreakConfig) -> RewardResult:
 # Формирование сообщения с улучшенным прогресс-баром (пункт 7)
 # ---------------------------------------------------------------------------
 
+# Плато (streak > max_streak_display=14) раньше показывало АБСОЛЮТНО
+# одинаковый заголовок/текст/бар «14/14» на день 15 и на день 365 подряд —
+# самый преданный игрок в игре годами смотрел на статичный экран (нарушение
+# S9 «content half-life» / D8 «escalation»: контент не может стареть быстрее
+# пользователя). Суммы OAC (plateau_reward) НЕ трогаем — это экономика,
+# не голос; меняется только то, что видит глаз.
+VETERAN_MILESTONES: Dict[int, Tuple[str, str]] = {
+    21: ("👑 ТРИ НЕДЕЛИ ВЕРНОСТИ 👑", "Ты не пропустил ни дня три недели подряд."),
+    30: ("🌌 МЕСЯЦ БЕЗ ИЗМЕНЫ 🌌", "Целый месяц Искажение видело тебя каждый день."),
+    50: ("⚜️ ПОЛУСОТНЯ ⚜️", "50 дней подряд. Немногие доходят до этой цифры."),
+    100: ("💯 СОТНЯ 💯", "100 дней. Ты — легенда Гильдии, и это не метафора."),
+    200: ("🩸 ДВЕСТИ ДНЕЙ 🩸", "200 дней верности. Искажение помнит таких, как ты."),
+    365: ("🔥 ГОД С ИСКАЖЕНИЕМ 🔥", "Целый год. Ты был здесь каждый божий день."),
+    500: ("🪬 ПОЛУТЫСЯЧЕЛЕТИЕ 🪬", "500 дней. История Гильдии будет о тебе."),
+    1000: ("👑 ТЫСЯЧА ДНЕЙ 👑", "1000 дней. Таких, как ты, можно сосчитать на пальцах."),
+}
+
+VETERAN_FLAVORS = (
+    "Пламя серии не гаснет — и не погаснет, пока ты здесь.",
+    "Искажение узнаёт твои шаги издалека.",
+    "Ты давно перестал быть новичком. Гильдия помнит это.",
+    "Каждый новый день серии — кирпич в стене легенды.",
+    "Другие приходят и уходят. Ты — остаёшься.",
+)
+
+
+def _next_veteran_milestone(streak: int) -> Optional[int]:
+    """Ближайшая именная веха ПОСЛЕ текущего дня, или None, если дальше нет."""
+    upcoming = [d for d in VETERAN_MILESTONES if d > streak]
+    return min(upcoming) if upcoming else None
+
+
 def _build_next_day_preview(streak: int, config: StreakConfig) -> str:
     """Предпросмотр завтрашней награды — крючок предвкушения + loss-aversion.
 
@@ -2264,11 +3460,15 @@ def _build_next_day_preview(streak: int, config: StreakConfig) -> str:
     Чистая функция (детерминированная часть награды, без случайных бонусов).
     """
     next_streak = streak + 1
-    base = config.base_rewards.get(next_streak, 100)
+    base = config.base_rewards.get(next_streak, config.plateau_reward)
     if next_streak >= config.hot_streak_threshold:
         base = int(base * config.hot_streak_multiplier)
     next_title = config.title_rewards.get(next_streak)
 
+    if next_streak in VETERAN_MILESTONES:
+        milestone_title, _ = VETERAN_MILESTONES[next_streak]
+        return (f"\n\n🎁 <b>Завтра (День {next_streak}):</b> +{base} OAC "
+                f"— {milestone_title}!\n<i>Особый день. Не пропусти 🔥</i>")
     if next_title:
         return (f"\n\n🎁 <b>Завтра (День {next_streak}):</b> +{base} OAC "
                 f"<b>и титул {next_title}!</b>\n<i>Вернись и не разорви серию 🔥</i>")
@@ -2277,8 +3477,23 @@ def _build_next_day_preview(streak: int, config: StreakConfig) -> str:
 
 
 def _build_daily_message(streak: int, reward: RewardResult, config: StreakConfig) -> str:
-    # Стиль заголовка
-    if streak >= 8:
+    # Стиль заголовка. Именная веха > обычное плато > обычный «стрик 8+» >
+    # «стрик 3+» > первые дни — порядок важен: вехи (21, 30, 100…) — подмножество
+    # обычного плато (>14), должны проверяться первыми.
+    if streak in VETERAN_MILESTONES:
+        milestone_title, milestone_desc = VETERAN_MILESTONES[streak]
+        title = f"<b>{milestone_title}</b>"
+        filled_char, empty_char = "🔮", "⬛️"
+        desc = milestone_desc
+    elif streak > config.max_streak_display:
+        # Плато: экономика не растёт дальше (см. plateau_reward — так и
+        # задумано), но текст обязан жить — иначе день 15 и день 365
+        # выглядят как один и тот же скриншот. Ротация по streak — без
+        # состояния, детерминированная, но хотя бы не одна и та же строка вечно.
+        title = "<b>🔮 ХРУСТАЛЬНЫЙ ШАР ВЕРНОСТИ 🔮</b>"
+        filled_char, empty_char = "🔮", "⬛️"
+        desc = VETERAN_FLAVORS[streak % len(VETERAN_FLAVORS)]
+    elif streak >= 8:
         title = "<b>🔮 ХРУСТАЛЬНЫЙ ШАР ВЕРНОСТИ 🔮</b>"
         filled_char, empty_char = "🔮", "⬛️"
         desc = "Твоя преданность вознаграждена…"
@@ -2359,11 +3574,14 @@ def _farm_on_cooldown(farm_count, last_farm, now) -> bool:
     return bool(last_farm and (now - last_farm) < timedelta(hours=FARM_COOLDOWN_HOURS))
 
 
-def _calculate_farm_reward(player, context) -> tuple[int, bool, bool]:
+def _calculate_farm_reward(player, context, temple_pct: int = 0) -> tuple[int, bool, bool]:
     """
     Чистая логика расчёта награды за фарм.
     Возвращает (earned, crit, happy).
     Не содержит побочных эффектов.
+
+    temple_pct — бонус Храма гильдии (см. temple_bonus_pct). Считается снаружи,
+    чтобы функция осталась чистой и тестируемой без БД.
     """
     now = datetime.now()
 
@@ -2373,6 +3591,11 @@ def _calculate_farm_reward(player, context) -> tuple[int, bool, bool]:
     if player.smoke_count > 0:
         earned += int(earned * 0.05)
 
+    # Бонус Храма гильдии — тот самый «+N% к фарму», который экраны Гильдии и
+    # Храма обещали, но который до сих пор не применялся ни в одной формуле.
+    if temple_pct:
+        earned += int(earned * temple_pct / 100)
+
     # Бонус, если курили в последние 5 минут
     last_smoke = context.user_data.get("last_smoke_time")
     if last_smoke and (now - last_smoke).total_seconds() < 300:
@@ -2381,7 +3604,7 @@ def _calculate_farm_reward(player, context) -> tuple[int, bool, bool]:
     # Happy hour – удвоение. Флаг живёт в ctx.cache (как и во всех остальных
     # механиках); раньше фарм ошибочно читал его из bot_data → ×2 не срабатывал.
     _ctx = context.bot_data.get("ctx")
-    happy = bool(_ctx and _ctx.cache and _ctx.cache.get("happy_hour", False))
+    happy = happy_hour_active(_ctx)
     if happy:
         earned *= HAPPY_HOUR_MULTIPLIER
 
@@ -2401,7 +3624,8 @@ def _calculate_farm_reward(player, context) -> tuple[int, bool, bool]:
 
 def _format_farm_message(earned: int, crit: bool, happy: bool,
                          medal_text: str, new_count: int, target: int,
-                         new_balance: int) -> str:
+                         new_balance: int, new_earned: int = None,
+                         temple_pct: int = 0) -> str:
     """Сообщение после фарма – чистая структура, как в крафте."""
     # Крит-эмодзи
     is_mega = crit and earned >= FARM_MAX * 10
@@ -2414,6 +3638,10 @@ def _format_farm_message(earned: int, crit: bool, happy: bool,
 
     # Happy Hour — теперь ВИДНО игроку (peak-момент нельзя прятать)
     happy_str = " 🌟×2 HAPPY HOUR" if happy else ""
+
+    # Вклад Храма — тоже видимый: пожертвования гильдии теперь реально работают,
+    # и игрок должен видеть отдачу от общего стока, иначе жертвовать незачем.
+    temple_str = f"\n🏛️ <i>Храм Гильдии: +{temple_pct}% к добыче</i>" if temple_pct else ""
 
     # Праздничный баннер пикового момента (peak-end / «liking»)
     if is_mega:
@@ -2429,17 +3657,24 @@ def _format_farm_message(earned: int, crit: bool, happy: bool,
         banner = ""
 
     # Прогресс-бары
-    progress_bar_str = get_medal_progress(new_count, FARM_MEDALS)
-    rank_progress = get_rank_progress(new_balance)
+    progress_bar_str = get_medal_progress(new_count, FARM_MEDALS, just_leveled=bool(medal_text))
+    # Шкала ранга — по заработанному за всё время, а не по кошельку.
+    # compact=True: SLAYER Red Team (A₄/A₅) поймал экран фарма стекующим до
+    # ~10 жирных блоков в худшем случае — "жирное везде" гасит "жирное" как
+    # сигнал важности. Один герой-факт (сколько нафармил) остаётся жирным,
+    # остальное — тихая, но не потерянная информация ниже.
+    rank_progress = get_rank_progress(new_balance if new_earned is None else new_earned, compact=True)
 
-    # Сборка сообщения
+    # Сборка сообщения: единственная жирная строка — герой-факт (сколько
+    # нафармил). Баланс и прогресс — та же информация, но не конкурирует
+    # за внимание с самим результатом действия.
     msg = (
         f"{banner}"
-        f"💎 <b>Ты нафармил: +{earned} OAC</b> {crit_emoji}{happy_str}\n"
-        f"🎉 <b>У тебя: {new_balance} OAC</b>\n\n"
+        f"💎 <b>Ты нафармил: +{_fmt_oac(earned)} OAC</b> {crit_emoji}{happy_str}{temple_str}\n"
+        f"🎉 У тебя: {_fmt_oac(new_balance)} OAC\n\n"
         f"{medal_text}"
-        f"🎯 <b>Фарминг: {new_count} / {target}</b>\n"
-        f"{progress_bar_str}\n\n"
+        f"🎯 Фарминг: {new_count} / {target}\n"
+        f"{progress_bar_str}\n"
         f"{rank_progress}"
     )
     return msg
@@ -2458,13 +3693,18 @@ async def farm_callback_v2(update, context, ctx, player):
         except Exception:
             pass
 
+    # Бонус Храма читаем ДО транзакции (кэш на 5 мин), чтобы не держать
+    # блокировку строки игрока на время запроса к БД.
+    temple_pct = await temple_bonus_pct(ctx, player.guild)
+
     async def _farm(p, conn):
         if _farm_on_cooldown(p.farm_count, p.last_farm, now):
             remain = math.ceil((timedelta(hours=FARM_COOLDOWN_HOURS) - (now - p.last_farm)).seconds / 60)
             return ("cooldown", remain)
 
         old_balance = p.balance
-        earned, crit, happy = _calculate_farm_reward(p, context)
+        old_earned = p.total_earned or 0
+        earned, crit, happy = _calculate_farm_reward(p, context, temple_pct)
 
         old_count = p.farm_count
         new_count = old_count + 1
@@ -2480,7 +3720,10 @@ async def farm_callback_v2(update, context, ctx, player):
         if ctx.war_service:
             await ctx.war_service.add_score_raw(uid, earned + medal_bonus, conn)
 
-        return ("ok", earned, crit, happy, medal_text, new_count, p.balance, old_balance)
+        # total_earned начислит atomic_update; здесь считаем то же значение,
+        # чтобы карточка и ранг-ап показали статус после этого фарма.
+        return ("ok", earned, crit, happy, medal_text, new_count, p.balance,
+                old_balance, old_earned, old_earned + earned + medal_bonus)
 
     result = await ctx.repo.atomic_update(uid, _farm)
     if result is None:
@@ -2490,25 +3733,46 @@ async def farm_callback_v2(update, context, ctx, player):
     status, *data = result
     if status == "cooldown":
         remain = data[0]
-        btn_text, btn_callback, advice = get_next_action(player, exclude_callback="farm")
+        _step = next_quest_step(player, exclude_key="farm")
+        if _step:
+            btn_text, btn_callback, advice = _step
+        elif not getattr(player, 'guild', None) and getattr(player, 'onboarding_step', 0) == -1:
+            # Все шаги сделаны, но гильдии нет — мягкий нудж ТОЛЬКО прошедшим
+            # онбординг (новичков не трогаем: у них флоу «сначала играй, гильдия
+            # позже»). Ничей шаг квеста не вытесняется — чистый апгрейд.
+            btn_text, btn_callback, advice = ("🏰 Выбрать Гильдию", "guild_info",
+                "Гильдия открывает Войну ⚔️, Ритуалы 🕯️ и Исповеди ⚜️ — выбери сторону!")
+        else:
+            btn_text, btn_callback, advice = ("🔙 В меню", "menu",
+                                              "Все шаги на сегодня сделаны — загляни позже!")
     
         progress = getattr(player, 'daily_progress', {}) or {}
         balance = getattr(player, 'balance', 0) or 0
         guild = getattr(player, 'guild', None)
         has_pet = bool(getattr(player, 'pet', ''))
-        is_veteran = balance >= 5000
+        is_veteran = has_rank(getattr(player, 'total_earned', 0) or 0, "Ветеран")
     
-        # Динамический прогресс-бар
-        guild_emoji = "🕯️" if guild == "BLACK" else "⚜️" if guild == "WHITE" else "🏰"
-        actions_emojis = {
-            "farm": "🍬",
-            "craft": "🌿",
-            "smoke": "💨",
-            "guild_action": guild_emoji,
+        # Мини-прогресс строим из РЕАЛЬНОГО текущего квеста — тот же фильтр
+        # условий, что у daily_quest_hub/next_quest_step. Раньше здесь стоял
+        # хардкод из 4 фиксированных иконок (farm/craft/smoke/guild_action),
+        # совпадавший только с главой 1: в главе 2 «Фармить» вообще не задача,
+        # а «Пожертвовать»/«Лабиринт» не показывались никогда — два экрана
+        # «прогресса дня» рисовали два разных набора задач на один день.
+        quest_id = progress.get("quest_id", "chapter1")
+        template = QUEST_TEMPLATES.get(quest_id, QUEST_TEMPLATES["chapter1"])
+        conditions = {
+            "guild_black": guild == "BLACK",
+            "guild_white": guild == "WHITE",
+            "has_guild": bool(guild),
+            "is_veteran_and_has_pet": is_veteran and has_pet,
         }
-        if is_veteran and has_pet:
-            actions_emojis["pet"] = "🐾"
-    
+        actions_emojis = {}
+        for task in template.get("tasks", []):
+            cond = task.get("condition")
+            if cond and not conditions.get(cond, False):
+                continue
+            actions_emojis[task["key"]] = task["label"].split(" ", 1)[0]
+
         total = len(actions_emojis)
         done = sum(1 for k in actions_emojis if progress.get(k))
     
@@ -2553,15 +3817,65 @@ async def farm_callback_v2(update, context, ctx, player):
             update, context, message_text,
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton(btn_text, callback_data=btn_callback)],
-                [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+                [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
             ])
         )
         return
 
-    earned, crit, happy, medal_text, new_count, new_balance, old_balance = data
+    earned, crit, happy, medal_text, new_count, new_balance, old_balance, old_earned, new_earned = data
 
     target = get_medal_target(new_count, FARM_MEDALS)
-    text = _format_farm_message(earned, crit, happy, medal_text, new_count, target, new_balance)
+    text = _format_farm_message(earned, crit, happy, medal_text, new_count, target,
+                                new_balance, new_earned, temple_pct)
+
+    # Подсказка следующего шага главы — та же чистая функция, что и в
+    # кулдаун-ветке ниже (next_quest_step), но здесь ей раньше вообще не
+    # было места: экран успешного фарма показывал только Крафт/Дунуть, а
+    # задачи вроде Ритуала/Исповеди/Пожертвования/Лабиринта на самом частом
+    # экране игры никак не подсвечивались. exclude_key="farm" — тот же
+    # приём против «протухшего» player, что и у кулдаун-ветки (см. ниже):
+    # daily_progress в этом объекте ещё не отражает только что засчитанный
+    # фарм.
+    # SLAYER Red Team (A₄/A₅): экран фарма стекует до ~10 отдельно оправданных
+    # жирных/абзацных блоков — здесь убрана пустая строка-разрыв и жирный
+    # ярлык "Дальше:" (эмодзи 💡 сам сигналит "подсказка", ярлык был дублем).
+    # Подсказка и строка войны ниже теперь читаются одним тихим футером под
+    # прогрессом, а не двумя отдельно объявленными абзацами.
+    _next_step = next_quest_step(player, exclude_key="farm")
+    if _next_step:
+        text += f"\n💡 {_next_step[2]}"
+
+    # Статус войны гильдий — раньше guild_weekly читался РОВНО раз в неделю,
+    # в момент подведения итогов; между сбросами счёт был невидим никому.
+    # Дешёвый кэшированный SELECT (get_guild_war_scores, TTL 60с) на самом
+    # частом экране игры превращает войну в видимый счётчик «ещё чуть-чуть»,
+    # а не сюрприз раз в воскресенье.
+    #
+    # Red Team на этой же находке (см. отчёт): loss aversion работает только
+    # в ДОГОНЯЕМОМ диапазоне — голый, неограниченный разрыв на КАЖДОМ фарме
+    # рискует развернуться в learned helplessness у отстающей гильдии.
+    # Два ограничения чинят именно это, не отменяя саму находку:
+    #   • раз в 3 фарма, не на каждом — иначе тот же баннер-эффект, который
+    #     только что чинили в главном меню, просто переехал сюда;
+    #   • при разрыве больше чем в 2 раза (mine < theirs/2) — нейтральный тон
+    #     без цифры вместо потенциально деморализующего числа. Ведущей
+    #     гильдии цифра не грозит: большой отрыв мотивирует «держать темп»,
+    #     не капитулировать, асимметрия оправдана.
+    if (player.guild and ctx.war_service and new_count % 3 == 0
+            and await ctx.war_service.is_war_active()):
+        scores = await get_guild_war_scores(ctx)
+        mine = scores.get(player.guild, 0)
+        theirs = scores.get("WHITE" if player.guild == "BLACK" else "BLACK", 0)
+        gap = mine - theirs
+        if gap > 0:
+            war_line = f"⚔️ Гильдия: 1-е место, впереди на {gap} очков"
+        elif gap < 0 and mine >= theirs / 2:
+            war_line = f"⚔️ Гильдия: 2-е место, отстаём на {-gap} очков"
+        elif gap < 0:
+            war_line = "⚔️ Гильдия: 2-е место — отставание большое, но неделя не кончилась"
+        else:
+            war_line = "⚔️ Гильдия: ровно, очко в очко"
+        text += f"\n{war_line}"
 
     # Экран-результат несёт навигацию (единый живой экран). На кулдауне НЕ
     # показываем «фарм» — это тупик (тап вернёт тот же кулдаун). Вместо этого
@@ -2571,17 +3885,41 @@ async def farm_callback_v2(update, context, ctx, player):
         result_kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("🍬 Фармить ещё", callback_data="farm"),
              InlineKeyboardButton("🌿 Крафт", callback_data="craft")],
-            [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+            [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
         ])
     else:
         text += (f"\n\n🌱 <i>Грядка зреет — новый фарм через "
                  f"{int(FARM_COOLDOWN_HOURS*60)} мин. А пока — в дело:</i>")
         result_kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("🌿 Крафт", callback_data="craft"),
-             InlineKeyboardButton("💨 Дунуть", callback_data="smoke")],
-            [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+             # do_smoke, не "smoke" (smoke_callback) — та же правка, что и
+             # ниже в handle_craft_normal_v2: см. комментарий там.
+             InlineKeyboardButton("💨 Дунуть", callback_data="do_smoke")],
+            [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
         ])
-    anim_msg = await animate_progress_bar(update, context, title="🍬 Фармим...", in_place=True)
+    # Juice ТОЛЬКО на mega-крит ×10 (1% фармов) — единственный сегмент, где по
+    # всем 4 призмам ревил строго-положителен: редко → латентность не
+    # хабитуируется в раздражение (в отличие от базы), пик → максимальное
+    # усиление reward prediction error, milestone → уместно «посмаковать».
+    # Раньше самый большой фарм подавался той же обыденной «Фармим...», что и
+    # рядовой — пик не отличался от базы. База (99%) — без изменений.
+    is_mega = crit and earned >= FARM_MAX * 10
+    anim_msg = None
+    if is_mega:
+        _q = update.callback_query
+        if _q and _q.message:
+            try:
+                for _frame in ("<b>🌑 Грядка задрожала…</b>",
+                               "<b>💥 ЧТО-ТО ПРОРЫВАЕТСЯ СКВОЗЬ ЗЕМЛЮ…</b>",
+                               "<b>💥💥💥 МЕГА-КРИТ ×10!</b>"):
+                    await _q.message.edit_text(_frame, parse_mode='HTML')
+                    await asyncio.sleep(0.55)
+                anim_msg = _q.message
+            except Exception:
+                anim_msg = None
+    else:
+        anim_msg = await animate_progress_bar(update, context, title="🍬 Фармим...", in_place=True)
+
     if anim_msg is not None:
         await anim_msg.edit_text(text, parse_mode='HTML', reply_markup=result_kb)
     else:
@@ -2594,20 +3932,37 @@ async def farm_callback_v2(update, context, ctx, player):
         )
 
     asyncio.create_task(check_achievements(uid, context))
-    asyncio.create_task(check_rank_up(context, uid, uname, old_balance, new_balance))
+    asyncio.create_task(check_rank_up(context, uid, uname, old_earned, new_earned))
 
     if player.onboarding_step == 1:
-        player.onboarding_step = 2
-        await ctx.repo.save(player)
+        # Только это поле и только под транзакцией. Раньше здесь был
+        # save(player) устаревшего снимка (загружен @game_handler ДО
+        # atomic_update) — и он затирал ВСЕ колонки: награда за первый фарм,
+        # farm_count, last_farm и daily_progress откатывались к состоянию
+        # «до фарма». Игрок видел «+81 OAC», а в БД оставалось 800.
+        async def _advance_onboarding(p, conn):
+            p.onboarding_step = 2
+        await ctx.repo.atomic_update(uid, _advance_onboarding)
+        # update.effective_chat.id, не uid: тот же чат, где нажали «Фармить» —
+        # фарм доступен и из группового чата (game_handler резолвит игрока по
+        # нажавшему, не по чату), а safe_send_message(uid) шлёт ЛС и падает
+        # с "Forbidden: bot can't initiate conversation" для тех, кто ни разу
+        # не открывал ЛС с ботом (зарегистрировался через /start в группе).
         await safe_send_message(
-            context, uid,
-            "<b>🎓 ОБУЧЕНИЕ [▓▓▓░] 3/3</b>\n\n"
+            context, update.effective_chat.id,
+            "<b>🎓 ОБУЧЕНИЕ [▓▓▓] 3/3</b>\n\n"
             "<b>🌿 Отлично! Теперь создадим твой первый блант.</b>\n"
             "Нажми кнопку ниже, чтобы <b>сразу создать обычный блант</b>.\n\n"
             "<i>💡 Бланты нужны, чтобы активировать случайный эффект.</i>\n"
             "<b>🎁 Сразу после — бонус за обучение!</b>",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🌿 Крафт", callback_data="craft_normal")],
+                # «Скрутить блант», а не «Крафт»: под подписью «🌿 Крафт» во всей
+                # остальной игре живёт ЭКРАН крафта (callback "craft"), а здесь
+                # тап немедленно создаёт блант ("craft_normal"). Обучение учило,
+                # что «Крафт» = мгновенно сделать блант, после чего та же надпись
+                # в меню открывала меню — ровно то соответствие, которое игрок
+                # только что выучил, тут же и ломалось.
+                [InlineKeyboardButton("🌿 Скрутить блант", callback_data="craft_normal")],
                 [InlineKeyboardButton("⏭️ Пропустить шаг", callback_data="skip_onboarding")]
             ]),
             parse_mode='HTML'
@@ -2637,7 +3992,7 @@ def _format_craft_menu_text(balance: int, blunts: int, craft_count: int,
                             medal_name: str, target: int, m_essence: int) -> str:
     """HTML‑текст меню крафта."""
     text = (
-        f"<b>🌱 КРАФТ БЛАНТОВ</b>\n\n"
+        f"<b>🌿 КРАФТ БЛАНТОВ</b>\n\n"
         f"<b>💎 У тебя: {balance} OAC 🍬</b>\n\n"
         f"<b>🗞️ Блантов в свёртке: {blunts}</b>\n"
         f"<b>🎯 Крафтинг: {craft_count}/{target} | {medal_name}</b>\n"
@@ -2666,11 +4021,11 @@ def _build_craft_keyboard(m_essence: int) -> InlineKeyboardMarkup:
 def _format_normal_craft_message(medal_text: str, new_count: int, target: int,
                                  blunts: int, new_balance: int) -> str:
     """Сообщение после обычного крафта."""
-    progress_bar_str = get_medal_progress(new_count, CRAFT_MEDALS)
+    progress_bar_str = get_medal_progress(new_count, CRAFT_MEDALS, just_leveled=bool(medal_text))
     return (
         f"<b>🌿 БЛАНТ СКРУЧЕН!</b>\n\n"
         f"💎 Потрачено: <b>15 OAC 🍬</b>\n"
-        f"⚜️ У тебя: <b>{new_balance} OAC 🍬</b>\n\n"
+        f"⚜️ У тебя: <b>{_fmt_oac(new_balance)} OAC 🍬</b>\n\n"
         f"{medal_text}"
         f"🎯 Крафтинг: <b>{new_count} / {target}</b>\n"
         f"<b>{progress_bar_str}</b>\n\n"
@@ -2689,6 +4044,11 @@ def _format_dust_message(name: str, reaction: str) -> str:
 @rate_limit(1)
 @game_handler
 async def craft_callback_v2(update, context, ctx, player):
+    if update.callback_query:
+        try:
+            await update.callback_query.answer()
+        except Exception:
+            pass
     user = update.effective_user
     uid = user.id
 
@@ -2748,7 +4108,7 @@ async def handle_craft_normal_v2(update, context, ctx, player):
             f"<b>❌ Недостаточно OAC.</b>\n🕯️ Требуется <b>{GAME_CONFIG['craft_cost']} OAC</b> 🍬.",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🍬 Фармить", callback_data="farm")],
-                [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+                [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
             ])
         )
         return
@@ -2757,10 +4117,27 @@ async def handle_craft_normal_v2(update, context, ctx, player):
     target = get_medal_target(new_count, CRAFT_MEDALS)
     text = _format_normal_craft_message(medal_text, new_count, target, blunts, new_balance)
 
+    # Тот же приём, что уже на экране фарма (см. farm_callback_v2): следующий
+    # незакрытый шаг квеста — тихой строкой-футером, а не отдельным экраном.
+    # Держит цепочку фарм→крафт→дунуть видимой на каждом звене, не только на
+    # первом — незакрытая цель тянет внимание сильнее закрытой (Zeigarnik),
+    # и именно это разрывает момент «а что дальше?» между действиями.
+    # exclude_key="craft": player — снимок ДО этого крафта, daily_progress в
+    # нём ещё не видит только что сделанный шаг (тот же приём, что у фарма).
+    _next_step = next_quest_step(player, exclude_key="craft")
+    if _next_step:
+        text += f"\n💡 {_next_step[2]}"
+
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🌿 Скрафтить ещё", callback_data="craft_normal"),
-         InlineKeyboardButton("💨 Дунуть", callback_data="smoke")],
-        [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
+        [InlineKeyboardButton("🌿 Скрутить ещё", callback_data="craft_normal"),
+         # Баг, который поймал сам игрок: "smoke" вёл на старый экран-прокладку
+         # smoke_callback («Блантов в свёртке: N» + ещё один тап «Дунуть»)
+         # вместо прямого броска — ровно то, что build_main_menu уже избегает
+         # («Гача-цикл должен начинаться с первого тапа», см. её комментарий).
+         # После крафта это особенно чувствительно: Жар держится на
+         # моментальности следующего тапа, лишний экран рвёт именно её.
+         InlineKeyboardButton("💨 Дунуть", callback_data="do_smoke")],
+        [InlineKeyboardButton("🔙 В меню", callback_data="menu")]
     ])
 
     # Единый живой экран: анимация и результат редактируют нажатый экран.
@@ -2774,16 +4151,28 @@ async def handle_craft_normal_v2(update, context, ctx, player):
     
     # Онбординг
     if player.onboarding_step == 2:
-        player.onboarding_step = -1
-        await ctx.repo.save(player)
+        # См. фарм: save() устаревшего снимка стирал результат крафта
+        # (списание OAC, +1 блант, craft_count, медаль).
+        async def _finish_onboarding(p, conn):
+            p.onboarding_step = -1
+        await ctx.repo.atomic_update(uid, _finish_onboarding)
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("🎁 Забрать награду", callback_data="onboarding_reward")]
         ])
+        # chat_id (чат нажатия), не uid — см. тот же фикс в farm_callback_v2.
         await safe_send_message(
-            context, uid,
-            "<b>🎓 Обучение [▓▓▓▓] (шаг 3 из 3)</b>\n\n🎉 Поздравляю! Ты освоил основы.</b>\n\nНажми кнопку ниже, чтобы получить бонус за обучение!",
+            context, chat_id,
+            "<b>🎓 Обучение [▓▓▓] (шаг 3 из 3)</b>\n\n🎉 Поздравляю! Ты освоил основы.</b>\n\nНажми кнопку ниже, чтобы получить бонус за обучение!",
             reply_markup=kb
         )
+        # Реферальная награда рефереру — теперь именно здесь, не на голом
+        # /start приглашённого (см. комментарий в start()). onboarding_step
+        # переходит 2 → -1 ровно один раз за игрока (обратно в 2 никогда не
+        # выставляется), поэтому лишнего срабатывания при повторных заходах
+        # не будет. player.invited_by читаем из уже загруженного декоратором
+        # снимка — это поле пишется один раз при регистрации и не меняется.
+        if player.invited_by:
+            await _reward_referrer(ctx, context, player.invited_by, new_username=player.username)
 
 @rate_limit(3)
 @game_handler
@@ -2843,28 +4232,58 @@ async def handle_named_name(update, context):
                 color = {"legendary": "🟡", "epic": "🟣", "rare": "🔵"}.get(rarity, "🟢")
                 reaction = item.get("reaction", "")
 
+                # Автограф, не инвентарный предмет: имя навсегда прикреплено
+                # к вещи — тот же психологический механизм extended self
+                # (Belk), что заставляет беречь и хотеть показать вещь с
+                # собственным именем сильнее, чем безымянный дроп.
                 caption = (
                     f"✅ <b>ИМЯ ДАНО! ✨</b>\n\n"
                     f"{color} <b><i>«{html.escape(name)}»</i></b> 🌿\n"
                     f"<i>Редкость: {rarity}</i>\n\n"
                     f"📜 <i>{reaction}</i>\n\n"
-                    f"💎 Этот блант навсегда останется в твоей коллекции!"
+                    f"💎 Он навсегда несёт твоё имя — как автограф: даже "
+                    f"подаренный, останется твоим следом в чужой коллекции."
                 )
-                
+
+                # Red Team (SLAYER A₈) поймал реальный баг: этот CTA раньше стоял
+                # ЗДЕСЬ с комментарием "гарантированный момент" — но эта ветка
+                # переименовывает БЕЗЫМЯННЫЙ named-item, а create_named_blunt
+                # НИГДЕ в файле не вызывается с пустым именем (проверено по всем
+                # call site'ам) — стартовый блант при регистрации получает имя
+                # сразу (_create_new_player: create_named_blunt(uid, new_name, …)
+                # с непустым new_name). Ветка мертва для любого реального игрока,
+                # CTA внутри нее никогда не показывался никому. Перенесён в
+                # onboarding_reward — единственный по-настоящему гарантированный,
+                # ровно один раз наступающий момент (см. там).
                 await update.message.reply_text(caption, parse_mode='HTML',
                     reply_markup=InlineKeyboardMarkup([
                         [InlineKeyboardButton("💍 Мои бланты", callback_data="my_blunts")],
-                        [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+                        [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
                     ]))
                 context.user_data.pop('awaiting_named_blunt', None)
                 return
 
+        # === ГЕНЕРАЦИЯ ИМЕНИ (реакцию не меняем) ===
+        # Считаем ДО транзакции и кладём в предмет ВНУТРИ неё. Раньше мутация
+        # применялась к уже сохранённому item после atomic_update — то есть
+        # только в памяти: в БД навсегда оставалось введённое имя, а карточка
+        # создания, текст шеринга и НАРИСОВАННАЯ картинка (её file_id как раз
+        # сохраняется) показывали мутированное. Один предмет жил под двумя
+        # именами: в Кодексе одно, на его же картинке — другое.
+        original_name = name
+        meme_name = mutate_name(original_name)
+
         async def _named(p, conn):
             if p.balance < GAME_CONFIG["named_blunt_cost"]:
                 return ("no_money",)
-            p.balance -= 50
+            # Цена — из конфига, а не зашитая 50: проверка выше уже читает
+            # GAME_CONFIG, и при правке цены списание разъехалось бы с гейтом.
+            p.balance -= GAME_CONFIG["named_blunt_cost"]
             p.craft_count = (p.craft_count or 0) + 1
-            item = await create_named_blunt(uid, name, rarity=None, conn=conn, ctx=ctx, player=p)
+            item = await create_named_blunt(uid, meme_name, rarity=None, conn=conn, ctx=ctx, player=p)
+            # Предмет уже лежит в p.inventory; финальный save() внутри
+            # atomic_update сериализует его вместе с этим полем.
+            item["original_name"] = original_name
 
             await ctx.war_service.add_score_raw(uid, 0, conn)
             await ctx.war_service.add_score(uid, WarAction.NAMED_CRAFT, conn)
@@ -2881,7 +4300,7 @@ async def handle_named_name(update, context):
                 parse_mode='HTML',
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("🍬 Фармить", callback_data="farm")],
-                    [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+                    [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
                 ]))
             return
 
@@ -2891,42 +4310,45 @@ async def handle_named_name(update, context):
         color = {"legendary": "🟡", "epic": "🟣", "rare": "🔵"}.get(item["rarity"], "🟢")
         reaction = item["reaction"]          # <-- твоя реакция из БД, не трогаем
 
-        # === ГЕНЕРАЦИЯ ИМЕНИ (реакцию не меняем) ===
-        original_name = name
-        meme_name = mutate_name(original_name)
-        item["name"] = meme_name
-        item["original_name"] = original_name
-
-        # Локальная таблица (нигде больше не нужна)
+        # Шанс — РЕАЛЬНЫЙ, взят из того же места, что и ролл (см. create_named_blunt).
+        #
+        # Раньше здесь стояли выдуманные числа, поданные как факт о популяции:
+        # «Обнаружен у 3.5% игроков» при фактических 55%, легендарка — «0.17%»
+        # при реальных 2% (в 12 раз реже правды), а сумма всех четырёх давала
+        # 5.77%, что для доли игроков просто невозможно. Это ровно тот фейковый
+        # дефицит, который продукт себе запрещает: не гипербола лора, а
+        # конкретная цифра в формате статистики.
+        #
+        # Честный шанс не слабее выдуманного: 2% — это уже «1 из 50», редкость
+        # настоящая, её не нужно приукрашивать. А доверие к числам — то, на чём
+        # держится ценность ВСЕЙ коллекции: игрок, поймавший одну ложь, перестаёт
+        # верить и правдивым цифрам Кодекса. Формулировка сменена с «обнаружен у
+        # N% игроков» (утверждение о мире) на «шанс с крафта» (проверяемый факт
+        # о механике) — так же, как это уже честно сделано в _build_codex_header.
         rarity = item["rarity"]
-        
-        if rarity == "legendary":
-            label = "ЛЕГЕНДАРНЫЙ"
-            discovery = "0.17%"
-        elif rarity == "epic":
-            label = "ЭПИЧЕСКИЙ"
-            discovery = "0.7%"
-        elif rarity == "rare":
-            label = "РЕДКИЙ"
-            discovery = "1.4%"
-        else:
-            label = "ОБЫЧНЫЙ"
-            discovery = "3.5%"
+        label, odds = {
+            "legendary": ("ЛЕГЕНДАРНЫЙ", "2%"),
+            "epic":      ("ЭПИЧЕСКИЙ",   "13%"),
+            "rare":      ("РЕДКИЙ",      "30%"),
+        }.get(rarity, ("ОБЫЧНЫЙ", "55%"))
 
         # Фанфары по редкости — эмоциональный пик («ахнуть»), твой текст ниже не тронут
         fanfare = {
-            "legendary": "🎊✨🎊 <b>ЛЕГЕНДАРНЫЙ!!!</b> 🎊✨🎊\n<i>Такое рождается раз на тысячу. Ты уловил невозможное.</i>\n\n",
+            "legendary": "🎊✨🎊 <b>ЛЕГЕНДАРНЫЙ!!!</b> 🎊✨🎊\n<i>Один блант из пятидесяти. Ты уловил невозможное.</i>\n\n",
             "epic": "🟣✨ <b>ЭПИЧЕСКИЙ!</b> Искажение благосклонно к тебе.\n\n",
             "rare": "🔵 <b>РЕДКИЙ!</b> Достойный улов.\n\n",
         }.get(rarity, "")
 
         caption = fanfare + (
             f"<b>💍 ТЫ СОЗДАЛ ИМЕННОЙ БЛАНТ!</b>\n"
-            f"🎉 Он навсегда останется в <b>твоей коллекции</b>.\n\n"
+            # Автограф, не инвентарный предмет (тот же сдвиг, что и в
+            # renaming-ветке free-бланта выше) — extended self (Belk):
+            # вещь с твоим именем ценится и бережётся сильнее.
+            f"🎉 Он навсегда несёт твоё имя — <b>твой автограф</b> в этом мире.\n\n"
             f"{color}<b><i>«{html.escape(meme_name)}»</i></b>\n"
             f"💎 Редкость: <b>{label} • #{item.get('rare_number', '?-????')}</b>\n"
             f"👑 Первый владелец: <b>{html.escape(player.username or 'игрок')}</b>\n"
-            f"🌎 Обнаружен у <b>{discovery}</b> игроков\n\n"
+            f"🎲 Шанс поймать такой: <b>{odds}</b> с крафта\n\n"
             f"🕯️ <i>{reaction}</i>\n\n"
             f"💬 Этот блант достоин того, чтобы его <b>увидели друзья. Действуй!</b>"
         )
@@ -2937,16 +4359,27 @@ async def handle_named_name(update, context):
         # Прежний ?start=b_<short_code> не работал — short_code нигде не сохранялся.
         ref_link = f"https://t.me/{bot_username}?start=blunt_{blunt_id}"
         
+        # "NFT" убран: слово сегодня триггерит «развод», а не «интересно», и
+        # роняет CTR по ссылке у большинства аудиторий. Ведём с игры и с себя
+        # (identity/social currency), а не с предмета как товара — тот же сдвиг,
+        # что и в invite_friend_handler.
+        #
+        # Без HTML-тегов: share_text уходит прямиком в URL (build_share_url →
+        # t.me/share/url?url=...&text=...), Telegram НЕ парсит здесь HTML —
+        # <b> показался бы другу буквальными угловыми скобками, а не жирным
+        # текстом. Ссылка НЕ дублируется в тексте — она уже в url= отдельным
+        # параметром, Telegram сам покажет её другу с превью; повторение той
+        # же голой ссылки текстом давало на экране друга одну и ту же ссылку
+        # дважды подряд.
         share_text = (
-            f"{color} ИМЯ NFT Бланта: «{html.escape(meme_name)}»\n"
-            f"💎 Редкость: {label} • #{item.get('rare_number', '?-????')}\n"
-            f"👑 Первый владелец: {html.escape(player.username or 'игрок')}\n\n"
-            f"💬 Реакция: {reaction}\n"
-            f"🎁 ЗАБРАТЬ СЕБЕ ТАКОЙ ЖЕ:\n"
-            f"{ref_link}"
+            f"🕯️⚜️ Я играю в Antysocialshop — RPG про гильдии и войну миров.\n"
+            f"Только что скрутил {color} «{meme_name}» — {label.lower()}, "
+            f"#{item.get('rare_number', '?-????')}.\n\n"
+            f"💬 {reaction}\n\n"
+            f"🎁 Заходи по ссылке — +100 OAC на старт:"
         )
 
-        share_url = build_share_url(share_text)
+        share_url = build_share_url(ref_link, share_text)
         
         kb = InlineKeyboardMarkup([
             [
@@ -2975,9 +4408,16 @@ async def handle_named_name(update, context):
         except Exception:
             pass
 
-        sent_img = await safe_send_blunt_image(
-            context, update.effective_chat.id, item["rarity"], caption=caption, reply_markup=kb
-        )
+        # Уникальная коллекционная карточка (рисуется из хэша бланта → у каждого
+        # своя). Кэшируется как file_id на предмете. Откат: старая per-rarity
+        # картинка, затем текст — путь блантов не может упасть из-за рендера.
+        sent_img = await _send_blunt_card(
+            context, update.effective_chat.id, item, player.username or "",
+            caption=caption, reply_markup=kb, ctx=ctx, uid=uid)
+        if not sent_img:
+            sent_img = await safe_send_blunt_image(
+                context, update.effective_chat.id, item["rarity"], caption=caption, reply_markup=kb
+            )
         if not sent_img:
             await update.message.reply_text(caption, reply_markup=kb, parse_mode='HTML')
 
@@ -3007,40 +4447,46 @@ async def handle_named_name(update, context):
         asyncio.create_task(fomo_reminder())
 
         await asyncio.sleep(0.5)
-        bonus_msg = await context.bot.send_message(
-            uid,
-            "⚡ <b>БОНУС ЗА СКОРОСТЬ!</b>\n\n"
-            "Если ты <b>подаришь</b> или <b>поделишься</b> этим блантом за 5 минут, получишь <b>+10 OAC</b> на счёт.\n"
-            "Просто нажми одну из кнопок выше!",
-            parse_mode='HTML'
-        )
-
-        context.user_data['fomo_bonus_msg'] = bonus_msg.message_id
-        context.user_data['fomo_blunt_id'] = blunt_id
-        context.user_data['fomo_start'] = time.time()
+        # Раньше — сырой context.bot.send_message без try/except (в отличие от
+        # соседнего fomo_reminder() выше, который уже защищён). Любая ошибка
+        # Telegram (Forbidden/BadRequest/сеть) роняла весь handle_named_name с
+        # необработанным исключением. safe_send_message даёт ретраи; try/except
+        # не даёт сбою здесь испортить уже успешный крафт бланта.
+        try:
+            bonus_msg = await safe_send_message(
+                context, uid,
+                "⚡ <b>БОНУС ЗА СКОРОСТЬ!</b>\n\n"
+                "Если ты <b>подаришь</b> или <b>поделишься</b> этим блантом за 5 минут, получишь <b>+10 OAC</b> на счёт.\n"
+                "Просто нажми одну из кнопок выше!",
+                parse_mode='HTML'
+            )
+            context.user_data['fomo_bonus_msg'] = bonus_msg.message_id
+            context.user_data['fomo_blunt_id'] = blunt_id
+            context.user_data['fomo_start'] = time.time()
+        except Exception:
+            logger.warning("FOMO-бонус: не удалось отправить сообщение uid=%d", uid)
         
-        # ── Оповещение в канал (закомментировано) ──
-        # try:
-        #     uname = html.escape(user.username or user.first_name)
-        #     await context.bot.send_message(
-        #         chat_id="@guild_antysocial",
-        #         text=f"<b><i>🩸 ЭХО ИСКАЖЕНИЯ</i></b>\n\n⚜️ <b>@{uname}</b> создал свой именной Блант {color} "
-        #              f"<b><i>«{name_escaped}»</i></b> 🌿\n<i>Редкость: {item['rarity']}</i>\n🩸 <i>{reaction}</i>",
-        #         parse_mode='HTML'
-        #     )
-        # except Exception as e:
-        #     logger.error(f"Ошибка отправки в канал: {e}")
+        # Оповещение о создании блантика в канал — уже покрыто активным вызовом
+        # _safe_send_guild_message выше (rarity in legendary/epic); этот блок был
+        # старым, мёртвым дублем той же логики (удалён, а не раскомментирован,
+        # чтобы не постить одно и то же событие в канал дважды подряд).
 
         await check_achievements(uid, context)
 
-    except Exception as e:
-        import traceback
-        err = traceback.format_exc()
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=f"❌ Ошибка в named_name:\n<code>{html.escape(err[:800])}</code>",
-            parse_mode='HTML'
-        )
+    except Exception:
+        # Раньше сюда печатался сырой traceback прямо в чат игроку: имена файлов,
+        # строки и внутренние сообщения об ошибках. Это и утечка внутренностей,
+        # и полный слом голоса продукта в самый дорогой момент (игрок только что
+        # заплатил 50 OAC за именной блант). Трейс — в лог, игроку — по-русски.
+        logger.exception("handle_named_name failed for uid=%s", update.effective_user.id)
+        await safe_send_message(
+            context, update.effective_chat.id,
+            "🌀 <b>Искажение сорвалось.</b>\n\n"
+            "Блант не скрутился, OAC остались при тебе. Попробуй ещё раз.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🌿 Крафт", callback_data="craft")],
+                [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
+            ]))
     finally:
         context.user_data['awaiting_named_blunt'] = False
 
@@ -3091,16 +4537,29 @@ async def handle_use_dust(update, context):
 
     await safe_send_blunt_image(context, query.message.chat.id, "legendary", caption=None, reply_markup=None)
     text = _format_dust_message(name, reaction)
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
+    kb_rows = [[InlineKeyboardButton("🔙 В меню", callback_data="menu")]]
+    # Тот же пробел, что чинил _win_share_button для ранг-апа/джекпота/рекорда
+    # Лабиринта: легендарка за Пыль — тоже личный триумф, транслируемый в
+    # гильд-чат АНОНИМНО для чужих, но у самого игрока не было ни одной кнопки
+    # поделиться ЭТОЙ победой за пределами официального чата.
+    try:
+        kb_rows.insert(0, [await _win_share_button(
+            context, uid, f"💠 Я получил легендарный блант «{name}» через Пыль в Antysocialshop!")])
+    except Exception:
+        pass
+    kb = InlineKeyboardMarkup(kb_rows)
     await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
 
-    # ── Оповещение в канал (закомментировано) ──
-    # try:
-    #     await context.bot.send_message(chat_id="@guild_antysocial",
-    #         text=f"<b><i>⚜️ ЭХО ИСКАЖЕНИЯ 🩸</i></b>\n\n🎉 <b>@{html.escape(player.username)}</b> использовал 💠 Пыль и получил легендарный Блант <b><i>«{name}»💍</i></b>!",
-    #         parse_mode='HTML')
-    # except Exception as e:
-    #     logger.error(f"Ошибка отправки в канал: {e}")
+    # Оповещение в канал — раньше сырой context.bot.send_message без ретраев,
+    # никогда не раскомментированный. Переведено на проверенный хелпер
+    # (тот же, что у джекпотов/ранг-апов/легендарных крафтов), с грациозным
+    # фолбэком без @username, как в check_rank_up.
+    who = f"@{html.escape(player.username)}" if player.username else "Один из наших"
+    asyncio.create_task(_safe_send_guild_message(
+        ctx,
+        f"<b><i>⚜️ ЭХО ИСКАЖЕНИЯ 🩸</i></b>\n\n"
+        f"🎉 <b>{who}</b> использовал 💠 Пыль и получил легендарный Блант "
+        f"<b><i>«{html.escape(name)}»💍</i></b>!"))
 
     await check_achievements(uid, context)
 
@@ -3119,7 +4578,12 @@ async def cancel_named(update, context):
             await context.bot.delete_message(chat_id=query.message.chat.id, message_id=msg_id)
         except Exception:
             pass
-    await craft_callback(update, context)
+    # craft_callback (без _v2) нигде не существовал — отмена ввода имени
+    # крашилась NameError вместо возврата в меню крафта. craft_callback_v2 уже
+    # обёрнута @game_handler и зарегистрирована в диспетчере как "craft":
+    # вызов с (update, context) — тот же контракт, что и у любой другой кнопки.
+    # Тот же баг нашли и починили параллельно в двух независимых сессиях.
+    await craft_callback_v2(update, context)
     
 @rate_limit(1)
 @game_handler
@@ -3153,13 +4617,43 @@ async def onboarding_reward(update, context, ctx, player):
             )
             cta = f"📋 Продолжить · осталось {left}"
 
+        # Ритуал перехода: единственный раз за всю жизнь игрока (onboarding_step
+        # необратимо ушёл 2→-1 до этого экрана) — в отличие от обычного крита
+        # на фарме (5% КАЖДОГО фарма навсегда, где такая же анимация была
+        # намеренно отклонена — риск хабитуации), здесь риска нет вообще.
+        # Peak-end rule: без явного маркера перехода у мозга нет «якоря», что
+        # туториал закончился и началась «настоящая» игра — тихая смена флага
+        # такого якоря не создаёт (flashbulb-подобные воспоминания требуют
+        # эмоциональной salience, не факта записи в БД).
+        try:
+            for frame in ("🌫️ <i>Фабрика присматривается к тебе...</i>",
+                          "🕯️ <i>Искажение шепчет твоё имя...</i>",
+                          "🎓 <b>ОБУЧЕНИЕ ЗАВЕРШЕНО</b>"):
+                await query.message.edit_text(frame, parse_mode='HTML')
+                await asyncio.sleep(0.6)
+        except Exception:
+            pass
+
+        # Гарантированный (не вероятностный) CTA первого приглашения для тех,
+        # кто ещё НИ РАЗУ никого не приглашал. Раньше стоял в ветке переименования
+        # безымянного стартового бланта — SLAYER Red Team (A₈) поймал, что та
+        # ветка мертва (create_named_blunt нигде не вызывается с пустым именем,
+        # стартовый блант получает имя сразу при регистрации). Этот экран —
+        # ЕДИНСТВЕННЫЙ реально гарантированный: onboarding_step необратимо
+        # переходит 2→-1 прямо перед вызовом этой функции, и путь сюда
+        # (farm → craft_normal → reward) — тот самый обязательный, не
+        # опциональный маршрут онбординга.
+        kb_rows = [[InlineKeyboardButton(cta, callback_data="daily_quest_hub")]]
+        if not (player.referral_count or 0):
+            kb_rows.append([InlineKeyboardButton(
+                "🔗 Подари другу лучший старт", callback_data="invite_friend")])
+
         await query.message.edit_text(
+            f"🎓 <b>Отныне Фабрика №9 признаёт тебя Странником.</b>\n\n"
             f"🎁 <b>Бонус за обучение: +30 OAC, +1 блант!</b>\n"
             f"💎 Баланс: {new_bal} OAC · 🗞️ Блантов: {new_blunts}\n\n"
             f"{body}",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton(cta, callback_data="daily_quest_hub")
-            ]]),
+            reply_markup=InlineKeyboardMarkup(kb_rows),
             parse_mode='HTML'
         )
     
@@ -3257,6 +4751,7 @@ async def gift_blunt_start(update, context, ctx, player):
         text=(
             "🎁 <b>ПОДАРИТЬ БЛАНТ</b>\n\n"
             "Введи <b>@username</b> или <b>числовой ID</b> игрока.\n"
+            "<i>Если его пока нет в игре — блант подождёт и придёт сам, когда он зайдёт.</i>\n"
             "Для отмены нажми кнопку ниже."
         ),
         parse_mode='HTML',
@@ -3278,6 +4773,11 @@ async def gift_blunt_start(update, context, ctx, player):
 @rate_limit(1)
 @game_handler
 async def smoke_callback(update, context, ctx, player):
+    if update.callback_query:
+        try:
+            await update.callback_query.answer()
+        except Exception:
+            pass
     user, msg = get_user_and_msg(update)
     uid = user.id
 
@@ -3289,12 +4789,9 @@ async def smoke_callback(update, context, ctx, player):
         )
         empty_kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("🌿 Крафт", callback_data="craft")],
-            [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
+            [InlineKeyboardButton("🔙 В меню", callback_data="menu")]
         ])
-        if update.callback_query:
-            await update.callback_query.message.edit_text(empty_text, reply_markup=empty_kb, parse_mode='HTML')
-        else:
-            await msg.reply_text(empty_text, reply_markup=empty_kb, parse_mode='HTML')
+        await edit_or_reply(update, context, empty_text, reply_markup=empty_kb, parse_mode='HTML')
         return
 
     main_text = f"<b>💨 ДУНУТЬ</b>\n\n🌿 Блантов в свёртке: <b>{player.blunts}</b>"
@@ -3302,10 +4799,7 @@ async def smoke_callback(update, context, ctx, player):
         [InlineKeyboardButton("💨 Дунуть", callback_data="do_smoke")],
         [InlineKeyboardButton("🔙 Назад", callback_data="menu")]
     ])
-    if update.callback_query:
-        await update.callback_query.message.edit_text(main_text, reply_markup=main_kb, parse_mode='HTML')
-    else:
-        await msg.reply_text(main_text, reply_markup=main_kb, parse_mode='HTML')
+    await edit_or_reply(update, context, main_text, reply_markup=main_kb, parse_mode='HTML')
 
 @rate_limit(1) #версия 2
 @game_handler
@@ -3319,7 +4813,11 @@ async def do_smoke(update, context, ctx, player):
             return SmokeStatus.NO_BLUNTS, None
 
         save = (p.guild == "WHITE" and random.randint(1, 100) <= 20)
-        earned, outcome = calculate_smoke_reward(p, ctx.cache.get("happy_hour", False))
+        p.daily_progress = p.daily_progress or {}
+        _dry = p.daily_progress.get("smoke_dry", 0)
+        earned, outcome = calculate_smoke_reward(
+            p, happy_hour_active(ctx), dry_count=_dry)
+        flavor = _pick_smoke_flavor(outcome, p.daily_progress)
 
         old_count = p.smoke_count or 0
         new_count = old_count + 1
@@ -3329,9 +4827,39 @@ async def do_smoke(update, context, ctx, player):
             p.blunts -= 1
         p.smoke_count = new_count
         p.balance = (p.balance or 0) + earned + medal_bonus
-        p.daily_progress = p.daily_progress or {}
         p.daily_progress["smoke"] = True
+        # Пити-счётчик: растёт на сухих тягах, обнуляется на выигрыше/джекпоте.
+        if outcome == "neutral":
+            p.daily_progress["smoke_dry"] = _dry + 1
+        else:
+            p.daily_progress["smoke_dry"] = 0
         p.inhaled = 1
+
+        # ── ЖАР ──────────────────────────────────────────────────────
+        # Двигается на КАЖДОЙ тяге, включая пустую: именно это делает
+        # нулевой исход шагом к цели, а не «ничем». Джекпот даёт +3 —
+        # редкий пик заодно ощутимо приближает Забой.
+        heat = (p.smoke_heat or 0) + (3 if outcome == "jackpot" else 1)
+        burst = None
+        if heat >= SMOKE_HEAT_MAX:
+            # Забой. Приз выдаётся В ТОЙ ЖЕ транзакции, что и всё остальное
+            # состояние тяги: иначе краш между списанием бланта и выдачей
+            # приза оставил бы игрока без того и без другого.
+            heat = 0
+            kind, amount = _roll_smoke_burst()
+            if kind == "oac":
+                p.balance = (p.balance or 0) + amount
+                burst = ("oac", amount, None)
+            elif kind == "blunts":
+                p.blunts = (p.blunts or 0) + amount
+                burst = ("blunts", amount, None)
+            else:
+                # Карта в Кодекс — тот же путь, что у Пыли (handle_use_dust):
+                # create_named_blunt внутри транзакции, с уже загруженным p.
+                _name = _pick_no_repeat(SMOKE_BURST_BLUNT_NAMES, "last_burst_name", p.daily_progress)
+                _item = await create_named_blunt(uid, _name, conn=conn, ctx=ctx, player=p)
+                burst = ("card", None, _item)
+        p.smoke_heat = heat
 
         if ctx.war_service:
             try:
@@ -3339,7 +4867,8 @@ async def do_smoke(update, context, ctx, player):
             except Exception:
                 logger.exception("War service error, proceeding without points")
 
-        return SmokeStatus.OK, (earned, outcome, save, medal_text, new_count, p.blunts, p.balance)
+        return SmokeStatus.OK, (earned, outcome, save, medal_text, new_count,
+                                p.blunts, p.balance, heat, burst, flavor)
 
     result = await ctx.repo.atomic_update(uid, _smoke)
     if result is None:
@@ -3348,34 +4877,182 @@ async def do_smoke(update, context, ctx, player):
 
     status, data = result
     if status == SmokeStatus.NO_BLUNTS:
+        # Именно здесь игрок вероятнее всего уйдёт (бланты кончились посреди
+        # серии тяг) — и именно здесь Жар раньше был не виден совсем. Незакрытая
+        # петля должна оставаться на глазах ровно в момент прерывания (Зейгарник,
+        # 1927), иначе игрок физически не видит, что бросает.
+        heat = player.smoke_heat or 0
+        heat_line = ""
+        if heat > 0:
+            left = SMOKE_HEAT_MAX - heat
+            heat_line = (
+                f"\n\n{_smoke_heat_bar(heat)} <b>Жар {heat}/{SMOKE_HEAT_MAX}</b>\n"
+                f"<i>ещё {left} {_plural_ru(left, 'тяга', 'тяги', 'тяг')} до ЗАБОЯ — не дай ему остыть</i>"
+            )
+        text = (
+            "<b>💨 ДУНУТЬ</b>\n\n"
+            "<b>🍃 Свёрток пуст.</b> Один блант — и можно продолжать."
+            f"{heat_line}"
+        )
+        # Кнопка смотрит на реальный баланс: тот же переход к «Фармить», что уже
+        # стоит на экране нехватки OAC в крафте (handle_craft_normal_v2) — не
+        # новый паттерн, а переиспользование уже понятного игроку пути. Кнопка
+        # в меню крафта (именной блант/Пыль) убрана: рядом со «Скрутить блант»
+        # она читалась как второй похожий вариант, а не как отдельная функция
+        # (закон Хика — двусмысленный выбор тормозит решение); тот редкий
+        # сценарий по-прежнему в одном тапе через 🔙 В меню → 🌿 Крафт.
+        if (player.balance or 0) >= GAME_CONFIG['craft_cost']:
+            main_btn = _btn(f"🌿 Скрутить блант · {GAME_CONFIG['craft_cost']} OAC",
+                            callback_data="craft_normal", style="primary")
+        else:
+            main_btn = _btn("🍬 Фармить — не хватает на блант", callback_data="farm", style="primary")
         await query.message.edit_text(
-            "<b>💨 ДУНУТЬ</b>\n\n<b>🌿 Твой свёрток пуст</b>\n\n<i>🎈 Скрути новый блант</i>",
+            text,
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🌿 Крафт", callback_data="craft")],
-                [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
+                [main_btn],
+                [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
             ]),
             parse_mode='HTML'
         )
         return
 
-    earned, outcome, save, medal_text, new_count, bl_left, new_balance = data
-    effect = build_smoke_effect(outcome, earned)
+    earned, outcome, save, medal_text, new_count, bl_left, new_balance, heat, burst, flavor = data
+
+    # ── ЗАБОЙ: отдельный экран-пик ───────────────────────────────────
+    # Peak-end rule (Kahneman и соавт.): впечатление от всей серии тяг
+    # определяется её самым сильным моментом, а не средним по серии.
+    # Поэтому Забой не дописывается строчкой к обычному результату, а
+    # получает собственный экран с подвеской — как джекпот.
+    if burst:
+        kind, amount, item = burst
+        try:
+            for frame in ("🔥 <b>Жар не помещается в лёгких…</b>",
+                          "🔥🔥 <b>Дым идёт стеной…</b>",
+                          "🔥🔥🔥 <b>З А Б О Й</b>"):
+                await query.message.edit_text(frame, parse_mode='HTML')
+                await asyncio.sleep(0.5)
+        except Exception:
+            pass
+
+        head = ("🔥🔥🔥  <b>З А Б О Й</b>  🔥🔥🔥\n\n"
+                "<i>Жар прорвался — Фабрика №9 отдаёт своё.</i>\n\n")
+        burst_kb = [
+            [_btn("🔥 Дунуть ещё", callback_data="do_smoke", style="primary") if bl_left >= 1
+             else _btn(f"🌿 Скрутить блант · {GAME_CONFIG['craft_cost']} OAC",
+                       callback_data="craft_normal", style="primary")],
+            [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
+        ]
+
+        if kind == "card":
+            _rar = (item or {}).get("rarity", "common")
+            _c = {"legendary": "🟡 ЛЕГЕНДА", "epic": "🟣 ЭПИК",
+                  "rare": "🔵 РЕДКИЙ"}.get(_rar, "🟢 ОБЫЧНЫЙ")
+            burst_text = (
+                f"{head}💍 <b>«{html.escape((item or {}).get('name', '?'))}»</b> · {_c}\n"
+                f"<i>Новая карта в твоём Кодексе — ни у кого нет такой же.</i>"
+            )
+            # Делиться стоит тем, что реально редко: обычной картой хвастаться
+            # нечем, и кнопка на каждой второй карте обесценила бы сам жест.
+            if _rar in ("epic", "legendary"):
+                try:
+                    burst_kb.insert(0, [await _win_share_button(
+                        context, uid,
+                        f"🔥 ЗАБОЙ! Мне выпала карта «{(item or {}).get('name','?')}» "
+                        f"в Antysocialshop!")])
+                except Exception:
+                    pass
+            _sent = await _send_blunt_card(
+                context, query.message.chat.id, item, player.username or "",
+                burst_text, InlineKeyboardMarkup(burst_kb), ctx=ctx, uid=uid)
+            if _sent:
+                # _send_blunt_card всегда шлёт НОВОЕ сообщение (фото) — убираем
+                # за собой прежний экран, как это делает invite_friend_handler.
+                try:
+                    await query.message.delete()
+                except Exception:
+                    pass
+            else:
+                await query.message.edit_text(
+                    burst_text, reply_markup=InlineKeyboardMarkup(burst_kb), parse_mode='HTML')
+        else:
+            if kind == "oac":
+                burst_text = (f"{head}🍬 <b>+{amount} OAC</b>\n"
+                              f"<i>Касса Фабрики открылась разом.</i>")
+            else:
+                burst_text = (f"{head}🍃 <b>+{amount} "
+                              f"{_plural_ru(amount, 'блант', 'бланта', 'блантов')}</b>\n"
+                              f"<i>Свёрток пополнен — Жар можно гнать дальше.</i>")
+            burst_text += f"\n\n🍃 <b>Блантов в свёртке:</b> <b>{bl_left}</b>"
+            await query.message.edit_text(
+                burst_text, reply_markup=InlineKeyboardMarkup(burst_kb), parse_mode='HTML')
+
+        asyncio.create_task(check_achievements(uid, context))
+        return
+
+    # ── Обычный результат тяги ───────────────────────────────────────
+    effect = build_smoke_effect(outcome, earned, flavor)
+
+    # Жар занял слот, где раньше стояла строка пити-гаранта: тот же визуальный
+    # язык (🔥/▫️), но двигается на КАЖДОЙ тяге, а не только на сухой, и ведёт
+    # к настоящему призу, а не просто к «гарантированному улову».
+    _left = SMOKE_HEAT_MAX - heat
+    heat_line = (f"\n{_smoke_heat_bar(heat)} <b>Жар {heat}/{SMOKE_HEAT_MAX}</b>"
+                 f"\n<i>ещё {_left} {_plural_ru(_left, 'тяга', 'тяги', 'тяг')} до ЗАБОЯ</i>")
 
     text = (
         f"{effect}\n\n"
         f"{medal_text}"
         f"<b>💨 Дым:</b> {new_count}/{get_medal_target(new_count, SMOKE_MEDALS)}\n"
-        f"{get_medal_progress(new_count, SMOKE_MEDALS)}\n\n"
+        f"{get_medal_progress(new_count, SMOKE_MEDALS, just_leveled=bool(medal_text))}"
+        f"{heat_line}\n\n"
         f"<b>🍃 Блантов в свёртке:</b> <b>{bl_left}</b>"
     )
+
+    # Та же цепочка «что дальше», что теперь на фарме и крафте (см. их
+    # комментарии) — держит видимой связку фарм→крафт→дунуть на каждом звене.
+    # exclude_key="smoke": player — снимок ДО этой тяги.
+    _next_step = next_quest_step(player, exclude_key="smoke")
+    if _next_step:
+        text += f"\n💡 {_next_step[2]}"
     if save:
         text += "\n⚜️ <i>Светлая Гильдия сохранила твой Блант!</i>"
 
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("💨 Дунуть ещё", callback_data="do_smoke") if bl_left >= 1
-         else InlineKeyboardButton("🌿 Крафтить ещё", callback_data="craft")],
-        [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
-    ])
+    # Кнопка меняется на пороге Забоя: самый сильный момент предвкушения во
+    # всей механике — когда до гарантированного приза остался ровно один тап.
+    # Зелёный (success), не красный: это обещание награды, а не риск; danger
+    # в этой игре зарезервирован за действительно опасным выбором (см. пресет
+    # «Безумный» в Минах), иначе цвет перестаёт что-либо значить.
+    if bl_left >= 1:
+        if _left == 1:
+            _main_btn = _btn("🔥 ЕЩЁ ОДНА — И ЗАБОЙ!", callback_data="do_smoke", style="success")
+        else:
+            _main_btn = _btn("💨 Дунуть ещё", callback_data="do_smoke", style="primary")
+    else:
+        _main_btn = _btn(f"🌿 Скрутить блант · {GAME_CONFIG['craft_cost']} OAC",
+                         callback_data="craft_normal", style="primary")
+    kb_rows = [[_main_btn], [InlineKeyboardButton("🔙 В меню", callback_data="menu")]]
+    # Suspense-ревил ТОЛЬКО на джекпоте (2%): предвкушение поднимает дофаминовый
+    # пик именно там, где он редкий и ценный (dopamine живёт на фазе ожидания).
+    # Обычные тяги не тормозим ни на миллисекунду — никакого минуса на
+    # массовом пути, апгрейд бьёт точечно в самый яркий момент.
+    if outcome == "jackpot":
+        try:
+            for frame in ("🎰 <b>Дым сгущается…</b>",
+                          "🌌 <b>Ткань мира дрожит…</b>",
+                          "💥 <b>ХЛЫНУЛО ЗОЛОТО!</b>"):
+                await query.message.edit_text(frame, parse_mode='HTML')
+                await asyncio.sleep(0.6)
+        except Exception:
+            pass
+        # Джекпот транслировался в гильд-чат анонимно («кто-то из наших»), но
+        # сам игрок не мог поделиться СВОЕЙ победой ни с кем за пределами
+        # официального чата — тот же пробел, что и у ранг-апа.
+        try:
+            kb_rows.insert(0, [await _win_share_button(
+                context, uid, f"🎰 Я сорвал ДЖЕКПОТ +{earned} OAC в Antysocialshop!")])
+        except Exception:
+            pass
+    kb = InlineKeyboardMarkup(kb_rows)
     await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
 
     asyncio.create_task(check_achievements(uid, context))
@@ -3387,91 +5064,274 @@ async def do_smoke(update, context, ctx, player):
             f"<i>Фабрика №9 сегодня щедра. Кто следующий?</i>"
         ))
 
-@rate_limit(3)
-async def ritual_callback(update, context):
-    ctx = context.bot_data.get("ctx")
-    if not ctx:
-        await update.effective_message.reply_text("⚠️ Бот инициализируется, попробуйте позже.")
-        return
+# ============================================================
+# ГИЛЬДЕЙСКОЕ ДЕЙСТВИЕ: общая механика Ритуала (BLACK) и Исповеди (WHITE)
+# ============================================================
+# Раньше Ритуал был одним тапом на фиксированное число, Исповедь — одним
+# тапом на случайное число без всякого выбора. Ни одна из фракций не
+# принимала решения в своём главном действии — только в Лабиринте и Минах
+# у игрока вообще есть агентность (см. GUILD_ACTION_TIERS в game_content.py
+# для полного обоснования). Ниже — общая логика; тема (текст/эмодзи) берётся
+# из GUILD_ACTION_THEME[guild], сама механика для BLACK и WHITE идентична.
 
+def _guild_action_tier_for(key: str) -> dict:
+    return next(t for t in GUILD_ACTION_TIERS if t["key"] == key)
+
+
+def _guild_action_cooldown_hours(guild: str) -> int:
+    return GAME_CONFIG["ritual_cooldown_hours"] if guild == "BLACK" else GAME_CONFIG["repent_cooldown_hours"]
+
+
+async def _show_guild_action_picker(update, context, ctx, guild: str):
+    """Экран выбора профиля риска — общий для обеих фракций. Показывается
+    ПЕРЕД действием: игрок выбирает один из трёх профилей на каждое
+    действие заново, а не жмёт единственную доступную кнопку."""
+    query = update.callback_query
+    theme = GUILD_ACTION_THEME[guild]
+    lines = [f"<b>{theme['title']}</b>\n", f"<i>{theme['cta']}</i>\n"]
+    keyboard = []
+    for tier in GUILD_ACTION_TIERS:
+        lo, hi = tier["oac_range"]
+        avg = (lo + hi) // 2
+        name = theme["tier_names"][tier["key"]]
+        rare_chance = tier["dust_chance"] + tier["legendary_chance"]
+        # Явный процент на ОБЕИХ ветках, а не только на редкой: "~95 OAC ·
+        # 25% шанс Пыли" читается неоднозначно — можно понять как "OAC И
+        # ещё бонусный шанс сверху", хотя ветки взаимоисключающие (or, не
+        # and). Та же ошибка чтения вероятностных формулировок разобрана в
+        # Tversky & Kahneman, 1983 ("conjunction fallacy") — лечится тем же,
+        # чем и в Минах: числом на каждой стороне, а не на одной.
+        if rare_chance:
+            oac_pct = int(round((1 - rare_chance) * 100))
+            rare_pct = int(round(rare_chance * 100))
+            rare_label = "💠 Пыль" if tier["dust_chance"] else "🟡 Легендарка"
+            line = f"{name} — {oac_pct}% · ~{avg} OAC, или {rare_pct}% · {rare_label}"
+        else:
+            line = f"{name} — стабильно ~{avg} OAC"
+        lines.append(line)
+        keyboard.append([_btn(name, callback_data=f"guild_act_{guild}_{tier['key']}", style=tier["style"])])
+    keyboard.append([InlineKeyboardButton("🔙 В меню", callback_data="menu")])
+    text = "\n".join(lines)
+    await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
+
+
+async def _resolve_guild_action(update, context, ctx, guild: str, tier_key: str):
+    """Резолвит выбранный профиль риска. Общая логика для Ритуала/Исповеди —
+    различаются только полем кулдауна/счётчика, таблицей медалей и темой."""
+    query = update.callback_query
+    if query:
+        try:
+            await query.answer()
+        except Exception:
+            pass
     user, msg = get_user_and_msg(update)
     uid = user.id
     now = datetime.now()
+    theme = GUILD_ACTION_THEME[guild]
+    tier = _guild_action_tier_for(tier_key)
+    cooldown_hours = _guild_action_cooldown_hours(guild)
+    medals = RITUAL_MEDALS if guild == "BLACK" else REPENT_MEDALS
+    count_field = "ritual_count" if guild == "BLACK" else "repent_count"
+    cooldown_field = "last_ritual" if guild == "BLACK" else "last_repent"
 
-    async def _ritual(player, conn):
-        if player.guild != "BLACK":
+    async def _act(p, conn):
+        if p.guild != guild:
             return ("wrong_guild",)
-        if player.last_ritual and (now - player.last_ritual) < timedelta(hours=GAME_CONFIG["ritual_cooldown_hours"]):
-            remain = timedelta(hours=GAME_CONFIG["ritual_cooldown_hours"]) - (now - player.last_ritual)
+        last = getattr(p, cooldown_field)
+        if last and (now - last) < timedelta(hours=cooldown_hours):
+            remain = timedelta(hours=cooldown_hours) - (now - last)
             hrs, rem = divmod(int(remain.total_seconds()), 3600)
             return ("cooldown", hrs, rem // 60)
+        # Исповедь тратит блант при любом исходе (как и раньше); Ритуал —
+        # ничем не расходуется, кроме кулдауна (тоже как и раньше).
+        if guild == "WHITE" and (p.blunts or 0) < 1:
+            return ("no_blunts",)
+        if guild == "WHITE":
+            p.blunts -= 1
 
-        reward = 150
-        if ctx.cache.get("happy_hour", False):
-            reward *= HAPPY_HOUR_MULTIPLIER
-        extra = 15 if random.random() < 0.1 else 0
+        p.daily_progress = p.daily_progress or {}
+        lo, hi = tier["oac_range"]
+        r = random.random()
+        if r < tier["dust_chance"]:
+            outcome_kind, reward, item_name = "dust", 0, None
+            p.m_essence = (p.m_essence or 0) + 1
+        elif r < tier["dust_chance"] + tier["legendary_chance"]:
+            item_name = _pick_no_repeat(theme["legendary_pool"], "last_legend_name", p.daily_progress)
+            outcome_kind, reward = "legendary", 0
+            await create_named_blunt(uid, item_name, rarity="legendary", ctx=ctx, player=p, conn=conn)
+        else:
+            outcome_kind, item_name = "oac", None
+            reward = random.randint(lo, hi)
+            if happy_hour_active(ctx):
+                reward *= HAPPY_HOUR_MULTIPLIER
+            p.balance += reward
 
-        old_count = player.ritual_count
+        old_count = getattr(p, count_field) or 0
         new_count = old_count + 1
-        medal_text, medal_bonus = get_medal_text_and_reward(old_count, new_count, RITUAL_MEDALS)
+        medal_text, medal_bonus = get_medal_text_and_reward(old_count, new_count, medals)
+        # medal_bonus теперь начисляется ВСЕГДА, а не только когда исход этого
+        # конкретного тапа — OAC. Раньше (в исповеди) награда за медаль молча
+        # пропадала, если ровно на шаге ранг-апа медали выпадала пыль/легенда
+        # вместо OAC — два независимых события по ошибке делили один канал.
+        p.balance += medal_bonus
+        # Литеральная запись per-branch, не setattr(p, count_field, ...): статический
+        # страж (mechanics_test.py) построчно ищет "p.<поле> = " в исходнике, чтобы
+        # ловить достижения, чьё поле нигде не растёт (см. историю с alchemy_count в
+        # том же тесте) — динамическое имя поля для него невидимо, хотя рантайм
+        # был бы корректен. Дублирование здесь — цена этой защиты, не лишний код.
+        if guild == "BLACK":
+            p.ritual_count = new_count
+            p.last_ritual = now
+            p.daily_progress = p.daily_progress or {}
+            p.daily_progress["ritual"] = True
+        else:
+            p.repent_count = new_count
+            p.last_repent = now
+            p.daily_progress = p.daily_progress or {}
+            p.daily_progress["repent"] = True
+        p.daily_progress["guild_action"] = True
 
-        player.balance += reward + extra + medal_bonus
-        player.daily_progress = player.daily_progress or {}
-        player.daily_progress["guild_action"] = True
-        player.daily_progress["ritual"] = True
-        player.ritual_count = new_count
-        player.last_ritual = now
+        war_action = WarAction.RITUAL if guild == "BLACK" else WarAction.REPENT
+        await ctx.war_service.add_score(uid, war_action, conn)
 
-        await ctx.war_service.add_score(uid, WarAction.RITUAL, conn)
-        return ("ok", reward, extra, medal_text, new_count, player.balance)
+        return ("ok", outcome_kind, reward, medal_bonus, item_name, medal_text, new_count, p.balance)
 
-    result = await ctx.repo.atomic_update(uid, _ritual)
+    result = await ctx.repo.atomic_update(uid, _act)
     if result is None:
         await msg.reply_text("Профиль не найден.")
         return
 
     status, *data = result
     if status == "wrong_guild":
-        await send_whisper_dm(update, context, "❌ Только Тёмная Гильдия.")
+        await send_whisper_dm(update, context, theme["wrong_guild_msg"])
+        return
+    if status == "no_blunts":
+        await send_whisper_dm(update, context, "❌ Нет блантов. Скрути!")
         return
     if status == "cooldown":
         hrs, mins = data[0], data[1]
         wait = f"{hrs} ч {mins} мин" if hrs else f"{mins} мин"
-        # Единый живой экран: кулдаун заменяет текущий экран, не плодит новый.
         await edit_or_reply(update, context,
-            f"<b>🕯️ Тёмный алтарь истощён 🌙</b>\n\n<b>🗝️ Жди {wait}</b>",
+            f"{theme['cooldown_line']}\n\n<b>🗝️ Жди {wait}</b>",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🍬 Фармить", callback_data="farm")],
-                [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+                [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
             ]))
         return
 
-    reward, extra, medal_text, new_count, new_balance = data
-    target = get_medal_target(new_count, RITUAL_MEDALS)
-    progress_bar_str = get_medal_progress(new_count, RITUAL_MEDALS)
+    outcome_kind, reward, medal_bonus, item_name, medal_text, new_count, new_balance = data
+    tier_name = theme["tier_names"][tier_key]
+    target = get_medal_target(new_count, medals)
+    progress_bar_str = get_medal_progress(new_count, medals, just_leveled=bool(medal_text))
+
+    if outcome_kind == "oac":
+        result_line = f"{tier_name} принёс тебе <b>{reward + medal_bonus} OAC</b> 🍬"
+    elif outcome_kind == "dust":
+        result_line = f"{tier_name} обернулся 💠 <b>+1 Кристальной Пылью</b>"
+    else:
+        result_line = f"🌟 Чудо! {tier_name} подарил легендарный блант <b>«{item_name}»</b>"
 
     text = (
-        f"<b>🕯️ РИТУАЛ ЗАВЕРШЁН 🎉</b>\n\n"
-        f"Ритуал принёс тебе <b>{reward} OAC</b> 🍬\n"
-        f"<b>⚜️ У тебя:</b> <b>{new_balance} OAC 🪽</b>\n\n"
+        f"<b>{theme['result_title']}</b>\n\n"
+        f"{result_line}\n"
+        f"<b>У тебя:</b> <b>{new_balance} OAC</b>\n\n"
         f"{medal_text}"
-        f"<b>🕯️ Ритуалы:</b> {new_count}/{target}\n"
+        f"<b>{theme['count_word']}:</b> {new_count}/{target}\n"
         f"<b>{progress_bar_str}</b>"
     )
-    # Единый живой экран: результат ритуала заменяет экран и несёт навигацию.
-    ritual_kb = InlineKeyboardMarkup([
+    kb_rows = [
         [InlineKeyboardButton("🏛️ Храм", callback_data="guild_shrine"),
          InlineKeyboardButton("🏰 Гильдия", callback_data="guild_info")],
-        [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
-    ])
-    anim_msg = await animate_progress_bar(update, context, title="🕯️ Ритуал проводится...", in_place=True)
-    if anim_msg is not None:
-        await anim_msg.edit_text(text, parse_mode='HTML', reply_markup=ritual_kb)
+        [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
+    ]
+    # Легендарка — тот же класс пика, что джекпот/Забой/рангап: игрок должен
+    # мочь поделиться СВОЕЙ победой за пределами официального гильд-чата.
+    if outcome_kind == "legendary":
+        try:
+            kb_rows.insert(0, [await _win_share_button(
+                context, uid, f"🌟 {tier_name} подарил мне легендарку «{item_name}» в Antysocialshop!")])
+        except Exception:
+            pass
+
+    kb = InlineKeyboardMarkup(kb_rows)
+    if outcome_kind == "legendary" and query and query.message:
+        # Suspense-ревил ТОЛЬКО на легендарке — тот же принцип, что уже у
+        # джекпота в do_smoke и у Забоя: предвкушение поднимает дофаминовый
+        # пик именно там, где он редкий и ценный (Berridge & Robinson, 1998,
+        # incentive salience — «wanting» строится на фазе ожидания, не на
+        # самом раскрытии). OAC/Пыль (подавляющее большинство тапов) не
+        # тормозим НИ НА МИЛЛИСЕКУНДУ — апгрейд бьёт точечно, без цены на
+        # массовом пути.
+        frames = (
+            ["🕯️ Тьма сгущается вокруг алтаря…", "🩸 Кровь на камне закипает…", "🌟 ЧУДО СВЕРШИЛОСЬ"]
+            if guild == "BLACK" else
+            ["⚜️ Свет над алтарём разгорается…", "🕊️ Голоса небес шепчут твоё имя…", "🌟 ЧУДО СВЕРШИЛОСЬ"]
+        )
+        try:
+            for frame in frames:
+                await query.message.edit_text(f"<b>{frame}</b>", parse_mode='HTML')
+                await asyncio.sleep(0.6)
+            await query.message.edit_text(text, parse_mode='HTML', reply_markup=kb)
+        except Exception:
+            await safe_send_message(context, update.effective_chat.id, text,
+                                    parse_mode='HTML', reply_markup=kb)
     else:
-        await safe_send_message(context, update.effective_chat.id, text,
-                                parse_mode='HTML', reply_markup=ritual_kb)
+        anim_title = "🕯️ Ритуал проводится..." if guild == "BLACK" else "🕊️ Исповедь..."
+        anim_msg = await animate_progress_bar(update, context, title=anim_title, in_place=True)
+        if anim_msg is not None:
+            await anim_msg.edit_text(text, parse_mode='HTML', reply_markup=kb)
+        else:
+            await safe_send_message(context, update.effective_chat.id, text,
+                                    parse_mode='HTML', reply_markup=kb)
 
     await check_achievements(uid, context)
+
+
+async def _guild_action_pick_wrapper(update, context):
+    """Клик по одному из трёх профилей риска: callback_data =
+    'guild_act_{BLACK|WHITE}_{safe|balanced|risky}'."""
+    ctx = context.bot_data.get("ctx")
+    parts = update.callback_query.data.split("_")
+    guild, tier_key = parts[2], parts[3]
+    await _resolve_guild_action(update, context, ctx, guild, tier_key)
+
+
+@rate_limit(3)
+async def ritual_callback(update, context):
+    if update.callback_query:
+        try:
+            await update.callback_query.answer()
+        except Exception:
+            pass
+    ctx = context.bot_data.get("ctx")
+    if not ctx:
+        await update.effective_message.reply_text("⚠️ Бот инициализируется, попробуй позже.")
+        return
+
+    user, msg = get_user_and_msg(update)
+    uid = user.id
+    player = await ctx.repo.get_by_id(uid)
+    if not player or not player.exists:
+        await send_whisper_dm(update, context, "Сначала активируйся: /start")
+        return
+    theme = GUILD_ACTION_THEME["BLACK"]
+    if player.guild != "BLACK":
+        await send_whisper_dm(update, context, theme["wrong_guild_msg"])
+        return
+    now = datetime.now()
+    cooldown_hours = _guild_action_cooldown_hours("BLACK")
+    if player.last_ritual and (now - player.last_ritual) < timedelta(hours=cooldown_hours):
+        remain = timedelta(hours=cooldown_hours) - (now - player.last_ritual)
+        hrs, rem = divmod(int(remain.total_seconds()), 3600)
+        wait = f"{hrs} ч {rem // 60} мин" if hrs else f"{rem // 60} мин"
+        await edit_or_reply(update, context,
+            f"{theme['cooldown_line']}\n\n<b>🗝️ Жди {wait}</b>",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🍬 Фармить", callback_data="farm")],
+                [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
+            ]))
+        return
+    await _show_guild_action_picker(update, context, ctx, "BLACK")
 
 # ============================================================
 # ПЛАНТАЦИЯ (idle-система: владение + апгрейды + лимит накопления)
@@ -3481,6 +5341,57 @@ async def ritual_callback(update, context):
 PLANT_RATE_PER_LEVEL = 25     # OAC/час за каждый уровень плантации
 PLANT_CAP_HOURS = 8           # максимум накопления (создаёт крючок «зайди собрать»)
 PLANT_MAX_LEVEL = 10
+
+
+# ============================================================
+# ХРАМ ГИЛЬДИИ — уровни и бонус к фарму
+# ============================================================
+# Единый источник правды. Раньше эта таблица была скопирована в двух экранах
+# (guild_info_callback и guild_shrine_callback), а обещанный ими «+N% к фарму»
+# не применялся НИГДЕ: pожертвования (до 250 000 OAC — крупнейший сток в игре)
+# оседали в счётчике `donated` и не влияли ни на одну награду. Показанное число
+# и начисляемое теперь берутся из одного места, поэтому разъехаться не могут.
+TEMPLE_LEVELS = [
+    {"level": 1, "cost": 0,      "bonus": 0,  "name": "Алтарь"},
+    {"level": 2, "cost": 15000,  "bonus": 5,  "name": "Святилище"},
+    {"level": 3, "cost": 45000,  "bonus": 10, "name": "Храм"},
+    {"level": 4, "cost": 100000, "bonus": 15, "name": "Цитадель"},
+    {"level": 5, "cost": 250000, "bonus": 25, "name": "Обитель Богов"},
+]
+
+
+def _temple_tier(total_donated: int) -> dict:
+    """Текущий уровень Храма по сумме пожертвований гильдии. Чистая функция."""
+    tier = TEMPLE_LEVELS[0]
+    for lvl in TEMPLE_LEVELS:
+        if (total_donated or 0) >= lvl["cost"]:
+            tier = lvl
+        else:
+            break
+    return tier
+
+
+async def temple_bonus_pct(ctx, guild: str) -> int:
+    """Бонус Храма к фарму, %. Кэшируется на 5 минут: сумма пожертвований
+    гильдии меняется редко, а читается на каждом фарме."""
+    if guild not in ("BLACK", "WHITE"):
+        return 0
+    try:
+        rows = await perfected_cache.fetch(
+            redis_client=getattr(ctx, "redis", None),
+            db_pool=ctx.db_pool,
+            cache_key=f"temple_donated:{guild}",
+            query="SELECT COALESCE(SUM(donated),0) AS total FROM players WHERE guild=$1",
+            params=(guild,),
+            ttl=300,
+            adapter=lambda rows: [{"total": rows[0]["total"] if rows else 0}],
+            fallback=[{"total": 0}],
+        )
+        total = (rows or [{}])[0].get("total", 0) or 0
+    except Exception:
+        logger.warning("Не удалось получить пожертвования гильдии %s", guild)
+        return 0
+    return _temple_tier(total)["bonus"]
 
 
 def _plant_rate(level: int) -> int:
@@ -3510,11 +5421,258 @@ def _plant_pending(level, last_collected, now):
     return (earned, hrs_used, capped)
 
 
+def _pet_cfg(player):
+    """Конфиг текущего питомца игрока или None. Единая точка сопоставления
+    Player.pet (хранит ИМЯ) ↔ PET_CONFIG (ключи по типу)."""
+    pet = player.pet
+    if not pet:
+        return None
+    return next((c for c in PET_CONFIG.values() if c.get("name") == pet), None)
+
+
+def _pet_bonus_pct(player, target: str) -> float:
+    """Эффективный бонус питомца к цели `target`, в процентах (data-driven).
+
+    Тип и величина эффекта берутся из PET_CONFIG (не из кода) → новый питомец
+    или иная цель = правка данных. Бонус масштабируется сытостью, но НЕ ниже пола
+    hunger_floor: заброшенный питомец выглядит голодным (эмоциональный крючок
+    «покорми»), но баф не обрывается в 0 — вернувшийся игрок всегда сохраняет
+    часть (никакого механического наказания за паузу). Возвращает 0.0, если
+    питомца нет или он не бустит эту цель.
+    """
+    cfg = _pet_cfg(player)
+    if not cfg or cfg.get("bonus_target") != target:
+        return 0.0
+    max_pct = cfg.get("bonus_max_pct", 0)
+    if max_pct <= 0:
+        return 0.0
+    floor_frac = cfg.get("hunger_floor", 0) / 100.0
+    hunger = player.pet_hunger if player.pet_hunger is not None else 100
+    frac = max(floor_frac, min(100, max(0, hunger)) / 100.0)
+    return max_pct * frac
+
+
+def _plant_pending_player(player, now):
+    """(earned, hours, capped) плантации ИГРОКА с учётом бонуса питомца.
+
+    Единая точка расчёта дохода: меню, экран плантации, сбор, апгрейд считают
+    одинаково → база и бонус никогда не разъезжаются. Питомец ускоряет
+    производство (бонус к earned), а не объём хранилища (кап-часы — по базовой
+    ставке в _plant_pending). Care-loop замыкается: кормишь → плантация даёт
+    больше → собираешь больше → апаешь быстрее.
+    """
+    earned, hrs, capped = _plant_pending(
+        player.passive_level or 0, _to_datetime(player.passive_collected), now)
+    if earned > 0:
+        bonus = _pet_bonus_pct(player, "plantation")
+        if bonus:
+            earned = int(earned * (1 + bonus / 100.0))
+    return (earned, hrs, capped)
+
+
+# ============================================================
+# АЛТАРЬ ВЕЧНОСТИ — эндгейм-сток (см. game_content.py для мотивации)
+# ============================================================
+
+def _altar_level_cost(level: int) -> int:
+    """Цена ЭТОГО уровня (не кумулятивная). Квадратичная кривая → бесконечный
+    сток: каждый следующий уровень дороже, Алтарь никогда не «закрывается»."""
+    return ALTAR_BASE_COST * level * level
+
+
+def _altar_gate_open(player) -> bool:
+    """Алтарь открывается ровно там, где по аудиту начинается валютная пустота:
+    вершина ранговой вертикали ИЛИ максимум плантации. Раньше — сток встал бы
+    поперёк здоровых мид-гейм трат (апгрейды плантации, питомец)."""
+    return (has_rank(player.total_earned or 0, "Некромант")
+            or (player.passive_level or 0) >= PLANT_MAX_LEVEL)
+
+
+def _altar_level(prestige: int):
+    """(level, cost_to_next, into_current_level) — чистая функция.
+
+    prestige растёт ТОЛЬКО пожертвованием (см. _altar_invest), поэтому уровень
+    отсюда же считается детерминированно — нет отдельного счётчика «уровень»,
+    который мог бы разъехаться с реальным вложением."""
+    prestige = max(0, prestige or 0)
+    level, cum = 0, 0
+    while True:
+        cost = _altar_level_cost(level + 1)
+        if cum + cost > prestige:
+            return level, cost - (prestige - cum), prestige - cum
+        cum += cost
+        level += 1
+
+
+def _altar_tier(level: int):
+    """(титул, метка) по уровню — данные, не код: новый тир добавляется в
+    ALTAR_TIERS без правки логики."""
+    title, mark = ALTAR_TIERS[0][1], ALTAR_TIERS[0][2]
+    for threshold, t, m in ALTAR_TIERS:
+        if level >= threshold:
+            title, mark = t, m
+    return title, mark
+
+
+async def _altar_locked_text(ctx) -> str:
+    """Витрина эндгейма для тех, кто ещё не дошёл — не просто «закрыто», а
+    честный, конкретный превью финала: какие титулы ждут и кто уже там.
+    Отвечает на «а смысл во всём этом?» напрямую — curiosity gap
+    (Loewenstein) тянет сильнее, когда виден конкретный разрыв между «вот
+    цель» и «я ещё не там», чем абстрактное «открой позже»."""
+    lines = [
+        "🌫️ <b>Алтарь Вечности — пока в тумане.</b>\n",
+        "Открывается на ранге 🪬 Некромант или на максимуме Плантации-империи "
+        "(ур.10) — ровно там, где вертикаль роста исчерпана, и OAC нужна "
+        "новая, бесконечная цель.\n",
+        "<b>🏆 Титулы, что ждут за туманом:</b>",
+    ]
+    lines.extend(f"  {title}" for _threshold, title, _mark in ALTAR_TIERS)
+
+    try:
+        async with ctx.db_pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT username, prestige FROM players WHERE prestige > 0 "
+                "ORDER BY prestige DESC LIMIT 3")
+        if rows:
+            lines.append("\n<b>🕯️ Уже там:</b>")
+            for row in rows:
+                uname = html.escape(row["username"] or "Странник")
+                lines.append(f"  {uname} — {_fmt_oac(row['prestige'])} OAC вложено")
+    except Exception:
+        pass
+
+    return "\n".join(lines)
+
+
+@rate_limit(1)
+@game_handler
+async def altar_hub(update, context, ctx, player):
+    """Алтарь Вечности: эндгейм-сток. Жертвуешь OAC → престиж растёт навсегда,
+    уровень/титул — вечная цель поверх исчерпанной вертикали рангов."""
+    await _render_altar(update, context, ctx, player)
+
+
+async def _render_altar(update, context, ctx, player):
+    """Рисует экран Алтаря. Вынесено из altar_hub, чтобы вызывать из соседнего
+    хендлера НАПРЯМУЮ: @game_handler держит идемпотентность по update_id в общем
+    ctx.cache, поэтому декорированный altar_hub, вызванный из уже
+    декорированного altar_invest_handler на том же апдейте, выходил на первой
+    строке и не рисовал ничего — игрок отдавал кошелёк и видел прежние цифры."""
+    query = update.callback_query
+
+    if not _altar_gate_open(player):
+        await query.answer()
+        await query.message.edit_text(
+            await _altar_locked_text(ctx), parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 В меню", callback_data="menu")]]))
+        return
+
+    balance = player.balance or 0
+    prestige = player.prestige or 0
+    level, cost_to_next, into_level = _altar_level(prestige)
+    title, mark = _altar_tier(level)
+    level_cost = _altar_level_cost(level + 1)
+    pct = int(into_level / level_cost * 100) if level_cost else 0
+    bar = "▓" * (pct // 10) + "░" * (10 - pct // 10)
+
+    async with ctx.db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT user_id, username, prestige FROM players "
+            "WHERE prestige > 0 ORDER BY prestige DESC LIMIT 10")
+        my_rank = await conn.fetchval(
+            "SELECT COUNT(*) + 1 FROM players WHERE prestige > $1", prestige
+        ) if prestige > 0 else None
+
+    lines = [
+        "<b>🕯️ АЛТАРЬ ВЕЧНОСТИ</b>",
+        "<i>Жертва невозвратна. Уровень — навсегда.</i>", "",
+        f"{title} · <b>уровень {level}</b>",
+        f"💠 Вложено всего: <b>{_fmt_oac(prestige)} OAC</b>", "",
+    ]
+    if cost_to_next > 0:
+        lines.append(f"{bar} {pct}%  · до ур.{level + 1}: <b>{_fmt_oac(cost_to_next)} OAC</b>")
+    lines.append("")
+
+    if rows:
+        lines.append("<b>🏆 Верные Алтарю:</b>")
+        for i, row in enumerate(rows, 1):
+            _lvl, _, _ = _altar_level(row["prestige"] or 0)
+            _title, _mark = _altar_tier(_lvl)
+            uname = html.escape(row["username"] or f"ID{row['user_id']}")
+            if _mark:
+                uname = f"{_mark}{uname}{_mark}"
+            marker = "➤ " if row["user_id"] == player.user_id else f"{i}. "
+            lines.append(f"{marker}<b>{uname}</b> — {_fmt_oac(row['prestige'])} OAC")
+        if my_rank and my_rank > 10:
+            lines.append(f"<i>Твоя позиция: #{my_rank}</i>")
+        lines.append("")
+
+    lines.append(f"💰 В кошельке: <b>{_fmt_oac(balance)} OAC</b>")
+    text = "\n".join(lines)
+
+    kb_rows = []
+    if balance >= 10:
+        half = balance // 2
+        kb_rows.append([InlineKeyboardButton(f"🕯️ Вложить половину · {_fmt_oac(half)} OAC",
+                                              callback_data="altar_invest_half")])
+        kb_rows.append([InlineKeyboardButton(f"🔥 Вложить всё · {_fmt_oac(balance)} OAC",
+                                             callback_data="altar_invest_all")])
+    kb_rows.append([InlineKeyboardButton("🔙 В меню", callback_data="menu")])
+
+    await query.answer()
+    await query.message.edit_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb_rows))
+
+
+@rate_limit(1)
+@game_handler
+async def altar_invest_handler(update, context, ctx, player):
+    """Жертва в Алтарь: balance → prestige, 1:1, безвозвратно.
+
+    Чистый односторонний сток — эксплойтить нечем (никакого обратного курса,
+    никакого дохода с престижа). Гейт проверяется здесь же (не только в UI):
+    прямой callback без пройденного гейта не должен работать."""
+    query = update.callback_query
+    uid = query.from_user.id
+    half = query.data == "altar_invest_half"
+
+    async def _invest(p, conn):
+        if not _altar_gate_open(p):
+            return ("locked",)
+        bal = p.balance or 0
+        amount = bal // 2 if half else bal
+        if amount < 10:
+            return ("too_small",)
+        p.balance -= amount
+        p.prestige = (p.prestige or 0) + amount
+        return ("ok", amount, p.prestige)
+
+    result = await ctx.repo.atomic_update(uid, _invest)
+    if result is None:
+        await query.answer("Профиль не найден.", show_alert=True)
+        return
+    status = result[0]
+    if status == "locked":
+        await query.answer("Алтарь ещё закрыт.", show_alert=True)
+        return
+    if status == "too_small":
+        await query.answer("Слишком мало OAC для жертвы.", show_alert=True)
+        return
+
+    _, amount, new_prestige = result
+    level, _cost, _into = _altar_level(new_prestige)
+    title, _mark = _altar_tier(level)
+    await query.answer(f"🔥 Вложено {_fmt_oac(amount)} OAC. {title}, уровень {level}!", show_alert=True)
+    # Перерисовываем экран со СВЕЖИМ игроком (баланс и престиж только что
+    # изменились). Зовём _render_altar, а не altar_hub: см. её docstring.
+    await _render_altar(update, context, ctx, await ctx.repo.get_by_id(uid))
+
+
 async def collect_callback(update, context):
     """Вход в Плантацию (эволюция старого «кустика»/collect)."""
     ctx = context.bot_data.get("ctx")
     if not ctx:
-        await update.effective_message.reply_text("⚠️ Бот инициализируется, попробуйте позже.")
+        await update.effective_message.reply_text("⚠️ Бот инициализируется, попробуй позже.")
         return
     user, msg = get_user_and_msg(update)
     player = await ctx.repo.get_by_id(user.id)
@@ -3537,10 +5695,10 @@ async def _show_plantation(update, context, ctx, player):
         )
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("🌱 Посадить (бесплатно)", callback_data="plant_start")],
-            [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+            [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
         ])
     else:
-        earned, _hrs, capped = _plant_pending(level, _to_datetime(player.passive_collected), now)
+        earned, _hrs, capped = _plant_pending_player(player, now)
         rate = _plant_rate(level)
         cap_total = rate * PLANT_CAP_HOURS
         fill = min(100, int(earned / cap_total * 100)) if cap_total else 0
@@ -3553,9 +5711,18 @@ async def _show_plantation(update, context, ctx, player):
         else:
             up_cost = None
             up_line = "⭐️ <b>Максимальный уровень!</b>"
+        # Строка питомца делает связь «забота → доход» видимой (peak-end): базовая
+        # ставка — интринзик уровня, бонус — вклад сытого питомца, отдельной строкой,
+        # чтобы математика апгрейда (по базовой ставке) не путалась.
+        _pet_pct = _pet_bonus_pct(player, "plantation")
+        pet_line = ""
+        if _pet_pct > 0:
+            _hunger = player.pet_hunger if player.pet_hunger is not None else 100
+            pet_line = f"🐾 <b>Питомец:</b> +{_pet_pct:.0f}% к сбору <i>(сытость {_hunger}%)</i>\n"
         text = (
             f"🪴 <b>ПЛАНТАЦИЯ · Уровень {level}</b>\n\n"
             f"⚡ Скорость: <b>{rate} OAC/час</b>\n"
+            f"{pet_line}"
             f"🌾 К сбору: <b>{earned} OAC</b>\n"
             f"{cap_line}\n\n"
             f"{up_line}"
@@ -3563,7 +5730,7 @@ async def _show_plantation(update, context, ctx, player):
         rows = [[InlineKeyboardButton(f"🌾 Собрать ({earned} OAC)", callback_data="plant_harvest")]]
         if up_cost is not None:
             rows.append([InlineKeyboardButton(f"⬆️ Улучшить · {up_cost} OAC", callback_data="plant_upgrade")])
-        rows.append([InlineKeyboardButton("🏰 В меню", callback_data="menu")])
+        rows.append([InlineKeyboardButton("🔙 В меню", callback_data="menu")])
         kb = InlineKeyboardMarkup(rows)
 
     await edit_or_reply(update, context, text, reply_markup=kb, parse_mode='HTML')
@@ -3590,13 +5757,13 @@ async def plant_harvest_handler(update, context, ctx):
     query = update.callback_query
     uid = query.from_user.id
     now = datetime.now()
-    happy = bool(ctx.cache.get("happy_hour", False))
+    happy = happy_hour_active(ctx)
 
     async def _harvest(p, conn):
         level = p.passive_level or 0
         if level < 1:
             return ("no_plant",)
-        earned, _hrs, _capped = _plant_pending(level, _to_datetime(p.passive_collected), now)
+        earned, _hrs, _capped = _plant_pending_player(p, now)
         if happy:
             earned *= HAPPY_HOUR_MULTIPLIER
         if earned < 1:
@@ -3631,8 +5798,8 @@ async def plant_upgrade_handler(update, context, ctx):
         cost = _plant_upgrade_cost(level)
         if (p.balance or 0) < cost:
             return ("no_money", cost)
-        # Сначала собираем накопленное по старой ставке (честно), потом апаем
-        pending, _h, _c = _plant_pending(level, _to_datetime(p.passive_collected), now)
+        # Сначала собираем накопленное по старой ставке + бонусу питомца (честно), потом апаем
+        pending, _h, _c = _plant_pending_player(p, now)
         p.balance += pending
         p.balance -= cost
         p.passive_level = level + 1
@@ -3642,6 +5809,9 @@ async def plant_upgrade_handler(update, context, ctx):
     result = await ctx.repo.atomic_update(uid, _upgrade)
     if result and result[0] == "ok":
         await query.answer(f"⬆️ Плантация улучшена до ур.{result[1]}!")
+        # passive_level растёт именно тут — «plantation_5» раньше ждал
+        # следующего фарма/крафта вместо срабатывания в момент самого апгрейда.
+        await check_achievements(uid, context, ctx=ctx)
     elif result and result[0] == "no_money":
         await query.answer(f"Недостаточно OAC. Нужно {result[1]}.", show_alert=True)
     elif result and result[0] == "max":
@@ -3653,19 +5823,28 @@ async def plant_upgrade_handler(update, context, ctx):
 @rate_limit(1)
 @game_handler
 async def profile_callback(update, context, ctx, player):
+    # query.answer() гасит спиннер загрузки на кнопке, пока не позвано —
+    # Telegram показывает нажатие «висящим» до таймаута. Раньше этого вызова
+    # не было нигде в функции.
+    if update.callback_query:
+        try:
+            await update.callback_query.answer()
+        except Exception:
+            pass
     user, msg = get_user_and_msg(update)
     uid = user.id
     uname = html.escape(user.username or user.first_name)
 
     # player гарантированно существует благодаря @game_handler
     bal = player.balance or 0
+    earned = player.total_earned or 0
     bl = player.blunts or 0
     guild = player.guild or ""
 
-    # Ранг
+    # Ранг — по заработанному за всё время, не по остатку в кошельке
     rank_emoji, rank_name = "🪓", "Рекрут"
     for emoji, threshold, _ in RANKS:
-        if bal >= threshold:
+        if earned >= threshold:
             rank_emoji = emoji
             rank_name = emoji_to_name(emoji)
 
@@ -3683,7 +5862,21 @@ async def profile_callback(update, context, ctx, player):
     # Фон по умолчанию читаемый, иначе строка «🫧 Фон: » висела пустой (выглядит
     # как баг). Пустой active_background → «🌑 Обычный».
     bg = skins.get("active_background") or "🌑 Обычный"
-    active_title = skins.get("active_title", "—")
+    active_title = skins.get("active_title") or "—"
+    # SLAYER (early-game, D1-D2 retention): «Титул: —» и «Заслуги: —» раньше
+    # были тупиковыми прочерками — для новичка это ДВЕ строки подряд «у тебя
+    # ничего нет», без единого намёка, что с этим делать (тот же класс
+    # проблемы, что уже решён для Плантации/Гильдии на этом же экране — у них
+    # есть CTA прямо в тексте, здесь не было). Пустой экран без крючка вперёд
+    # не тянет открыть бота завтра; конкретная, близкая, честная цель тянет
+    # (Zeigarnik: незакрытое держит внимание сильнее закрытого).
+    earned_titles = (player.titles or "").split()
+    if active_title != "—":
+        title_line = active_title
+    elif earned_titles:
+        title_line = "<i>есть, но не выбран — 🎨 Кастомизация</i>"
+    else:
+        title_line = "<i>ещё нет — первый за 7-дневную серию входов</i>"
 
     inv_data = player.inventory or []
     badges = []
@@ -3695,9 +5888,9 @@ async def profile_callback(update, context, ctx, player):
         badges.append("🔥")
     if player.check_count >= 10:
         badges.append("👁️")
-    badge_str = ' '.join(badges) if badges else "—"
+    badge_str = ' '.join(badges) if badges else "<i>0/4 — см. 🏆 Достижения ниже</i>"
 
-    rank_progress = get_rank_progress(bal)
+    rank_progress = get_rank_progress(earned)
 
     pet_line = ""
     if player.pet:
@@ -3712,15 +5905,30 @@ async def profile_callback(update, context, ctx, player):
     bush_line = (f"🪴 <b>Плантация:</b> ур.{plant_lvl} · +{_plant_rate(plant_lvl)} OAC/ч"
                  if plant_lvl > 0 else "🪴 <b>Плантация:</b> <i>не посажена — открой в 🌍 Мир</i>")
 
+    # Серия входов — раньше на профиле не показывалась вообще (только в
+    # главном меню и только как временный нудж). Профиль — экран «кто я»;
+    # держать серию видимой именно здесь, каждый раз, когда игрок сюда
+    # заходит, — постоянное, не разовое напоминание «не рви цепочку» (loss
+    # aversion работает только пока есть что терять, поэтому строка стоит с
+    # первого дня серии, не с какого-то порога).
+    streak = player.login_streak or 0
+    streak_line = ""
+    if streak >= 1:
+        fz = player.streak_freezes or 0
+        fz_note = f" · ❄️{fz}" if fz > 0 else ""
+        streak_line = f"🔥 <b>Серия входов:</b> {streak} дн.{fz_note}\n"
+
     text = (
         f"<b>⚜️ ПРОФИЛЬ</b>\n"
         f"👤 <b>{uname}</b>{guild_line}\n"
         f"🫧 Фон: {bg}\n\n"
         f"{rank_progress}\n\n"
-        f"💎 <b>ОАС:</b> <b>{bal} OAC</b> 🍬\n"
+        f"💎 <b>Кошелёк:</b> <b>{_fmt_oac(bal)} OAC</b> 🍬 <i>(тратится)</i>\n"
+        f"🏛️ <b>Заработано за всё время:</b> <b>{_fmt_oac(earned)} OAC</b> — <i>твой ранг держится на этом числе, траты его не трогают</i>\n"
         f"🌿 <b>Блантов в свёртке:</b> <b>{bl}</b>\n"
         f"{bush_line}\n"
-        f"🧬 <b>Титул:</b> {active_title}\n"
+        f"{streak_line}"
+        f"🧬 <b>Титул:</b> {title_line}\n"
         f"🧠 <b>Нейро-статус:</b> <i>{neuro}</i>\n"
         f"{pet_line}"
         f"🎖️ <b>Заслуги:</b> {badge_str}"
@@ -3746,36 +5954,69 @@ async def profile_callback(update, context, ctx, player):
 
     kb_rows = []
     if not guild:
-        kb_rows.append([InlineKeyboardButton("🕋 Вступить в Гильдию", callback_data="guild_info")])
+        kb_rows.append([InlineKeyboardButton("🏰 Вступить в Гильдию", callback_data="guild_info")])
     # Кодекс блантов — приоритетная, полноширинная (это про статус/коллекцию).
     if len(named) > 2:
         kb_rows.append([InlineKeyboardButton(f"💍 Все именные бланты ({len(named)})", callback_data="my_blunts")])
+    # Приглашение — единственное постоянное место в игре, где такая ссылка вообще
+    # есть. Раньше она существовала одноразово и только сразу после крафта
+    # именного бланта (50 OAC) — уйти с того экрана, и позвать следующего друга
+    # было нечем. Полноширинная: это единственный канал органического роста.
+    # Анкер на СВОЮ выгоду, не на выгоду друга: решение нажать принимает тот, кто
+    # видит эту кнопку, а якорь собственного выигрыша убеждает сильнее чужого,
+    # даже когда мотив искренне про друга. Текст, который реально уходит другу
+    # (invite_friend_handler → share_text), анкерит на его выгоду правильно —
+    # это тот самый случай, когда разным адресатам нужен разный порядок якоря.
+    kb_rows.append([InlineKeyboardButton("🔗 Позвать друга (+50 OAC и легендарка тебе)", callback_data="invite_friend")])
+    # achievements_callback уже ЖДАЛ этот вход: ветка data == "achievements_profile"
+    # существовала (и корректно вела back_cb="profile") — но ни одна кнопка
+    # нигде в игре не отправляла именно этот callback_data. Богатый список из
+    # 33 достижений с честными прогресс-барами (см. achievements_callback) был
+    # практически ненаходим — только через 📊 Личный прогресс, до которого
+    # ещё нужно догадаться дойти. Теперь виден прямо с экрана «кто я».
+    kb_rows.append([InlineKeyboardButton("🏆 Достижения", callback_data="achievements_profile")])
     # Утилитарные — парой в ряд: короче вертикаль, удобнее большому пальцу.
     kb_rows.append([
         InlineKeyboardButton("📖 Правила мира", callback_data="rules"),
         InlineKeyboardButton("🎨 Кастомизация", callback_data="skins_menu"),
     ])
-    kb_rows.append([InlineKeyboardButton("🏰 В меню", callback_data="menu")])
+    kb_rows.append([InlineKeyboardButton("🔙 В меню", callback_data="menu")])
     kb = InlineKeyboardMarkup(kb_rows)
 
-    photo_id = None
+    # Раньше профиль с аватаркой ВСЕГДА уходил фото-сообщением, и любая
+    # последующая навигация (меню, правила…) либо молча падала (menu_handler
+    # звал edit_text без фолбэка), либо плодила новое сообщение на каждый тап
+    # — Telegram не даёт отредактировать фото-сообщение в текстовое. Профиль
+    # без аватарки решал это, убирая фото совсем — но тогда терялась и
+    # обратная возможность: пара экранов, у которых ОБА реально фото (эта
+    # аватарка ↔ витрина «Мои бланты»), могла бы редактироваться на месте
+    # через editMessageMedia (Telegram честно показывает «изменено», ни
+    # одного нового сообщения) — ровно то, что видно в полированных ботах.
+    #
+    # Поэтому: есть аватарка — профиль ВСЕГДА фото, и переход профиль↔витрина
+    # в обе стороны — настоящий edit одного и того же сообщения. Нет
+    # аватарки — профилю нечем стать фото, он текстовый, как раньше (без
+    # регресса: переход из/в текстовые экраны по-прежнему редактируется на
+    # месте через edit_or_reply, просто в паре с витриной будет «новое +
+    # уборка старого», см. edit_or_send_photo).
+    avatar_id = None
     try:
         photos = await context.bot.get_user_profile_photos(uid, limit=1)
         if photos.photos:
-            photo_id = photos.photos[0][0].file_id
+            avatar_id = photos.photos[0][0].file_id
     except Exception:
         pass
 
-    if photo_id:
-        await context.bot.send_photo(
-            chat_id=msg.chat.id,
-            photo=photo_id,
-            caption=text,
-            reply_markup=kb,
-            parse_mode='HTML'
-        )
+    if avatar_id:
+        await edit_or_send_photo(update, context, avatar_id, text, reply_markup=kb, parse_mode='HTML')
+    elif msg and getattr(msg, "text", None):
+        await edit_or_reply(update, context, text, reply_markup=kb, parse_mode='HTML')
     else:
         await msg.reply_text(text, reply_markup=kb, parse_mode='HTML')
+        try:
+            await msg.delete()
+        except Exception:
+            pass
 
 # Все мои бланты
 # Порядок и мета редкостей — единый источник для Кодекса.
@@ -3830,6 +6071,32 @@ def _build_codex_header(named):
             lines.append(f"{emoji} {label}: <b>{c}</b>")
         else:
             lines.append(f"🔒 <s>{label}</s>: <b>0</b> — ещё не в коллекции")
+    # ── Формы скрутки: второй набор, тот, что не закрывается за день ──
+    # Набор редкостей выше состоит из 4 слотов и закрывается почти сразу (одна
+    # легендарка падает бесплатно за реферал, исповедь или алхимию) — после
+    # 4/4 Зейгарник умолкает навсегда, и собирать становится нечего.
+    # Формы дают вторую, ДЛИННУЮ ось: 8 силуэтов по 12.5%, полный набор — около
+    # 22 блантов ожидания. Ничего не добавлено в механику: форма выведена из
+    # того же хэша, что и картинка, поэтому она уже есть у каждого выданного
+    # бланта, и это ровно то, что игрок видит на карточке.
+    if blunt_forms is not None:
+        try:
+            have = {blunt_forms.form_of(it)["id"] for it in named}
+            catalog = blunt_forms.all_forms()
+            lines.append("")
+            lines.append(f"<b>🌀 Формы скрутки: {len(have)}/{blunt_forms.FORMS_TOTAL}</b>")
+            missing = [f["name"] for f in catalog if f["id"] not in have]
+            if not missing:
+                lines.append("<i>Все формы Искажения покорены. Такое видели немногие.</i>")
+            else:
+                # Показываем ровно то, чего не хватает, а не «осталось N»: у
+                # названной нехватки есть образ, у числа — нет.
+                shown = ", ".join(missing[:3])
+                tail = f" и ещё {len(missing) - 3}" if len(missing) > 3 else ""
+                lines.append(f"<i>Не хватает: {shown}{tail}</i>")
+        except Exception:
+            logger.exception("Не удалось посчитать формы скрутки")
+
     # Аспирация: чего не хватает до вершины (Зейгарник — тянет закрыть пробел).
     if counts.get("legendary", 0) == 0:
         lines.append("\n✨ <i>Легендарного пока нет — 2% с крафта или 🎰 джекпот дыма. "
@@ -3838,6 +6105,101 @@ def _build_codex_header(named):
         lines.append("\n✨ <i>Нет Эпического — 13% с крафта. Коллекция ждёт печать искажения.</i>")
     lines.append("")
     return "\n".join(lines)
+
+
+async def _send_collection_wall(update, context, ctx, uid, page_blunts, owner_name,
+                                owned_tiers, caption, reply_markup, page):
+    """Показывает страницу коллекции ВИТРИНОЙ (одно фото) вместо текстового списка.
+
+    Зачем вообще: уникальные силуэты карточек не с чем было сравнить — «Кодекс»
+    был текстовым списком, а новизна работает только на сравнении. Витрина —
+    первое место в игре, где собрание видно целиком.
+
+    Почему одно фото, а не альбом настоящих карточек: альбом Telegram не носит
+    инлайн-клавиатуру (кнопки «Детали/Подарить» пришлось бы уносить в отдельное
+    сообщение), а шесть полных карт стоили бы шесть проходов по ~220 МБ. Витрина
+    — один проход на ~51 МБ, и фото-сообщение клавиатуру носит.
+
+    Возврат False → вызывающий откатывается на прежний текстовый список: витрина
+    украшение, а не критичный путь.
+    """
+    if render_collection_wall is None:
+        return False
+
+    # Кэш по составу страницы: витрина зависит только от предметов на ней и от
+    # версии арта. Пересобирать её на каждое открытие незачем — коллекция меняется
+    # редко, а просмотры частые.
+    sig = hashlib.sha1(
+        ("|".join(f"{b.get('id')}:{b.get('rarity')}" for b in page_blunts)
+         + f"|{owned_tiers}|{BLUNT_ART_VERSION}").encode()).hexdigest()[:16]
+    cache_key = f"codex_wall:{uid}:{page}:{sig}"
+
+    fid = None
+    if ctx and getattr(ctx, "redis", None):
+        try:
+            cached = await ctx.redis.get(cache_key)
+            if cached:
+                fid = cached.decode() if isinstance(cached, bytes) else cached
+        except Exception:
+            pass
+
+    photo = fid
+    if photo is None:
+        # Некэшированный рендер — реальная задержка (executor + сборка
+        # изображения), а не мгновенная отдача file_id. Экран всё это время
+        # выглядит замершим на прежнем кадре — игрок не знает, сработал ли
+        # тап. send_chat_action — нативный, бесплатный индикатор Telegram
+        # («отправляет фото…» в шапке чата); подпись-плейсхолдер — второй,
+        # более явный сигнал прямо на экране, если есть что редактировать
+        # (родное фото уже есть — правим только подпись, не гоняем лишний
+        # editMessageMedia на плейсхолдер).
+        try:
+            await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="upload_photo")
+        except Exception:
+            pass
+        _query = update.callback_query
+        _cur_msg = _query.message if _query else None
+        if _cur_msg and getattr(_cur_msg, "photo", None):
+            try:
+                await context.bot.edit_message_caption(
+                    chat_id=update.effective_chat.id, message_id=_cur_msg.message_id,
+                    caption="⏳ Рисуем твою витрину...")
+            except Exception:
+                pass
+
+        sem = _get_blunt_render_sem()
+        if sem.locked() and len(getattr(sem, "_waiters", None) or ()) >= BLUNT_RENDER_MAX_QUEUE:
+            return False
+        try:
+            async with sem:
+                blob = await asyncio.get_event_loop().run_in_executor(
+                    None, functools.partial(
+                        render_collection_wall, list(page_blunts),
+                        owner_name or "", 6, owned_tiers))
+        except Exception:
+            logger.exception("Рендер витрины коллекции не удался")
+            return False
+        photo = io.BytesIO(blob)
+
+    # edit_or_send_photo: если пришли из ДРУГОГО фото-сообщения (аватарка
+    # профиля — теперь тоже фото, см. profile_callback; либо другая страница
+    # этой же витрины при листании) — редактирует ТО ЖЕ сообщение через
+    # editMessageMedia, без нового сообщения. Если пришли из текста (у
+    # игрока нет аватарки) — Telegram не даёт превратить текст в фото ни
+    # одним методом API; тогда новое фото-сообщение + уборка старого, чтобы
+    # не копился мусор из мёртвых экранов (update.effective_chat.id, не uid —
+    # витрина открывается в чате нажатия, а не в личке игрока).
+    msg = await edit_or_send_photo(update, context, photo, caption,
+                                   reply_markup=reply_markup, parse_mode='HTML')
+    if msg is None:
+        return False
+
+    if fid is None and getattr(msg, "photo", None) and ctx and getattr(ctx, "redis", None):
+        try:
+            await ctx.redis.setex(cache_key, 7 * 24 * 3600, msg.photo[-1].file_id)
+        except Exception:
+            pass
+    return True
 
 
 @rate_limit(1)
@@ -3853,6 +6215,7 @@ async def my_blunts_callback(update, context, ctx, player, page=0):
     rarity_order = {"legendary": 0, "epic": 1, "rare": 2, "common": 3}
     named.sort(key=lambda x: (rarity_order.get(x.get("rarity") or "common", 3),
                                x.get("serial") or 999999))
+    owned_tiers = len({b.get("rarity") for b in named})
 
     if not named:
         await edit_or_reply(update, context,
@@ -3900,14 +6263,48 @@ async def my_blunts_callback(update, context, ctx, player, page=0):
         nav_buttons.append(InlineKeyboardButton("▶️ Далее", callback_data=f"blunts_page_{page+1}"))
     if nav_buttons:
         kb_rows.append(nav_buttons)
-    kb_rows.append([InlineKeyboardButton("🔙 В профиль", callback_data="profile")])
 
-    await edit_or_reply(update, context, text, reply_markup=InlineKeyboardMarkup(kb_rows))
+    # Витрина — самый визуально сильный артефакт в игре: у КАЖДОГО бланта
+    # свой силуэт (см. blunt_art._pose), у коллекции — набор форм и редкостей.
+    # До этой правки её физически некому было показать: экран Кодекса не имел
+    # НИ ОДНОГО пути наружу, хотя это единственное место, где новизна карточек
+    # вообще видна рядом друг с другом (сравнение — обязательное условие для
+    # того, чтобы «уникальный силуэт» вообще читался как отличие).
+    if blunt_forms is not None:
+        try:
+            forms_owned = len({blunt_forms.form_of(it)["id"] for it in named})
+            win_line = (f"🎴 Моя коллекция в Antysocialshop: {len(named)} именных "
+                       f"блантов, {owned_tiers}/4 редкостей, {forms_owned}/8 форм собрано!")
+            kb_rows.append([await _win_share_button(context, uid, win_line)])
+        except Exception:
+            logger.exception("Не удалось построить кнопку шеринга коллекции")
+
+    kb_rows.append([InlineKeyboardButton("🔙 В профиль", callback_data="profile")])
+    kb = InlineKeyboardMarkup(kb_rows)
+
+    # Витрина: подпись к фото ограничена 1024 символами, поэтому в неё идёт
+    # шапка Кодекса без построчного перечня — имена и редкости уже НАРИСОВАНЫ
+    # на самой витрине, дублировать их текстом незачем. Номера в подписи
+    # совпадают с порядком плиток слева направо, как и номера на кнопках.
+    if page == 0:
+        cap = _build_codex_header(named)
+    else:
+        cap = f"<b>💎 ТВОИ ИМЕННЫЕ БЛАНТЫ ({len(named)} всего, стр. {page+1}/{total_pages})</b>\n"
+    cap += f"\n<i>Витрина: страница {page+1}/{total_pages}</i>"
+    if len(cap) > 1000:
+        cap = cap[:997] + "…"
+
+    if await _send_collection_wall(update, context, ctx, uid, page_blunts,
+                                   player.username or "Странник", owned_tiers,
+                                   cap, kb, page):
+        return
+
+    await edit_or_reply(update, context, text, reply_markup=kb)
 
 async def achievements_callback(update, context, page=0):
     ctx = context.bot_data.get("ctx")
     if not ctx:
-        await update.callback_query.answer("⚠️ Бот инициализируется, попробуйте позже.")
+        await update.callback_query.answer("⚠️ Бот инициализируется, попробуй позже.")
         return
 
     query = update.callback_query
@@ -3939,6 +6336,15 @@ async def achievements_callback(update, context, page=0):
     if not player or not player.user_id:
         await query.answer("Профиль не найден.", show_alert=True)
         return
+
+    # Самоисцеление экрана: раньше он ТОЛЬКО читал таблицу achievements_awarded,
+    # а награждение идёт фоновой задачей после конкретных действий (farm/craft/
+    # smoke/ritual/repent/lab_win — не всех, см. ниже). Игрок мог открыть
+    # «Достижения» и увидеть 🔒 (заперто) РЯДОМ с прогресс-баром на 100% для
+    # уже выполненного условия — самопротиворечащий экран, который читается
+    # как «игра сломана», а не «подожди чуть-чуть». Пересчёт перед показом
+    # закрывает разрыв независимо от того, какое действие его вызвало.
+    await check_achievements(uid, context, ctx=ctx)
 
     async with ctx.db_pool.acquire() as conn:
         awarded = await conn.fetch("SELECT ach_id FROM achievements_awarded WHERE user_id = $1", uid)
@@ -3995,19 +6401,37 @@ async def top_callback(update, context, ctx, player):
 
     # Прямой запрос топа
     async with ctx.db_pool.acquire() as conn:
+        # Топ — по ЗАРАБОТАННОМУ за всё время. По balance лидерборд поощрял
+        # скупость: любая покупка роняла тебя вниз, поэтому выгоднее было
+        # не играть, а копить. Теперь место в топе покупкой не отнять.
         rows = await conn.fetch(
-            "SELECT user_id, username, balance, guild FROM players ORDER BY balance DESC LIMIT 10"
+            "SELECT user_id, username, total_earned AS balance, guild FROM players "
+            "ORDER BY total_earned DESC LIMIT 10"
         )
     top = [dict(r) for r in rows]
 
     if not top:
-        await edit_or_reply(update, context, "🏆 Топ-10 пока пуст.")
+        # Раньше эта ветка отдавала голый текст БЕЗ КЛАВИАТУРЫ — единственный
+        # настоящий тупик в игре: «🏅 Лидеры ›» стоит на главном экране, и
+        # игрок, попавший сюда, не мог вернуться ничем, кроме /menu (то есть
+        # должен был знать команду, которой на экране нет). Пустой рейтинг —
+        # это ещё и ровно та ситуация, которую чинит приглашение друга,
+        # поэтому пустое состояние не извиняется, а предлагает выход.
+        await edit_or_reply(update, context,
+            "<b>💎 ТОП-10 ИГРОКОВ 🏆</b>\n\n"
+            "<i>Рейтинг пока пуст — трон никем не занят.</i>\n\n"
+            "🥇 Позови друга: соперничество начинается со второго игрока.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔗 Позвать друга", callback_data="invite_friend")],
+                [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
+            ]), parse_mode="HTML")
         return
 
     first_balance = top[0]["balance"]
-    my_balance = player.balance or 0
+    my_balance = player.total_earned or 0
 
-    text = "<b>💎 ТОП-10 ИГРОКОВ 🏆</b>\n\n"
+    text = ("<b>💎 ТОП-10 ИГРОКОВ 🏆</b>\n"
+            "<i>По заработанному за всё время — траты место не отнимают.</i>\n\n")
     my_position = None
 
     for i, row in enumerate(top, 1):
@@ -4035,15 +6459,23 @@ async def top_callback(update, context, ctx, player):
         else:
             g_emoji, g_name = "🩸", "<b>Без гильдии</b>"
 
-        rank_emoji, rank_name = "🪓", "Рекрут"
-        for emoji, threshold, _ in RANKS:
+        # Было: rank_emoji = emoji (полная строка "🪦 Призрак") → рендер дублировал
+        # имя ранга («🪦 Призрак <b>Призрак</b>»). Плюс: маркер статуса из
+        # RANK_LORE (единый источник с ascension-карточкой/Полярной звездой) —
+        # Призрак/Некромант получают видимый в лидерборде знак отличия
+        # (🩸/👑) — то самое «все видят, кто я» вместо невидимой скидки.
+        rank_label = "🪓 Рекрут"
+        for label, threshold, _ in RANKS:
             if bal >= threshold:
-                rank_emoji = emoji
-                rank_name = emoji_to_name(emoji)
+                rank_label = label
+        rank_emoji, rank_name = rank_label.split(" ", 1)
+        mark = RANK_LORE.get(rank_label, {}).get("mark")
         username = html.escape(row["username"])
+        if mark:
+            username = f"{mark}{username}{mark}"
 
         text += (
-            f"{prefix}<b>{username}</b> {g_emoji} — {bal} оас 🍬\n"
+            f"{prefix}<b>{username}</b> {g_emoji} — {bal} OAC 🍬\n"
             f"   <i>{bar} {percent}%</i>\n"
             f"   {g_emoji} {g_name} | {rank_emoji} <b>{rank_name}</b>\n\n"
         )
@@ -4080,7 +6512,7 @@ async def top_callback(update, context, ctx, player):
         if gap > 0:
             text += (
                 f"✦ 📊 Твоя позиция: {my_position} — "
-                f"осталось 🎯 {gap} оас 🍬 до ТРОЙКИ ЛИДЕРОВ 💎🏆 ✦\n"
+                f"осталось 🎯 {gap} OAC 🍬 до ТРОЙКИ ЛИДЕРОВ 💎🏆 ✦\n"
             )
         else:
             text += f"✦ 📊 Твоя позиция: {my_position} ✦\n"
@@ -4088,11 +6520,12 @@ async def top_callback(update, context, ctx, player):
         # Объединённый запрос для позиции вне топа
         async with ctx.db_pool.acquire() as conn:
             cnt_row = await conn.fetchrow(
-                "SELECT COUNT(*) as cnt FROM players WHERE balance > $1", my_balance
+                "SELECT COUNT(*) as cnt FROM players WHERE total_earned > $1", my_balance
             )
             pos = cnt_row["cnt"] + 1 if cnt_row else 1
             tenth_row = await conn.fetchrow(
-                "SELECT balance FROM players ORDER BY balance DESC LIMIT 1 OFFSET 9"
+                "SELECT total_earned AS balance FROM players "
+                "ORDER BY total_earned DESC LIMIT 1 OFFSET 9"
             )
             tenth_balance = tenth_row["balance"] if tenth_row else 0
 
@@ -4100,14 +6533,14 @@ async def top_callback(update, context, ctx, player):
         if gap_to_top10 > 0:
             text += (
                 f"✦ 📊 Твоя позиция: {pos} — "
-                f"осталось 🎯 {gap_to_top10} оас 🍬 до ТОП-10 💎🏆 ✦\n"
+                f"осталось 🎯 {gap_to_top10} OAC 🍬 до ТОП-10 💎🏆 ✦\n"
             )
         else:
             text += f"✦ 📊 Твоя позиция: {pos} — ты уже в топе! 💎 ✦\n"
 
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔍 Разведка", callback_data="top_scout")],
-        [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
+        [InlineKeyboardButton("🔙 В меню", callback_data="menu")]
     ])
     await edit_or_reply(update, context, text, reply_markup=kb, parse_mode="HTML")
 
@@ -4120,7 +6553,8 @@ async def top_scout_callback(update, context, ctx):
     # ctx гарантирован @cb, проверка не нужна
     async with ctx.db_pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT username, balance, guild FROM players ORDER BY balance DESC LIMIT 3"
+            "SELECT username, total_earned AS balance, guild FROM players "
+            "ORDER BY total_earned DESC LIMIT 3"
         )
     if not rows:
         await query.answer("Топ пуст.")
@@ -4139,13 +6573,19 @@ async def top_scout_callback(update, context, ctx):
 async def guild_info_callback(update, context):
     ctx = context.bot_data.get("ctx")
     if not ctx:
-        await update.effective_message.reply_text("⚠️ Бот инициализируется, попробуйте позже.")
+        await update.effective_message.reply_text("⚠️ Бот инициализируется, попробуй позже.")
         return
 
     user, msg = get_user_and_msg(update)
     uid = user.id
     player = await ctx.repo.get_by_id(uid)
-    if not player:
+    # Было `if not player:` — get_by_id для незарегистрированного возвращает
+    # не None, а пустой Player(exists=False) (тот же баг, что уже чинили в
+    # welcome_new_member/guild_join_handler). Условие никогда не срабатывало:
+    # незнакомец, набравший /guild или "гильдия" НЕ через /start (эта команда
+    # без декоратора/гейта), видел полный экран Гильдий с нулевыми полями
+    # вместо приглашения активироваться.
+    if not player or not player.exists:
         await edit_or_reply(update, context, "Профиль не найден. Напиши /start")
         return
 
@@ -4161,14 +6601,9 @@ async def guild_info_callback(update, context):
         black_donated = await conn.fetchval("SELECT COALESCE(SUM(donated),0) FROM players WHERE guild='BLACK'") or 0
         white_donated = await conn.fetchval("SELECT COALESCE(SUM(donated),0) FROM players WHERE guild='WHITE'") or 0
 
-    # Уровни и бонусы храма
-    temple_levels = [
-        {"level": 1, "cost": 0, "bonus": 0, "name": "Алтарь"},
-        {"level": 2, "cost": 15000, "bonus": 5, "name": "Святилище"},
-        {"level": 3, "cost": 45000, "bonus": 10, "name": "Храм"},
-        {"level": 4, "cost": 100000, "bonus": 15, "name": "Цитадель"},
-        {"level": 5, "cost": 250000, "bonus": 25, "name": "Обитель Богов"},
-    ]
+    # Уровни и бонусы храма — из единого источника (см. TEMPLE_LEVELS). Копия,
+    # жившая здесь, теперь не может разъехаться с тем, что реально начисляется.
+    temple_levels = TEMPLE_LEVELS
 
     text = "<b>🏰 ГИЛЬДИИ</b>\n\n"
 
@@ -4187,7 +6622,9 @@ async def guild_info_callback(update, context):
         members = cnt.get(guild_name, 0)
 
         text += f"{guild_emoji} <b>{guild_label} Гильдия</b>\n"
-        text += f"👥 <b>{members} странников</b>\n"
+        # Раньше «1 странников» — заметная грамматическая царапина в первый же
+        # момент, где игрок видит масштаб гильдии (соц-доказательство).
+        text += f"👥 <b>{members} {_plural_ru(members, 'странник', 'странника', 'странников')}</b>\n"
 
         # Цветные эмодзи для каждой гильдии
         if guild_name == "BLACK":
@@ -4223,7 +6660,9 @@ async def guild_info_callback(update, context):
     # Твой статус в гильдии
     if guild:
         g_emoji = "🕯️" if guild == "BLACK" else "⚜️"
-        g_name = "Тёмная" if guild == "BLACK" else "Светлая"
+        # Предложный падеж: «состоишь в Тёмной Гильдии», а не «в Тёмная Гильдии» —
+        # раньше сюда подставлялась именительная форма из заголовков списка выше.
+        g_name = "Тёмной" if guild == "BLACK" else "Светлой"
         text += f"✨ Ты состоишь в {g_emoji} <b>{g_name} Гильдии</b>.\n"
     else:
         text += "🔮 <i>Ты пока не в Гильдии. Выбери сторону!</i>\n"
@@ -4242,9 +6681,15 @@ async def guild_info_callback(update, context):
                     diff = timedelta(hours=cooldown_hours) - (datetime.now() - lt)
                     hrs, rem = divmod(int(diff.total_seconds()), 3600)
                     wait = f"{hrs} ч {rem // 60} мин" if hrs else f"{rem // 60} мин"
-                    return InlineKeyboardButton(f"{base_label} ({wait})", callback_data=cb)
-            return InlineKeyboardButton(base_label, callback_data=cb)
+                    # «›» и на кулдауне: тап всё равно ведёт на экран (там будет
+                    # видно, сколько ждать), поведение кнопки от таймера не меняется.
+                    return InlineKeyboardButton(f"{base_label} ({wait}) ›", callback_data=cb)
+            return InlineKeyboardButton(f"{base_label} ›", callback_data=cb)
 
+        # «›» здесь обязательна ровно по той же причине, что и на главном экране:
+        # это ОДНА И ТА ЖЕ кнопка, ведущая на один и тот же экран выбора профиля
+        # риска. Разные подписи у одного пункта в двух местах — это два разных
+        # обещания об одном действии (Nielsen, consistency & standards).
         if guild == "BLACK":
             kb_rows.append([_action_label("🕯️ Ритуал", player.last_ritual,
                             GAME_CONFIG["ritual_cooldown_hours"], "ritual")])
@@ -4259,6 +6704,11 @@ async def guild_info_callback(update, context):
         text += "<i>🔮 Ты пока не в Гильдии. Выбери Светлую или Темную Гильдию!</i>\n"
         kb_rows.append([InlineKeyboardButton("🕯️ Вступить в Тёмную", callback_data="guild_join_BLACK"),
                         InlineKeyboardButton("⚜️ Вступить в Светлую", callback_data="guild_join_WHITE")])
+    # Публичный чат Гильдии уже получает джекпоты, легендарные крафты и итоги
+    # войны (см. _safe_send_guild_message) — но нигде в игре на него не было
+    # ссылки. Тематически это самое естественное место: экран и так про
+    # Гильдии, а чат буквально называется "Гильдия Antysocial".
+    kb_rows.append([InlineKeyboardButton("💬 Публичный чат Гильдии", url="https://t.me/guild_antysocial")])
     kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="menu")])
     kb = InlineKeyboardMarkup(kb_rows)
 
@@ -4298,11 +6748,16 @@ async def guild_war_callback(update, context):
         scores = await conn.fetch("SELECT guild, total_score FROM guild_weekly")
         black_score = next((r["total_score"] for r in scores if r["guild"] == "BLACK"), 0)
         white_score = next((r["total_score"] for r in scores if r["guild"] == "WHITE"), 0)
+        # AND donated > 0 — раньше без этого условия свежая гильдия без единого
+        # донатера всё равно выводила 3 случайных строки «Герои Тьмы... — 0»:
+        # honesty-нарушение (B3 Real social proof) — «герой» ничего не сделал.
         top_black = await conn.fetch(
-            "SELECT username, donated FROM players WHERE guild='BLACK' ORDER BY donated DESC LIMIT 3"
+            "SELECT username, donated FROM players WHERE guild='BLACK' AND donated > 0 "
+            "ORDER BY donated DESC LIMIT 3"
         )
         top_white = await conn.fetch(
-            "SELECT username, donated FROM players WHERE guild='WHITE' ORDER BY donated DESC LIMIT 3"
+            "SELECT username, donated FROM players WHERE guild='WHITE' AND donated > 0 "
+            "ORDER BY donated DESC LIMIT 3"
         )
 
     total = max(black_score + white_score, 1)
@@ -4327,10 +6782,16 @@ async def guild_war_callback(update, context):
         text += "🕯️ <b>Герои Тьмы:</b>\n"
         for i, row in enumerate(top_black, 1):
             text += f"  {i}. {html.escape(row['username'])} — {row['donated']}\n"
+    else:
+        # Пустой список честнее прежних «героев с нулём»: зовёт стать первым
+        # (FOMO первопроходца), а не изображает несуществующий рекорд.
+        text += "🕯️ <i>Герои Тьмы ещё не появились — стань первым.</i>\n"
     if top_white:
         text += "⚜️ <b>Герои Света:</b>\n"
         for i, row in enumerate(top_white, 1):
             text += f"  {i}. {html.escape(row['username'])} — {row['donated']}\n"
+    else:
+        text += "⚜️ <i>Герои Света ещё не появились — стань первым.</i>\n"
 
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔙 Назад", callback_data="guild_info")]
@@ -4347,115 +6808,31 @@ async def repent_callback(update, context, ctx):
         await query.answer()
     user, _msg = get_user_and_msg(update)
     uid = user.id
-
-    async def _repent(p, conn):
-        now = datetime.now()
-        cooldown_hours = GAME_CONFIG.get("repent_cooldown_hours", 12)
-        if p.last_repent and (now - p.last_repent) < timedelta(hours=cooldown_hours):
-            remain = timedelta(hours=cooldown_hours) - (now - p.last_repent)
-            hrs, rem = divmod(int(remain.total_seconds()), 3600)
-            mins = rem // 60
-            return ("cooldown", f"⏳ Исповедь через {hrs} ч {mins} мин")
-
-        if p.guild != "WHITE":
-            return ("wrong_guild", "❌ Только Светлая Гильдия.")
-        if (p.blunts or 0) < 1:
-            return ("no_blunts", "❌ Нет блантов. Скрути!")
-
-        # === ДОБАВЛЕНО: Счётчик исповедей (пункт 2) ===
-        p.blunts -= 1
-        p.last_repent = now
-        p.daily_progress = p.daily_progress or {}
-        p.repent_count = (p.repent_count or 0) + 1
-        # Исповедь СОСТОЯЛАСЬ (блант потрачен, кулдаун 12ч запущен) — квест
-        # обязан засчитаться при ЛЮБОМ исходе. Раньше отметка стояла только в
-        # ветке награды (70%): при удаче на эссенцию/легендарку задание не
-        # тикало, а повторить нельзя 12ч → Светлая гильдия застревала в главе.
-        p.daily_progress["repent"] = True
-        p.daily_progress["guild_action"] = True
-
-        # === ДОБАВЛЕНО: Медали и прогресс (пункты 3 и 4) ===
-        old_count = p.repent_count - 1
-        new_count = p.repent_count
-        medal_text, medal_bonus = get_medal_text_and_reward(old_count, new_count, REPENT_MEDALS)
-
-        # Случайный исход
-        r = random.random()
-        reward = 0
-        result_line = ""
-
-        if r < 0.70:
-            reward = random.randint(100, 200)
-            p.balance += reward + medal_bonus  # ← добавили medal_bonus
-            result_line = f"Исповедь принесла тебе <b>{reward} OAC</b> 🍬"
-        elif r < 0.95:
-            p.m_essence = (p.m_essence or 0) + 1
-            result_line = "Ты получил 💠 <b>+1 Кристальную Пыль</b>"
-        else:
-            name = random.choice(["Крик Бездны", "Пепел Короля", "Шёпот Склепа"])
-            await create_named_blunt(uid, name, rarity="legendary", ctx=ctx, player=p, conn=conn)
-            result_line = f"🌟 Чудо! Легендарный блант <b>«{name}»</b>"
-
-        # === ДОБАВЛЕНО: Прогресс-бар (пункт 4) ===
-        target = get_medal_target(new_count, REPENT_MEDALS)
-        progress_bar_str = get_medal_progress(new_count, REPENT_MEDALS)
-
-        # === ДОБАВЛЕНО: Красивый текст с цитатой (пункт 9) ===
-        full_text = (
-            f"<b>⚜️ ИСПОВЕДЬ ПРИНЯТА🎉</b>\n\n"
-            f"{result_line}\n"
-            f"<b>⚜️ У тебя:</b> <b>{p.balance} OAC 🕊️</b>\n\n"
-            f"<i>«Твоя душа очистилась...»</i>\n"
-            f"{medal_text}\n"
-            f"<b>🕊️ Исповеди:</b> {new_count}/{target}\n"
-            f"<b>{progress_bar_str}</b>"
-        )
-
-        return ("ok", full_text)
-
-    result = await ctx.repo.atomic_update(uid, _repent)
-
-    if result is None:
-        await query.message.edit_text(
-            "❌ Профиль не найден. Напиши /start",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
-        )
+    player = await ctx.repo.get_by_id(uid)
+    theme = GUILD_ACTION_THEME["WHITE"]
+    if not player or not player.exists:
+        await send_whisper_dm(update, context, "Сначала активируйся: /start")
         return
-
-    status, data = result[0], result[1] if len(result) > 1 else ""
-
-    if status == "ok":
-        # Единый живой экран: исповедь анимируется и завершается на месте.
-        repent_kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🏛️ Храм", callback_data="guild_shrine"),
-             InlineKeyboardButton("🏰 Гильдия", callback_data="guild_info")],
-            [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
-        ])
-        anim_msg = await animate_progress_bar(update, context, title="🕊️ Исповедь...", duration=0.6, steps=4, in_place=True)
-        if anim_msg is not None:
-            await anim_msg.edit_text(
-                data,
-                reply_markup=repent_kb,
-                parse_mode='HTML'
-            )
-        else:
-            # Если анимация не удалась – отправляем новое сообщение
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=data,
-                reply_markup=repent_kb,
-                parse_mode='HTML'
-            )
-    else:
-        # Ошибки (кулдаун/не та гильдия/нет блантов) — тоже на месте.
-        await edit_or_reply(
-            update, context, data,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="guild_info")]]),
-            parse_mode='HTML'
-        )
-
-    if status == "ok":
-        await check_achievements(uid, context)
+    if player.guild != "WHITE":
+        await send_whisper_dm(update, context, theme["wrong_guild_msg"])
+        return
+    now = datetime.now()
+    cooldown_hours = _guild_action_cooldown_hours("WHITE")
+    if player.last_repent and (now - player.last_repent) < timedelta(hours=cooldown_hours):
+        remain = timedelta(hours=cooldown_hours) - (now - player.last_repent)
+        hrs, rem = divmod(int(remain.total_seconds()), 3600)
+        wait = f"{hrs} ч {rem // 60} мин" if hrs else f"{rem // 60} мин"
+        await edit_or_reply(update, context,
+            f"{theme['cooldown_line']}\n\n<b>🗝️ Жди {wait}</b>",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🍬 Фармить", callback_data="farm")],
+                [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
+            ]))
+        return
+    if (player.blunts or 0) < 1:
+        await send_whisper_dm(update, context, "❌ Нет блантов. Скрути!")
+        return
+    await _show_guild_action_picker(update, context, ctx, "WHITE")
 
 async def rules_callback(update, context):
     user, msg = get_user_and_msg(update)
@@ -4471,13 +6848,22 @@ async def rules_callback(update, context):
         "💎 Создай свой <b>вечный именной Блант</b> через меню «Крафт».\n"
         "<i>Он не курится, получает редкость и навсегда остаётся в твоей коллекции.</i>\n\n"
         "<b>🏰 ГИЛЬДИИ И РАЗВИТИЕ</b>\n"
-        "🕯️ <b>Тёмная Гильдия:</b> <code>/ritual</code> (+150 OAC раз в 24 ч) — <i>«Ритуалы укрепляют нити»</i>\n"
-        "⚜️ <b>Светлая Гильдия:</b> 20% шанс сохранить блант при 💨, <code>/repent</code> — <i>исповедь</i>\n"
+        f"🕯️ <b>Тёмная Гильдия:</b> <code>/ritual</code> раз в {GAME_CONFIG['ritual_cooldown_hours']} ч — "
+        f"<i>сам выбираешь риск: стабильный OAC или шанс на легендарку</i>\n"
+        f"⚜️ <b>Светлая Гильдия:</b> 20% шанс сохранить блант при 💨, <code>/repent</code> раз в "
+        f"{GAME_CONFIG['repent_cooldown_hours']} ч — <i>тот же выбор риска</i>\n"
         "🪴 <b>Куст:</b> пассивный доход с ранга ⚔️ Ветеран\n"
         "🐾 <b>Питомец:</b> доступен с ранга ⚔️ Ветеран\n\n"
         "<b>ℹ️ ИНФОРМАЦИЯ</b>\n"
         "⚜️ <code>/profile</code> — твой профиль и коллекция\n"
         "🏆 <code>/top</code> — список сильнейших\n\n"
+        # Был только в /help (более глубокой справке), не здесь — «Кодекс»
+        # читается раньше и чаще, а реферала в нём не было ни строкой: чистый
+        # Ability-барьер по Fogg — человек не приглашает не потому что не
+        # хочет, а потому что не знает, что вообще можно.
+        "<b>🤝 ДРУЗЬЯ</b>\n"
+        "🎁 Постоянная ссылка — в профиле (кнопка «Пригласить друга»).\n"
+        "<i>Другу — 100 OAC на старт, тебе — 50 OAC и легендарный блант.</i>\n\n"
         "<b>🛡️ МАГАЗИН</b>\n"
         "<code>/privilege</code> — твоя скидка\n"
         "<code>/catalog</code> — ссылка на каталог\n\n"
@@ -4487,24 +6873,81 @@ async def rules_callback(update, context):
     if update.callback_query:
         await edit_or_reply(update, context, text,
     reply_markup=InlineKeyboardMarkup([
+        [InlineKeyboardButton("❓ Полная справка (Мины, Алтарь, Питомец…)", callback_data="help")],
         [InlineKeyboardButton("💍 Создать именной блант", callback_data="craft_named")],
         [InlineKeyboardButton("🔙 Назад", callback_data="profile")]
     ]))
     else:
         await msg.reply_text(text, parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
+                [InlineKeyboardButton("❓ Полная справка", callback_data="help")],
+                [InlineKeyboardButton("🔙 В меню", callback_data="menu")]
             ]))
+
+
+async def help_callback(update, context):
+    """Полная справка — раньше «Правила мира» не упоминали Лабиринт, Мины,
+    Алтарь Вечности, Плантацию, Питомца, Достижения, Витрину и рефералов
+    ни словом: у половины механик игры не было НИ ОДНОГО места в боте, где
+    новичок мог бы прочитать, что это и как этим пользоваться."""
+    user, msg = get_user_and_msg(update)
+    text = (
+        "<b>❓ ПОЛНАЯ СПРАВКА</b>\n\n"
+        "<b>🏛️ Лабиринт</b> <code>/lab</code>\n"
+        "<i>Спускайся по комнатам, собирай награду, выходи вовремя — смерть "
+        "стоит часть добычи. Кулдаун между попытками.</i>\n\n"
+        "<b>💣 Мины</b>\n"
+        "<i>Сетка 5×5 — сам выбираешь интенсивность (1–10 мин): больше мин, "
+        "выше риск и множитель. Чем больше клеток открыто без подрыва — тем "
+        "выше выигрыш. Забрать можно в любой момент.</i>\n\n"
+        "<b>🕯️ Алтарь Вечности</b>\n"
+        "<i>Эндгейм-цель для тех, кто уже всё скопил: баланс необратимо "
+        "превращается в престиж. Открывается на позднем этапе игры.</i>\n\n"
+        "<b>🪴 Плантация</b>\n"
+        "<i>Открой в разделе «🌍 Мир»: посади куст <b>(бесплатно)</b> — он копит OAC "
+        "сам по себе, пока тебя нет. Собирай урожай регулярно — хранилище не "
+        "бесконечное.</i>\n\n"
+        "<b>🐾 Питомец</b> <code>/pet</code>\n"
+        "<i>Доступен с ранга ⚔️ Ветеран. Корми — голодный питомец даёт меньше "
+        "бонуса к плантации, но эффект никогда не падает до нуля.</i>\n\n"
+        "<b>🎴 Витрина коллекции</b>\n"
+        "<i>«Мои бланты» в профиле — у каждого именного бланта свой уникальный "
+        "силуэт. Собирай редкости (4 уровня) и формы скрутки (8 видов).</i>\n\n"
+        "<b>🏆 Достижения</b>\n"
+        "<i>Открываются автоматически по игровым показателям — смотри "
+        "прогресс в разделе «Достижения».</i>\n\n"
+        "<b>🔗 Пригласить друга</b>\n"
+        "<i>Постоянная ссылка в профиле — тебе и другу за каждого приведённого "
+        "игрока бонус OAC.</i>\n\n"
+        "<b>🔥 Серия входов и Час Удачи</b>\n"
+        "<i>Заходи каждый день — награда растёт с серией. Час Удачи выпадает "
+        "случайно и на время удваивает часть наград.</i>\n\n"
+        "<i>📖 Базовые команды (фарм/крафт/дым/гильдия) — в «Правила мира».</i>"
+    )
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📖 Правила мира", callback_data="rules")],
+        [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
+    ])
+    if update.callback_query:
+        await edit_or_reply(update, context, text, reply_markup=kb, parse_mode='HTML')
+    else:
+        await msg.reply_text(text, parse_mode='HTML', reply_markup=kb)
+
 
 async def privilege_callback(update, context):
     ctx = context.application.bot_data["ctx"]
     user, msg = get_user_and_msg(update)
     uid = user.id
     player = await ctx.repo.get_by_id(uid)
-    if not player or not player.user_id:
-        await msg.reply_text("Сначала активируйся: /start")
+    # Было `not player.user_id` — get_by_id всегда конструирует Player(user_id=uid)
+    # даже для незарегистрированного (repository.py: return Player(user_id=user_id)),
+    # так что user_id truthy в любом случае — условие никогда не срабатывало.
+    # /privilege и "привилегия" не идут через @game_handler (нет гейта выше).
+    if not player or not player.exists:
+        await _notify_user(update, context, "Сначала активируйся: /start")
         return
-    bal = player.balance
+    # Ранг и «сила» — по заработанному за всё время, а не по остатку кошелька.
+    bal = player.total_earned or 0
     rank_emoji, rank_name = "🪓", "Рекрут"
     next_rank_name = "Ветеран"
     for emoji, threshold, _ in RANKS:
@@ -4523,15 +6966,19 @@ async def privilege_callback(update, context):
         f"{progress_bar_str} {percent}%\n\n"
         f"🎯 <b>До след. уровня:</b> {next_rank_name}"
     )
-    await msg.reply_text(text, parse_mode='HTML', reply_markup=get_back_to_menu_keyboard())
+    # Было: msg.reply_text безусловно — на тапе кнопки это НОВОЕ сообщение
+    # поверх старого (не единый живой экран, как везде в игре) и без
+    # query.answer() (та же серия багов, см. edit_or_reply). edit_or_reply
+    # сам решает править на месте (кнопка) или прислать новое (команда).
+    await edit_or_reply(update, context, text, reply_markup=get_back_to_menu_keyboard(), parse_mode='HTML')
 
 async def catalog_callback(update, context):
     # Раньше был тупик: только внешняя ссылка, назад в игру — никак (приходилось
     # писать /menu). Добавлена навигация; экран редактируется на месте.
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔗 Открыть Каталог", url="https://t.me/antysocialshop")],
-        [InlineKeyboardButton("🛒 Магазин", callback_data="shop"),
-         InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+        [InlineKeyboardButton("🛒 Лавка Фабрики", callback_data="shop"),
+         InlineKeyboardButton("🔙 В меню", callback_data="menu")],
     ])
     await edit_or_reply(update, context,
         "<b>🕯️ ANTYSOCIALSHOP · КАТАЛОГ</b>\n\n"
@@ -4609,7 +7056,7 @@ def _build_luck_keyboard(now, player, cfg, wheel_ok, mines_ok, alchemy_ok):
             rows.append([InlineKeyboardButton(f"🍀 Бездна шепчет всё громче. Жди {hrs} ч {mins} мин", callback_data="luck_mines")])
 
     rows.append([InlineKeyboardButton("🔮 Алхимия", callback_data="alchemy_start") if alchemy_ok else InlineKeyboardButton("🔮 Алхимия 🔒", callback_data="alchemy_start")])
-    rows.append([InlineKeyboardButton("🏰 В меню", callback_data="menu")])
+    rows.append([InlineKeyboardButton("🔙 В меню", callback_data="menu")])
     return rows
 
 
@@ -4625,12 +7072,17 @@ def _format_remaining(td):
 async def luck_callback(update, context, action=None):
     ctx = context.bot_data.get("ctx")
     if not ctx:
-        await update.effective_message.reply_text("⚠️ Бот инициализируется, попробуйте позже.")
+        await update.effective_message.reply_text("⚠️ Бот инициализируется, попробуй позже.")
         return
     user, msg = get_user_and_msg(update)
     uid = user.id
     player = await ctx.repo.get_by_id(uid)
-    if not player or not player.user_id:
+    # Тот же баг, что в privilege_callback/guild_info_callback: user_id у
+    # get_by_id truthy даже для незарегистрированного, условие никогда не
+    # срабатывало. Дальше по коду player.balance/player.guild читаются
+    # напрямую (не через atomic_update) — без этого гейта незнакомец видел бы
+    # полноценный хаб Удачи и мог бы тапнуть в _process_wheel/_process_mines.
+    if not player or not player.exists:
         await _notify_user(update, context, "Сначала активируйся: /start")
         return
 
@@ -4639,7 +7091,11 @@ async def luck_callback(update, context, action=None):
 
     wheel_ok = _check_wheel_availability(player, now, cfg["wheel"]["cooldown_hours"])
     mines_ok = _check_mines_availability(player, now, cfg["mines"]["cost"], cfg["mines"]["cooldown_hours"])
-    alchemy_ok = player.balance >= cfg["alchemy"]["required_balance"]
+    # Замок кнопки должен отражать тот же гейт, что и сам хендлер
+    # (_process_alchemy_start: has_rank по total_earned, не по кошельку) —
+    # иначе Ветеран, потративший OAC, видит 🔒 на механике, которая по тапу
+    # всё равно откроется.
+    alchemy_ok = has_rank(player.total_earned or 0, "Ветеран")
 
     if action == "luck_wheel":
         await _process_wheel(update, context, uid, player, cfg, ctx)     
@@ -4656,15 +7112,58 @@ async def luck_callback(update, context, action=None):
 
     # Главное меню удачи
     text = (
-        "<b>🍀 УДАЧА</b>\n\n"
+        "<b>🎲 ЗАЛ УДАЧИ</b>\n\n"
         "<i>🌀 «Испытай свою удачу и выиграй OAC 🍬 и редкие эксклюзивные вещи!» 🪽</i>\n\n"
         "🎡 <b>Крутить Колесо</b> — ежедневный выигрыш 🎉\n"
-        "🎰 <b>Мины</b> — бросить вызов 💣 и отдать деньги ради выигрыша 💫\n"
-        "⚗️ <b>Алхимия</b> — древнее искусство, магия для достойных 🔮"
+        "🎰 <b>Мины</b> — рискни ставкой ради множителя 💣\n"
+        # 🔮, а не ⚗️: этой же строкой ниже стоит КНОПКА «🔮 Алхимия», и один
+        # пункт на одном экране был помечен двумя разными значками сразу
+        # (⚗️ в описании, 🔮 на кнопке) — глаз ищет соответствие описания кнопке
+        # по значку. Трейлинг-🔮 убран, чтобы значок не двоился уже внутри строки.
+        "🔮 <b>Алхимия</b> — древнее искусство, магия для достойных"
     )
     kb_rows = _build_luck_keyboard(now, player, cfg, wheel_ok, mines_ok, alchemy_ok)
     kb = InlineKeyboardMarkup(kb_rows)
     await edit_or_reply(update, context, text, reply_markup=kb, parse_mode='HTML')
+
+
+async def _suspense_reveal(update, context, frames: list, frame_delay: float = 0.35) -> None:
+    """Короткая подвеска ожидания перед раскрытием результата азартной
+    механики: несколько кадров редактируют ОДИН И ТОТ ЖЕ экран (не плодит
+    сообщений); сам финальный результат кладёт вызывающий код отдельным
+    edit_or_reply сразу после — эта функция чисто косметическая, сбой
+    здесь (устаревшее сообщение, фото вместо текста) не должен стоить
+    самого результата, просто тихо пропускаем подвеску.
+
+    SLAYER Red Team (Cluster Б, A1 Dopamine/Neuroscience): дофаминовые
+    нейроны отвечают СИЛЬНЕЕ на предсказывающий сигнал, чем на сам приз,
+    как только связь усвоена (Schultz 1997 — reward prediction error;
+    сигнал ожидания несёт больше нейрохимического отклика, чем момент
+    доставки). Колесо и Алхимия — единственные две по-настоящему азартные
+    механики игры, и обе раскрывали результат МГНОВЕННО на тап, без
+    единого кадра ожидания — отдавая большую часть отклика впустую.
+
+    query.answer() — здесь, а не только внутри финального edit_or_reply:
+    подвеска сама по себе занимает ~секунду смены кадров, спиннер кнопки
+    не должен висеть всё это время до финального edit_or_reply. Двойной
+    answer() безопасен — тот же приём уже используется в edit_or_reply.
+    """
+    query = update.callback_query
+    if not query or not query.message:
+        return
+    try:
+        await query.answer()
+    except Exception:
+        pass
+    for frame in frames:
+        try:
+            await query.message.edit_text(frame, parse_mode='HTML')
+        except Exception:
+            return   # экран не поддаётся редактированию — тихо пропускаем подвеску
+        await asyncio.sleep(frame_delay)
+
+
+_WHEEL_SPIN_SYMBOLS = ("🍬", "💰", "🌿", "🩸", "⚜️", "🎯")
 
 
 # ── Колесо ──────────────────────────────────────────────────
@@ -4680,9 +7179,12 @@ async def _process_wheel(update, context, uid, player, cfg, ctx):
             if r < prob:
                 prize, ptype = amount, kind
                 break
+        # Near-miss: попал в последнюю НЕ-джекпот полосу (сразу под джекпотом) —
+        # мозг реагирует на «почти» почти как на выигрыш → тяга «ещё разок».
+        near_miss = ptype != "jackpot" and r >= 0.90
         if ptype == "jackpot" and random.random() < 0.5:
             prize *= 2
-        if ctx.cache.get("happy_hour") and ptype in ("oac", "jackpot"):
+        if happy_hour_active(ctx) and ptype in ("oac", "jackpot"):
             prize *= HAPPY_HOUR_MULTIPLIER
 
         if ptype in ("oac", "jackpot"):
@@ -4694,14 +7196,23 @@ async def _process_wheel(update, context, uid, player, cfg, ctx):
         if ctx.war_service and ptype in ("oac", "jackpot"):
             await ctx.war_service.add_score_raw(uid, prize, conn)
 
-        return prize, ptype, p.balance
+        return prize, ptype, p.balance, near_miss
 
     result = await ctx.repo.atomic_update(uid, _wheel)
     if result is None:
         logger.error("wheel atomic_update failed", extra={"user_id": uid})
         await _notify_user(update, context, "❌ Ошибка при обработке. Попробуй позже.")
         return
-    prize, ptype, new_balance = result
+    prize, ptype, new_balance, near_miss = result
+
+    # Подвеска ожидания ДО раскрытия — см. _suspense_reveal. Исход уже
+    # определён (result выше), кадры не влияют на экономику, чисто визуальный
+    # разгон-и-замедление перед тем же самым результатом.
+    await _suspense_reveal(
+        update, context,
+        frames=[f"<b>🎡 Колесо крутится...</b>\n\n{'  '.join(random.sample(_WHEEL_SPIN_SYMBOLS, 3))}"
+                for _ in range(3)] + ["<b>🎡 Колесо замедляется...</b>"],
+    )
 
     uname = html.escape(update.effective_user.username or update.effective_user.first_name)
     if ptype == "jackpot":
@@ -4711,8 +7222,11 @@ async def _process_wheel(update, context, uid, player, cfg, ctx):
     else:
         msg_text = f"<b><i>🌱 КОЛЕСО СМОТРИТЕЛЯ</i></b>\n\n+{prize} 🌿 Блант → 🍬 <b>{new_balance} OAC</b> 🍬"
 
+    if near_miss:
+        msg_text += "\n\n😤 <i>Стрелка замерла у самого ДЖЕКПОТА (1000 OAC)! Ещё чуть-чуть — крутани снова завтра.</i>"
+
     await edit_or_reply(update, context, msg_text,
-                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]))
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🎲 Зал Удачи", callback_data="luck")]]))
 
 # МИНЫ
 import json
@@ -4721,66 +7235,150 @@ import random
 from typing import Optional, Tuple, Set, List
 
 # Вспомогательная функция для генерации поля (чистая)
-def _generate_mines_field() -> Tuple[List[List[int]], Set[Tuple[int, int]]]:
-    """Создаёт поле 5x5 и расставляет 3 мины. Возвращает (поле, координаты мин)."""
-    size = 5
+MINES_GRID_SIZE = 5
+MINES_TOTAL_CELLS = MINES_GRID_SIZE * MINES_GRID_SIZE  # 25
+# RTP по умолчанию — единый источник в LUCK_CONFIG (game_content.py), см.
+# комментарий там про честную кривую. Читается один раз при импорте; функции
+# ниже всё равно принимают rtp параметром, чтобы оставаться чистыми и
+# тестируемыми без обращения к глобальному конфигу.
+MINES_RTP = LUCK_CONFIG["mines"]["rtp"]
+# Зона «настоящей неопределённости» для паузы-предвкушения перед раскрытием
+# клетки (см. _mines_open_cell) — шанс дожить рядом с 50/50, где по Fiorillo,
+# Tobler, Schultz (Science, 2003) дофаминовый ответ на неопределённость
+# максимален. Вне этой зоны исход и так предсказуем — тормозить незачем.
+MINES_TENSION_LOW = 0.35
+MINES_TENSION_HIGH = 0.65
+MINES_SUSPENSE_DELAY = 0.4
+
+
+def _mines_preset_for(mines_count: int) -> dict:
+    """Пресет интенсивности по числу мин на поле. Фолбэк на «Обычный» —
+    защита от рассинхрона данных, реально не должна срабатывать."""
+    presets = LUCK_CONFIG["mines"]["presets"]
+    return next((p for p in presets if p["mines"] == mines_count), presets[1])
+
+
+def _generate_mines_field(mines_count: int) -> Tuple[List[List[int]], Set[Tuple[int, int]]]:
+    """Создаёт поле 5×5 и расставляет `mines_count` мин. Возвращает (поле, координаты мин)."""
+    size = MINES_GRID_SIZE
     field = [[0]*size for _ in range(size)]
-    # Все координаты
     all_cells = [(r, c) for r in range(size) for c in range(size)]
-    mines = set(random.sample(all_cells, 3))  # 3 мины
+    mines = set(random.sample(all_cells, mines_count))
     return field, mines
 
-# Вспомогательная функция для расчёта множителя
-def _calc_multiplier(step: int) -> float:
-    """Множитель от 1.0 до 3.0, линейно растёт с каждым шагом."""
-    max_step = 22  # всего безопасных клеток (25-3)
-    return round(1.0 + (step / max_step) * 2.0, 2)
+
+def _mines_survival_prob(mines_count: int, step: int) -> float:
+    """Вероятность дожить (не задеть мину) на первых `step` открытых клетках
+    подряд. Чистая комбинаторика: на каждом шаге безопасных клеток на одну
+    меньше, мин — столько же, сколько было (мины убывают только при попадании)."""
+    total_safe = MINES_TOTAL_CELLS - mines_count
+    if step <= 0:
+        return 1.0
+    if step > total_safe:
+        return 0.0
+    p = 1.0
+    for i in range(step):
+        p *= (total_safe - i) / (MINES_TOTAL_CELLS - i)
+    return p
+
+
+def _calc_multiplier(mines_count: int, step: int, rtp: float = MINES_RTP) -> float:
+    """Честный множитель: rtp / P(дожить). Раньше множитель рос линейно
+    (1.0→3.0) независимо от реальной вероятности — ожидаемая отдача падала с
+    каждым шагом, и уйти глубже было математически ВСЕГДА невыгоднее, чем
+    забрать раньше. Здесь ожидаемая отдача постоянна на любом шаге (честная
+    игра с фиксированным хаус-эджем rtp), риск глубже оплачивается растущим
+    призом, а не штрафуется — near-miss на экране проигрыша перестаёт быть
+    обманом (см. _mines_show_field)."""
+    if step <= 0:
+        return 1.0
+    p = _mines_survival_prob(mines_count, step)
+    if p <= 0:
+        return 0.0
+    return round(rtp / p, 2)
+
+
+def _mines_next_risk_pct(mines_count: int, step: int) -> int:
+    """Шанс подорваться НА СЛЕДУЮЩЕМ клике, целыми процентами. Показывается
+    игроку в открытую — прозрачность не убивает азарт (исход всё равно
+    неизвестен до самого клика), но даёт честное основание для решения
+    «забрать или продолжить», а не догадки на пустом месте."""
+    remaining_cells = MINES_TOTAL_CELLS - step
+    if remaining_cells <= 0:
+        return 0
+    return round(mines_count / remaining_cells * 100)
+
 
 # Основная функция – замена _process_mines
 async def _mines_state_get(ctx, uid):
-    """Состояние игры «Мины»: Redis, если он есть, иначе in-memory кэш.
+    """Состояние игры «Мины»: Postgres (players.mines_state), не Redis/кэш.
 
-    Приложение по дизайну работает и без Redis (main.py: «без Redis продолжим»),
-    но мины дёргали ctx.redis напрямую → при отсутствующем/упавшем Redis
-    ctx.redis был None и кнопка «Рискнуть» молча падала на None.get(). Фолбэк
-    на ctx.cache (TTL ~10мин, партии хватает) чинит мины без Redis."""
-    key = f"mines_game:{uid}"
-    if getattr(ctx, "redis", None):
-        raw = await ctx.redis.get(key)
-        return json.loads(raw) if raw else None
-    val = ctx.cache.get(key)
-    return json.loads(val) if isinstance(val, (str, bytes)) else val
+    Redis подтверждённо был недоступен в проде несколько дней подряд —
+    прежний фолбэк «Redis, если он есть, иначе ctx.cache (TTL ~10мин)» на
+    практике означал, что партия переживала рестарт процесса ТОЛЬКО пока
+    Redis реально работал; без него ctx.cache (тоже in-memory) стирался при
+    каждом деплое так же, как стёрлась бы и без всякого фолбэка. БД переживает
+    рестарт процесса всегда, а не «если повезло с инфраструктурой».
+
+    1-часовой TTL сохранён поведенчески (был Redis SETEX 3600): партия
+    старше часа читается как брошенная и не возвращается.
+    """
+    if not ctx or not ctx.db_pool:
+        return None
+    async with ctx.db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT mines_state, mines_state_updated_at FROM players WHERE user_id=$1", uid)
+    if not row or not row["mines_state"]:
+        return None
+    updated = row["mines_state_updated_at"]
+    if not updated or (datetime.now(timezone.utc) - updated) > timedelta(hours=1):
+        return None
+    return _json_safe_load(row["mines_state"], None)
+
+
+def _mines_positions(state) -> set:
+    """Координаты мин как множество кортежей.
+
+    Состояние партии сериализуется в JSON (Redis), а JSON не знает кортежей:
+    сохранённое [(0,1),(2,3)] возвращается как [[0,1],[2,3]], и прямой
+    set(state["mines"]) падал с «unhashable type: list». Из-за этого «Мины»
+    работали ТОЛЬКО без Redis (там состояние лежит в памяти и кортежи целы) —
+    а в проде, где Redis подключён, первый же тап по клетке ронял игру.
+    """
+    return {tuple(m) for m in (state.get("mines") or ())}
 
 
 async def _mines_state_set(ctx, uid, state):
-    key = f"mines_game:{uid}"
-    if getattr(ctx, "redis", None):
-        await ctx.redis.setex(key, 3600, json.dumps(state))
-    else:
-        ctx.cache[key] = state
+    if not ctx or not ctx.db_pool:
+        return
+    async with ctx.db_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE players SET mines_state=$1, mines_state_updated_at=now() WHERE user_id=$2",
+            json.dumps(state, default=str), uid)
 
 
 async def _process_mines(update, context, uid, player, cfg, ctx):
     """
-    Запускает игру «Мины» (вместо Берсерка).
+    Запускает игру «Мины».
     Обрабатывает все состояния: начало, открытие клетки, кэшаут, завершение.
     """
     query = update.callback_query
     if query:
         await query.answer()
 
-    # --- 1. Проверяем доступность (баланс, кулдаун) ---
+    # --- 1. Проверяем доступность (баланс) ---
     min_bet = min(cfg["mines"]["bet_options"])
     if player.balance < min_bet:
         await _notify_user(update, context, f"💣 Недостаточно OAC. Минимальная ставка: {min_bet} OAC.")
         return
 
-    # --- 2. Загружаем или создаём состояние игры (Redis или in-memory) ---
+    # --- 2. Загружаем или создаём состояние игры (Postgres) ---
     redis_key = f"mines_game:{uid}"
     state = await _mines_state_get(ctx, uid)
     if not state:
-        # Если игра не начата – показываем меню выбора ставки
-        await _show_mines_bet_menu(update, context, player, cfg)
+        # Если игра не начата – выбор интенсивности первым шагом, не ставки
+        # напрямую: игрок сам решает, какой кривой риска играть.
+        await _show_mines_preset_menu(update, context, player)
         return
 
     # --- 3. Обработка действий в зависимости от состояния ---
@@ -4796,10 +7394,15 @@ async def _process_mines(update, context, uid, player, cfg, ctx):
         await _mines_cashout(update, context, state, redis_key, uid, ctx)
         return
 
-    # Если действие – начать новую игру (выбрана ставка)
+    # Если действие – начать новую игру (выбраны интенсивность и ставка)
     if action and action.startswith("mines_bet_"):
-        bet = int(action.split("_")[-1])
-        await _mines_start_game(update, context, uid, bet, ctx)
+        try:
+            parts = action.split("_")
+            mines_count, bet = int(parts[-2]), int(parts[-1])
+        except (ValueError, IndexError):
+            await query.answer("Некорректная ставка", show_alert=True)
+            return
+        await _mines_start_game(update, context, uid, mines_count, bet, ctx)
         return
 
     # Если действие – "назад" или "меню" – просто показываем меню удачи
@@ -4809,33 +7412,81 @@ async def _process_mines(update, context, uid, player, cfg, ctx):
 
     # Если никакое действие не подошло – показываем текущее поле
     await _mines_show_field(update, context, state, redis_key, uid, ctx)
-    
-async def _show_mines_bet_menu(update, context, player, cfg):
-    """Показывает меню выбора ставки."""
+
+
+async def _show_mines_preset_menu(update, context, player):
+    """Первый экран Мин: выбор интенсивности (числа мин на поле). Игрок сам
+    решает кривую риска — осторожный получает пологий рост, азартный более
+    крутой (тот же принцип выбора риска, что в жанре в целом)."""
     query = update.callback_query
     if not query:
         return
-    text = (
-        "💣 **МИНЫ**\n\n"
-        "Выбери ставку и начни игру.\n"
-        "Поле 5×5, спрятано 3 мины.\n"
-        "Открывай клетки, множитель растёт!\n"
-        "Можешь в любой момент забрать выигрыш.\n\n"
-        f"💰 Твой баланс: {player.balance} OAC"
-    )
-    keyboard = []
-    for bet in cfg["mines"]["bet_options"]:
-        keyboard.append([InlineKeyboardButton(f"{bet} OAC", callback_data=f"mines_bet_{bet}")])
-    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="luck")])
-    await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+    presets = LUCK_CONFIG["mines"]["presets"]
+    lines = [
+        "💣 <b>МИНЫ</b>\n",
+        "Выбери интенсивность — от неё зависит, как быстро",
+        "растёт куш и как быстро растёт риск.\n",
+    ]
+    for p in presets:
+        survive_pct = round((1 - p["mines"] / MINES_TOTAL_CELLS) * 100)
+        lines.append(
+            f"{p['emoji']} <b>{p['name']}</b> · {p['mines']} "
+            f"{_plural_ru(p['mines'], 'мина', 'мины', 'мин')} на поле · "
+            f"пережить 1-й тап: {survive_pct}%"
+        )
+    text = "\n".join(lines)
+    best = player.mines_best_step or 0
+    if best:
+        text += f"\n\n🏅 Твой рекорд глубины: {best} клеток"
+    text += f"\n💰 Баланс: {player.balance} OAC"
 
-async def _mines_start_game(update, context, uid, bet, ctx):
+    keyboard = [
+        [_btn(f"{presets[0]['emoji']} {presets[0]['name']}", callback_data=f"mines_preset_{presets[0]['mines']}", style=presets[0]["style"]),
+         _btn(f"{presets[1]['emoji']} {presets[1]['name']}", callback_data=f"mines_preset_{presets[1]['mines']}", style=presets[1]["style"])],
+        [_btn(f"{presets[2]['emoji']} {presets[2]['name']}", callback_data=f"mines_preset_{presets[2]['mines']}", style=presets[2]["style"]),
+         _btn(f"{presets[3]['emoji']} {presets[3]['name']}", callback_data=f"mines_preset_{presets[3]['mines']}", style=presets[3]["style"])],
+        [InlineKeyboardButton("🔙 Назад", callback_data="luck")],
+    ]
+    await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
+
+
+async def _show_mines_bet_menu(update, context, player, mines_count):
+    """Второй экран: выбор ставки для уже выбранной интенсивности."""
+    query = update.callback_query
+    if not query:
+        return
+    preset = _mines_preset_for(mines_count)
+    text = (
+        f"💣 <b>МИНЫ</b> · {preset['emoji']} {preset['name']}\n\n"
+        f"Поле 5×5, спрятано {mines_count} "
+        f"{_plural_ru(mines_count, 'мина', 'мины', 'мин')}.\n"
+        f"Множитель честный: одинаковая ожидаемая отдача на каждом шаге.\n"
+        f"Забрать выигрыш можно в любой момент.\n\n"
+        f"💰 Баланс: {player.balance} OAC"
+    )
+    bets = LUCK_CONFIG["mines"]["bet_options"]
+    keyboard, row = [], []
+    for bet in bets:
+        row.append(InlineKeyboardButton(f"{bet} OAC", callback_data=f"mines_bet_{mines_count}_{bet}"))
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    keyboard.append([InlineKeyboardButton("🎚 Другая интенсивность", callback_data="mines_preset_menu")])
+    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="luck")])
+    await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
+
+
+async def _mines_start_game(update, context, uid, mines_count, bet, ctx):
     """Создаёт новую игру, списывает ставку и показывает поле."""
     query = update.callback_query
     if not query:
         return
-    # Проверка баланса
     player = await ctx.repo.get_by_id(uid)
+    if not player or not player.exists:
+        await query.answer("Профиль не найден.", show_alert=True)
+        return
     if player.balance < bet:
         await query.answer("Недостаточно OAC!", show_alert=True)
         return
@@ -4845,6 +7496,12 @@ async def _mines_start_game(update, context, uid, bet, ctx):
         if p.balance < bet:
             raise ValueError("Недостаточно средств")
         p.balance -= bet
+        # Отмечаем задание квеста «Мины» (Глава 1) на СТАРТЕ партии, не на
+        # исходе — тот же принцип, что у «lab» (_mark_lab отмечает вход в
+        # Лабиринт). Цель шага — знакомство с механикой реального выбора,
+        # а не конкретный результат.
+        p.daily_progress = p.daily_progress or {}
+        p.daily_progress["mines"] = True
         return p.balance
 
     try:
@@ -4855,7 +7512,7 @@ async def _mines_start_game(update, context, uid, bet, ctx):
         return
 
     # Генерируем поле и мины
-    field, mines = _generate_mines_field()
+    field, mines = _generate_mines_field(mines_count)
     state = {
         "field": field,
         "mines": list(mines),  # для сериализации
@@ -4863,11 +7520,17 @@ async def _mines_start_game(update, context, uid, bet, ctx):
         "step": 0,
         "multiplier": 1.0,
         "status": "playing",
-        "created_at": time.time()
+        "created_at": time.time(),
+        # Захвачен на старте партии — рендер поля не должен ходить в БД за
+        # игроком на каждый клик ради одной цифры; сравнение «побит ли
+        # рекорд» и запись новой в players.mines_best_step происходят только
+        # один раз, на завершающем экране партии (см. _win/_cash/_record).
+        "best_step": player.mines_best_step or 0,
     }
     redis_key = f"mines_game:{uid}"
     await _mines_state_set(ctx, uid, state)
     await _mines_show_field(update, context, state, redis_key, uid, ctx)
+
 
 async def _mines_show_field(update, context, state, redis_key, uid, ctx):
     """Отображает текущее состояние поля."""
@@ -4875,74 +7538,141 @@ async def _mines_show_field(update, context, state, redis_key, uid, ctx):
     if not query:
         return
     field = state["field"]
-    mines = set(state["mines"])
     bet = state["bet"]
     step = state["step"]
     multiplier = state["multiplier"]
     status = state["status"]
+    mines_count = len(state.get("mines") or [])
+    total_safe = MINES_TOTAL_CELLS - mines_count
+    preset = _mines_preset_for(mines_count)
+    best = state.get("best_step", 0)
+    size = MINES_GRID_SIZE
 
-    # Строим визуальное поле
-    size = 5
-    lines = []
-    for r in range(size):
-        row_cells = []
-        for c in range(size):
-            val = field[r][c]
-            if val == 0:
-                row_cells.append("?")
-            elif val == 1:
-                row_cells.append("💎")
-            elif val == 2:
-                row_cells.append("💀")
-        lines.append("│ " + " │ ".join(row_cells) + " │")
-    field_str = "┌───┬───┬───┬───┬───┐\n" + "\n├───┼───┼───┼───┼───┤\n".join(lines) + "\n└───┴───┴───┴───┴───┘"
+    # Было: `int(bet * multiplier) if status == "playing" else 0` — то есть на
+    # экранах «ПОБЕДА» и «Ты забрал выигрыш» печаталось «Выигрыш: 0 OAC», хотя
+    # баланс начислялся верно. Ноль уместен только там, где ставка реально сгорела.
+    win = 0 if status == "lost" else int(bet * multiplier)
 
-    win = int(bet * multiplier) if status == "playing" else 0
-
-    text = (
-        f"💣 **МИНЫ**\n\n"
-        f"💰 Ставка: {bet} OAC\n"
-        f"🏆 Множитель: x{multiplier:.2f}\n"
-        f"📊 Прогресс: {step}/22 клеток\n"
-    )
-
-    if status == "playing":
-        text += f"💰 Возможный выигрыш: {win} OAC\n\n"
-        text += f"```\n{field_str}\n```\n"
-        # Клавиатура с клетками
-        keyboard = []
+    # Сетка — единственный источник правды: эмодзи прямо на кнопках (Bot API
+    # с 2022 умеет эмодзи-текст на inline-кнопках), без отдельного ASCII-поля
+    # текстом рядом. Раньше это были два независимых изображения одного и
+    # того же состояния — лишняя когнитивная нагрузка на сверку (Sweller,
+    # 1988) без единой практической пользы.
+    def _build_grid():
+        rows = []
         for r in range(size):
             row_btns = []
             for c in range(size):
-                if field[r][c] == 0:
+                val = field[r][c]
+                if val == 0:
                     row_btns.append(InlineKeyboardButton("▪️", callback_data=f"mines_open_{r}_{c}"))
+                elif val == 1:
+                    row_btns.append(InlineKeyboardButton("💎", callback_data="noop"))
                 else:
-                    row_btns.append(InlineKeyboardButton("  ", callback_data="noop"))
-            keyboard.append(row_btns)
-        keyboard.append([InlineKeyboardButton(f"🏆 Забрать {win} OAC", callback_data="mines_cashout")])
-        keyboard.append([InlineKeyboardButton("🔙 В меню", callback_data="luck")])
+                    row_btns.append(InlineKeyboardButton("💀", callback_data="noop"))
+            rows.append(row_btns)
+        return rows
+
+    if status == "playing":
+        risk_pct = _mines_next_risk_pct(mines_count, step)
+        filled = min(10, risk_pct // 10)
+        risk_bar = "▓" * filled + "░" * (10 - filled)
+        record_line = ""
+        if step > 0:
+            if step > best:
+                record_line = "\n🏅 <b>Новый рекорд прямо сейчас!</b>"
+            elif best:
+                record_line = f"\n🏅 Рекорд: {best} · до него {best - step} клет."
+        text = (
+            f"💣 <b>МИНЫ</b> · {preset['emoji']} {preset['name']}\n\n"
+            f"💰 Ставка: {bet} OAC\n"
+            f"📊 Открыто: {step} / {total_safe}\n"
+            f"🏆 Множитель: ×{multiplier:.2f}\n"
+            f"💎 Заберёшь сейчас: {win} OAC\n\n"
+            f"⚠️ Шанс взрыва на след. шаге: {risk_pct}%\n"
+            f"{risk_bar} риск"
+            f"{record_line}"
+        )
+        keyboard = _build_grid()
+        keyboard.append([_btn(f"🏆 Забрать {win} OAC", callback_data="mines_cashout", style="success")])
+        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="luck")])
+
     elif status == "won":
-        text += f"🎉 **ПОБЕДА!** Ты открыл все клетки!\n"
-        text += f"💰 Выигрыш: {win} OAC\n\n```\n{field_str}\n```"
-        keyboard = [[InlineKeyboardButton("💣 Новая игра", callback_data="mines_bet_50")],
-                    [InlineKeyboardButton("🔙 В меню", callback_data="luck")]]
+        text = (
+            f"💣 <b>МИНЫ</b> · {preset['emoji']} {preset['name']}\n\n"
+            f"🎉 <b>ПОБЕДА! Поле зачищено полностью!</b>\n"
+            f"💰 Ставка: {bet} OAC · ×{multiplier:.2f}\n"
+            f"💰 Выигрыш: <b>{win} OAC</b>\n\n"
+            f"🏅 Новый рекорд глубины: {step} клеток!"
+        )
+        keyboard = [
+            [_btn(f"🔥 Ещё раз · {bet} OAC", callback_data=f"mines_bet_{mines_count}_{bet}", style="primary")],
+            [InlineKeyboardButton("🎚 Другая интенсивность", callback_data="mines_preset_menu")],
+            [InlineKeyboardButton("🔙 Назад", callback_data="luck")],
+        ]
+
     elif status == "lost":
-        text += f"💥 **ВЗРЫВ!** Ты попал на мину!\n"
+        # Раскрываем ВСЕ мины на проигрыше — честное закрытие партии: игрок
+        # видит расклад целиком, а не только точку смерти.
+        for (mr, mc) in _mines_positions(state):
+            if field[mr][mc] == 0:
+                field[mr][mc] = 2
+
         if step >= 1:
             almost = int(bet * multiplier)
-            text += f"😱 Так близко! Открыто {step}/22 — ты мог забрать {almost} OAC (x{multiplier:.2f}).\n"
-            text += f"💰 Ставка сгорела. Ещё один шаг — и куш был бы твой.\n\n```\n{field_str}\n```"
+            next_mult = _calc_multiplier(mines_count, step + 1)
+            next_win = int(bet * next_mult) if step + 1 <= total_safe else None
+            near_miss = (
+                f"😱 <b>ТАК БЛИЗКО!</b> 😱\n\n"
+                f"💎 У тебя на руках было ×{multiplier:.2f} → <b>{almost} OAC</b>\n"
+            )
+            if next_win is not None:
+                near_miss += f"🔥 Ещё один шаг — и ×{next_mult:.2f} → <b>{next_win} OAC</b>\n"
+            near_miss += "💣 Мина ждала ровно там. Ставка сгорела."
         else:
-            text += f"💰 Ты потерял ставку.\n\n```\n{field_str}\n```"
-        keyboard = [[InlineKeyboardButton("💣 Попробовать снова", callback_data="mines_bet_50")],
-                    [InlineKeyboardButton("🔙 В меню", callback_data="luck")]]
-    else:  # cashed_out
-        text += f"✅ **Ты забрал выигрыш!**\n"
-        text += f"💰 Выигрыш: {win} OAC\n\n```\n{field_str}\n```"
-        keyboard = [[InlineKeyboardButton("💣 Новая игра", callback_data="mines_bet_50")],
-                    [InlineKeyboardButton("🔙 В меню", callback_data="luck")]]
+            # Практически недостижимо (первый клик партии гарантированно
+            # безопасен, см. _mines_open_cell) — оставлено как честный фолбэк.
+            near_miss = "💰 Ты потерял ставку."
 
-    await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+        if best > step:
+            gap = best - step
+            pct = int(step / best * 100) if best else 0
+            bar = "▓" * (pct // 10) + "░" * (10 - pct // 10)
+            record_line = f"\n\n🏅 Рекорд: {best} клеток · сейчас {step}\n{bar} до рекорда — {gap} клет."
+        else:
+            record_line = f"\n\n🏅 <b>Новый рекорд! Было {best}, стало {step}</b>"
+
+        text = f"💥💥💥 <b>ВЗРЫВ</b> 💥💥💥\n\n{near_miss}{record_line}"
+        keyboard = [
+            [_btn(f"🔥 Ещё раз · {bet} OAC", callback_data=f"mines_bet_{mines_count}_{bet}", style="primary")],
+            [InlineKeyboardButton("🎚 Другая интенсивность", callback_data="mines_preset_menu")],
+            [InlineKeyboardButton("🔙 Назад", callback_data="luck")],
+        ]
+
+    else:  # cashed_out
+        if step > best:
+            record_line = f"🏅 <b>Новый рекорд! Было {best} → стало {step}</b>"
+        elif best:
+            gap = best - step
+            pct = int(step / best * 100) if best else 0
+            bar = "▓" * (pct // 10) + "░" * (10 - pct // 10)
+            record_line = f"🏅 Рекорд остаётся {best}\n{bar} до него — {gap} клет."
+        else:
+            record_line = ""
+        text = (
+            f"✅ <b>ЗАБРАЛ</b>\n\n"
+            f"💰 <b>+{win} OAC</b> · {step} "
+            f"{_plural_ru(step, 'клетка', 'клетки', 'клеток')} · ×{multiplier:.2f}\n\n"
+            f"{record_line}"
+        )
+        keyboard = [
+            [_btn(f"🔥 Ещё раз · {bet} OAC", callback_data=f"mines_bet_{mines_count}_{bet}", style="primary")],
+            [InlineKeyboardButton("🎚 Другая интенсивность", callback_data="mines_preset_menu")],
+            [InlineKeyboardButton("🔙 Назад", callback_data="luck")],
+        ]
+
+    await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
+
 
 async def _mines_open_cell(update, context, state, redis_key, uid, ctx):
     """Открывает клетку, проверяет мину, обновляет состояние."""
@@ -4961,7 +7691,39 @@ async def _mines_open_cell(update, context, state, redis_key, uid, ctx):
         await query.answer("Эта клетка уже открыта", show_alert=True)
         return
 
-    mines = set(state["mines"])
+    mines_count = len(state.get("mines") or [])
+    mines = _mines_positions(state)
+
+    # Гарантия первого клика: первый тап в партии никогда не мина (конвенция
+    # Сапёра). Это не подкрутка последующих шансов — мина переносится на
+    # случайную ДРУГУЮ ещё закрытую клетку ровно один раз, только пока не
+    # открыто ни одной клетки; дальше игра идёт по тем же честным шансам без
+    # исключений. Устраняет худший возможный первый опыт с новой механикой
+    # (мгновенная потеря до единого сигнала обратной связи) — эффект
+    # первичности делает такой опыт непропорционально вредным для отношения
+    # к механике в целом (Asch, 1946).
+    if state["step"] == 0 and (row, col) in mines:
+        candidates = [(r, c) for r in range(MINES_GRID_SIZE) for c in range(MINES_GRID_SIZE)
+                     if (r, c) != (row, col) and (r, c) not in mines]
+        mines.discard((row, col))
+        mines.add(random.choice(candidates))
+        state["mines"] = list(mines)
+
+    # Пауза-предвкушение — только в зоне настоящей неопределённости (шанс
+    # дожить в диапазоне 35–65%, где дофаминовый ответ на риск максимален,
+    # см. MINES_TENSION_LOW/HIGH выше). На безопасных и на почти безнадёжных
+    # клетках тормозить незачем — там и так всё ясно, задержка была бы
+    # пустым раздражением, не саспенсом (тот же принцип уже применён к
+    # suspense-ревилу джекпота в do_smoke — там тоже только на редком пике).
+    remaining_before = MINES_TOTAL_CELLS - state["step"]
+    survive_chance = (1 - mines_count / remaining_before) if remaining_before > 0 else 0
+    if MINES_TENSION_LOW <= survive_chance <= MINES_TENSION_HIGH:
+        try:
+            await query.message.edit_text(
+                "💣 <b>МИНЫ</b>\n\n🕳️ <i>Тянешься к клетке…</i>", parse_mode='HTML')
+            await asyncio.sleep(MINES_SUSPENSE_DELAY)
+        except Exception:
+            pass
 
     # Проверяем мину
     if (row, col) in mines:
@@ -4970,20 +7732,45 @@ async def _mines_open_cell(update, context, state, redis_key, uid, ctx):
         # Ставка уже списана, ничего не возвращаем
         await _mines_state_set(ctx, uid, state)
         await _mines_show_field(update, context, state, redis_key, uid, ctx)
+        if state["step"] > (state.get("best_step") or 0):
+            async def _record(p, conn):
+                if state["step"] > (p.mines_best_step or 0):
+                    p.mines_best_step = state["step"]
+                return p.mines_best_step
+            try:
+                await ctx.repo.atomic_update(uid, _record)
+            except Exception:
+                logger.exception("Не удалось обновить mines_best_step для %d", uid)
         return
 
     # Безопасная клетка
     field[row][col] = 1
     state["step"] += 1
-    state["multiplier"] = _calc_multiplier(state["step"])
+    state["multiplier"] = _calc_multiplier(mines_count, state["step"])
 
-    # Проверяем победу (все 22 клетки открыты)
-    if state["step"] == 22:
+    total_safe = MINES_TOTAL_CELLS - mines_count
+    if state["step"] == total_safe:
         state["status"] = "won"
-        win = int(state["bet"] * state["multiplier"])
-        # Начисляем выигрыш атомарно
+        bet = state["bet"]
+        win = int(bet * state["multiplier"])
+        # Начисляем выигрыш атомарно. total_earned учитывает НЕТТО-прибыль
+        # (win - bet), а не всю выплату — см. комментарий в _cash ниже (та же
+        # логика, тот же корень бага C10: без вычета ставки статус-ось «заработано
+        # за всё время» накачивалась почти на всю выплату при почти нулевом
+        # реальном доходе, и ранг Некромант обходился в разы дешевле честного пути).
         async def _win(p, conn):
             p.balance += win
+            # atomic_update само добавит +win к total_earned после возврата отсюда
+            # (см. repository.py: _gain = баланс-после − баланс-до). Отняв bet
+            # здесь заранее, получаем net-эффект (win − bet) — ровно ту прибыль,
+            # которую игрок реально получил, а не всю выплату, включая свою же
+            # ставку. Пол в 0 достаточен: ставка уже списана РАНЬШЕ (в отдельном
+            # atomic_update при старте партии) без изменения total_earned, поэтому
+            # слэк (total_earned − balance) на этот момент уже ≥ bet — просадки
+            # ниже баланса не будет, независимый пол в repository.save() не сработает.
+            p.total_earned = max(0, (p.total_earned or 0) - bet)
+            if state["step"] > (p.mines_best_step or 0):
+                p.mines_best_step = state["step"]
             return p.balance
         try:
             await ctx.repo.atomic_update(uid, _win)
@@ -4999,6 +7786,7 @@ async def _mines_open_cell(update, context, state, redis_key, uid, ctx):
     await _mines_state_set(ctx, uid, state)
     await _mines_show_field(update, context, state, redis_key, uid, ctx)
 
+
 async def _mines_cashout(update, context, state, redis_key, uid, ctx):
     """Забирает текущий выигрыш."""
     query = update.callback_query
@@ -5011,21 +7799,47 @@ async def _mines_cashout(update, context, state, redis_key, uid, ctx):
         await query.answer("Нужно открыть хотя бы одну клетку", show_alert=True)
         return
 
-    win = int(state["bet"] * state["multiplier"])
-    # Начисляем выигрыш
+    bet = state["bet"]
+    win = int(bet * state["multiplier"])
+
+    # Партию закрываем ДО начисления. Раньше статус проставлял вызывающий
+    # (_mines_cashout_wrapper) уже ПОСЛЕ выплаты — между проверкой «status ==
+    # playing» и записью статуса помещался второй тап (каждый апдейт исполняется
+    # отдельной задачей, rate_limit на кэшауте нет), и одна ставка оплачивалась
+    # дважды. Теперь окно закрыто: второй тап видит "cashed_out" и выходит.
+    state["status"] = "cashed_out"
+    await _mines_state_set(ctx, uid, state)
+
     async def _cash(p, conn):
         p.balance += win
+        # См. подробный комментарий в _win (та же правка, та же причина C10):
+        # засчитываем в total_earned net-прибыль (win − bet), а не всю выплату.
+        p.total_earned = max(0, (p.total_earned or 0) - bet)
+        if state["step"] > (p.mines_best_step or 0):
+            p.mines_best_step = state["step"]
         return p.balance
     try:
         await ctx.repo.atomic_update(uid, _cash)
     except Exception as e:
         logger.error(f"Ошибка кэшаута {win} у {uid}: {e}")
+        # Выплата не прошла — возвращаем партию в игру, иначе ставка сгорает молча.
+        state["status"] = "playing"
+        await _mines_state_set(ctx, uid, state)
         await query.answer("Ошибка при выводе", show_alert=True)
         return
+
+    await _mines_show_field(update, context, state, redis_key, uid, ctx)
+
 
 async def _mines_open_cell_wrapper(update, context):
     # Извлекаем uid и данные из callback_data, затем вызываем основную функцию
     query = update.callback_query
+    # Баг: ни этот враппер, ни _mines_open_cell дальше по цепочке нигде не
+    # звали query.answer() на успешном пути (только на паре ошибочных веток).
+    # Это САМЫЙ частый тап во всей игре — каждая открытая клетка Мин — и
+    # каждый такой тап оставлял кнопку крутиться до таймаута Telegram.
+    # Двойной answer() безопасен — та же схема уже в _mines_bet_wrapper ниже.
+    await query.answer()
     uid = query.from_user.id
     ctx = context.bot_data.get("ctx")
     redis_key = f"mines_game:{uid}"
@@ -5037,6 +7851,7 @@ async def _mines_open_cell_wrapper(update, context):
 
 async def _mines_cashout_wrapper(update, context):
     query = update.callback_query
+    await query.answer()
     uid = query.from_user.id
     ctx = context.bot_data.get("ctx")
     redis_key = f"mines_game:{uid}"
@@ -5044,33 +7859,61 @@ async def _mines_cashout_wrapper(update, context):
     if not state:
         await query.answer("Игра не найдена.", show_alert=True)
         return
+    # Закрытие партии и перерисовка живут ВНУТРИ _mines_cashout. Раньше они
+    # стояли здесь и выполнялись даже при раннем выходе: тап «Забрать» с нулём
+    # открытых клеток выдавал алерт «нужно открыть хотя бы одну» и тут же
+    # добивал партию статусом cashed_out — ставка сгорала без единой клетки.
     await _mines_cashout(update, context, state, redis_key, uid, ctx)
 
-    state["status"] = "cashed_out"
-    await _mines_state_set(ctx, uid, state)
-    await _mines_show_field(update, context, state, redis_key, uid, ctx)
 
-
-async def _mines_bet_wrapper(update, context):
-    """Клик по кнопке ставки в минах: списывает ставку и стартует игру.
-
-    Раньше callback 'mines_bet_<n>' не был зарегистрирован ни в одном реестре,
-    поэтому выбор ставки выдавал «Неизвестная команда» и мины были непроходимы.
-    """
+async def _mines_preset_wrapper(update, context):
+    """Клик по кнопке интенсивности: показывает выбор ставки для неё."""
     query = update.callback_query
     await query.answer()
     ctx = context.bot_data.get("ctx")
     uid = query.from_user.id
     try:
-        bet = int(query.data.split("_")[-1])
+        mines_count = int(query.data.split("_")[-1])
     except (ValueError, AttributeError):
+        await query.answer("Некорректная интенсивность", show_alert=True)
+        return
+    player = await ctx.repo.get_by_id(uid)
+    if not player or not player.exists:
+        await query.answer("Профиль не найден.", show_alert=True)
+        return
+    await _show_mines_bet_menu(update, context, player, mines_count)
+
+
+async def _mines_preset_menu_wrapper(update, context):
+    """Кнопка «Другая интенсивность»: возврат к выбору из четырёх пресетов."""
+    query = update.callback_query
+    await query.answer()
+    ctx = context.bot_data.get("ctx")
+    uid = query.from_user.id
+    player = await ctx.repo.get_by_id(uid)
+    if not player or not player.exists:
+        await query.answer("Профиль не найден.", show_alert=True)
+        return
+    await _show_mines_preset_menu(update, context, player)
+
+
+async def _mines_bet_wrapper(update, context):
+    """Клик по кнопке ставки в минах: списывает ставку и стартует игру."""
+    query = update.callback_query
+    await query.answer()
+    ctx = context.bot_data.get("ctx")
+    uid = query.from_user.id
+    try:
+        parts = query.data.split("_")
+        mines_count, bet = int(parts[-2]), int(parts[-1])
+    except (ValueError, AttributeError, IndexError):
         await query.answer("Некорректная ставка", show_alert=True)
         return
-    await _mines_start_game(update, context, uid, bet, ctx)
+    await _mines_start_game(update, context, uid, mines_count, bet, ctx)
 
 # ── Алхимия (начало) ────────────────────────────────────────
 async def _process_alchemy_start(update, context, player, cfg):
-    if not has_rank(player.balance, "Ветеран"):
+    if not has_rank(player.total_earned or 0, "Ветеран"):
         await _notify_user(update, context, f"❌ Доступно с ранга ⚔️ Ветеран ({GAME_CONFIG['veteran_threshold']} OAC 🍬)", show_alert=True)
         return
     text = (
@@ -5102,6 +7945,10 @@ async def _process_alchemy_confirm(update, context, uid, player, cfg, ctx):
             return (AlchemyResult.NO_RESOURCES,)
         p.blunts -= cfg["alchemy"]["cost_blunts"]
         p.balance -= cfg["alchemy"]["cost_oac"]
+        # Счётчик не инкрементировался НИГДЕ: ачивки alchemy_15/alchemy_50 были
+        # недостижимы, а из-за них недостижим и «🌀 Лунный лорд» — приз за
+        # закрытие ВСЕХ достижений. Высшая цель игры была заперта навсегда.
+        p.alchemy_count = (p.alchemy_count or 0) + 1
         r = random.random()
         res = ""
         for prob, effect, value in cfg["alchemy"]["reactions"]:
@@ -5111,7 +7958,12 @@ async def _process_alchemy_confirm(update, context, uid, player, cfg, ctx):
                     res = f"<b>💠 {'Чистая' if value==1 else 'Мерцающая'} Пыльца!</b>\n\n+{value} Кристальной Пыли"
                 elif effect == "legendary":
                     name = random.choice(cfg["alchemy"]["legendary_names"])
-                    await create_named_blunt(uid, name, rarity="legendary", conn=conn)
+                    # Без ctx здесь падал ValueError внутри транзакции: главный
+                    # приз алхимии — «Философский Камень» — не выдавался никогда,
+                    # а откат съедал и списанные бланты, и счётчик попыток.
+                    # Соседний путь (5029) уже вызывает правильно — эта копия отстала.
+                    await create_named_blunt(uid, name, rarity="legendary",
+                                             conn=conn, ctx=ctx, player=p)
                     res = f"<b>🌟 Философский Камень!</b>\n\nЛегендарный блант «{name}»!"
                 else:
                     res = "<b>🌫️ Грязный Выхлоп...</b>\n\nБланты сгорели без следа."
@@ -5135,8 +7987,23 @@ async def _process_alchemy_confirm(update, context, uid, player, cfg, ctx):
         await _notify_user(update, context, "❌ Недостаточно ресурсов. Нужно 10 блантов и 250 OAC.", show_alert=True)
         return
 
+    # Подвеска ожидания ДО раскрытия — см. _suspense_reveal у Колеса. Исход
+    # уже определён (result выше), кадры — тот же ▓░-бар, что и везде в
+    # игре (медали/ранги/серия), а не новый визуальный язык с нуля.
+    await _suspense_reveal(
+        update, context,
+        frames=["<b>⚗️ Реакция кипит...</b>\n\n🧪 ▓░░░░",
+                "<b>⚗️ Реакция кипит...</b>\n\n🧪 ▓▓▓░░",
+                "<b>⚗️ Реакция кипит...</b>\n\n🧪 ▓▓▓▓▓",
+                "<b>⚗️ Котёл готов раскрыть тайну...</b>"],
+    )
+
     await edit_or_reply(update, context, data[0],
-                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="luck")]]))
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🎲 Зал Удачи", callback_data="luck")]]))
+    # alchemy_count растёт именно тут — «alchemy_15»/«alchemy_50» (и через них
+    # «Лунный лорд») раньше ждали случайного следующего фарма/крафта вместо
+    # срабатывания в момент самой алхимии — самого дорогого веторан-ритуала.
+    await check_achievements(uid, context, ctx=ctx)
 
 # /check
 async def check_blunt(update, context):
@@ -5151,12 +8018,22 @@ async def check_blunt(update, context):
             await update.message.reply_text("🕳️ Блант с таким серийным номером не найден.")
             return
         if len(rows) > 1:
-            await update.message.reply_text("⚠️ Найдено несколько блантов с таким номером, обратитесь к администратору.")
+            await update.message.reply_text("⚠️ Найдено несколько блантов с таким номером, напиши администратору.")
             return
         row = rows[0]
     blunt_id, creator_id, serial, rare_number = row["blunt_id"], row["created_by"], row["serial"], row["rare_number"]
     async with ctx.db_pool.acquire() as conn:
-        rows = await conn.fetch("SELECT user_id, inventory FROM players WHERE inventory LIKE $1", f"%{blunt_id}%")
+        # LIKE на JSONB-колонке — оператор, которого у jsonb вообще нет
+        # («operator does not exist: jsonb ~~ unknown»): запрос падал
+        # исключением при КАЖДОМ вызове (даже когда номер реально в реестре),
+        # и /check неизменно отвечал «внутренняя ошибка». jsonb_array_elements
+        # разворачивает массив инвентаря и ищет точное совпадение id — корректно
+        # и без риска ложных срабатываний от LIKE по подстроке.
+        rows = await conn.fetch(
+            "SELECT user_id, inventory FROM players "
+            "WHERE EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(inventory, '[]'::jsonb)) elem "
+            "WHERE elem->>'id' = $1)",
+            blunt_id)
         owner_id = None; item = None
         for user_row in rows:
             try:
@@ -5181,15 +8058,75 @@ async def check_blunt(update, context):
             details += f"   @{entry.get('user_id','?')} — {date_str}\n"
     await update.message.reply_text(details, parse_mode='HTML')
 
-    # Обновляем счётчик проверок через модель
-    player = await ctx.repo.get_by_id(update.effective_user.id)
-    if player:
-        player.check_count = (player.check_count or 0) + 1
-        await ctx.repo.save(player)
+    # Обновляем счётчик проверок атомарно (raw save() поверх снимка, который
+    # мог устареть за время сетевого похода в реестр, рисковал затереть
+    # конкурентные изменения того же игрока — тот же класс «потерянного
+    # апдейта», что уже пофикшен в других местах кодовой базы).
+    async def _inc_check(p, conn):
+        p.check_count = (p.check_count or 0) + 1
+        return p.check_count
+    await ctx.repo.atomic_update(update.effective_user.id, _inc_check)
+    await check_achievements(update.effective_user.id, context, ctx=ctx)
 
 # ============================================================
 # ЛАБИРИНТ ИСКАЖЕНИЯ — ИТОГОВАЯ СЕНЬОР-ВЕРСИЯ (ПОЛНАЯ ЗАМЕНА)
 # ============================================================
+
+
+# ─── ПЕРСИСТЕНТНОЕ СОСТОЯНИЕ ЛАБИРИНТА ───────────────────────────
+# Забег — ценный оплаченный контент, поэтому его состояние живёт в БД, а
+# context.user_data служит только быстрым представлением текущего снимка.
+LAB_STATE_KEYS = (
+    "lab_room", "lab_hp", "lab_max_hp", "lab_focus", "lab_rewards", "lab_depth",
+    "lab_total_rooms", "lab_attack_bonus", "lab_focused_attack", "lab_curse_rooms",
+    "lab_amulet", "lab_current_room", "lab_turn", "lab_phase", "lab_msg_id", "lab_chat_id",
+)
+
+
+def _lab_room_for_depth(depth: int) -> dict:
+    """Создаёт комнату в момент входа в неё, а не при каждом рендере."""
+    room = copy.deepcopy(random.choice(LABYRINTH_ROOMS))
+    risk_mult = 1.0 + (depth - 1) * 0.05
+    reward_mult = 1.0 + (depth - 1) * 0.10
+    attack = room["actions"]["attack"]
+    attack["risks"] = [min(0.95, risk * risk_mult) for risk in attack["risks"]]
+    attack["rewards"] = [
+        (int(low * reward_mult), int(high * reward_mult))
+        for low, high in attack["rewards"]
+    ]
+    return room
+
+
+def _lab_hydrate_context(context, state: dict) -> None:
+    """Копирует полный снимок БД в локальное представление текущего апдейта."""
+    for key in LAB_STATE_KEYS:
+        context.user_data.pop(key, None)
+    for key in LAB_STATE_KEYS:
+        if key in state:
+            context.user_data[key] = copy.deepcopy(state[key])
+
+
+def _lab_state_from_context(context) -> dict:
+    """Собирает сериализуемое игровое состояние без Telegram-объектов."""
+    return {
+        key: copy.deepcopy(context.user_data[key])
+        for key in LAB_STATE_KEYS
+        if key in context.user_data
+    }
+
+
+async def _lab_store_message_ref(ctx, uid: int, context) -> None:
+    """Сохраняет ссылку на активный экран, чтобы рестарт не плодил сообщения."""
+    snapshot = _lab_state_from_context(context)
+
+    async def _set_ref(state, conn):
+        state.update(snapshot)
+        return True
+
+    result = await ctx.repo.atomic_mutate_lab_run(uid, _set_ref)
+    if result:
+        _unused, state = result
+        _lab_hydrate_context(context, state)
 
 
 # ─── ВХОД В ЛАБИРИНТ ────────────────────────────────────────
@@ -5198,8 +8135,25 @@ async def lab_enter(update, context):
     user, msg = get_user_and_msg(update)
     uid = user.id
     player = await ctx.repo.get_by_id(uid)
-    if not player:
+    # Было `if not player: return` — самый тихий вариант того же бага, что и
+    # в guild_info_callback/privilege_callback/luck_callback: условие никогда
+    # не срабатывало (get_by_id не возвращает None), а незнакомец, набравший
+    # /lab или "лабиринт" без /start, не только видел полный экран входа —
+    # при полной тишине (не «профиль не найден», а буквально НИЧЕГО) не имел
+    # даже намёка, что пошло не так, и мог начать забег в user_data для
+    # аккаунта, которого нет в БД.
+    if not player or not player.exists:
+        await _notify_user(update, context, "Сначала активируйся: /start")
         return
+
+    # Активный забег имеет приоритет над кулдауном: попытка уже списана, а
+    # игрок должен продолжить ровно тот же путь после рестарта или возврата.
+    active_run = await ctx.repo.get_lab_run(uid)
+    if active_run:
+        _lab_hydrate_context(context, active_run)
+        await show_lab_room(update, context)
+        return
+
     depth = player.lab_depth or 1
     now = datetime.now()
     last = player.last_lab_attempt
@@ -5225,7 +8179,13 @@ async def lab_enter(update, context):
         f"💀 Смертей: {player.lab_deaths}\n\n"
         f"🔮 <i>\"Ты стоишь у входа...\"</i> 🎁\n\n"
         f"<b>💎 1 попытка</b>\n"
-        f"<b>⛓️‍💥 2 жизни</b>\n"
+        # Было «2 жизни» — обещание, которого нет в самой механике: забег
+        # ведёт ОДИН пул HP (100, см. show_lab_room/handle_lab_option), без
+        # второй жизни или возрождения. На словах — щедрость, на деле —
+        # разрыв между обещанным и прожитым РОВНО в момент первой смерти
+        # (худшая точка для открытия обмана: пик разочарования). Честная
+        # цифра — та же, что игрок увидит в первой же комнате.
+        f"<b>❤️ 100 HP</b>\n"
         f"<b>🗝️ Комнат: {total_rooms}</b>"
     )
     kb = InlineKeyboardMarkup([
@@ -5241,40 +8201,47 @@ async def lab_enter_confirm(update, context):
     await query.answer()
     uid = query.from_user.id
     player = await ctx.repo.get_by_id(uid)
-    depth = player.lab_depth or 1 if player else 1
+    if not player or not player.exists:
+        await query.answer("Сначала активируйся: /start", show_alert=True)
+        return
+
+    depth = player.lab_depth or 1
     total_rooms = 4 + depth
     now = datetime.now()
+    initial_state = {
+        "lab_room": 1,
+        "lab_hp": 100,
+        "lab_max_hp": 100,
+        "lab_focus": 3,
+        "lab_rewards": [],
+        "lab_depth": depth,
+        "lab_total_rooms": total_rooms,
+        "lab_attack_bonus": 0.0,
+        "lab_focused_attack": False,
+        "lab_curse_rooms": 0,
+        "lab_amulet": False,
+        "lab_current_room": _lab_room_for_depth(depth),
+        # Монотонный ход защищает от повторной доставки старой кнопки.
+        "lab_turn": 1,
+        "lab_phase": "active",
+    }
 
     async def _mark_lab(p, conn):
         p.last_lab_attempt = now
-        # Отмечаем задание квеста «Лабиринт» (раньше не трекалось → глава 2
-        # была непроходима)
         p.daily_progress = p.daily_progress or {}
         p.daily_progress["lab"] = True
         return True
-    await ctx.repo.atomic_update(uid, _mark_lab)
 
-    context.user_data["lab_room"] = 1
-    context.user_data["lab_hp"] = 100
-    context.user_data["lab_max_hp"] = 100
-    context.user_data["lab_focus"] = 3
-    context.user_data["lab_rewards"] = []
-    context.user_data["lab_depth"] = depth
-    context.user_data["lab_total_rooms"] = total_rooms
-    context.user_data["lab_attack_bonus"] = 0.0
-    context.user_data["lab_focused_attack"] = False
-    context.user_data["lab_curse_rooms"] = 0
+    status, payload = await ctx.repo.atomic_start_lab_run(uid, initial_state, _mark_lab)
+    if status == "player_missing":
+        await query.answer("Профиль не найден.", show_alert=True)
+        return
+    if status == "already_active":
+        _lab_hydrate_context(context, payload)
+        await show_lab_room(update, context)
+        return
 
-    if ctx.redis:
-        state = {k: context.user_data[k] for k in (
-            "lab_room","lab_hp","lab_max_hp","lab_focus","lab_rewards",
-            "lab_depth","lab_total_rooms","lab_attack_bonus",
-            "lab_focused_attack","lab_curse_rooms"
-        )}
-        await redis.setex(f"lab_state:{uid}", 3600, json.dumps(state, default=str))
-
-    room = random.choice(LABYRINTH_ROOMS)
-    context.user_data["lab_current_room"] = room
+    _lab_hydrate_context(context, initial_state)
     await show_lab_room(update, context)
 
 # ─── ОТОБРАЖЕНИЕ КОМНАТЫ ─────────────────────────────────────
@@ -5285,24 +8252,28 @@ async def show_lab_room(update, context):
     max_hp = context.user_data.get("lab_max_hp", 100)
     focus = context.user_data.get("lab_focus", 3)
     total_rooms = context.user_data.get("lab_total_rooms", 5)
-    depth = context.user_data.get("lab_depth", 1)
     attack_bonus = context.user_data.get("lab_attack_bonus", 0.0)
     focused = context.user_data.get("lab_focused_attack", False)
     curse = context.user_data.get("lab_curse_rooms", 0)
 
-    if room_index > total_rooms:
+    phase = context.user_data.get("lab_phase", "active")
+    if phase == "death":
+        await show_lab_death(update, context)
+        return
+    if phase == "final" or room_index > total_rooms:
         await show_lab_final(update, context)
         return
+    if phase != "active":
+        await _notify_user(update, context, "⚠️ Забег повреждён. Новая попытка не списана.")
+        return
 
-    # масштабирование комнаты под глубину
-    base_room = random.choice(LABYRINTH_ROOMS)
-    room = copy.deepcopy(base_room)
-    risk_mult = 1.0 + (depth - 1) * 0.05
-    reward_mult = 1.0 + (depth - 1) * 0.10
-    atk = room["actions"]["attack"]
-    atk["risks"] = [min(0.95, r * risk_mult) for r in atk["risks"]]
-    atk["rewards"] = [(int(lo * reward_mult), int(hi * reward_mult)) for lo, hi in atk["rewards"]]
-    context.user_data["lab_current_room"] = room
+    # Комната создаётся только в момент перехода. Повторный рендер не вправе
+    # менять описание, риски или награды уже начатой комнаты.
+    room = context.user_data.get("lab_current_room")
+    if not isinstance(room, dict):
+        await _notify_user(update, context, "⚠️ Забег повреждён. Мы не списали новую попытку — открой Лабиринт ещё раз.")
+        return
+    turn = int(context.user_data.get("lab_turn", 1) or 1)
 
     # прогресс-бар здоровья
     hp_percent = int(hp / max_hp * 10)
@@ -5327,23 +8298,23 @@ async def show_lab_room(update, context):
     if curse > 0:
         text += f"\n🌑 <b>Порча:</b> риск повышен (ещё {curse} комн.)"
     if hp < 30:
-        text += "\n⚠️ <b>Вы тяжело ранены! Действия опаснее</b>"
+        text += "\n⚠️ <b>Ты тяжело ранен! Действия опаснее</b>"
 
     # кнопки
     kb_rows = []
     atk = room["actions"]["attack"]
     kb_rows.append([
-        InlineKeyboardButton(f"⚔️ 🟢 (-{atk['costs'][0]} hp)", callback_data="lab_attack_0"),
-        InlineKeyboardButton(f"⚔️ 🟡 (-{atk['costs'][1]} hp)", callback_data="lab_attack_1"),
-        InlineKeyboardButton(f"⚔️ 🔴 (-{atk['costs'][2]} hp)", callback_data="lab_attack_2")
+        InlineKeyboardButton(f"⚔️ 🟢 (-{atk['costs'][0]} hp)", callback_data=f"lab_attack_{turn}_0"),
+        InlineKeyboardButton(f"⚔️ 🟡 (-{atk['costs'][1]} hp)", callback_data=f"lab_attack_{turn}_1"),
+        InlineKeyboardButton(f"⚔️ 🔴 (-{atk['costs'][2]} hp)", callback_data=f"lab_attack_{turn}_2")
     ])
     sp = room["actions"]["special"]
-    kb_rows.append([InlineKeyboardButton(f"{sp['name']} (-{sp['cost']} hp)", callback_data="lab_special")])
+    kb_rows.append([InlineKeyboardButton(f"{sp['name']} (-{sp['cost']} hp)", callback_data=f"lab_special_{turn}")])
 
     if focus > 0 and not focused:
-        kb_rows.append([InlineKeyboardButton("🌀 Сконцентрироваться (1⚡)", callback_data="lab_focus_use")])
+        kb_rows.append([InlineKeyboardButton("🌀 Сконцентрироваться (1⚡)", callback_data=f"lab_focus_use_{turn}")])
 
-    kb_rows.append([InlineKeyboardButton("🏃 Бежать (бесплатно)", callback_data="lab_escape")])
+    kb_rows.append([InlineKeyboardButton("🏃 Бежать (бесплатно)", callback_data=f"lab_escape_{turn}")])
 
     chat_id = context.user_data.get("lab_chat_id")
     msg_id = context.user_data.get("lab_msg_id")
@@ -5358,204 +8329,236 @@ async def show_lab_room(update, context):
             query = update.callback_query
             if query:
                 await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
+                context.user_data["lab_msg_id"] = query.message.message_id
+                context.user_data["lab_chat_id"] = query.message.chat.id
+                await _lab_store_message_ref(ctx, update.effective_user.id, context)
     else:
         query = update.callback_query
+        if not query or not query.message:
+            await _notify_user(update, context, "⚠️ Не удалось открыть экран Лабиринта. Повтори вход — забег сохранён.")
+            return
         lab_msg = await query.message.reply_text(text, reply_markup=kb, parse_mode='HTML')
         context.user_data["lab_msg_id"] = lab_msg.message_id
         context.user_data["lab_chat_id"] = lab_msg.chat.id
+        await _lab_store_message_ref(ctx, update.effective_user.id, context)
 
 
 # ─── ОБРАБОТКА ДЕЙСТВИЙ ──────────────────────────────────────
+def _parse_lab_action(data: str):
+    """Разбирает одноразовую кнопку Лабиринта: (turn, action, level|None)."""
+    parts = (data or "").split("_")
+    try:
+        if len(parts) == 4 and parts[:2] == ["lab", "attack"]:
+            return int(parts[2]), "attack", int(parts[3])
+        if len(parts) == 3 and parts[:2] == ["lab", "special"]:
+            return int(parts[2]), "special", None
+        if len(parts) == 4 and parts[:3] == ["lab", "focus", "use"]:
+            return int(parts[3]), "focus", None
+        if len(parts) == 3 and parts[:2] == ["lab", "escape"]:
+            return int(parts[2]), "escape", None
+    except ValueError:
+        pass
+    return None
+
+
+def _lab_advance_room(state: dict) -> str:
+    """Завершает текущую комнату и создаёт следующую ровно один раз."""
+    state["lab_room"] = int(state.get("lab_room", 1) or 1) + 1
+    state["lab_turn"] = int(state.get("lab_turn", 1) or 1) + 1
+    if state["lab_room"] > int(state.get("lab_total_rooms", 0) or 0):
+        state["lab_phase"] = "final"
+        return "final"
+    state["lab_current_room"] = _lab_room_for_depth(int(state.get("lab_depth", 1) or 1))
+    return "active"
+
+
 async def handle_lab_option(update, context):
     query = update.callback_query
-    data = query.data
     await query.answer()
-
-    hp = context.user_data.get("lab_hp", 100)
-    focus = context.user_data.get("lab_focus", 3)
-    max_hp = context.user_data.get("lab_max_hp", 100)
-    room = context.user_data.get("lab_current_room")
-    if not room:
+    parsed = _parse_lab_action(query.data)
+    if not parsed:
+        await query.answer("Этот экран устарел. Открой Лабиринт ещё раз.", show_alert=True)
+        return
+    expected_turn, action, level = parsed
+    ctx = context.application.bot_data.get("ctx")
+    uid = query.from_user.id
+    if not ctx:
+        await query.answer("Бот инициализируется. Попробуй позже.", show_alert=True)
         return
 
-    # ─── КОНЦЕНТРАЦИЯ ───
-    if data == "lab_focus_use":
-        if focus <= 0:
-            await query.answer("Нет фокуса.", show_alert=True)
-            return
-        if context.user_data.get("lab_focused_attack", False):
-            await query.answer("Уже сконцентрированы.", show_alert=True)
-            return
-        context.user_data["lab_focus"] = focus - 1
-        context.user_data["lab_focused_attack"] = True
-        await query.answer("Концентрация! Следующая атака будет успешной.")
+    async def _apply(state, conn):
+        if state.get("lab_phase", "active") != "active":
+            return ("stale", "Забег уже завершён.")
+        if int(state.get("lab_turn", 1) or 1) != expected_turn:
+            return ("stale", "Эта кнопка уже отработала. Открой текущий экран.")
+
+        hp = int(state.get("lab_hp", 100) or 0)
+        max_hp = int(state.get("lab_max_hp", 100) or 100)
+        focus = int(state.get("lab_focus", 3) or 0)
+        room = state.get("lab_current_room")
+        if not isinstance(room, dict):
+            state["lab_phase"] = "corrupt"
+            return ("corrupt", "Состояние комнаты повреждено.")
+
+        if action == "focus":
+            if focus <= 0:
+                return ("blocked", "Нет фокуса.")
+            if state.get("lab_focused_attack", False):
+                return ("blocked", "Ты уже сконцентрирован.")
+            state["lab_focus"] = focus - 1
+            state["lab_focused_attack"] = True
+            state["lab_turn"] = expected_turn + 1
+            return ("active", "Концентрация! Следующая атака будет успешной.")
+
+        if action == "attack":
+            attack = room["actions"]["attack"]
+            if level not in (0, 1, 2):
+                return ("blocked", "Неизвестный уровень атаки.")
+            cost = int(attack["costs"][level])
+            if hp < cost:
+                return ("blocked", "Недостаточно HP.")
+            hp -= cost
+            risk = float(attack["risks"][level])
+            if hp < 30:
+                risk += 0.15
+            elif hp < 60:
+                risk += 0.05
+            curse = int(state.get("lab_curse_rooms", 0) or 0)
+            if curse > 0:
+                risk += 0.10
+                state["lab_curse_rooms"] = curse - 1
+            risk = min(0.98, risk)
+
+            if state.get("lab_focused_attack", False):
+                success = True
+                state["lab_focused_attack"] = False
+            else:
+                success = random.random() < risk
+
+            if success:
+                earned = random.randint(*attack["rewards"][level])
+                bonus = float(state.get("lab_attack_bonus", 0.0) or 0.0)
+                if bonus > 0:
+                    earned = int(earned * (1 + bonus))
+                    state["lab_attack_bonus"] = 0.0
+                state.setdefault("lab_rewards", []).append(earned)
+                message = f"Успех! +{earned} OAC"
+            elif state.get("lab_amulet", False):
+                state["lab_amulet"] = False
+                message = "Амулет защитил тебя! Урон не получен."
+            else:
+                extra = random.randint(5, 15)
+                hp -= extra
+                message = f"Провал! -{cost + extra} HP"
+
+            state["lab_hp"] = max(0, hp)
+            if hp <= 0:
+                state["lab_phase"] = "death"
+                state["lab_turn"] = expected_turn + 1
+                return ("death", message)
+            return (_lab_advance_room(state), message)
+
+        if action == "special":
+            special = room["actions"]["special"]
+            cost = int(special["cost"])
+            if hp < cost:
+                return ("blocked", "Недостаточно HP.")
+            hp -= cost
+            state["lab_hp"] = hp
+            effect = special["effect"]
+            success = random.random() < float(special["risk"])
+            message = ""
+
+            if effect == "focus":
+                if success:
+                    state["lab_focus"] = min(3, focus + int(special.get("value", 1)))
+                    message = "+1 Фокус!"
+                else:
+                    message = "Ничего не произошло."
+            elif effect == "heal":
+                if success:
+                    heal = int(special.get("value", 30))
+                    state["lab_hp"] = min(max_hp, hp + heal)
+                    message = f"+{heal} HP!"
+                else:
+                    state["lab_hp"] = max(0, hp - 10)
+                    message = "Проклятая кровь! -10 HP"
+            elif effect == "oac":
+                if success:
+                    earned = random.randint(*special["value"])
+                    state.setdefault("lab_rewards", []).append(earned)
+                    message = f"+{earned} OAC!"
+                else:
+                    message = "Тени отобрали твою находку."
+            elif effect == "next_boost":
+                state["lab_attack_bonus"] = float(special.get("value", 0.5)) if success else 0.0
+                message = "Следующая атака будет мощнее!" if success else "Сгусток рассеялся."
+            elif effect == "reveal":
+                left = int(state.get("lab_total_rooms", 5)) - int(state.get("lab_room", 1))
+                message = f"Осталось комнат: {left}"
+            elif effect == "mirror_hp":
+                if success:
+                    state["lab_hp"] = random.randint(20, 80)
+                    message = f"Отражение изменило тебя! HP = {state['lab_hp']}"
+                else:
+                    message = "Зеркало разбилось."
+            elif effect == "amulet":
+                state["lab_amulet"] = bool(success)
+                message = "Руны создали защитный амулет!" if success else "Руны погасли."
+            elif effect == "sacrifice_boost":
+                if success:
+                    state["lab_attack_bonus"] = float(special.get("value", 0.8))
+                    message = "Пламя принимает жертву! +80% к атаке."
+                else:
+                    extra = random.randint(10, 20)
+                    state["lab_hp"] = max(0, hp - extra)
+                    message = f"Огонь отверг тебя! -{extra} HP"
+            elif effect == "gamble":
+                outcome = random.choice([
+                    ("heal", 20), ("focus_gain", 1), ("oac_win", random.randint(30, 60)),
+                    ("damage", -15), ("curse", None),
+                ])
+                if outcome[0] == "heal":
+                    state["lab_hp"] = min(max_hp, hp + outcome[1]); message = f"Голос исцелил тебя! +{outcome[1]} HP"
+                elif outcome[0] == "focus_gain":
+                    state["lab_focus"] = min(3, focus + 1); message = "Голос дарует озарение! +1 Фокус"
+                elif outcome[0] == "oac_win":
+                    state.setdefault("lab_rewards", []).append(outcome[1]); message = f"Награда из темноты! +{outcome[1]} OAC"
+                elif outcome[0] == "damage":
+                    state["lab_hp"] = max(0, hp + outcome[1]); message = f"Проклятие! {outcome[1]} HP"
+                else:
+                    state["lab_curse_rooms"] = 2; message = "Голос наслал порчу... Риск повышен на 2 комнаты."
+
+            if int(state.get("lab_hp", 0) or 0) <= 0:
+                state["lab_hp"] = 0
+                state["lab_phase"] = "death"
+                state["lab_turn"] = expected_turn + 1
+                return ("death", message)
+            return (_lab_advance_room(state), message)
+
+        if action == "escape":
+            state["lab_hp"] = min(max_hp, hp + random.randint(15, 25))
+            return (_lab_advance_room(state), "Ты сбежал, восстановив немного HP.")
+
+        return ("blocked", "Действие не реализовано.")
+
+    result = await ctx.repo.atomic_mutate_lab_run(uid, _apply)
+    if result is None:
+        await query.answer("Забег не найден. Открой Лабиринт ещё раз.", show_alert=True)
+        return
+    (status, message), state = result
+    _lab_hydrate_context(context, state)
+    if status in ("stale", "blocked", "corrupt"):
+        await query.answer(message, show_alert=True)
+        return
+
+    await query.answer(message)
+    if status == "death":
+        await show_lab_death(update, context)
+    elif status == "final":
+        await show_lab_final(update, context)
+    else:
         await show_lab_room(update, context)
-        return
-
-    # ─── АТАКА ───
-    if data.startswith("lab_attack_"):
-        level = int(data.split("_")[-1])
-        atk = room["actions"]["attack"]
-        cost = atk["costs"][level]
-        risk = atk["risks"][level]
-        reward_range = atk["rewards"][level]
-
-        if hp < cost:
-            await query.answer("Недостаточно HP.", show_alert=True)
-            return
-
-        hp -= cost
-        context.user_data["lab_hp"] = hp
-
-        # штраф за низкое HP
-        if hp < 30:
-            risk += 0.15
-        elif hp < 60:
-            risk += 0.05
-        # учёт порчи
-        curse = context.user_data.get("lab_curse_rooms", 0)
-        if curse > 0:
-            risk += 0.10
-            context.user_data["lab_curse_rooms"] = curse - 1
-        risk = min(0.98, risk)
-
-        focused = context.user_data.get("lab_focused_attack", False)
-        if focused:
-            success = True
-            context.user_data["lab_focused_attack"] = False
-        else:
-            success = random.random() < risk
-
-        if success:
-            base_earned = random.randint(*reward_range)
-            bonus = context.user_data.get("lab_attack_bonus", 0.0)
-            if bonus > 0:
-                base_earned = int(base_earned * (1 + bonus))
-                context.user_data["lab_attack_bonus"] = 0.0
-            # амулет не расходуется при успехе
-            context.user_data.setdefault("lab_rewards", []).append(base_earned)
-            await query.answer(f"Успех! +{base_earned} OAC")
-        else:
-            # проверка амулета
-            if context.user_data.get("lab_amulet"):
-                context.user_data["lab_amulet"] = False
-                await query.answer("Амулет защитил тебя! Урон не получен.")
-            else:
-                extra_dmg = random.randint(5, 15)
-                hp -= extra_dmg
-                context.user_data["lab_hp"] = hp
-                await query.answer(f"Провал! -{cost+extra_dmg} HP")
-
-        if hp <= 0:
-            context.user_data["lab_hp"] = 0
-            await show_lab_death(update, context)
-            return
-
-        context.user_data["lab_room"] += 1
-        await show_lab_room(update, context)
-        return
-
-    # ─── УНИКАЛЬНОЕ ДЕЙСТВИЕ ───
-    elif data == "lab_special":
-        sp = room["actions"]["special"]
-        cost = sp["cost"]
-        if hp < cost:
-            await query.answer("Недостаточно HP.", show_alert=True)
-            return
-
-        hp -= cost
-        context.user_data["lab_hp"] = hp
-
-        effect = sp["effect"]
-        success = random.random() < sp["risk"]
-
-        if effect == "focus":
-            if success:
-                context.user_data["lab_focus"] = min(3, focus + sp.get("value", 1))
-                await query.answer("+1 Фокус!")
-            else:
-                await query.answer("Ничего не произошло.")
-        elif effect == "heal":
-            if success:
-                heal = sp.get("value", 30)
-                context.user_data["lab_hp"] = min(max_hp, hp + heal)
-                await query.answer(f"+{heal} HP!")
-            else:
-                context.user_data["lab_hp"] = max(0, hp - 10)
-                await query.answer("Проклятая кровь! -10 HP")
-        elif effect == "oac":
-            if success:
-                oac = random.randint(*sp["value"])
-                context.user_data.setdefault("lab_rewards", []).append(oac)
-                await query.answer(f"+{oac} OAC!")
-            else:
-                await query.answer("Тени отобрали твою находку.")
-        elif effect == "next_boost":
-            if success:
-                context.user_data["lab_attack_bonus"] = sp.get("value", 0.5)
-                await query.answer("Следующая атака будет мощнее!")
-            else:
-                await query.answer("Сгусток рассеялся.")
-        elif effect == "reveal":
-            await query.answer(f"Осталось комнат: {context.user_data.get('lab_total_rooms', 5) - context.user_data.get('lab_room', 1)}")
-        elif effect == "mirror_hp":
-            if success:
-                new_hp = random.randint(20, 80)
-                context.user_data["lab_hp"] = new_hp
-                await query.answer(f"Отражение изменило тебя! HP = {new_hp}")
-            else:
-                await query.answer("Зеркало разбилось.")
-        elif effect == "amulet":
-            if success:
-                context.user_data["lab_amulet"] = True
-                await query.answer("Руны создали защитный амулет!")
-            else:
-                await query.answer("Руны погасли.")
-        elif effect == "sacrifice_boost":
-            if success:
-                context.user_data["lab_attack_bonus"] = sp.get("value", 0.8)
-                await query.answer("Пламя принимает жертву! +80% к атаке.")
-            else:
-                extra_dmg = random.randint(10, 20)
-                context.user_data["lab_hp"] = max(0, hp - extra_dmg)
-                await query.answer(f"Огонь отверг тебя! -{extra_dmg} HP")
-        elif effect == "gamble":
-            outcomes = [
-                ("heal", 20),
-                ("focus_gain", 1),
-                ("oac_win", random.randint(30, 60)),
-                ("damage", -15),
-                ("curse", None)
-            ]
-            outcome = random.choice(outcomes)
-            if outcome[0] == "heal":
-                context.user_data["lab_hp"] = min(max_hp, hp + outcome[1])
-                await query.answer(f"Голос исцелил тебя! +{outcome[1]} HP")
-            elif outcome[0] == "focus_gain":
-                context.user_data["lab_focus"] = min(3, focus + 1)
-                await query.answer("Голос дарует озарение! +1 Фокус")
-            elif outcome[0] == "oac_win":
-                context.user_data.setdefault("lab_rewards", []).append(outcome[1])
-                await query.answer(f"Награда из темноты! +{outcome[1]} OAC")
-            elif outcome[0] == "damage":
-                context.user_data["lab_hp"] = max(0, hp + outcome[1])
-                await query.answer(f"Проклятие! {outcome[1]} HP")
-            elif outcome[0] == "curse":
-                context.user_data["lab_curse_rooms"] = 2
-                await query.answer("Голос наслал порчу... Риск повышен на 2 комнаты.")
-
-        await show_lab_room(update, context)
-        return
-
-    # ─── БЕГСТВО ───
-    elif data == "lab_escape":
-        hp = min(max_hp, hp + random.randint(15, 25))
-        context.user_data["lab_hp"] = hp
-        await query.answer("Ты сбежал, восстановив немного HP.")
-        await show_lab_room(update, context)
-        return
-
-    await query.answer("Действие не реализовано")
 
 
 # ─── ФИНАЛЬНЫЙ СУНДУК ────────────────────────────────────────
@@ -5563,37 +8566,83 @@ async def show_lab_final(update, context):
     ctx = context.application.bot_data["ctx"]
     query = update.callback_query
     uid = query.from_user.id
-    player = await ctx.repo.get_by_id(uid)
-    if not player:
-        return
-    rewards = context.user_data.get("lab_rewards", [])
-    total_oac = sum(rewards) + 50
 
-    async def _lab_win(p, conn):
+    async def _lab_win(p, state, conn):
+        # Только машина состояний может перевести забег в финал. Прямой или
+        # устаревший вызов не трогает ни баланс, ни строку lab_runs.
+        if state.get("lab_phase") != "final":
+            return None
+        rewards = state.get("lab_rewards", [])
+        total_oac = sum(rewards) + 50
         p.balance += total_oac
         p.m_essence += 1
         p.lab_chests += 1
         p.lab_depth += 1
 
-        # Военный счёт
-        await ctx.war_service.add_score(uid, WarAction.LAB_WIN, conn)
+        # Военный счёт не должен отменять честно завершённый забег, если
+        # социальный сервис временно недоступен.
+        if ctx.war_service:
+            await ctx.war_service.add_score(uid, WarAction.LAB_WIN, conn)
 
-    await ctx.repo.atomic_update(uid, _lab_win)
+        # Рекорд забега (peak-end триумф): личный лучший банк за один заход.
+        # Раньше жил в Redis-ключе lab_best:{uid} отдельным round-trip'ом
+        # ПОСЛЕ этой транзакции — при недоступном Redis (был недоступен в
+        # проде несколько дней подряд) строка рекорда просто не показывалась.
+        # Здесь — поле на самом игроке, в ТОЙ ЖЕ транзакции: рекорд не может
+        # разъехаться с балансом даже при гонке двух одновременных забегов.
+        prev = p.lab_best_oac or 0
+        record_line = ""
+        new_record = False
+        if total_oac > prev:
+            p.lab_best_oac = total_oac
+            record_line = "\n🏆 <b>НОВЫЙ РЕКОРД ЗАБЕГА!</b>"
+            new_record = prev > 0  # первый-в-жизни рекорд не броадкастим (нет базы для «побил»)
+        elif prev:
+            record_line = f"\n📈 <i>Твой рекорд: {prev} OAC</i>"
+        return (record_line, new_record, total_oac, p.lab_depth, p.username,
+                int(state.get("lab_total_rooms", 0) or 0))
 
-    # очистка состояний
-    for key in ("lab_hp", "lab_focus", "lab_room"):
+    result = await ctx.repo.atomic_finish_lab_run(uid, _lab_win)
+    if result is None:
+        await query.answer("Финал уже обработан или экран устарел.", show_alert=True)
+        return
+    record_line, new_record, total_oac, depth, username, total_rooms = result
+
+    # Очищаем только локальное представление: запись в БД уже удалена ровно
+    # вместе с выплатой, поэтому рестарт больше не может выдать награду повторно.
+    for key in LAB_STATE_KEYS:
         context.user_data.pop(key, None)
 
-    depth = player.lab_depth + 1
+    # Соц-доказательство/аспирация: рекордный забег — в гильдию (как джекпот
+    # «Дунуть»). Естественно rate-limited 12-часовым кулдауном лабиринта → не спам.
+    if new_record:
+        who = f"@{username}" if username else "Один из наших"
+        asyncio.create_task(_safe_send_guild_message(
+            ctx,
+            f"🏛️ <b>{who}</b> вынес рекордные <b>{total_oac} OAC</b> из Лабиринта "
+            f"(Этаж {depth})! 🏆\n<i>Кто глубже?</i>"))
+    rooms_line = f"🗝️ <b>Покорено комнат: {total_rooms}</b>\n" if total_rooms else ""
     text = (
         f"<b>🎁 СУНДУК ИСКАЖЕНИЯ</b>\n\n"
         f"<i>Ты достиг цели! Древние награждают достойных.</i>\n\n"
-        f"<b>+{total_oac} OAC</b>\n"
+        f"{rooms_line}"
+        f"<b>+{total_oac} OAC</b>{record_line}\n"
         f"<b>💠 Кристальная Пыль: 1</b>\n"
         f"<b>🏆 Глубина увеличена! (Этаж {depth})</b>"
     )
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 К Лабиринту", callback_data="lab_start")],
-                               [InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
+    kb_rows = [[InlineKeyboardButton("🔙 К Лабиринту", callback_data="lab_start")],
+               [InlineKeyboardButton("🔙 В меню", callback_data="menu")]]
+    # Только на РЕКОРДЕ (не на каждом прохождении): та же логика, что у
+    # джекпота и ранг-апа — гильд-чат уже видел анонимный анонс, самому
+    # игроку поделиться было нечем.
+    if new_record:
+        try:
+            kb_rows.insert(0, [await _win_share_button(
+                context, uid,
+                f"🏛️ Я вынес рекордные {total_oac} OAC из Лабиринта Antysocialshop!")])
+        except Exception:
+            pass
+    kb = InlineKeyboardMarkup(kb_rows)
     await edit_or_reply(update, context, text, reply_markup=kb, parse_mode='HTML')
     await check_achievements(uid, context)
 
@@ -5602,47 +8651,105 @@ async def show_lab_death(update, context):
     ctx = context.application.bot_data["ctx"]
     query = update.callback_query
     uid = query.from_user.id
-    player = await ctx.repo.get_by_id(uid)
-    if not player:
-        return
-    depth = player.lab_depth or 1
 
-    # атомарно начисляем утешительный приз и военные очки
-    async def _lab_die(p, conn):
+    async def _lab_die(p, state, conn):
+        if state.get("lab_phase") != "death":
+            return None
         p.balance += 50
         p.lab_deaths += 1
+        if ctx.war_service:
+            await ctx.war_service.add_score(uid, WarAction.LAB_DEATH, conn)
+        return (p.lab_depth or 1, int(state.get("lab_room", 0) or 0),
+                int(state.get("lab_total_rooms", 0) or 0))
 
-        await ctx.war_service.add_score(uid, WarAction.LAB_DEATH, conn)
+    result = await ctx.repo.atomic_finish_lab_run(uid, _lab_die)
+    if result is None:
+        await query.answer("Финал уже обработан или экран устарел.", show_alert=True)
+        return
+    depth, reached, total_rooms = result
 
-    await ctx.repo.atomic_update(uid, _lab_die)
+    for key in LAB_STATE_KEYS:
+        context.user_data.pop(key, None)
 
-    context.user_data.pop("lab_hp", None)
-    context.user_data.pop("lab_focus", None)
-    context.user_data.pop("lab_room", None)
-
+    # Признание пройденного пути + форвард-фрейминг вместо наказующего регрета:
+    # мозг запоминает конец (peak-end), поэтому финал зовёт вперёд, а не добивает.
+    progress_line = f"🗝️ <b>Ты дошёл до комнаты {reached} из {total_rooms}</b>\n" if (reached and total_rooms) else ""
     text = (
         f"<b>🪦 БЕЗДНА ПОГЛОТИЛА ТЕБЯ</b>\n\n"
         f"<i>Твоё здоровье иссякло</i>\n\n"
+        f"{progress_line}"
         f"<b>+50 OAC</b> (утешительный приз)\n"
-        f"<b>Глубина: {depth}</b>"
+        f"<b>Глубина: {depth}</b>\n\n"
+        f"<i>💪 В следующий раз донеси добычу до Сундука!</i>"
     )
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 К Лабиринту", callback_data="lab_start")],
-                               [InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
+                               [InlineKeyboardButton("🔙 В меню", callback_data="menu")]])
     await edit_or_reply(update, context, text, reply_markup=kb, parse_mode='HTML')
+    # lab_deaths растёт именно здесь, но эту ветку раньше никто не проверял на
+    # достижения — «lab_death_5» (и заодно «Лунный лорд» через него) ждал
+    # случайного следующего фарма/крафта, а не срабатывал в момент самой
+    # 5-й смерти, где дофаминовая пара «действие → награда» ощутима сильнее всего.
+    await check_achievements(uid, context, ctx=ctx)
+
+async def _announce_bot_added_to_chat(update, context, bot_username):
+    """Бот сам стал new_chat_member — это и есть момент канала роста
+    «добавь бота в свой чат» (см. кнопку в invite_friend_handler).
+
+    До этой правки этот момент был АБСОЛЮТНО немым: цикл в welcome_new_member
+    явно пропускал ботов (`if member.is_bot: continue`), включая случай, когда
+    новый бот — это МЫ САМИ. Итог: человек добавляет бота в чат, полный живых
+    людей — и ровно ничего не происходит, ни одного сообщения, ни одной
+    кнопки. Тем, кто уже в чате, физически нечего нажать, чтобы узнать, что
+    бот вообще появился. Кнопка «Начать играть» — url-ссылка на ЛС с ботом
+    (не callback_data): у людей в чате ещё нет игрока в БД, а обычная кнопка
+    с callback потребовала бы сначала /start в личке и упёрлась бы в «профиль
+    не найден» — диплинк сразу открывает ЛС и создаёт игрока одним тапом.
+    """
+    start_url = f"https://t.me/{bot_username}?start=1"
+    text = (
+        "<b>🕯️⚜️ Гильдия Antysocialshop теперь здесь!</b>\n\n"
+        "RPG про крафт легендарных блантов, войну гильдий и охоту за лутом. "
+        "Джекпоты и легендарные крафты участников этого чата будут видны "
+        "здесь сами — без единой ссылки.\n\n"
+        "👉 Жми и получи свой первый именной блант бесплатно:"
+    )
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🍬 Начать играть", url=start_url)]])
+    try:
+        await update.effective_message.reply_text(text, reply_markup=kb, parse_mode='HTML')
+    except Exception:
+        logger.exception("не удалось анонсировать добавление бота в чат")
+
 
 async def welcome_new_member(update, context):
+    try:
+        me = await context.bot.get_me()
+        bot_id, bot_username = me.id, me.username
+    except Exception:
+        bot_id, bot_username = None, BOT_USERNAME
     for member in update.message.new_chat_members:
-        if member.is_bot: continue
+        if member.is_bot:
+            if member.id == bot_id:
+                await _announce_bot_added_to_chat(update, context, bot_username)
+            continue
         username = member.username or member.first_name
         ctx = context.bot_data.get("ctx")
         online = 0
+        player_exists = False
         player_guild = None
         if ctx:
             try:
                 cnt = await count_guilds(ctx)
                 online = cnt.get("BLACK", 0) + cnt.get("WHITE", 0)
                 player = await ctx.repo.get_by_id(member.id)
-                if player:
+                # Баг: get_by_id для НИКОГДА не регистрировавшегося юзера
+                # возвращает не None, а пустой Player(exists=False) — тот же
+                # приём, что уже задокументирован в guild_join_handler чуть
+                # ниже. `if player:` здесь был всегда True (Player — объект,
+                # не None), поэтому player_guild оставался None и для «нет
+                # гильдии», и для «вообще ни разу не запускал бота» — эти два
+                # случая уходили в ОДНУ ветку клавиатуры.
+                player_exists = bool(player and player.exists)
+                if player_exists:
                     player_guild = player.guild
             except Exception: pass
 
@@ -5658,13 +8765,58 @@ async def welcome_new_member(update, context):
             keyboard = InlineKeyboardMarkup([[
                 InlineKeyboardButton("🍬 Начать фарм", callback_data="farm")
             ]])
-        else:
+        elif player_exists:
+            # Уже зарегистрирован (хотя бы раз открывал ЛС с ботом) — ЛС
+            # доступно, callback безопасен ровно как в guild_join_handler.
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("🕯️ Тёмная Гильдия (+50 🍬)", callback_data="guild_join_BLACK"),
                  InlineKeyboardButton("⚜️ Светлая Гильдия (+50 🍬)", callback_data="guild_join_WHITE")]
             ])
+        else:
+            # Настоящий новичок: НИ РАЗУ не открывал ЛС с ботом — это как раз
+            # самый частый случай при появлении человека в группе (пришёл в
+            # чат, а не по личной реф-ссылке). Тап по callback-кнопке гильдии
+            # здесь бил в guild_join_handler:10098 ("Сначала активируйся: /start")
+            # и на этом всё — короткий alert без единой кнопки, а /start нужно
+            # было печатать руками. Тот же диплинк-приём, что уже работает в
+            # _announce_bot_added_to_chat чуть выше: url сразу открывает ЛС и
+            # создаёт игрока одним тапом, без набора команды руками.
+            start_url = f"https://t.me/{bot_username}?start=1"
+            keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton("🍬 Начать играть", url=start_url)
+            ]])
 
         await safe_send_message(context, update.message.chat.id, welcome_text, reply_markup=keyboard, parse_mode='HTML')
+
+
+async def track_chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Ловит блокировку/разблокировку бота в реальном времени через
+    my_chat_member — в отличие от 403 на попытке отправки (см. push-джобы),
+    этот сигнал приходит от Telegram сам по себе, независимо от того, слали
+    ли мы вообще что-то игроку. Даёт честный blocked_at: момент, когда
+    игрок реально заблокировал бота, а не момент, когда мы это заметили.
+    """
+    ctx = context.bot_data.get("ctx")
+    if not ctx or not ctx.db_pool:
+        return
+    cm = update.my_chat_member
+    if not cm or not cm.new_chat_member:
+        return
+    uid = cm.from_user.id
+    status = cm.new_chat_member.status
+    try:
+        async with ctx.db_pool.acquire() as conn:
+            if status == ChatMemberStatus.BANNED:
+                await conn.execute(
+                    "UPDATE players SET blocked_at = now() "
+                    "WHERE user_id = $1 AND blocked_at IS NULL", uid)
+            elif status == ChatMemberStatus.MEMBER:
+                # Запустил бота заново после блокировки — снимаем отметку,
+                # иначе игрок навсегда выглядел бы «заблокировавшим».
+                await conn.execute(
+                    "UPDATE players SET blocked_at = NULL WHERE user_id = $1", uid)
+    except Exception:
+        logger.exception("track_chat_member_update: не удалось обновить blocked_at для uid=%s", uid)
 
 logger = logging.getLogger(__name__)
 
@@ -5677,70 +8829,224 @@ logger = logging.getLogger(__name__)
 # ФУНКЦИИ ДЛЯ ИМЕННЫХ БЛАНТОВ И ДАРЕНИЯ (ВОССТАНОВЛЕНЫ)
 # ============================================================
 
+_USERNAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{4,31}$")
+
+
+async def _refresh_username(ctx, uid: int, username: str) -> None:
+    """Точечно обновляет players.username, если Telegram-ник изменился.
+
+    Раньше эта колонка писалась ОДИН раз при регистрации (см.
+    _create_new_player) и больше никогда — Telegram позволяет менять
+    @username в любой момент, и после смены игрок становился ненаходимым по
+    текущему нику НАВСЕГДА. Это и есть главная причина «дарение — русская
+    рулетка»: даритель вводит настоящий, действующий @username, а бот ищет
+    его в колонке, где годами лежит старое значение.
+
+    Лёгкий point-update без блокировки строки (не через atomic_update):
+    поле никак не участвует в игровой логике начислений, конкурентная гонка
+    с ним не создаёт риска для баланса/инвентаря.
+    """
+    if not username:
+        return
+    try:
+        async with ctx.db_pool.acquire() as conn:
+            changed = await conn.fetchval(
+                "UPDATE players SET username=$1 WHERE user_id=$2 "
+                "AND username IS DISTINCT FROM $1 RETURNING TRUE",
+                username, uid)
+        if changed:
+            # Инвалидация короткоживущего кэша — иначе следующий get_by_id ещё
+            # до истечения TTL вернёт снимок со старым username.
+            if getattr(ctx, "redis", None):
+                try:
+                    await redis_breaker.call(ctx.redis.delete, f"player:{uid}")
+                except Exception:
+                    pass
+            elif getattr(ctx, "cache", None) is not None:
+                ctx.cache.pop(uid, None)
+    except Exception:
+        logger.warning("Не удалось обновить username для %d", uid)
+
+
+async def _transfer_named_item(ctx, from_uid: int, to_uid: int, blunt_id: str):
+    """Атомарно переносит предмет между ДВУМЯ существующими игроками.
+
+    Возвращает ("ok", item) / ("not_owned", None) / ("target_missing", None).
+    Обе стороны блокируются и сохраняются в ОДНОЙ транзакции (см.
+    PlayerRepository.atomic_pair_update) — без промежутка, в котором предмет
+    существовал бы у обоих или ни у кого.
+    """
+    async def _move(giver, receiver, conn):
+        if giver is None:
+            return ("giver_missing", None)
+        if receiver is None:
+            return ("target_missing", None)
+        item = next((it for it in (giver.inventory or [])
+                    if it.get("id") == blunt_id and it.get("type") == "named"), None)
+        if item is None:
+            return ("not_owned", None)
+        giver.inventory = [it for it in giver.inventory if it.get("id") != blunt_id]
+        item = dict(item)
+        item["owner_history"] = list(item.get("owner_history") or [])
+        item["owner_history"].append(
+            {"user_id": str(from_uid), "since": datetime.now(timezone.utc).isoformat()})
+        receiver.inventory = list(receiver.inventory or []) + [item]
+        return ("ok", item)
+
+    return await ctx.repo.atomic_pair_update(from_uid, to_uid, _move)
+
+
+async def _claim_pending_gifts(ctx, uid: int, username: str, context) -> None:
+    """Атомарно выдаёт все ожидающие подарки при первом подходящем /start.
+
+    Получатель, его инвентарь и строки очереди блокируются внутри репозитория
+    одной транзакцией. Поэтому сбой не может оставить предмет одновременно в
+    очереди и инвентаре либо удалить его из обоих мест.
+    """
+    try:
+        items = await ctx.repo.atomic_claim_pending_gifts(uid, username)
+    except Exception:
+        logger.exception("Не удалось выдать отложенные подарки игроку %d", uid)
+        return
+    if not items:
+        return
+
+    names = ", ".join(f"«{it.get('name', '?')}»" for it in items)
+    try:
+        await safe_send_message(
+            context, uid,
+            f"🎁 <b>Пока тебя не было, тебе подарили: {names}!</b>\n"
+            f"Загляни в 💍 «Мои бланты», чтобы увидеть.",
+            parse_mode='HTML')
+    except Exception:
+        pass
+
+
 async def handle_gift_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ctx: AppContext = context.application.bot_data.get("ctx")
     if not ctx:
         return
-    target_username = update.message.text.strip().lstrip('@')
-    if not target_username:
-        await update.message.reply_text("❌ Укажите корректный @username.")
+    raw = update.message.text.strip().lstrip('@')
+    if not raw:
+        await update.message.reply_text("❌ Укажите @username или числовой ID.")
         return
 
     blunt_id = context.user_data.get('gifting_blunt_id')
     if not blunt_id:
-        await update.message.reply_text("❌ Не найден блант для дарения. Попробуйте заново.")
+        await update.message.reply_text("❌ Не найден блант для дарения. Попробуй заново.")
         return
 
     uid = update.effective_user.id
+
+    # Сначала убеждаемся, что блант вообще ещё в инвентаре дарителя (дешёвая
+    # проверка ДО похода в _transfer_named_item — там она тоже есть, но раннее
+    # понятное сообщение лучше молчаливого отказа внутри транзакции).
     player = await ctx.repo.get_by_id(uid, with_inventory=True)
-    if not player:
+    if not player or not player.exists:
         await update.message.reply_text("Профиль не найден.")
         context.user_data.pop('gifting_blunt_id', None)
         return
-
-    # Находим блант в инвентаре
-    item = None
-    for it in player.inventory:
-        if it.get("id") == blunt_id:
-            item = it
-            break
-    if not item:
-        await update.message.reply_text("❌ Блант уже не в вашем инвентаре.")
+    if not any(it.get("id") == blunt_id for it in (player.inventory or [])):
+        await update.message.reply_text("❌ Бланта уже нет в твоём инвентаре.")
         context.user_data.pop('gifting_blunt_id', None)
         return
 
-    # Находим получателя по username
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("💍 Мои бланты", callback_data="my_blunts")],
+        [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
+    ])
+
+    # ── Числовой ID: раньше промпт-текст ОБЕЩАЛ поддержку «@username или
+    # числовой ID», но код проверял только username — ввод чистого ID искал
+    # несуществующий username, равный этой цифровой строке, и ВСЕГДА отвечал
+    # «игрок не найден», даже если ID был настоящим активным игроком.
+    if raw.isdigit():
+        target_id = int(raw)
+        if target_id == uid:
+            await update.message.reply_text("❌ Нельзя подарить блант самому себе.")
+            return
+        target = await ctx.repo.get_by_id(target_id, with_inventory=False)
+        if target and target.exists:
+            status, item = await _transfer_named_item(ctx, uid, target_id, blunt_id)
+        else:
+            status, item = "target_missing", None
+        if status == "target_missing":
+            # Изъятие у дарителя и запись в pending_gifts — единая транзакция.
+            # При сбое предмет остаётся у дарителя; при успехе он существует
+            # ровно в одной очереди и не может быть подарен повторно.
+            queued_status, queued_item = await ctx.repo.atomic_enqueue_named_gift(
+                uid, blunt_id, target_user_id=target_id)
+            if queued_status == "not_owned":
+                await update.message.reply_text("❌ Бланта уже нет в твоём инвентаре.", reply_markup=kb)
+                context.user_data.pop('gifting_blunt_id', None)
+                return
+            if queued_status != "ok":
+                await update.message.reply_text("❌ Не удалось поставить подарок в очередь. Блант остался у вас.", reply_markup=kb)
+                context.user_data.pop('gifting_blunt_id', None)
+                return
+            await update.message.reply_text(
+                f"📮 Игрока с ID {target_id} пока нет в игре — блант «{queued_item.get('name')}» "
+                f"будет ждать его здесь и придёт автоматически, как только он зайдёт впервые.",
+                reply_markup=kb)
+        elif status == "not_owned":
+            await update.message.reply_text("❌ Бланта уже нет в твоём инвентаре.", reply_markup=kb)
+        elif status == "ok":
+            await update.message.reply_text(
+                f"✅ Блант «{item.get('name')}» подарен игроку ID {target_id}!", reply_markup=kb)
+        else:
+            await update.message.reply_text("❌ Не удалось передать блант. Попробуй позже.", reply_markup=kb)
+        context.user_data.pop('gifting_blunt_id', None)
+        return
+
+    # ── Username: сначала пытаемся найти уже существующего игрока. players.
+    # username — снимок на момент /start, а не живое состояние (Telegram
+    # позволяет менять @username когда угодно, и колонка НИКОГДА не
+    # обновлялась) — поэтому даже реальный игрок иногда «не находился». Ветка
+    # ниже больше не считает промах окончательным отказом.
+    if not _USERNAME_RE.match(raw):
+        await update.message.reply_text(
+            "❌ Это не похоже на настоящий @username Telegram (5–32 символа, "
+            "буквы/цифры/подчёркивание, начинается с буквы). Проверь и введи снова.")
+        return
+
     async with ctx.db_pool.acquire() as conn:
-        target = await conn.fetchrow("SELECT user_id FROM players WHERE LOWER(username) = LOWER($1)", target_username)
-    if not target:
-        await update.message.reply_text("❌ Игрок с таким username не найден.")
-        return
-    target_id = target["user_id"]
-    if target_id == uid:
-        await update.message.reply_text("❌ Нельзя подарить блант самому себе.")
+        target = await conn.fetchrow(
+            "SELECT user_id FROM players WHERE LOWER(username) = LOWER($1)", raw)
+
+    if target:
+        target_id = target["user_id"]
+        if target_id == uid:
+            await update.message.reply_text("❌ Нельзя подарить блант самому себе.")
+            return
+        status, item = await _transfer_named_item(ctx, uid, target_id, blunt_id)
+        if status == "not_owned":
+            await update.message.reply_text("❌ Бланта уже нет в твоём инвентаре.", reply_markup=kb)
+        elif status == "ok":
+            await update.message.reply_text(
+                f"✅ Блант «{item.get('name')}» подарен @{raw}!", reply_markup=kb)
+        else:
+            await update.message.reply_text("❌ Не удалось передать блант. Попробуй позже.", reply_markup=kb)
+        context.user_data.pop('gifting_blunt_id', None)
         return
 
-    # Передаём блант
-    # 1. Удаляем у дарителя
-    player.inventory = [it for it in player.inventory if it.get("id") != blunt_id]
-    # 2. Добавляем получателю (с обновлением истории)
-    target_player = await ctx.repo.get_by_id(target_id, with_inventory=True)
-    if not target_player:
-        target_player = Player(user_id=target_id)
-    if not target_player.inventory:
-        target_player.inventory = []
-    item["owner_history"] = item.get("owner_history", [])
-    item["owner_history"].append({"user_id": uid, "since": datetime.now().isoformat()})
-    target_player.inventory.append(item)
-    await ctx.repo.save(player)
-    await ctx.repo.save(target_player)
-
+    # Не найден СЕЙЧАС — не отказ, а очередь. Изъятие у дарителя и запись
+    # в pending_gifts выполняются одной транзакцией, поэтому сетевой сбой не
+    # способен молча уничтожить коллекционный предмет.
+    queued_status, queued_item = await ctx.repo.atomic_enqueue_named_gift(
+        uid, blunt_id, username_lower=raw.lower())
+    if queued_status == "not_owned":
+        await update.message.reply_text("❌ Бланта уже нет в твоём инвентаре.", reply_markup=kb)
+        context.user_data.pop('gifting_blunt_id', None)
+        return
+    if queued_status != "ok":
+        await update.message.reply_text("❌ Не удалось поставить подарок в очередь. Блант остался у вас.", reply_markup=kb)
+        context.user_data.pop('gifting_blunt_id', None)
+        return
     await update.message.reply_text(
-        f"✅ Блант «{item.get('name')}» подарен @{target_username}!",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("💍 Мои бланты", callback_data="my_blunts")],
-            [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
-        ]))
+        f"📮 @{raw} пока не найден в игре — блант «{queued_item.get('name')}» "
+        f"будет ждать его здесь и придёт автоматически, как только он зайдёт впервые "
+        f"(или если это его нынешний @username, но он давно не заходил — тоже сработает).",
+        reply_markup=kb)
     context.user_data.pop('gifting_blunt_id', None)
 
 # ============================================================
@@ -5758,6 +9064,29 @@ async def pet_preview(update, context, ctx):
         name_str = f" по кличке «{player.pet_name}»" if player.pet_name else ""
         hunger = player.pet_hunger if player.pet_hunger is not None else 100
         hbar = "🟩" * (hunger // 20) + "⬛️" * (5 - hunger // 20)
+        # Состояние по уровню сытости — шкала теперь убывает (−25/день), и её
+        # значение должно ЧИТАТЬСЯ эмоционально, а не только числом.
+        if hunger >= 80:
+            mood = "😊 <i>Сыт и доволен — виляет хвостом!</i>"
+        elif hunger >= 40:
+            mood = "😋 <i>Проголодался и поглядывает на миску…</i>"
+        else:
+            mood = "🥺 <i>Совсем голодный! Покорми — он скучал по тебе.</i>"
+        # Care-loop замыкается только когда забота ВИДНА как выгода: показываем,
+        # что даёт питомец сейчас и что даст сытым. Тогда кормёжка — не галка
+        # дейлика, а «верни/подними мой доход» (взаимность тамагочи + goal-gradient).
+        _pet_pct = _pet_bonus_pct(player, "plantation")
+        _cfg = _pet_cfg(player) or {}
+        _max_pct = _cfg.get("bonus_max_pct", 0)
+        bonus_block = ""
+        if _max_pct > 0:
+            if hunger >= 100:
+                bonus_block = (f"\n🪴 <b>Бонус плантации:</b> +{_pet_pct:.0f}% "
+                               f"<i>— досыта, максимум!</i>")
+            else:
+                bonus_block = (f"\n🪴 <b>Бонус плантации:</b> +{_pet_pct:.0f}% "
+                               f"<i>(сытым: +{_max_pct}%)</i>\n"
+                               f"🍖 <i>Покорми — подними бонус к пассивному доходу.</i>")
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("🍖 Покормить", callback_data="pet_feed")],
             [InlineKeyboardButton("🔙 Назад", callback_data="menu")],
@@ -5765,7 +9094,9 @@ async def pet_preview(update, context, ctx):
         await edit_or_reply(
             update, context,
             f"🐾 <b>Твой питомец: {player.pet}{name_str}</b>\n\n"
-            f"🍖 <b>Сытость:</b> {hbar} {hunger}/100",
+            f"🍖 <b>Сытость:</b> {hbar} {hunger}/100\n"
+            f"{mood}"
+            f"{bonus_block}",
             reply_markup=kb)
     else:
         kb = InlineKeyboardMarkup([
@@ -5785,7 +9116,14 @@ async def pet_feed_handler(update, context, ctx):
     if not result or result.get("status") == "no_pet":
         await query.answer("Сначала заведи питомца!", show_alert=True)
         return
-    await query.answer("🐾 Питомец сыт и доволен!")
+    # Награда за заботу — в тот же момент, что и забота (замыкаем петлю видимо).
+    player = await ctx.repo.get_by_id(uid)
+    _cfg = _pet_cfg(player) or {}
+    _max_pct = _cfg.get("bonus_max_pct", 0)
+    if _max_pct > 0 and _cfg.get("bonus_target") == "plantation":
+        await query.answer(f"🐾 Сыт! Бонус плантации +{_max_pct}% на максимуме.")
+    else:
+        await query.answer("🐾 Питомец сыт и доволен!")
     await pet_preview(update, context)
 
 
@@ -5795,7 +9133,7 @@ async def pet_buy_dog_handler(update, context, ctx):
     uid = query.from_user.id
     result = await ctx.pet_service.buy(uid, "dog")
     if result is None:
-        await query.answer("❌ Ошибка сервиса питомцев. Попробуйте позже.", show_alert=True)
+        await query.answer("❌ Ошибка сервиса питомцев. Попробуй позже.", show_alert=True)
         return
 
     status = result["status"]
@@ -5818,13 +9156,13 @@ async def pet_name_skip_handler(update, context, ctx):
     await query.message.edit_text("🐕 Хорошо, твой питомец будет просто Песиком!",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("🐾 Питомец", callback_data="pet_preview")],
-            [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+            [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
         ]))
 
 async def handle_pet_name(update, context):
     ctx = context.bot_data.get("ctx")
     if not ctx:
-        await update.message.reply_text("⚠️ Игра инициализируется (отсуствие контекста ctx), попробуйте позже.")
+        await update.message.reply_text("⚠️ Игра инициализируется (отсуствие контекста ctx), попробуй позже.")
         return
     name = update.message.text.strip()[:PET_CONFIG["dog"]["max_name_len"]]
     if not name:
@@ -5843,21 +9181,35 @@ async def handle_pet_name(update, context):
             f"Отлично! Теперь твоего питомца зовут «{name}»! 🐕",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🐾 Питомец", callback_data="pet_preview")],
-                [InlineKeyboardButton("🏰 В меню", callback_data="menu")],
+                [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
             ]))
     context.user_data.pop('awaiting_pet_name', None)
 
 async def pet_locked_handler(update, context):
+    # Было: голый порог без единого слова о том, что вообще открывается —
+    # единственный локед-экран в игре без аспирации (Алхимия хотя бы
+    # называет механику в своём locked-тексте, у Алтаря — целый абзац "что
+    # там"). Разница дорого стоит именно тут: "нужно 5000 OAC" не тянет
+    # вперёд, а "сытый питомец даёт +10% к доходу" — тянет, потому что
+    # называет РЕАЛЬНУЮ выгоду (bonus_max_pct=10 из PET_CONFIG), не выдумку.
     query = update.callback_query
-    await query.answer("❌ Доступно с ранга ⚔️ Ветеран (5000 OAC 🍬)", show_alert=True)
+    max_pct = PET_CONFIG.get("dog", {}).get("bonus_max_pct", 0)
+    await query.answer(
+        f"❌ Питомец открывается на ранге ⚔️ Ветеран (5000 OAC 🍬) — "
+        f"сытый Песик даёт +{max_pct}% к доходу Плантации.",
+        show_alert=True)
 
 # ============================================================
 # МАГАЗИН, АДМИН-КОМАНДЫ
 # ============================================================
 # ── Прилавок: чистая логика (тестируется без БД) ────────────
 def _shop_discount_pct(balance):
-    """Скидка прилавка по достатку — ранг даёт ощутимую выгоду в лавке.
-    Потолок 15%, чтобы не разгонять инфляцию."""
+    """Скидка прилавка по РАНГУ (total_earned), а не по остатку в кошельке.
+    Потолок 15%, чтобы не разгонять инфляцию.
+
+    Раньше сюда шёл balance — и скидка исчезала ровно в момент покупки,
+    ради которой копили: потратил → упал ниже порога → в следующий раз
+    платишь дороже. Привилегия ранга не должна отбираться тратой."""
     b = balance or 0
     if b >= 50000:
         return 15
@@ -5888,12 +9240,13 @@ def _shop_time_left(now):
     return delta.seconds // 3600, (delta.seconds % 3600) // 60
 
 
-def _build_shop_view(balance, now):
+def _build_shop_view(balance, now, earned=None):
     """Собирает текст+клавиатуру прилавка. Чистая функция для тестов."""
-    disc = _shop_discount_pct(balance)
+    # Скидка — от ранга (total_earned); доступность товара — от кошелька.
+    disc = _shop_discount_pct(balance if earned is None else earned)
     today = _shop_today(now.toordinal())
     h, m = _shop_time_left(now)
-    lines = ["<b>🏪 ЛАВКА ФАБРИКИ №9</b>", ""]
+    lines = ["<b>🛒 ЛАВКА ФАБРИКИ №9</b>", ""]
     if disc:
         lines.append(f"🪪 <b>Скидка ранга: −{disc}%</b> на всё сегодня")
     else:
@@ -5919,7 +9272,7 @@ def _build_shop_view(balance, now):
         InlineKeyboardButton("🪪 Скидка", callback_data="privilege"),
         InlineKeyboardButton("📦 Каталог", callback_data="catalog"),
     ])
-    rows.append([InlineKeyboardButton("🏰 В меню", callback_data="menu")])
+    rows.append([InlineKeyboardButton("🔙 В меню", callback_data="menu")])
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
@@ -5930,7 +9283,8 @@ async def shop_callback(update, context, ctx):
     uid = update.effective_user.id
     player = await ctx.repo.get_by_id(uid)
     balance = (player.balance if player else 0) or 0
-    text, kb = _build_shop_view(balance, datetime.now())
+    earned = (player.total_earned if player else 0) or 0
+    text, kb = _build_shop_view(balance, datetime.now(), earned)
     await edit_or_reply(update, context, text, reply_markup=kb)
 
 
@@ -5956,7 +9310,8 @@ async def shop_buy_callback(update, context):
         # tenacity-retry, который завернул бы кастомный exception в RetryError
         # и вхолостую ретраил бы «нет денег». Статус-кортеж — принятый здесь
         # паттерн (см. do_smoke/craft).
-        price = _shop_price(item["price"], _shop_discount_pct(p.balance or 0))
+        # Та же ось, что и в витрине — иначе цена на экране разошлась бы с кассой.
+        price = _shop_price(item["price"], _shop_discount_pct(p.total_earned or 0))
         if (p.balance or 0) < price:
             return ("no_funds", price, None)
         p.balance = (p.balance or 0) - price
@@ -5974,7 +9329,8 @@ async def shop_buy_callback(update, context):
     await query.answer(f"✅ Куплено! −{price} OAC", show_alert=False)
     player = await ctx.repo.get_by_id(uid)
     balance = (player.balance if player else 0) or 0
-    text, kb = _build_shop_view(balance, now)
+    earned = (player.total_earned if player else 0) or 0
+    text, kb = _build_shop_view(balance, now, earned)
     banner = (f"✅ <b>{item['emoji']} {item['name']} — твоё!</b>\n"
               f"📦 Теперь у тебя: <b>{new_total}</b>\n\n")
     await query.message.edit_text(banner + text, reply_markup=kb, parse_mode='HTML')
@@ -6045,8 +9401,19 @@ async def give_oac(update, context, ctx):
         return
 
     try:
+        # /give_oac намеренно умеет начислять НЕзарегистрированному (см. ниже:
+        # atomic_update вернёт None, и для него создастся свежий Player) — сам
+        # факт "не найден в БД" тут не ошибка. Баг был в другом: get_by_id
+        # всегда возвращает объект (Player(exists=False), не None), поэтому
+        # `if target_player else` никогда не уходил в фолбэк, и для настоящего
+        # незнакомца target_name становился None (username по умолчанию) —
+        # html.escape(None) ниже бросал AttributeError, тот молча гасился
+        # внешним except, а админ видел ложное "не удалось начислить" ПОСЛЕ
+        # того, как баланс уже реально зачислился.
         target_player = await ctx.repo.get_by_id(target_id, with_inventory=False)
-        target_name = target_player.username if target_player else f"ID{target_id}"
+        target_name = (target_player.username
+                        if target_player and target_player.exists and target_player.username
+                        else f"ID{target_id}")
     except Exception:
         target_name = f"ID{target_id}"
 
@@ -6114,6 +9481,176 @@ async def broadcast(update, context, ctx):
     
     await update.message.reply_text(f"✅ Разослано {success} из {len(users)} игроков")
 
+
+@cb
+async def growth_stats_command(update, context, ctx):
+    """/growth — единственный способ узнать, работает ли хоть один из
+    каналов роста, собранных за сегодня (постоянная ссылка, установка бота
+    в чужой чат, шеринг на пике эмоции, шеринг коллекции), вместо того
+    чтобы гадать. Все числа — из уже существующих полей, без новой телеметрии:
+    invited_by различает «пришёл по ссылке» от «пришёл сам/через видимость
+    бота в группе», referral_count — кто реально приводит людей.
+    """
+    if update.effective_user.id != ctx.settings.admin_id:
+        await update.message.reply_text("🔒 Только для администратора.")
+        return
+
+    async with ctx.db_pool.acquire() as conn:
+        total = await conn.fetchval(
+            'SELECT COUNT(*) FROM players WHERE COALESCE("exists", TRUE)')
+        new_week = await conn.fetchval(
+            "SELECT COUNT(*) FROM players WHERE created_at >= now() - interval '7 days'")
+        new_week_referred = await conn.fetchval(
+            "SELECT COUNT(*) FROM players WHERE created_at >= now() - interval '7 days' "
+            "AND invited_by IS NOT NULL")
+        # last_login_date обновляется РОВНО в одном месте (process_daily_login),
+        # а тот вызывается ТОЛЬКО из /start (bot.py:2721). Кнопки — фарм, крафт,
+        # что угодно — идут через button_handler напрямую в свои обработчики,
+        # МИМО /start целиком. Игрок, который просто тапает «Фармить» на старом
+        # сообщении меню (обычное поведение — сообщение с кнопками не исчезает
+        # из чата), реально играет, но эта дата не сдвигается. Старый запрос
+        # считал «кто сегодня набрал /start», а не «кто сегодня играл» — заведомо
+        # заниженное число. last_farm — самое частое реальное действие в игре
+        # (фарм — первый шаг обучения, доступный без кулдауна первые 5 раз),
+        # добавлен как второй сигнал активности.
+        dau = await conn.fetchval(
+            "SELECT COUNT(*) FROM players WHERE last_login_date = CURRENT_DATE "
+            "OR last_farm >= CURRENT_DATE")
+        # «Всего игроков» — это ряды в таблице, а не люди, которые играли.
+        # Отдельно от acquisition-вопроса: тот, кто ни разу не нажал фарм, не
+        # тронут ни одним каналом роста и ни одной механикой удержания — он
+        # не «дремлющая аудитория», а шум в счётчике. Без этого числа «155
+        # всего» читается как обещание вовлечённости, которого нет.
+        never_farmed = await conn.fetchval(
+            "SELECT COUNT(*) FROM players WHERE COALESCE(farm_count, 0) = 0")
+        top = await conn.fetch(
+            "SELECT username, referral_count FROM players "
+            "WHERE referral_count > 0 ORDER BY referral_count DESC LIMIT 10")
+        # blocked_at — момент реальной блокировки (my_chat_member), не момент,
+        # когда push-джоба случайно наткнулась на 403. Различает «заблокировал
+        # почти сразу после /start» (проблема первого впечатления) от
+        # «заблокировал спустя недели дрейфа» (обычный отток) — без этого
+        # разреза оба случая тонут в одном агрегате «заблокировали: N» у
+        # push-джоб ниже.
+        blocked_week = await conn.fetchval(
+            "SELECT COUNT(*) FROM players WHERE blocked_at >= now() - interval '7 days'")
+        blocked_week_early = await conn.fetchval(
+            "SELECT COUNT(*) FROM players WHERE blocked_at >= now() - interval '7 days' "
+            "AND blocked_at - created_at < interval '24 hours'")
+
+    never_pct = round(never_farmed / total * 100) if total else 0
+    lines = [
+        "<b>📊 РОСТ ЗА НЕДЕЛЮ</b>",
+        "",
+        f"👥 Всего игроков: <b>{total}</b>",
+        f"🆕 Новых за 7 дней: <b>{new_week}</b> (по приглашению: <b>{new_week_referred}</b>)",
+        f"🟢 Активны сегодня (открыли /start или фармили): <b>{dau}</b>",
+        f"🔴 Ни разу не фармили: <b>{never_farmed} ({never_pct}%)</b>",
+        f"🚫 Заблокировали бота за 7 дней: <b>{blocked_week}</b> "
+        f"(в первые 24ч после регистрации: <b>{blocked_week_early}</b>)",
+    ]
+
+    # created_at появился только этой миграцией: если бОльшая часть ВСЕХ
+    # игроков попадает в «новые за 7 дней», это не всплеск роста, а старые
+    # игроки, которым миграция проставила now() задним числом. Числа станут
+    # честными сами собой через неделю после деплоя — предупреждаем, а не
+    # молчим, иначе первый прогон читается как ложный успех.
+    if total > 0 and new_week >= total * 0.5:
+        lines.append(
+            "\n⚠️ <i>Похоже, это первая неделя после добавления created_at — "
+            "старым игрокам дата регистрации проставлена задним числом "
+            "(миграция), число «новых» временно завышено. Станет честным "
+            "через 7 дней.</i>")
+
+    if blocked_week == 0:
+        # blocked_at не бэкфиллится — Telegram не сообщает задним числом,
+        # когда игрок заблокировал бота до того, как заработал этот трекинг.
+        # Ноль сразу после деплоя — это «ещё не накопилось данных», а не
+        # «никто не блокирует» (последнее уже опровергнуто блоками в
+        # push-джобах ниже).
+        lines.append(
+            "\n<i>🚫-метрика — новая (my_chat_member), считает только блоки "
+            "с момента, когда это отследили. Ноль сейчас не значит «никто не "
+            "блокирует» — смотри «заблокировали» у пуш-джоб ниже, там счёт "
+            "не с нуля.</i>")
+
+    if top:
+        lines.append("\n<b>🏆 Топ по приглашениям:</b>")
+        for i, row in enumerate(top, 1):
+            uname = row["username"] or "без ника"
+            lines.append(f"{i}. @{uname} — {row['referral_count']}")
+    else:
+        lines.append("\n<i>Пока ни одного успешного приглашения.</i>")
+
+    # Здоровье процесса и джоб — теперь из Postgres (таблица job_health), не
+    # Redis. Раньше эта диагностика жила ТОЛЬКО при подключённом Redis — то
+    # есть ровно там, где она нужнее всего (Redis недоступен), она сама
+    # молчала и говорила «неизвестно» вместо ответа. db_pool есть всегда.
+    health_rows = {}
+    try:
+        async with ctx.db_pool.acquire() as conn:
+            hrows = await conn.fetch(
+                "SELECT job, last_run, sent, candidates, blocked, failed FROM job_health")
+        health_rows = {r["job"]: r for r in hrows}
+    except Exception:
+        health_rows = {}
+
+    def _fmt_age(delta: timedelta) -> str:
+        mins = int(delta.total_seconds() / 60)
+        if mins < 60:
+            return f"{mins}м"
+        hours = mins // 60
+        if hours < 48:
+            return f"{hours}ч {mins % 60}м"
+        return f"{hours // 24}д {hours % 24}ч"
+
+    proc_row = health_rows.get("process_start")
+    if proc_row:
+        age = _fmt_age(datetime.now(timezone.utc) - proc_row["last_run"])
+        lines.append(f"\n🕐 Процесс запущен: <b>{age} назад</b>")
+    else:
+        lines.append("\n🕐 Процесс запущен: <i>нет записи в job_health — "
+                     "процесс ни разу не проходил on_startup после этой миграции</i>")
+
+    # Здоровье пуш-джоб. Раньше единственным способом узнать, работает ли
+    # reengagement_push, было руками рыться в логах Render и не уметь отличить
+    # «был один безобидный деплой» от «джоба вообще не доживает до конца
+    # цикла». Staleness теперь считает читающая сторона (max_age ниже), а не
+    # TTL записи — можно честно сказать «был 5 дней назад», а не просто
+    # «нет данных», неотличимо от «не было вообще ни разу».
+    lines.append("\n<b>⚙️ Здоровье пуш-джоб:</b>")
+    for job, label, max_age in (("reengagement", "Возврат (1ч-3д дрейфа)", timedelta(hours=3)),
+                                ("winback", "Винбэк (3-30д дрейфа)", timedelta(days=9)),
+                                ("activation", "Активация (ни разу не фармили)", timedelta(days=2)),
+                                ("happy_hour_dm", "DM о Часе Удачи", timedelta(days=2))):
+        row = health_rows.get(job)
+        if not row:
+            lines.append(f"🔴 {label}: <i>нет свежих запусков</i>")
+            continue
+        age = datetime.now(timezone.utc) - row["last_run"]
+        if age > max_age:
+            lines.append(f"🔴 {label}: <i>последний запуск {_fmt_age(age)} назад — устарело</i>")
+            continue
+        try:
+            extra = ""
+            # Раньше "отправлено 0 из 9" не отличало «все заблокировали бота»
+            # (ожидаемо) от «реальная ошибка отправки» (баг) — теперь видно.
+            blocked_n = row["blocked"] or 0
+            failed_n = row["failed"] or 0
+            if blocked_n or failed_n:
+                parts = []
+                if blocked_n:
+                    parts.append(f"заблокировали: {blocked_n}")
+                if failed_n:
+                    parts.append(f"ошибок: {failed_n}")
+                extra = f" ({', '.join(parts)})"
+            lines.append(f"🟢 {label}: {_fmt_age(age)} назад, "
+                         f"отправлено {row['sent']} из {row['candidates']}{extra}")
+        except Exception:
+            lines.append(f"🟡 {label}: <i>есть отметка, не смог разобрать</i>")
+
+    await update.message.reply_text("\n".join(lines), parse_mode='HTML')
+
 # ============================================================
 # ГЛОБАЛЬНЫЙ ОБРАБОТЧИК ОШИБОК
 # ============================================================
@@ -6144,12 +9681,32 @@ async def debug_pet(update, context, ctx):
 # ───────────────────────────────────────────────
 # НОВАЯ ГЛАВНАЯ ПАНЕЛЬ (КАРТА 3, СОСТОЯНИЯ А–З)
 # ───────────────────────────────────────────────
+def happy_hour_active(ctx) -> bool:
+    """Активен ли Час Удачи.
+
+    Источник правды — дедлайн на самом ctx: он переживает TTLCache, у которого
+    ttl=600 c (main.py). Раньше флаг жил ТОЛЬКО в кэше и испарялся через 10
+    минут, хотя Час заявлен 30-минутным и выключается таском через 30 → две
+    трети времени «×2» молча не работало, а баннер продолжал обещать
+    «Осталось 25м — фарми и дуй прямо сейчас!». Кэш оставлен запасным каналом
+    (совместимость и тесты).
+    """
+    if ctx is None:
+        return False
+    end = getattr(ctx, "happy_hour_end", None)
+    if end is not None:
+        return datetime.now() < end
+    cache = getattr(ctx, "cache", None)
+    return bool(cache and cache.get("happy_hour", False))
+
+
 def _happy_hour_banner(ctx, now):
     """Живой баннер Часа Удачи с обратным отсчётом. Чистая, тестируемая.
     Показывается в момент входа → FOMO бьёт именно когда игрок уже в игре."""
-    if not (ctx and getattr(ctx, "cache", None) and ctx.cache.get("happy_hour")):
+    if not happy_hour_active(ctx):
         return ""
-    end = ctx.cache.get("happy_hour_end")
+    end = (getattr(ctx, "happy_hour_end", None)
+           or (getattr(ctx, "cache", None) or {}).get("happy_hour_end"))
     if end and now < end:
         mins = max(1, math.ceil((end - now).total_seconds() / 60))
         tail = f"Осталось {mins}м — фарми и дуй прямо сейчас!"
@@ -6159,12 +9716,50 @@ def _happy_hour_banner(ctx, now):
             f"<b>Все действия ×{HAPPY_HOUR_MULTIPLIER} OAC 🍬.</b> {tail}")
 
 
+def _north_star_line(balance: int) -> str:
+    """«Полярная звезда» — ответ на «зачем я играю», в каждой сессии.
+
+    На вход — total_earned (заработано за всё время). Раньше сюда шёл кошелёк,
+    и трата откатывала цель назад: купил питомца — и «Полярная звезда» снова
+    зовёт к рангу, который ты уже взял. Цель, которая умеет пятиться, целью
+    быть перестаёт.
+
+    Ядро проблемы драйва: игроку показывали ЦЕНУ ранга («осталось X OAC») —
+    счётчик к уплате, а не мечту. Цена без награды = гринд. Здесь — цель
+    (кем становишься) + НАГРАДА за неё (что откроется, из RANK_LORE) + прогресс
+    (goal-gradient). Специфичная желанная цель тянет сильнее абстрактного числа
+    (теория постановки целей Локка-Латэма). Показывается в ОБОИХ режимах меню.
+    """
+    # Максимум определяем по последнему порогу RANKS напрямую — надёжнее, чем
+    # доверять next_th (при балансе выше вершины он мог вернуть последний порог
+    # → отрицательный «разрыв»). Заодно чинит и старую строку цены.
+    if balance >= RANKS[-1][1]:
+        return ("👑 <b>Ты — вершина Искажения.</b>\n"
+                "<i>Имя, которым пугают в обоих мирах. Дальше — только легенда.</i>")
+    _re, _rn, ne, nn, next_th, prev_th = compute_rank_info(balance)
+    if not next_th or next_th <= balance:
+        return ("👑 <b>Ты — вершина Искажения.</b>\n"
+                "<i>Имя, которым пугают в обоих мирах. Дальше — только легенда.</i>")
+    gap = next_th - balance
+    pct = int((balance - prev_th) / (next_th - prev_th) * 100) if next_th > prev_th else 0
+    pct = min(100, max(0, pct))
+    bar = "▓" * (pct // 10) + "░" * (10 - pct // 10)
+    line = f"🎯 <b>Цель: {ne} {nn}</b> · ещё {gap} OAC\n{bar} {pct}%"
+    unlock = RANK_LORE.get(f"{ne} {nn}", {}).get("unlock", "")
+    if unlock:
+        line += f"\n🎁 <i>Откроется: {unlock}</i>"
+    return line
+
+
 async def build_main_menu(player, ctx, context=None, full_mode=False):
     now = datetime.now()
     guild = player.guild
     balance = player.balance or 0
     has_pet = bool(player.pet)
-    is_veteran = balance >= 5000
+    # Статус (ранг, гейты, Полярная звезда) — по заработанному за всё время.
+    # balance остаётся кошельком: он тратится и на статус не влияет.
+    earned = player.total_earned or 0
+    is_veteran = has_rank(earned, "Ветеран")
 
     # ---- Автоматический сброс daily_progress ----
     progress = await ensure_daily_progress(player, ctx)
@@ -6176,6 +9771,7 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
         conditions = {
             "guild_black": guild == "BLACK",
             "guild_white": guild == "WHITE",
+            "has_guild": bool(guild),
             "is_veteran_and_has_pet": is_veteran and has_pet,
         }
         filtered_tasks = []
@@ -6193,7 +9789,19 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
     reward_claimed = progress.get("reward_claimed", False)
 
     # ── ТЕКСТ ──
-    whisper = random.choice(WHISPERS)
+    # Пул зовёт только туда, куда игрок реально может пойти (см. WHISPERS_GUILD).
+    # Анти-повтор держим в context.user_data, а НЕ в daily_progress: главное меню
+    # открывается чаще любого другого экрана, и запись в БД ради декоративной
+    # строки была бы лишним походом в базу на самом горячем пути. Память процесса
+    # здесь достаточна — задача скромная: не показать ту же строку дважды подряд
+    # в рамках одной сессии (точный повтор стимула слабее активирует
+    # чувствительные к новизне зоны — repetition suppression, Grill-Spector,
+    # Henson & Martin, 2006); переживать рестарт ей незачем.
+    _wpool = WHISPERS + (WHISPERS_GUILD if guild else [])
+    _wlast = context.user_data.get("last_whisper") if context else None
+    whisper = random.choice([w for w in _wpool if w != _wlast] or _wpool)
+    if context:
+        context.user_data["last_whisper"] = whisper
     display_name = html.escape(player.username or "Странник")
 
     if full_mode:
@@ -6207,7 +9815,7 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
         lines.append("")
 
         # Определение текущего и следующего ранга
-        rank_emoji, rank_name, next_rank_emoji, next_rank_name, next_threshold, _ = compute_rank_info(balance)
+        rank_emoji, rank_name, next_rank_emoji, next_rank_name, next_threshold, _ = compute_rank_info(earned)
 
         rank_display = f"{rank_emoji} {rank_name}" if rank_name else rank_emoji
 
@@ -6224,14 +9832,10 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
             lines.append("🔮 Гильдия откроет <b>ритуалы, исповеди и войну</b>")
             lines.append("👉 <b>Нажми кнопку «🏰 Гильдии» в меню чтобы ВСТУПИТЬ.</b>")
 
-        lines.append("")  # отступ перед мотивационной строкой
+        lines.append("")  # отступ перед Полярной звездой
 
-        # Мотивационная строка (до следующего ранга)
-        if next_threshold > 0:
-            gap = next_threshold - balance
-            lines.append(f"📈 До следующего ранга <b>{next_rank_emoji} {next_rank_name}</b> осталось — <b>{gap} OAC 🍬!</b>")
-        else:
-            lines.append(f"<b>⚡ Ты достиг вершины! Твой ранг — {rank_emoji} {rank_name}.</b>")
+        # Полярная звезда: цель + НАГРАДА за неё + прогресс (не голая цена).
+        lines.append(_north_star_line(earned))
 
         lines.append("")  # отступ перед подсказкой
 
@@ -6246,6 +9850,13 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
             hint = "<b>💡 Попробуй 🌿 Крафт, чтобы создать свой первый Блант!</b>"
         elif len(named) <= 1 and balance >= GAME_CONFIG["named_blunt_cost"]:
             hint = "<b>💡 Готов к большему? Создай свой первый 💍 Именной блант! (50 OAC)</b>"
+        elif _altar_gate_open(player):
+            # Раньше эндгейм-игрок (Некромант, макс-плантация) навечно видел ТУ
+            # ЖЕ подсказку «исследуй алхимию и корми питомца», что и свежий
+            # ветеран — хотя вертикаль роста для него уже сместилась в Алтарь
+            # Вечности. Подсказка обязана двигаться вместе с прогрессом, а не
+            # застывать на первом же плато (D8 escalation).
+            hint = "💡 Загляни в <b>🕯️ Алтарь Вечности</b> — вершина роста открыта именно для тебя."
         elif is_veteran:
             hint = "💡 Исследуй <b>🔮 Алхимию</b> и корми своего 🐾 <b>питомца!</b>"
         else:
@@ -6253,21 +9864,43 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
         lines.append(hint)
 
     else:
-        # Краткий режим (без изменений)
-        lines = [f"<i>{whisper}</i>"]
+        # Краткий режим: раньше показывал только whisper — цели «зачем я здесь»
+        # не было НИ на одной кнопочной сессии (90% входов). Теперь Полярная
+        # звезда присутствует всегда — постоянный ответ «к чему я иду».
+        lines = [f"<i>{whisper}</i>", "", _north_star_line(earned)]
 
-    # Общие краткие сообщения (всегда) — новые фичи оставлены
-    if context and context.user_data.get("return_after_pause"):
-        lines.append("🎁 <b>Пока вас не было: накопились задания и готова награда</b>")
+    # SLAYER Red Team (A₄/A₅) поймал реальное накопление: до этой правки здесь
+    # могли встать РЯДОМ 3 отдельных строки (пауза-возврат, гильд-нудж, стрик),
+    # каждая обоснованная в изоляции своим коммитом — но никто не сложил их
+    # вместе на одном экране. Рабочая память держит ~4 независимых чанка
+    # (Cowan 2001, не устаревшее «7±2» Миллера); на самом частом экране бота
+    # это било по потолку. Схлопываем "пауза-возврат" и "стрик" в ОДНУ строку,
+    # когда обе истинны (обычно так и есть: заморозка серии переживает паузу
+    # ≤2 дня) — приоритет у более конкретного повода (готовая награда).
+    _streak = player.login_streak or 0
+    _has_pause = bool(context and context.user_data.get("return_after_pause"))
+    _has_streak = _streak >= 3
+    if context and _has_pause:
         context.user_data["return_after_pause"] = False
 
-    if not guild and (player.login_streak or 0) == 3:
-        lines.append("🏰 Гильдии помогают расти быстрее — загляните")
+    if _has_pause and _has_streak:
+        _fz = player.streak_freezes or 0
+        _fz_note = f" · ❄️{_fz}" if _fz > 0 else ""
+        lines.append(f"🎁 Пока тебя не было: готова награда · 🔥 серия {_streak} дн.{_fz_note} держится!")
+    elif _has_pause:
+        lines.append("🎁 Пока тебя не было: накопились задания и <b>готова награда</b>")
+    elif _has_streak:
+        _fz = player.streak_freezes or 0
+        _fz_note = f" · ❄️{_fz}" if _fz > 0 else ""
+        lines.append(f"🔥 Серия входов: <b>{_streak} дн.</b>{_fz_note} — вернись завтра за наградой!")
 
-    # Loss-aversion по серии входов: показываем, что можно потерять
-    _streak = player.login_streak or 0
-    if _streak >= 3:
-        lines.append(f"🔥 <b>Серия входов: {_streak} дн.</b> — не разорви её, вернись завтра за наградой!")
+    # Гильд-нудж: в full_mode это уже сказано (и подробнее, с CTA) в блоке
+    # приветствия выше ("Ты ещё не ВЫБРАЛ сторону!") — вторая строка о том же
+    # была чистым дублем. В коротком режиме (обычный путь "🔙 В меню") это
+    # приветствие не показывается вообще — там строка остаётся единственным
+    # напоминанием про гильдию.
+    if not guild and _streak >= 3 and not full_mode:
+        lines.append("🏰 Гильдии помогают расти быстрее — загляните")
 
     # Час Удачи — баннер поверх всего меню (peak-момент нельзя прятать)
     hh_banner = _happy_hour_banner(ctx, now)
@@ -6299,8 +9932,13 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
     farm_in_cta = False    
     if not reward_claimed and total > 0:
         if done == total:
-            # Все задания выполнены → кнопка "Забрать награду"
-            keyboard.append([InlineKeyboardButton("🎁 Забрать награду!", callback_data="claim_reward")])
+            # Главы с выбором архетипа (choices) завершаются выбором в хабе, а не
+            # claim_reward — иначе claim крадёт награду выбора (OAC/титул/предмет)
+            # и сага не движется. Такие ведём в хаб, где живут кнопки выбора.
+            if template and template.get("choices"):
+                keyboard.append([InlineKeyboardButton("🎁 Заверши главу — сделай выбор!", callback_data="daily_quest_hub")])
+            else:
+                keyboard.append([InlineKeyboardButton("🎁 Забрать награду!", callback_data="claim_reward")])
         else:
             # Есть незавершённые задания → прогресс-бар
             remaining = total - done
@@ -6316,41 +9954,118 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
 
     # Вторая строка: фарм включаем только если его НЕТ в первой строке —
     # иначе «🍬 Фармить» дублировалась бы двумя одинаковыми кнопками подряд.
+    # «Дунуть» ведёт СРАЗУ в бросок (do_smoke), без экрана-прокладки «Блантов: N».
+    # Гача-цикл должен начинаться с первого тапа; остаток блантов и так виден в
+    # карточке результата. Нет блантов — do_smoke сам покажет пустой свёрток.
     row2 = ([] if farm_in_cta else [_farm_btn()]) + [
         InlineKeyboardButton("🌿 Крафт ›", callback_data="craft"),
-        InlineKeyboardButton("💨 Дунуть", callback_data="smoke"),
+        InlineKeyboardButton("💨 Дунуть", callback_data="do_smoke"),
     ]
     keyboard.append(row2)
 
     # ===== АДАПТИВНАЯ КНОПКА ГИЛЬДИИ =====
     if guild:
         now = datetime.now()
+        # «›» обязательна: после перехода Ритуала/Исповеди на выбор профиля
+        # риска тап ведёт на ЭКРАН ВЫБОРА, а не совершает действие сразу —
+        # подпись без «›» обещала бы мгновенный результат (как «🍬 Фармить»
+        # или «💨 Дунуть») и обманывала бы ожидание.
         if guild == "BLACK":
             last_time = player.last_ritual
             cooldown = GAME_CONFIG["ritual_cooldown_hours"]
-            label = "🕯️ Ритуал"
+            label = "🕯️ Ритуал ›"
             callback = "ritual"
         else:  # WHITE
             last_time = player.last_repent
             cooldown = GAME_CONFIG["repent_cooldown_hours"]
-            label = "⚜️ Исповедь"
+            label = "⚜️ Исповедь ›"
             callback = "repent"
         
         # Показываем кнопку ТОЛЬКО если доступно
         if not last_time or (now - last_time) >= timedelta(hours=cooldown):
             keyboard.append([InlineKeyboardButton(label, callback_data=callback)])
 
-    # Навигация: 2 кнопки в ряд, чтобы длинные подписи не обрезались
-    # (3-в-ряд не помещались: «Прогресс…», «Гильди…»).
+    # ===== АДАПТИВНАЯ КНОПКА ПЛАНТАЦИИ (idle-крючок «зайди собрать») =====
+    # Самый сильный повод вернуться в игру — созревший пассивный доход. Раньше он
+    # был виден только внутри «Мир › Плантация»; теперь всплывает на ГЛАВНЫЙ экран
+    # ровно когда есть что собрать, и исчезает после сбора — как кнопка Ритуала,
+    # без засорения экрана. Переполненное хранилище = loss-aversion (стоит зря).
+    _plant_earned, _ph, _pcapped = _plant_pending_player(player, now)
+    if _plant_earned > 0:
+        _harvest_label = (f"⚠️ Урожай переполнен · собрать {_plant_earned} 🌾"
+                          if _pcapped else f"🌾 Собрать урожай · {_plant_earned} OAC")
+        # callback_data="plant_harvest", НЕ "collect": подпись называет точную
+        # сумму и глагол «собрать», а "collect" — навигация, она открывала экран
+        # Плантации, где урожай нужно было собирать ВТОРЫМ тапом. Кнопка обещала
+        # действие и не выполняла его — прямое нарушение соответствия подписи
+        # результату (Nielsen, «match between system and the real world»), да ещё
+        # на самом сильном крючке возврата в игру. plant_harvest_handler
+        # самодостаточен (атомарный сбор + показ Плантации), поэтому работает
+        # с любого входа, включая главное меню.
+        keyboard.append([InlineKeyboardButton(_harvest_label, callback_data="plant_harvest")])
+    elif (player.passive_level or 0) == 0 and player.onboarding_step == -1:
+        # D1→D2 мост: посадка «растёт пока тебя нет» доступна с первого дня, но
+        # живёт только внутри «Мир» → новичок уходит, НЕ активировав самый
+        # сильный повод вернуться к утру. Выносим посадку на ГЛАВНЫЙ экран, но
+        # ТОЛЬКО прошедшим онбординг (тутор farm→craft не засоряем) и ТОЛЬКО пока
+        # не посажено (после посадки слот займёт кнопка урожая). Бесплатно →
+        # чистый плюс: endowment («уже моё, растёт») + overnight-крючок возврата.
+        keyboard.append([InlineKeyboardButton(
+            "🌱 Посади Плантацию · растёт, пока тебя нет ›", callback_data="collect")])
+    elif 1 <= (player.passive_level or 0) < PLANT_MAX_LEVEL:
+        # Компаунд-движок наверх: у владельца плантации без готового урожая (сразу
+        # после сбора) слот висел ПУСТЫМ — единственный в игре растущий движок
+        # дохода был невидим на главном экране. Показываем аспирацию роста:
+        # текущая ставка → следующая за апгрейд + цена. Дофамин «смотрю, как мой
+        # доход растёт» + goal-gradient к следующему тиру. Чистая визуализация:
+        # экономика не тронута, кнопка ведёт в Плантацию, где апгрейд списывает
+        # OAC осознанным вторым тапом (без внезапной траты). Занят ровно тот слот,
+        # что пустовал → ни новой постоянной кнопки, ни дублей, ни лишнего текста.
+        _lvl = player.passive_level or 0
+        keyboard.append([InlineKeyboardButton(
+            f"🪴 Империя {_plant_rate(_lvl)}→{_plant_rate(_lvl + 1)}/ч · "
+            f"{_plant_upgrade_cost(_lvl)} OAC ›",
+            callback_data="collect")])
+    elif (player.passive_level or 0) >= PLANT_MAX_LEVEL and _altar_gate_open(player):
+        # Плантация максимальна → её слот на главном экране освободился (ветка
+        # выше больше не матчится). Ровно в этот момент, по экономическому
+        # аудиту, вертикаль роста исчерпана и OAC копится впустую — Алтарь
+        # Вечности занимает этот же освободившийся слот следующей вечной целью.
+        _lvl, _cost_next, _into = _altar_level(player.prestige or 0)
+        # Титул тира (_altar_tier) намеренно НЕ выводим в подпись: он уже несёт
+        # собственный эмодзи (ALTAR_TIERS: «🕯️ Послушник Алтаря», «🔥 Хранитель
+        # Пламени», …), и с ведущим 🕯️ получалось «🕯️ Алтарь: 🕯️ Послушник
+        # Алтаря» — тот же двойной эмодзи, что уже чинили в строке приветствия
+        # («⚔️⚔️ Ветеран», см. выше). Убрать вместо этого ведущий 🕯️ нельзя: с
+        # тира 5 титул перестаёт содержать слово «Алтарь» («🔥 Хранитель
+        # Пламени · ещё 1200 OAC»), и по подписи уже не предсказать, куда ведёт
+        # тап. Имя пункта важнее украшения, поэтому в подписи — то же «Алтарь»,
+        # что и в хабе «🌍 Мир» (одна вещь называется одинаково везде — Nielsen,
+        # consistency & standards), а титул тира ждёт на самом экране Алтаря.
+        keyboard.append([InlineKeyboardButton(
+            f"🕯️ Алтарь ур.{_lvl} · ещё {_cost_next} OAC ›",
+            callback_data="altar_hub")])
+
+    # Навигация: 2 кнопки в ряд (3-в-ряд не помещались: «Прогресс…», «Гильди…»).
+    #
+    # Пары СМЫСЛОВЫЕ, а не как легли. Раньше было [Гильдия | Прогресс] и
+    # [Лидеры | Мир]: два социальных пункта (Гильдия и Лидеры) оказывались в
+    # разных рядах, а личная статистика стояла в паре с гильдией. Ряд не имел
+    # своего лица, поэтому глазу приходилось прочитывать все четыре подписи —
+    # ровно та цена решения, которую описывает закон Хика.
+    #
+    # Теперь у каждого ряда одна тема, и ненужный можно пропустить целиком:
+    #   МЕСТА, куда идти      — 🌍 Мир, 🏰 Гильдия
+    #   ПОКАЗАТЕЛИ, где я     — 📊 Прогресс (свои), 🏅 Лидеры (в сравнении)
+    # Лидерборд остаётся на главном экране (сильнейший соц-крючок), просто
+    # встаёт рядом с той цифрой, с которой его и сравнивают.
     keyboard.append([
-        InlineKeyboardButton("🏰 Гильдия ›", callback_data="guild_info"),
-        InlineKeyboardButton("📊 Прогресс ›", callback_data="progress_hub"),
-    ])
-    # Лидерборд — из подвала на главный экран: сильнейший соц-крючок (топ-10 +
-    # твоя позиция + приз, который надо удержать). 2-в-ряд, без обрезки подписей.
-    keyboard.append([
-        InlineKeyboardButton("🏅 Лидеры ›", callback_data="top"),
         InlineKeyboardButton("🌍 Мир ›", callback_data="world_hub"),
+        InlineKeyboardButton("🏰 Гильдия ›", callback_data="guild_info"),
+    ])
+    keyboard.append([
+        InlineKeyboardButton("📊 Прогресс ›", callback_data="progress_hub"),
+        InlineKeyboardButton("🏅 Лидеры ›", callback_data="top"),
     ])
 
     return text, InlineKeyboardMarkup(keyboard)
@@ -6367,8 +10082,60 @@ async def menu_handler(update, context, ctx):
         await query.answer("Профиль не найден. Напиши /start", show_alert=True)
         return
 
+    # Тот же дневной hook, что в game_handler (bot.py ~180) — «🔙 В меню»
+    # не проходит через game_handler (отдельный декоратор @cb), а это,
+    # вероятно, самая нажимаемая кнопка в боте.
+    if (player.onboarding_step == -1
+            and _parse_last_login_date(player.last_login_date) != date.today()):
+        asyncio.create_task(process_daily_login(uid, context))
+
     text, kb = await build_main_menu(player, ctx, context)
-    await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
+    # edit_or_reply, не query.message.edit_text напрямую: последнее падает
+    # BadRequest без единого фолбэка, если нажатие пришло из фото-сообщения
+    # (нет текста для edit) — кнопка «🏰 В меню» просто ничего не делала,
+    # без ошибки и без ответа игроку.
+    await edit_or_reply(update, context, text, reply_markup=kb, parse_mode='HTML')
+
+
+# Единицы вех для честной формулировки «ещё N <чего>» (goal-gradient конкретнее
+# абстрактного числа). Ключи — поля Player из ACHIEVEMENT_CONDITIONS.
+_MILESTONE_UNITS = {
+    "balance": "OAC", "total_earned": "OAC", "farm_count": "фарм.", "craft_count": "крафт.",
+    "smoke_count": "затяжек", "ritual_count": "ритуал.", "repent_count": "исповед.",
+    "referral_count": "друзей", "login_streak": "дн. подряд", "lab_chests": "сундук.",
+    "lab_deaths": "смертей", "check_count": "проверок", "alchemy_count": "алхимии",
+    "passive_level": "ур. плантации",
+}
+
+
+def _nearest_milestone(player, awarded_ids):
+    """Ближайшая НЕвзятая веха-достижение по проценту прогресса (goal-gradient).
+
+    Плотно заполняет разреженный мид-гейм: между редкими рангами (5k→20k→50k)
+    всегда светит близкая конкретная цель из УЖЕ существующих ACHIEVEMENTS —
+    чистая визуализация, без новой экономики и контента. Data-driven: новые
+    достижения обогащают трекер сами. Берём максимум по %, поэтому всплывает
+    самое близкое (обычно активити-веха → разнообразие сверх балансового грайнда).
+    Возвращает (ach, current, target, pct) или None, если незакрытых счётных вех нет.
+    """
+    best = None
+    for ach in ACHIEVEMENTS:
+        ach_id = ach["id"]
+        if ach_id == "lunar_lord" or ach_id in awarded_ids:
+            continue
+        cond = ACHIEVEMENT_CONDITIONS.get(ach_id)
+        if not cond:
+            continue
+        field, target = cond
+        if target <= 0:
+            continue
+        current = getattr(player, field, 0) or 0
+        if current >= target:
+            continue  # вот-вот выдастся сама — это не «цель впереди»
+        pct = current / target * 100
+        if best is None or pct > best[3]:
+            best = (ach, current, target, pct)
+    return best
 
 
 # ── Прогресс-хаб (LVL 1) ──
@@ -6384,23 +10151,37 @@ async def progress_hub_handler(update, context, ctx):
             await query.answer("❌ Профиль не найден!", show_alert=True)
             return
 
-        balance = player.balance or 0
+        # Ранг и лестница — по заработанному за всё время (единая ось со всеми
+        # остальными экранами). Через `balance` этот экран пятился назад после
+        # каждой покупки и противоречил и профилю, и главному меню, и топу.
+        balance = player.total_earned or 0
+        wallet = player.balance or 0
         username = html_escape(player.username or str(uid))
 
-        # ===== 1. РАНГ И ПРОГРЕСС =====
+        # ===== 1. РАНГ + ЛЕСТНИЦА ВОСХОЖДЕНИЯ (шапка «куда я расту») =====
         rank_emoji, rank_name, next_rank_emoji, next_rank_name, next_threshold, prev_threshold = compute_rank_info(balance)
+
+        # Лестница рангов перенесена из «Пути к власти»: вопрос статуса «куда я
+        # расту» отвечается в ОДНОМ месте (Прогресс), а не размазан по 4 экранам.
+        ladder = []
+        for _e, _th, _ in RANKS:
+            _em = _e.split(' ', 1)[0]
+            _nm = _e.split(' ', 1)[1] if ' ' in _e else _e
+            if balance >= _th:
+                ladder.append(f"✅ {_em} <b>{_nm}</b>")
+            elif _th == next_threshold:
+                ladder.append(f"➡️ {_em} <b>{_nm}</b> — осталось {_th - balance} OAC")
+            else:
+                ladder.append(f"🔒 {_em} {_nm}")
+        ladder_str = "<b>⚜️ Восхождение:</b>\n" + "\n".join(ladder)
 
         if next_threshold:
             progress_percent = int((balance - prev_threshold) / (next_threshold - prev_threshold) * 100) if next_threshold > prev_threshold else 100
             progress_percent = min(100, max(0, progress_percent))
             bar = "▓" * (progress_percent // 10) + "░" * (10 - progress_percent // 10)
-            rank_line = (
-                f"<b>⚜️ Ранг: {rank_emoji} {rank_name} → {next_rank_emoji} {next_rank_name}</b>\n"
-                f"<b>{balance} / {next_threshold} OAC</b>\n"
-                f"{bar} <b>{progress_percent}</b>%"
-            )
+            rank_line = f"{ladder_str}\n<b>{balance} / {next_threshold} OAC</b>  {bar} <b>{progress_percent}%</b>"
         else:
-            rank_line = f"<b>⚜️ Ранг: {rank_emoji} {rank_name}</b> (Максимум!)"
+            rank_line = f"{ladder_str}\n<b>⚡ Ты достиг вершины!</b>"
 
         # ===== 2. ЕЖЕДНЕВНЫЕ ЗАДАНИЯ =====
         progress = await ensure_daily_progress(player, ctx)
@@ -6419,7 +10200,9 @@ async def progress_hub_handler(update, context, ctx):
         conditions = {
             "guild_black": player.guild == "BLACK",
             "guild_white": player.guild == "WHITE",
-            "is_veteran_and_has_pet": (player.balance or 0) >= 5000 and bool(player.pet),
+            "has_guild": bool(player.guild),
+            "is_veteran_and_has_pet": (has_rank(player.total_earned or 0, "Ветеран")
+                                       and bool(player.pet)),
         }
         filtered_tasks = []
         for task in template["tasks"]:
@@ -6442,35 +10225,45 @@ async def progress_hub_handler(update, context, ctx):
         )
         
         # --- Список заданий (галочки) ---
-        #tasks_list = []
-        #for task in filtered_tasks:
-            #label = task["label"]
-            #if progress.get(task["key"], False):
-                #tasks_list.append(f"   ✅ {label}")
-            #else:
-                #tasks_list.append(f"   ⬜️ {label}")
-        #tasks_text = "\n".join(tasks_list)
-     
+        # Был закомментирован — экран показывал только абстрактный % и счётчик
+        # «3/5 этапов», ни разу не называя, КАКИЕ шаги закрыты и какой остался.
+        # Единственное место на этом же экране, где goal-gradient не конкретный
+        # (ближайшая веха и лестница рангов ниже — оба называют точную цель):
+        # внутренняя нестыковка, а не осознанный выбор. Прогресс-хаб — один из
+        # двух постоянных пунктов подвала главного меню, трафик высокий.
+        tasks_list = []
+        for task in filtered_tasks:
+            label = task.get("label", "Задание")
+            if progress.get(task["key"], False):
+                tasks_list.append(f"   ✅ {label}")
+            else:
+                tasks_list.append(f"   ⬜️ {label}")
+        tasks_text = "\n".join(tasks_list)
+
         # --- Если всё выполнено — радостный текст (всегда!) ---
         if done == total:
-            tasks_block = f"{tasks_header}\n🎉 <b>ВСЕ ЗАДАНИЯ ВЫПОЛНЕНЫ!</b>"
+            tasks_block = f"{tasks_header}\n{tasks_text}\n🎉 <b>ВСЕ ЗАДАНИЯ ВЫПОЛНЕНЫ!</b>"
         else:
-            tasks_block = f"{tasks_header}" #\n{tasks_text}
+            tasks_block = f"{tasks_header}\n{tasks_text}"
 
         # ===== 3. СРАВНЕНИЕ С СОСЕДЯМИ =====
-        my_balance = player.balance or 0
+        # Соседи по рейтингу — по той же оси, что и сам рейтинг (total_earned).
+        my_balance = player.total_earned or 0
         async with ctx.db_pool.acquire() as conn:
             # ✅ добавлен user_id
             above_row = await conn.fetchrow(
-                "SELECT user_id, username, balance FROM players WHERE balance > $1 ORDER BY balance ASC LIMIT 1",
+                "SELECT user_id, username, total_earned AS balance FROM players "
+                "WHERE total_earned > $1 ORDER BY total_earned ASC LIMIT 1",
                 my_balance
             )
             below_row = await conn.fetchrow(
-                "SELECT user_id, username, balance FROM players WHERE balance < $1 ORDER BY balance DESC LIMIT 1",
+                "SELECT user_id, username, total_earned AS balance FROM players "
+                "WHERE total_earned < $1 ORDER BY total_earned DESC LIMIT 1",
                 my_balance
             )
             total_players = await conn.fetchval("SELECT COUNT(*) FROM players")
-            above_count = await conn.fetchval("SELECT COUNT(*) FROM players WHERE balance > $1", my_balance)
+            above_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM players WHERE total_earned > $1", my_balance)
 
         position = (above_count or 0) + 1
         in_top10 = position <= 10
@@ -6500,14 +10293,20 @@ async def progress_hub_handler(update, context, ctx):
             comparison_lines.append(f"⬆️ <b>Выше вас: {name}</b> (нужно {gap} OAC для обгона)")
 
         if not comparison_lines:
-            comparison_lines.append("🏅 Вы единственный в рейтинге!")
+            comparison_lines.append("🏅 Ты пока единственный в рейтинге!")
 
         if in_top10:
             comparison_lines.append(f"🎯 <b>Позиция в топе: #{position}</b>")
         else:
-            tenth_row = await conn.fetchrow(
-                "SELECT balance FROM players ORDER BY balance DESC LIMIT 1 OFFSET 9"
-            )
+            # Прежний код звал conn.fetchrow ЗДЕСЬ, а connection к этому моменту
+            # уже вернулось в пул (async with выше закрылся) → "connection has
+            # been released back to the pool" для любого игрока не из топ-10.
+            # Берём свежее соединение.
+            async with ctx.db_pool.acquire() as conn2:
+                tenth_row = await conn2.fetchrow(
+                    "SELECT total_earned AS balance FROM players "
+                    "ORDER BY total_earned DESC LIMIT 1 OFFSET 9"
+                )
             if tenth_row:
                 tenth_balance = tenth_row["balance"]
                 gap_top10 = tenth_balance - my_balance
@@ -6520,6 +10319,8 @@ async def progress_hub_handler(update, context, ctx):
 
         # ===== 4. СТАТИСТИКА =====
         stats_lines = []
+        # Обе оси рядом: по чему считается ранг и что реально можно потратить.
+        stats_lines.append(f"💎 Кошелёк: {wallet} OAC 🍬")
         stats_lines.append(f"🌿 Блантов скручено: {player.craft_count or 0}")
         stats_lines.append(f"💨 Выкурено: {player.smoke_count or 0}")
 
@@ -6530,11 +10331,24 @@ async def progress_hub_handler(update, context, ctx):
 
         stats_text = "\n".join(stats_lines)
 
-        # ===== 5. ДОСТИЖЕНИЯ =====
+        # ===== 5. ДОСТИЖЕНИЯ + БЛИЖАЙШАЯ ВЕХА (плотный мид-гейм) =====
         async with ctx.db_pool.acquire() as conn:
-            awarded = await conn.fetchval("SELECT COUNT(*) FROM achievements_awarded WHERE user_id=$1", uid)
+            awarded_rows = await conn.fetch("SELECT ach_id FROM achievements_awarded WHERE user_id=$1", uid)
+        awarded_ids = {r["ach_id"] for r in awarded_rows}
         total_ach = len(ACHIEVEMENTS)
-        ach_line = f"🏆 Достижений: {awarded or 0} / {total_ach}"
+        ach_line = f"🏆 Достижений: {len(awarded_ids)} / {total_ach}"
+        # Между редкими рангами всегда должна светить близкая конкретная цель —
+        # иначе мид-гейм = плоский грайнд к далёкому числу. Мёртвый счётчик выше
+        # оживляем в живой goal-gradient к ближайшей невзятой вехе.
+        _ms = _nearest_milestone(player, awarded_ids)
+        if _ms:
+            _a, _cur, _tgt, _pct = _ms
+            _p = min(100, max(0, int(_pct)))
+            _mbar = "▓" * (_p // 10) + "░" * (10 - _p // 10)
+            _unit = _MILESTONE_UNITS.get(ACHIEVEMENT_CONDITIONS[_a["id"]][0], "")
+            _left = _tgt - _cur
+            ach_line += (f"\n🎯 <b>Ближайшая веха:</b> {_a['emoji']} {_a['name']}\n"
+                         f"{_mbar} {_p}% · ещё {_left} {_unit}".rstrip())
 
         # ===== СБОРКА =====
         text = (
@@ -6549,11 +10363,15 @@ async def progress_hub_handler(update, context, ctx):
         kb_rows = [
             [InlineKeyboardButton("👤 Профиль", callback_data="profile"),
              InlineKeyboardButton("🏆 Достижения", callback_data="achievements_menu"),
-             InlineKeyboardButton("🏅 Лидеры", callback_data="top")]
+             InlineKeyboardButton("🎯 Путь", callback_data="destiny_hub")]
         ]
 
         if done == total and not progress.get("reward_claimed"):
-            kb_rows.insert(0, [InlineKeyboardButton("🎁 Забрать награду!", callback_data="claim_reward")])
+            # Главы с выбором архетипа завершаются выбором в хабе, а не claim_reward.
+            if template.get("choices"):
+                kb_rows.insert(0, [InlineKeyboardButton("🎁 Заверши главу — сделай выбор!", callback_data="daily_quest_hub")])
+            else:
+                kb_rows.insert(0, [InlineKeyboardButton("🎁 Забрать награду!", callback_data="claim_reward")])
 
         kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="menu")])
         kb = InlineKeyboardMarkup(kb_rows)
@@ -6561,10 +10379,21 @@ async def progress_hub_handler(update, context, ctx):
         await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
 
     except Exception as e:
-        logger.exception("Ошибка в progress_hub_handler")
-        await query.answer("⚠️ Внутренняя ошибка. Попробуйте позже.", show_alert=True)
-        # Уведомление админу
-        if ctx.settings.admin_id:
+        # RetryAfter/Forbidden — ожидаемый шум (перегрузка чата, недостижимый
+        # адресат), не баг; см. _is_expected_telegram_noise и тот же фикс в
+        # game_handler. Не роняем это на админа как «🚨 Ошибка».
+        noisy = _is_expected_telegram_noise(e)
+        if noisy:
+            logger.warning(f"Ожидаемый шум Telegram в progress_hub_handler: {e}")
+        else:
+            logger.exception("Ошибка в progress_hub_handler")
+        try:
+            await query.answer("⏳ Слишком много запросов — попробуй через пару секунд." if
+                               isinstance(e, RetryAfter) else "⚠️ Внутренняя ошибка. Попробуй позже.",
+                               show_alert=True)
+        except Exception:
+            pass
+        if ctx.settings.admin_id and not noisy:
             try:
                 await context.bot.send_message(
                     chat_id=ctx.settings.admin_id,
@@ -6597,12 +10426,13 @@ async def daily_quest_hub(update, context, ctx):
 
     guild = player.guild
     has_pet = bool(player.pet)
-    is_veteran = (player.balance or 0) >= 5000
+    is_veteran = has_rank(player.total_earned or 0, "Ветеран")
 
     # Проверка условий
     conditions = {
         "guild_black": guild == "BLACK",
         "guild_white": guild == "WHITE",
+        "has_guild": bool(guild),
         "is_veteran_and_has_pet": is_veteran and has_pet,
     }
     
@@ -6643,16 +10473,37 @@ async def daily_quest_hub(update, context, ctx):
     text += f"<b>[{bar}] {done}/{total} этапов</b>\n\n"
     
     # ===== СПИСОК ЗАДАНИЙ =====
+    # Кнопки невыполненных заданий собираем отдельно и раскладываем ПО ДВЕ В
+    # РЯД. Было по одной: шесть подписей длиной 7–19 символов («🎲 Мины»,
+    # «🌿 Крафт», «💨 Дунуть») занимали по целому ряду каждая — экран вытягивался
+    # вшестеро длиннее нужного, а полная ширина, сильнейший визуальный вес в
+    # Telegram, доставалась ВСЕМ пунктам сразу, то есть не выделяла ни одного.
+    # Разложенные парами, задания читаются как сетка: взгляд идёт по строкам,
+    # а не перебирает шесть равнозначных вариантов подряд (закон Хика — цена
+    # решения растёт с числом равнозначных альтернатив; чанкинг её снижает).
+    # Порядок сохранён — слева направо, сверху вниз, как в тексте выше.
     kb_rows = []
+    task_btns = []
     for task in tasks:
         label = task["label"]
         key = task["key"]
         is_done = progress.get(key, False)
+        # Донат — единственное задание с накопительной целью, которую можно
+        # честно показать (не ограничено кулдауном, копится за цикл, см.
+        # shrine_donate_handler). Остальные ключи (farm/craft/ritual/train…)
+        # закрываются одним действием — их "target" не отслеживается по счётчику.
+        if key == "donate" and not is_done and task.get("target", 1) > 1:
+            label = f"{label} ({progress.get('donate_amount', 0)}/{task['target']} OAC)"
         if is_done:
             text += f"✅ {label}\n"
         else:
             text += f"⬜️ {label}\n"
-            kb_rows.append([InlineKeyboardButton(label, callback_data=f"quest_{key}")])
+            task_btns.append(InlineKeyboardButton(label, callback_data=f"quest_{key}"))
+
+    # Пары; нечётный «хвост» остаётся один в последнем ряду — это нормально и
+    # заодно выделяет последнее оставшееся задание, когда оно одно.
+    for i in range(0, len(task_btns), 2):
+        kb_rows.append(task_btns[i:i + 2])
 
     # ===== ПРОЦЕНТ ПРОГРЕССА =====
     text += f"\n🎯 <b>Прогресс: {percent}%</b>"
@@ -6692,6 +10543,17 @@ async def handle_choice(update, context, ctx):
         await query.answer("Выбор сейчас недоступен", show_alert=True)
         return
 
+    # Защита от «вчерашних» кнопок: после дневного сброса задачи главы обнуляются,
+    # но старое сообщение с кнопками выбора остаётся в чате — без этой проверки
+    # тап по нему выдавал награду выбора (250 OAC + титул + предмет) в обход задач.
+    _done, _total = _quest_progress_counts(
+        template, progress, player.guild,
+        has_rank(player.total_earned or 0, "Ветеран"), bool(player.pet))
+    if _done < _total:
+        await query.answer(
+            f"Сначала заверши все шаги главы! ({_done}/{_total})", show_alert=True)
+        return
+
     try:
         idx = int(query.data.split("_")[-1])
         choice = choices[idx]
@@ -6707,9 +10569,22 @@ async def handle_choice(update, context, ctx):
             if reward_title not in titles:
                 titles.append(reward_title)
                 p.titles = " ".join(titles).strip()
-        for item_key, qty in choice.get("reward_items", {}).items():
-            if hasattr(p, item_key):
-                setattr(p, item_key, getattr(p, item_key, 0) + qty)
+        # Было: setattr(p, item_key, ...) на поля (claw_of_beast и т.п.), которых
+        # НЕТ в модели Player → hasattr всегда False → награда за архетип-выбор
+        # молча не начислялась НИКОГДА. reward_bg — реальный канал (тот же, что
+        # у достижений: profile_skins → уже работающий choose_bg_handler).
+        # Инлайним (не зовём _award_achievement_rewards — та делает свой
+        # ctx.repo.save() ВНЕ этой транзакции, гонка с save() atomic_update).
+        reward_bg = choice.get("reward_bg")
+        if reward_bg:
+            skins = p.profile_skins or {}
+            if not isinstance(skins, dict):
+                skins = {}
+            unlocked = skins.get("unlocked_backgrounds", [])
+            if reward_bg not in unlocked:
+                unlocked.append(reward_bg)
+            skins["unlocked_backgrounds"] = unlocked
+            p.profile_skins = skins
         reset_date = (p.daily_progress or {}).get("reset_date")
         p.daily_progress = {
             "reset_date": reset_date,
@@ -6719,9 +10594,13 @@ async def handle_choice(update, context, ctx):
         return True
 
     await ctx.repo.atomic_update(uid, _apply)
+    _result_text = choice.get("result_text", "✨ Выбор сделан.")
+    _reward_bg = choice.get("reward_bg")
+    if _reward_bg:
+        _result_text += f"\n\n🖼️ <b>Новый фон профиля: {_reward_bg}</b>"
     await context.bot.send_message(
         chat_id=query.message.chat.id,
-        text=choice.get("result_text", "✨ Выбор сделан."),
+        text=_result_text,
         parse_mode='HTML',
     )
 
@@ -6739,14 +10618,25 @@ async def skip_onboarding_handler(update, context):
     player = await ctx.repo.get_by_id(uid)
     if not player or not player.exists:
         return
+    _was_active = player.onboarding_step != -1
     player.onboarding_step = -1
     await ctx.repo.save(player)
+
+    # Тот же гейт реферальной награды, что и в handle_craft_normal_v2: даже
+    # «пропустить обучение» — реальное действие внутри игры, не голый /start,
+    # так что это тоже валидный сигнал для разблокировки награды рефереру.
+    # _was_active защищает от повторного начисления, если кнопка почему-то
+    # нажата ещё раз после того, как обучение уже завершено.
+    if _was_active and player.invited_by:
+        await _reward_referrer(ctx, context, player.invited_by, new_username=player.username)
 
     text, kb = await build_main_menu(player, ctx, context, full_mode=True)
     try:
         await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
     except Exception:
-        await safe_send_message(context, uid, text, reply_markup=kb, parse_mode='HTML')
+        # chat нажатия, не uid — тот же класс бага, что и в остальных
+        # онбординг-сообщениях этой правки (см. farm_callback_v2/train_callback).
+        await safe_send_message(context, query.message.chat.id, text, reply_markup=kb, parse_mode='HTML')
 
 
 @rate_limit(2)
@@ -6758,6 +10648,7 @@ async def train_callback(update, context, ctx, player):
     (сбрасывается вместе с дневным прогрессом), поэтому не требует новой колонки БД.
     """
     uid = update.effective_user.id
+    chat_id = update.effective_chat.id
     if update.callback_query:
         try:
             await update.callback_query.answer()
@@ -6776,16 +10667,19 @@ async def train_callback(update, context, ctx, player):
     result = await ctx.repo.atomic_update(uid, _train)
     if not result:
         return
+    # chat_id (чат нажатия), не uid — тренировка доступна и из группового
+    # чата, а безусловный ЛС на uid падает "Forbidden: bot can't initiate
+    # conversation" для тех, кто ни разу не открывал ЛС с ботом.
     if result[0] == "already":
         await safe_send_message(
-            context, uid,
+            context, chat_id,
             "⚔️ <b>Ты уже тренировался сегодня.</b>\n"
             "<i>Дух воина крепнет постепенно — возвращайся завтра.</i>",
             parse_mode='HTML')
         return
     _, reward, new_balance = result
     await safe_send_message(
-        context, uid,
+        context, chat_id,
         f"⚔️ <b>ТРЕНИРОВКА ЗАВЕРШЕНА!</b>\n\n"
         f"🛡️ Ты закалил дух воина. <b>+{reward} OAC</b>\n"
         f"💎 <b>Баланс:</b> {new_balance} OAC",
@@ -6846,11 +10740,21 @@ async def handle_quest_action(update, context):
     elif action == "lab":
         await lab_enter(update, context)
         return
+    elif action == "mines":
+        # Ведёт сразу на выбор ставки (luck_callback → _process_mines), не в
+        # общий хаб Удачи — тот же принцип, что у donate/lab: один тап от
+        # чек-листа задания до самого действия, без промежуточного экрана.
+        await luck_callback(update, context, action="luck_mines")
+        return
     else:
         await query.answer("Неизвестное задание", show_alert=True)
 
-    # Обновляем экран заданий после любой попытки
-    await daily_quest_hub(update, context, ctx)
+    # Обновляем экран заданий после любой попытки.
+    # БЕЗ ctx: декоратор @cb сам достаёт его из bot_data и подставляет третьим
+    # аргументом. Передавая ctx руками, мы отдавали в функцию ЧЕТЫРЕ аргумента
+    # при трёх параметрах — TypeError, который @cb молча проглатывал в лог.
+    # Итог: хаб не перерисовывался, галочка выполненного шага не появлялась.
+    await daily_quest_hub(update, context)
 
 # ── Забирание награды (обновлённый профиль с наградой) ──
 @cb
@@ -6879,10 +10783,11 @@ async def claim_reward_handler(update, context, ctx):
 # ---- Фильтруем задания по условиям (как в daily_quest_hub) ----
     guild = player.guild
     has_pet = bool(player.pet)
-    is_veteran = (player.balance or 0) >= 5000
+    is_veteran = has_rank(player.total_earned or 0, "Ветеран")
     conditions = {
         "guild_black": guild == "BLACK",
         "guild_white": guild == "WHITE",
+        "has_guild": bool(guild),
         "is_veteran_and_has_pet": is_veteran and has_pet,
     }
     filtered_tasks = []
@@ -6904,6 +10809,16 @@ async def claim_reward_handler(update, context, ctx):
         await query.answer("Выполни все доступные этапы квеста!", show_alert=True)
         return
 
+    # Корневая защита: главы с выбором архетипа НЕ забираются через claim — иначе
+    # игрок теряет награду выбора (250 OAC/титул/предмет) и сага застревает. Все
+    # UI-поверхности уже ведут такие главы в хаб; это — последний рубеж.
+    if template.get("choices"):
+        try:
+            await query.answer("Все шаги готовы — сделай выбор в «Заданиях дня» 👇", show_alert=True)
+        except Exception:
+            pass
+        return
+
     # ---- Начисляем награду из шаблона ----
     async def _reward(p, conn):
         reward_oac = template.get("reward_oac", 150)
@@ -6916,9 +10831,19 @@ async def claim_reward_handler(update, context, ctx):
                 titles.append(reward_title)
                 p.titles = " ".join(titles).strip()
 
-        for item_key, qty in template.get("reward_items", {}).items():
-            if hasattr(p, item_key):
-                setattr(p, item_key, getattr(p, item_key, 0) + qty)
+        # Было: setattr на несуществующие поля (war_essence и т.п.) — молча
+        # ничего не начисляло. reward_bg — тот же реальный канал, что в
+        # handle_choice._apply (profile_skins → choose_bg_handler).
+        reward_bg = template.get("reward_bg")
+        if reward_bg:
+            skins = p.profile_skins or {}
+            if not isinstance(skins, dict):
+                skins = {}
+            unlocked = skins.get("unlocked_backgrounds", [])
+            if reward_bg not in unlocked:
+                unlocked.append(reward_bg)
+            skins["unlocked_backgrounds"] = unlocked
+            p.profile_skins = skins
 
         next_quest = template.get("next_quest")
         reset_date = p.daily_progress.get("reset_date")
@@ -6936,6 +10861,25 @@ async def claim_reward_handler(update, context, ctx):
     if result is not None:
         reward_oac = template.get("reward_oac", 150)
         reward_text = f"+{reward_oac} OAC 🍬" if reward_oac > 0 else ""
+        # Объявляем разблокированный фон явно — иначе награда снова невидима
+        # игроку (просто по другой причине: тихо добавлена в список вместо
+        # тихо потеряна). Забрать его можно в 🎨 Скины → Выбрать фон.
+        reward_bg = template.get("reward_bg")
+        if reward_bg:
+            reward_text += f"\n🖼️ <b>Новый фон профиля: {reward_bg}</b>"
+
+        # Прохождение главы — тот же класс пика, что у ранг-апа/джекпота/
+        # рекорда Лабиринта (см. _win_share_button), но единственный из них
+        # без кнопки шеринга: почти каждый вовлечённый игрок хотя бы раз
+        # проходит ГЛАВУ 1, а реферал в этот момент сейчас нигде не всплывает.
+        claim_kb = None
+        try:
+            share_btn = await _win_share_button(
+                context, uid, f"📜 Я прошёл «{template['title']}» в Antysocialshop!")
+            claim_kb = InlineKeyboardMarkup([[share_btn]])
+        except Exception:
+            pass
+
         await context.bot.send_message(
             chat_id=query.message.chat.id,
             text=(
@@ -6944,82 +10888,81 @@ async def claim_reward_handler(update, context, ctx):
                 f"<b>📜 {template['title']} — пройдена! {reward_text}</b>\n\n"
                 f"Отличная работа!"
             ),
-            parse_mode='HTML'
+            parse_mode='HTML',
+            reply_markup=claim_kb
         )
     else:
-        await query.answer("Ошибка при начислении награды. Попробуйте позже.", show_alert=True)
+        await query.answer("Ошибка при начислении награды. Попробуй позже.", show_alert=True)
 
-    # Обновляем главное меню
-    await menu_handler(update, context, ctx)
+    # Обновляем главное меню (без ctx — его подставит @cb, см. handle_quest_action).
+    # Раньше TypeError глушился, и после «Забрать награду» экран замирал с той же
+    # кнопкой: повторный тап отвечал «Награда уже получена» — тупик на самом
+    # пиковом моменте главы.
+    await menu_handler(update, context)
 
 # ── Все возможности (для новичков) ──
 @cb
 async def all_features_handler(update, context, ctx):
+    """Карта пути (бывшая «Все возможности»).
+
+    Раньше — тупиковая стена из 11 строк текста: рассказывала, что есть, но не
+    давала попробовать и не отвечала на «зачем». Теперь — живая карта: каждая
+    открытая система — кнопка-вход (обучение действием), заблокированное показано
+    с условием разблокировки (аспирация, синхронная лестнице рангов), а заголовок
+    отвечает на «кем ты станешь» (identity до функциональности).
+    """
     query = update.callback_query
     await query.answer()
+    player = await ctx.repo.get_by_id(query.from_user.id)
+    balance = (player.balance if player else 0) or 0
+    earned = (player.total_earned if player else 0) or 0
+    is_veteran = has_rank(earned, "Ветеран")
+    rank_emoji, rank_name, *_ = compute_rank_info(earned)
+
     text = (
-        "<b>✨ ВСЕ ВОЗМОЖНОСТИ</b>\n\n"
-        "• 🍬 <b>Фарм</b> — добыча OAC\n"
-        "• 🌿 <b>Крафт</b> — создание Блантов\n"
-        "• 💨 <b>Дунуть</b> — случайный эффект\n"
-        "• 🪴 <b>Плантация</b> — развитие твоей <b>империи</b> дохода 📉\n"
-        "• 🕯️ <b>Ритуал</b> — для Тёмной Гильдии 🕯️\n"
-        "• ⚜️ <b>Исповедь</b> — для Светлой Гильдии 🪽\n"
-        "• 🐾 <b>Питомец</b> — появится с ранга Ветеран ⚔️\n"
-        "• 🍀 <b>Удача</b> — колесо, мины, алхимия ⚗️\n"
-        "• 🏛️ <b>Лабиринт</b> — глубины и сокровища 🎁\n"
-        "• 🛍️ <b>Магазин</b> — скидки и каталог магазина 🛒\n"
-        "• 📖 <b>Правила Мира</b> — команды и правила игры\n\n"
-        "<i>Продолжай выполнять задания, и всё откроется!</i>"
+        "🌍 <b>ТВОЙ МИР</b>\n\n"
+        f"<i>Ты — {rank_emoji} {rank_name}. Впереди — трон 🪬 Некроманта Искажения.</i>\n\n"
+        "<b>Открыто сейчас — жми и пробуй:</b>"
     )
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🏰 В меню", callback_data="menu")]])
-    await query.message.edit_text(text, reply_markup=kb, parse_mode='HTML')
+    kb_rows = [
+        [InlineKeyboardButton("🍬 Фарм", callback_data="farm"),
+         InlineKeyboardButton("🌿 Крафт", callback_data="craft"),
+         InlineKeyboardButton("💨 Дунуть", callback_data="do_smoke")],
+        [InlineKeyboardButton("🪴 Плантация", callback_data="collect"),
+         InlineKeyboardButton("🎲 Зал Удачи", callback_data="luck")],
+        [InlineKeyboardButton("🏛️ Лабиринт", callback_data="lab_start"),
+         InlineKeyboardButton("🛒 Лавка Фабрики", callback_data="shop")],
+        [InlineKeyboardButton("🏰 Гильдия — ритуалы, война", callback_data="guild_info")],
+    ]
+    if is_veteran:
+        kb_rows.append([InlineKeyboardButton("🐾 Питомец", callback_data="pet_preview")])
+    else:
+        text += ("\n\n<b>Откроется с ⚔️ Ветерана (5000 🍬):</b>\n"
+                 "   🐾 Питомец — верный спутник в пути")
+    kb_rows.append([InlineKeyboardButton("📖 Правила мира", callback_data="rules"),
+                    InlineKeyboardButton("🔙 В меню", callback_data="menu")])
+    await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode='HTML')
 
 async def bush_preview_handler(update, context):
     query = update.callback_query
     await query.answer("❌ Доступно с ранга ⚔️ Ветеран (5000 OAC 🍬)", show_alert=True)
 
-@cb
-async def activate_menu_handler(update, context, ctx):
-    query = update.callback_query
-    user = query.from_user
-    uname = user.username or user.first_name
-    uid = user.id
-    player = await ctx.repo.get_by_id(uid, with_inventory=False)
-    if player is None:
-        player = Player(user_id=uid, username=uname, balance=800)
-        new_name = random.choice(["Крик Бездны","Пепел Короля","Шёпот Склепа"])
-        await create_named_blunt(uid, new_name, ctx=ctx)
-        await ctx.repo.save(player)
-        bonus = "🎁 Смотритель дарует тебе <code>800</code> 🍬 и твой первый именной блант!\n\n"
-    else:
-        bonus = ""
-    welcome = (
-        "<b><i>🎉 Добро пожаловать в Гильдию Antysocialshop!</i></b>\n\n"
-        "🕯️ <b>Тёмная Гильдия</b> — стабильность, ритуалы, тёмное благословение.\n"
-        "⚜️ <b>Светлая Гильдия</b> — азарт, удача, танец на лезвии.\n\n"
-        "▸ <i>Выбери свой путь:</i>"
-    )
-    guild_kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🕯️ Тёмная Гильдия", callback_data="guild_join_BLACK"),
-         InlineKeyboardButton("⚜️ Светлая Гильдия", callback_data="guild_join_WHITE")]
-    ])
-    await query.message.edit_text(bonus + welcome, reply_markup=guild_kb, parse_mode='HTML')
+# NB: activate_menu_handler удалён как мёртвый код — ни одна кнопка/команда на
+# него не вела (недостижимый второй велком, расходившийся с каноничным онбордингом).
 
 @cb
 async def skins_menu_handler(update, context, ctx):
-    query = update.callback_query
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("💬 Выбрать титул", callback_data="choose_title")],
         [InlineKeyboardButton("🖼️ Выбрать фон", callback_data="choose_bg")],
         [InlineKeyboardButton("🔙 Назад", callback_data="profile")]
     ])
-    try:
-        await query.message.edit_text("<b>🎨 СКИНЫ</b>\n\nВыбери, что хочешь изменить.", reply_markup=kb, parse_mode='HTML')
-    except BadRequest as e:
-        if "message is not modified" in str(e).lower():
-            return
-        await query.message.reply_text("<b>🎨 СКИНЫ</b>\n\nВыбери, что хочешь изменить.", reply_markup=kb, parse_mode='HTML')
+    # edit_or_reply, не ручной try/except: reachable прямо из профиля
+    # («🎨 Кастомизация») — с аватаркой это фото-сообщение, редактировать
+    # его в текст нельзя. Старый фолбэк слал новое, но не убирал старое —
+    # тот же класс мусора, что чинили в profile_callback/_send_collection_wall.
+    await edit_or_reply(update, context, "<b>🎨 СКИНЫ</b>\n\nВыбери, что хочешь изменить.",
+                        reply_markup=kb, parse_mode='HTML')
 
 @cb
 async def choose_title_handler(update, context, ctx):
@@ -7081,7 +11024,9 @@ async def handle_set_title(update, context, ctx):
         await query.answer("Профиль не найден", show_alert=True)
         return
     await context.bot.send_message(chat_id=query.message.chat.id, text=f"✨ Титул «{new_title}» активирован!")
-    await skins_menu_handler(update, context, ctx)
+    # Без ctx — его подставит @cb (см. handle_quest_action). Раньше TypeError
+    # глушился и меню скинов не возвращалось после выбора титула.
+    await skins_menu_handler(update, context)
 
 @rate_limit(1)
 @cb
@@ -7119,10 +11064,16 @@ async def blunt_details_handler(update, context, ctx, player):
     rare_number = item.get("rare_number", "?-????")
     hash_code = item.get("hash", "0x????...????")
     reaction = item.get("reaction", "")
+    # Строка «Оригинальное имя» печатала ту же переменную, что и строка выше, —
+    # то есть мутированное имя (mutate_name переписывает ввод игрока). Настоящее
+    # имя лежит в original_name; показываем его, и только если оно отличается.
+    original = item.get("original_name")
+    original_line = (f"✍️ Ты назвал его: <b>«{html.escape(original)}»</b>\n"
+                     if original and original != name else "")
     text = (
         f"<b>💎 ДЕТАЛИ NFT БЛАНТА</b>\n\n"
         f"{color} <b>«{html.escape(name)}»</b>\n"
-        f"Оригинальное имя:<b>«{name}»</b>\n"
+        f"{original_line}"
         f"<b>Редкость:</b> <i>{rarity}</i> {color}\n\n"
         f"🩸 <b>Серийный номер:</b> <i>#{rare_number}</i>\n\n"
         f"🔗 <b>Хеш:</b> <i>{hash_code}</i>\n\n"
@@ -7136,16 +11087,26 @@ async def blunt_details_handler(update, context, ctx, player):
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔗 Поделиться", callback_data=f"share_blunt_{blunt_id}"),
          InlineKeyboardButton("🎁 Подарить", callback_data=f"gift_blunt_{blunt_id}")],
-        [InlineKeyboardButton("🏆 К списку", callback_data="my_blunts")]
+        [InlineKeyboardButton("💍 Мои бланты", callback_data="my_blunts")]
     ])
-    sent = await safe_send_blunt_image(context, query.message.chat.id, rarity, caption=text, reply_markup=kb, ctx=ctx)
+    # Уникальная карточка бланта (кэш file_id на предмете; старым блантам
+    # дорисуется при первом просмотре). Откат: per-rarity картинка, затем текст.
+    sent = await _send_blunt_card(context, query.message.chat.id, item,
+                                  player.username or "", caption=text, reply_markup=kb,
+                                  ctx=ctx, uid=uid)
+    if not sent:
+        sent = await safe_send_blunt_image(context, query.message.chat.id, rarity, caption=text, reply_markup=kb)
     if sent:
         try:
             await query.message.delete()
         except Exception:
             pass
     else:
-        await query.message.edit_text(text=text, reply_markup=kb, parse_mode='HTML')
+        # edit_or_reply, не query.message.edit_text напрямую: если оба пути
+        # отправки фото отказали (редкий двойной сбой), query.message — всё
+        # ещё витрина (фото), голый edit_text упал бы тем же "There is no
+        # text in the message to edit", что и в share_blunt_handler.
+        await edit_or_reply(update, context, text, reply_markup=kb, parse_mode='HTML')
 
 @rate_limit(1)
 @game_handler
@@ -7181,13 +11142,29 @@ async def share_blunt_handler(update, context, ctx, player):
     # Рабочий шеринг: switch_inline_query требует inline-режима/обработчика (их нет)
     # → кнопка была мёртвой. Используем нативный t.me/share/url (без HTML — он там
     # не рендерится) и мотивируем двусторонним бонусом (реферер+приглашённый).
-    share_plain = re.sub(r"<[^>]+>", "", share_text)
+    # build_share_url ОБЯЗАН получить url= отдельным параметром — раньше сюда
+    # шёл только text с зашитой внутри ссылкой, и t.me/share/url без url=
+    # не открывал пикер выбора получателя вообще: "рабочий шеринг" из
+    # комментария выше на деле тоже вёл в тупик, просто в другой (браузер
+    # вместо мёртвого inline-режима).
+    #
+    # share_plain НЕ включает ref_link (в отличие от share_text выше, который
+    # игрок видит на СВОЁМ экране) — ссылка уже в url= отдельным параметром,
+    # Telegram сам покажет её другу с превью; повторение той же голой ссылки
+    # текстом давало на экране друга одну и ту же ссылку дважды подряд.
+    share_plain = re.sub(r"<[^>]+>", "", share_text.replace(f"\n{ref_link}", ""))
     share_kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📤 Отправить другу", url=build_share_url(share_plain))],
+        [InlineKeyboardButton("📤 Отправить другу", url=build_share_url(ref_link, share_plain))],
         [InlineKeyboardButton("🔙 Назад", callback_data="my_blunts")],
     ])
     await query.answer()
-    await query.message.edit_text(
+    # edit_or_reply, не query.message.edit_text напрямую: кнопка "🔗" реально
+    # нажимается из витрины «Мои бланты» — та теперь фото-сообщение (см.
+    # edit_or_send_photo), у него caption, а не text. Голый edit_text падал
+    # BadRequest "There is no text in the message to edit", необработанным
+    # долетая до админа как "🚨 Ошибка в share_blunt_handler".
+    await edit_or_reply(
+        update, context,
         share_text + "\n\n<i>👆 Отправь другу — когда он войдёт по ссылке, "
         "<b>вы оба получите бонус!</b></i>",
         reply_markup=share_kb, parse_mode='HTML'
@@ -7206,10 +11183,19 @@ async def shrine_donate_handler(update, context, ctx, player):
         p.balance -= amount
         p.donated = (p.donated or 0) + amount
         # Отмечаем задание квеста «Пожертвовать» (раньше не трекалось → глава 2
-        # была непроходима)
+        # была непроходима). Задание объявляет target (200/300 OAC) — донат не
+        # ограничен кулдауном, в отличие от фарма/крафта/ритуала, поэтому здесь
+        # (и только здесь) можно честно накапливать сумму за цикл и сверять её
+        # с целью, а не закрывать шаг первым же донатом в 100 OAC при target 200.
         p.daily_progress = p.daily_progress or {}
-        p.daily_progress["donate"] = True
-        return ("ok",)
+        quest_id = p.daily_progress.get("quest_id", "chapter1")
+        template = QUEST_TEMPLATES.get(quest_id) or {}
+        donate_task = next((t for t in template.get("tasks", []) if t["key"] == "donate"), None)
+        target = donate_task.get("target", 1) if donate_task else 1
+        cycle_donated = (p.daily_progress.get("donate_amount") or 0) + amount
+        p.daily_progress["donate_amount"] = cycle_donated
+        p.daily_progress["donate"] = cycle_donated >= target
+        return ("ok", cycle_donated, target)
 
     result = await ctx.repo.atomic_update(uid, _donate)
     if result is None:
@@ -7219,8 +11205,15 @@ async def shrine_donate_handler(update, context, ctx, player):
     if status == "no_money":
         await query.answer("Недостаточно OAC.", show_alert=True)
         return
+    _, cycle_donated, target = result
 
-    await send_whisper_dm(update, context, f"💎 Ты внёс {amount} OAC в Храм. Спасибо, Странник!")
+    text = f"💎 Ты внёс {amount} OAC в Храм. Спасибо, Странник!"
+    if target and target > 1:
+        if cycle_donated >= target:
+            text += f"\n\n✅ Задание главы «Пожертвовать» выполнено ({cycle_donated}/{target} OAC)."
+        else:
+            text += f"\n\n📿 Задание главы «Пожертвовать»: {cycle_donated}/{target} OAC."
+    await send_whisper_dm(update, context, text)
     
 @cb
 async def guild_shrine_callback(update, context, ctx):
@@ -7238,13 +11231,7 @@ async def guild_shrine_callback(update, context, ctx):
             "SELECT COALESCE(SUM(donated),0) FROM players WHERE guild=$1", guild
         ) or 0
 
-    levels = [
-        {"level": 1, "cost": 0,      "bonus": 0},
-        {"level": 2, "cost": 15000,  "bonus": 5},
-        {"level": 3, "cost": 45000,  "bonus": 10},
-        {"level": 4, "cost": 100000, "bonus": 15},
-        {"level": 5, "cost": 250000, "bonus": 25},
-    ]
+    levels = TEMPLE_LEVELS   # единый источник, см. комментарий у TEMPLE_LEVELS
 
     current_level = 1
     for lvl in levels:
@@ -7296,8 +11283,14 @@ async def guild_join_handler(update, context, ctx):
 
     try:
         player = await ctx.repo.get_by_id(uid, with_inventory=False)
-        if player is None:
-            await query.answer("Профиль не найден, начните с /start", show_alert=True)
+        # get_by_id для незарегистрированного возвращает НЕ None, а пустого
+        # Player(exists=False). Проверки `is None` не хватало: кнопки гильдии
+        # висят и в приветствии чата (welcome_new_member), поэтому человек без
+        # /start создавал себе строку в БД с 50 OAC — навсегда мимо стартовых
+        # 800 OAC, первого именного бланта и обучения (повторный /start уже
+        # видит exists=True и ведёт сразу в меню).
+        if player is None or not player.exists:
+            await query.answer("Сначала активируйся: нажми /start", show_alert=True)
             return
 
         was_guildless = player.guild is None   # первый в жизни выбор стороны
@@ -7307,6 +11300,8 @@ async def guild_join_handler(update, context, ctx):
         # отложившие фракцию теряли +50 — теперь честно один раз.
         if player.onboarding_step == 0 or was_guildless:
             player.balance += 50
+            # Путь сохраняется прямым save(), мимо учёта дельты в atomic_update.
+            player.total_earned = (player.total_earned or 0) + 50
         g_emoji = "🕯️" if guild == "BLACK" else "⚜️"
         g_name = "Тёмная" if guild == "BLACK" else "Светлая"
 
@@ -7323,10 +11318,15 @@ async def guild_join_handler(update, context, ctx):
                 [InlineKeyboardButton("🍬 Фармить", callback_data="farm")],
                 [InlineKeyboardButton("⏭️ Пропустить обучение", callback_data="skip_onboarding")]
             ])
+            # query.message.chat.id (чат нажатия), не uid — эти кнопки гильдии
+            # показываются и в welcome_new_member внутри группового чата; ЛС
+            # на uid падает "Forbidden: bot can't initiate conversation" для
+            # тех, кто ни разу не открывал ЛС с ботом (вступил в гильдию из
+            # группы, зарегистрировавшись там же через /start).
             await safe_send_message(
-                context, uid,
+                context, query.message.chat.id,
                 f"🏰 <b>Ты в {g_name} Гильдии!</b> Сейчас в ней <b>{online}</b> странников.\n\n"
-                "<b>🎓 ОБУЧЕНИЕ [▓▓░░] 2/3</b>\n\n"
+                "<b>🎓 ОБУЧЕНИЕ [▓▓░] 2/3</b>\n\n"
                 "<b>🍬 Твой первый шаг — фарм!</b>\n"
                 "Нажми кнопку ниже, чтобы получить <b>OAC</b>.\n\n"
                 "<i>💡 OAC — главная валюта. Трать её на крафт, питомцев и свитки.</i>",
@@ -7350,7 +11350,7 @@ async def guild_join_handler(update, context, ctx):
 
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton(f"{action_emoji} {action_text}", callback_data=action_cb)],
-            [InlineKeyboardButton("🏰 В меню", callback_data="menu")]
+            [InlineKeyboardButton("🔙 В меню", callback_data="menu")]
         ])
 
         bonus_line = "🎁 <b>+50 OAC 🍬 за выбор стороны!</b>\n\n" if was_guildless else ""
@@ -7383,6 +11383,113 @@ async def cancel_gift_handler(update, context):
     await query.answer()
     context.user_data.pop("gifting_blunt_id", None)
     await profile_callback(update, context)
+
+
+@rate_limit(2)
+@game_handler
+async def invite_friend_handler(update, context, ctx, player):
+    """Постоянная персональная ссылка-приглашение — доступна с первой минуты.
+
+    До этого экрана ссылку на игру можно было дать другу РОВНО в одном месте —
+    сразу после крафта именного бланта (50 OAC), и то она была одноразовой,
+    привязанной к конкретному предмету. Уйти с того экрана — и ссылки для
+    следующего друга больше нет нигде в игре. Здесь она не гейтится ничем и
+    живёт постоянно в профиле.
+
+    Картинка — рендер собственного бланта игрока (если есть), а не голый текст:
+    `t.me/share/url` физически не умеет прикреплять изображение к ссылке, но
+    ПЕРЕСЛАННОЕ фото-сообщение — умеет. Отправляем фото с подписью и просим
+    переслать: то, чем реально хочется поделиться, а не ссылка сама по себе.
+    """
+    query = update.callback_query
+    # Своя награда за реферал (+50 OAC + легендарка, см. _reward_referrer) была
+    # НЕВИДИМА ровно в момент решения «жать ли эту кнопку» — текст ниже говорил
+    # только о бонусе ДРУГУ. Показываем её всплывающим алертом, а не строкой в
+    # тексте: алерт гарантированно приватен и не попадёт в сообщение, которое
+    # можно переслать другу — self-serving формулировка в адресованном другу
+    # тексте выглядела бы транзакционно и била бы по конверсии на его стороне.
+    await query.answer(
+        "🎁 За каждого друга, который зайдёт по ссылке: +50 OAC и легендарный блант — тебе!",
+        show_alert=True)
+    uid = query.from_user.id
+
+    bot_username = (await context.bot.get_me()).username
+    ref_link = f"https://t.me/{bot_username}?start=ref_{uid}"
+
+    # Соц-доказательство ДО клика: раньше число «сколько уже играет» было
+    # видно только вступившему В ЧАТ (welcome_new_member), то есть ПОСЛЕ
+    # решения зайти — в самом приглашении, где решение реально принимается,
+    # его не было вообще. count_new_players_week уже кэширован
+    # (perfected_cache), лишнего похода в БД на каждый тап не добавляет.
+    # Темп роста, не тотал: небольшое абсолютное число при текущем масштабе
+    # читалось бы как «тут мало кто есть», а не как соц-доказательство
+    # (см. Red Team отчёт на этой же находке).
+    new_players = await count_new_players_week(ctx)
+    proof_line = f"👥 {new_players} новых Странников за эту неделю.\n\n" if new_players else ""
+
+    named = [it for it in (player.inventory or []) if it.get("type") == "named"]
+    rarity_order = {"legendary": 0, "epic": 1, "rare": 2, "common": 3}
+    named.sort(key=lambda x: rarity_order.get(x.get("rarity"), 3))
+    best = named[0] if named else None
+
+    # Не "NFT" и не "забери такой же": ведёт с того, ЧТО за игра и КТО зовёт —
+    # identity/social currency сильнее, чем предмет как товар (см. share_blunt_
+    # handler ниже — тот же сдвиг применён и там).
+    #
+    # Две версии текста, не одна: caption идёт в фото с parse_mode='HTML' (имя
+    # бланта обязано быть html.escape — предотвращает HTML-инъекцию из имени,
+    # которое вводил игрок), а plain уходит в build_share_url БЕЗ HTML-парсинга
+    # (Telegram не парсит HTML в t.me/share/url — экранированные сущности вроде
+    # &amp; показались бы другу буквально, если использовать ту же строку).
+    best_rarity_emoji = {"legendary": "🟡", "epic": "🟣", "rare": "🔵"}.get(
+        (best or {}).get("rarity"), "🟢")
+    best_line = (f"Вот один из моих — «{{name}}» {best_rarity_emoji}, поймал сам.\n\n"
+                if best else "")
+    intro = ("🕯️⚜️ Я играю в Antysocialshop — RPG про гильдии, крафт легендарных "
+            "блантов и войну миров.\n\n" + proof_line)
+    outro = (f"🎁 Заходи по ссылке — сразу +100 OAC на старт:\n{ref_link}\n\n"
+            f"👥 Или добавь бота в свой чат — джекпоты и легендарки друзей "
+            f"видны всем сами, без ссылок.")
+    # outro_plain — без ref_link (для plain/build_share_url): ссылка уже в
+    # url= отдельным параметром, Telegram сам покажет её другу с превью;
+    # caption (СВОЙ экран игрока) сохраняет ссылку текстом — там дубля нет.
+    outro_plain = (f"🎁 Заходи по ссылке — сразу +100 OAC на старт:\n\n"
+                  f"👥 Или добавь бота в свой чат — джекпоты и легендарки друзей "
+                  f"видны всем сами, без ссылок.")
+
+    caption = intro + best_line.format(name=html.escape((best or {}).get("name", "?"))) + outro
+    plain = intro + best_line.format(name=(best or {}).get("name", "?")) + outro_plain
+    # Пересланная ссылка бьёт по ОДНОМУ конкретному другу и стоит социальной
+    # цены (просьба, «не спамлю ли я»). Добавление бота в СВОЙ чат — другой канал:
+    # никого не просишь; дальше КАЖДЫЙ джекпот, легендарный крафт и итог войны
+    # (см. _safe_send_guild_message) виден всей компании сам, без единого
+    # действия с чьей-либо стороны. Обработчики бота уже не завязаны на тип
+    # чата (game_handler резолвит игрока по нажавшему, а не по чату) — это не
+    # новая функция, а недостающая ссылка на уже работающую возможность.
+    group_url = f"https://t.me/{bot_username}?startgroup=community"
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📤 Отправить ссылку другу", url=build_share_url(ref_link, plain))],
+        [InlineKeyboardButton("👥 Добавить бота в свой чат", url=group_url)],
+        [InlineKeyboardButton("🔙 Назад", callback_data="profile")],
+    ])
+
+    sent = False
+    if best:
+        sent = await _send_blunt_card(
+            context, query.message.chat.id, best, player.username or "",
+            caption, kb, ctx=ctx, uid=uid)
+        if sent:
+            # _send_blunt_card всегда шлёт НОВОЕ сообщение (уникальная карточка,
+            # не переиспользуемая через editMessageMedia) — убираем прежний
+            # экран профиля за собой, тем же принципом, что и edit_or_reply:
+            # единый живой экран не копит мусор из мёртвых предыдущих экранов.
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+    if not sent:
+        await edit_or_reply(update, context, caption, reply_markup=kb)
     
 # ========== ЕДИНЫЙ РЕЕСТР КОМАНД ДЛЯ / И ТЕКСТА ==========
 TEXT_COMMAND_HANDLERS = {
@@ -7395,6 +11502,7 @@ TEXT_COMMAND_HANDLERS = {
     "profile": profile_callback,
     "top": top_callback,
     "rules": rules_callback,
+    "help": help_callback,
     "privilege": privilege_callback,
     "catalog": catalog_callback,
     "luck": luck_callback,
@@ -7410,6 +11518,7 @@ TEXT_COMMAND_HANDLERS = {
     "debugpet": debug_pet,
     "checkbluntpics": check_blunt_pics,
     "broadcast": broadcast,
+    "growth": growth_stats_command,
     # Текстовые сокращения (без слеша)
     "старт": start,
     "меню": start,
@@ -7421,6 +11530,8 @@ TEXT_COMMAND_HANDLERS = {
     "профиль": profile_callback,
     "сбор": collect_callback,
     "правила": rules_callback,
+    "помощь": help_callback,
+    "справка": help_callback,
     "исповедь": repent_callback,
     "гильдия": guild_info_callback,
     "привилегия": privilege_callback,
@@ -7449,6 +11560,7 @@ CALLBACKS: Dict[str, Callable] = {
     "top": top_callback,
     "guild_info": guild_info_callback,
     "rules": rules_callback,
+    "help": help_callback,
     "privilege": privilege_callback,
     "catalog": catalog_callback,
     "luck": luck_callback,
@@ -7456,6 +11568,7 @@ CALLBACKS: Dict[str, Callable] = {
     "craft_named": handle_craft_named,
     "cancel_named": cancel_named,
     "do_smoke": do_smoke,
+    "invite_friend": invite_friend_handler,
     "use_dust": handle_use_dust,
     "top_scout": top_scout_callback,
     "achievements": achievements_callback,
@@ -7467,7 +11580,6 @@ CALLBACKS: Dict[str, Callable] = {
     "repent": repent_callback,
     "shop": shop_callback,
     "bush_preview": bush_preview_handler,
-    "activate_menu": activate_menu_handler,
     "skins_menu": skins_menu_handler,
     "choose_title": choose_title_handler,
     "choose_bg": choose_bg_handler,
@@ -7490,15 +11602,16 @@ CALLBACKS: Dict[str, Callable] = {
     "claim_reward": claim_reward_handler,
     "skip_onboarding": skip_onboarding_handler,
     "defer_faction": defer_faction_handler,
+    "altar_hub": altar_hub,
+    "altar_invest_half": altar_invest_handler,
+    "altar_invest_all": altar_invest_handler,
 }
 
 EXACT_HANDLERS: Dict[str, Callable] = {
-    "lab_special": handle_lab_option,
-    "lab_focus_use": handle_lab_option,
-    "lab_escape": handle_lab_option,
     "luck_wheel": luck_wheel_handler,
     "luck_mines": luck_mines_handler,
     "mines_cashout": _mines_cashout_wrapper,
+    "mines_preset_menu": _mines_preset_menu_wrapper,
     "alchemy_start": alchemy_start_handler,
     "alchemy_confirm": alchemy_confirm_handler,
 }
@@ -7512,10 +11625,15 @@ PREFIX_HANDLERS: Dict[str, Callable] = {
     "set_title_": handle_set_title,
     "set_bg_": handle_set_bg,
     "lab_attack_": handle_lab_option,
+    "lab_special_": handle_lab_option,
+    "lab_focus_use_": handle_lab_option,
+    "lab_escape_": handle_lab_option,
     "achievements_": achievements_callback,
     "quest_": handle_quest_action,
     "mines_open_": _mines_open_cell_wrapper,
     "mines_bet_": _mines_bet_wrapper,
+    "mines_preset_": _mines_preset_wrapper,
+    "guild_act_": _guild_action_pick_wrapper,
     "shop_buy_": shop_buy_callback,
 }
 
@@ -7571,22 +11689,112 @@ async def update_pulse(ctx: AppContext):
     except Exception:
         pass
 
+async def _happy_hour_dm_broadcast(ctx: AppContext) -> None:
+    """Личное DM-уведомление о старте Часа Удачи — тем, кто не сидит в боте
+    прямо сейчас.
+
+    SLAYER Red Team (Cluster Б, A1 Dopamine/Neuroscience + A3 Systems: пик
+    ценности не должен быть немым): раньше пик был виден только в публичном
+    чате гильдии (кто там не сидит — не увидит) и пассивным баннером внутри
+    самого бота (_happy_hour_banner — нужно САМОМУ зайти в игру, чтобы его
+    заметить). x2 OAC на 30 минут — реальная, не фейковая, ограниченная по
+    времени ценность (Cialdini: настоящий дефицит работает, придуманный —
+    подрывает доверие при разоблачении); именно такому событию место в
+    личном канале, а не только в фоне. Раз в сутки (см. job_happy_hour) —
+    частота DM не спамная сама по себе.
+
+    blocked_at IS NULL — фильтруем известно-заблокировавших ДО отправки
+    (остальные пуш-джобы полагаются только на реактивный dead-chat-хэндлинг
+    в момент отправки; здесь фильтр дешёвый и данные уже есть — не грузим
+    HTTP-запросами тех, кто гарантированно не получит сообщение).
+
+    last_farm > NOW()-3д — этого фильтра раньше не было: рассылка била ПО
+    ВСЕЙ базе, включая тех, кого reengagement_push/winback_push сознательно
+    не трогают (winback сам объясняет почему за окном 30д: «шанс раздражить/
+    схватить блок растёт быстрее, чем шанс вернуть»). «Час Удачи» длится 30
+    минут — сообщение бесполезно тому, кто не заходит неделями, а стреляет
+    оно в одно и то же время КАЖДЫЙ день без остановки, всей базе разом.
+    На проде это была ежедневная рассылка ~176 адресатам с 50% блоком за
+    один прогон — и именно поэтому winback (окно 3-30д, тот же контингент,
+    что не успел заблокироваться от этой рассылки) находил уже заблокировавшими
+    96% своих целей. Оставляем только тех, кто фармил в последние 3 дня —
+    ту же границу, что reengagement_push уже считает «ещё тёплым»; дальше
+    получателя ведут winback/activation, не ежедневный широковещательный пуш.
+    """
+    if not ctx or not ctx.db_pool:
+        return
+    cutoff = datetime.now(timezone.utc) - timedelta(days=3)
+    try:
+        async with ctx.db_pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT user_id FROM players "
+                "WHERE blocked_at IS NULL AND last_farm IS NOT NULL AND last_farm > $1",
+                cutoff)
+    except Exception as e:
+        logger.error(f"happy_hour dm query error: {e}")
+        return
+
+    text = ("🎉 <b>ЧАС УДАЧИ начался!</b>\n"
+            "🌠 Все действия приносят x2 OAC — 30 минут, прямо сейчас.")
+    kb = {"inline_keyboard": [[{"text": "🍬 Фармить", "callback_data": "farm"}]]}
+    token = ctx.settings.bot_token
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    sent = 0
+    blocked = 0
+    failed = 0
+    first_failure_logged = False
+    async with httpx.AsyncClient(timeout=10) as client:
+        for row in rows:
+            uid = row["user_id"]
+            try:
+                r = await client.post(url, json={"chat_id": uid, "text": text,
+                                                   "parse_mode": "HTML", "reply_markup": kb})
+                if r.status_code == 200:
+                    sent += 1
+                elif _is_dead_chat_error(r.status_code, r.text):
+                    blocked += 1
+                else:
+                    failed += 1
+                    if not first_failure_logged:
+                        first_failure_logged = True
+                        logger.error("happy_hour dm: sendMessage %d для uid=%s: %s",
+                                     r.status_code, uid, r.text[:300])
+            except Exception as e:
+                failed += 1
+                if not first_failure_logged:
+                    first_failure_logged = True
+                    logger.error("happy_hour dm: исключение при отправке uid=%s: %s", uid, e)
+            await asyncio.sleep(0.05)
+
+    logger.info("happy_hour dm: sent %d pushes to %d candidates (blocked=%d, failed=%d)",
+                sent, len(rows), blocked, failed)
+    await _record_job_health(ctx, "happy_hour_dm", sent, len(rows), blocked, failed)
+
+
 async def happy_hour_trigger(ctx: AppContext):
     if not ctx:
         return
-    ctx.cache["happy_hour"] = True
-    ctx.cache["happy_hour_end"] = datetime.now() + timedelta(minutes=ctx.settings.happy_hour_duration_min)
+    _end = datetime.now() + timedelta(minutes=ctx.settings.happy_hour_duration_min)
+    ctx.happy_hour_end = _end          # авторитетный источник, без TTL
+    ctx.cache["happy_hour"] = True     # совместимость
+    ctx.cache["happy_hour_end"] = _end
     try:
         await _send_http_message(ctx, "@guild_antysocial",
             "🎉 <b>ЧАС УДАЧИ!</b> 🌠 Все действия приносят x2 OAC 🍬 (30 минут)!")
     except Exception as e:
         logger.error(f"Happy hour announce error: {e}")
 
+    # Личный канал — не только публичный чат и пассивный баннер (см. докстрок
+    # _happy_hour_dm_broadcast). Фоном: полная рассылка не должна держать
+    # включение Часа Удачи и таймер сброса ниже.
+    asyncio.create_task(_happy_hour_dm_broadcast(ctx))
+
     # Отложенное выключение через asyncio вместо PTB job_queue
     asyncio.create_task(_reset_happy_hour_after(ctx, ctx.settings.happy_hour_duration_min * 60))
 
 async def _reset_happy_hour_after(ctx: AppContext, delay_seconds: int):
     await asyncio.sleep(delay_seconds)
+    ctx.happy_hour_end = None
     ctx.cache["happy_hour"] = False
     try:
         await _send_http_message(ctx, "@guild_antysocial", "⏳ Час Удачи завершён.")
@@ -7720,10 +11928,55 @@ async def weekly_guild_rating(ctx: AppContext):
             except Exception:
                 pass
 
-async def _safe_send_guild_message(ctx: AppContext, text: str):
+# Хардкод, а не context.bot.get_me(): фоновые джобы (джекпот, ранг-ап, итоги
+# войны) держат только ctx, без объекта bota. Тот же уровень допущения, что и у
+# "@guild_antysocial" — литерал ниже по файлу в десятке мест.
+BOT_USERNAME = "antysocialshop_bot"
+
+
+def _guild_cta_keyboard() -> dict:
+    """Кнопка входа в бота под публичным анонсом.
+
+    URL, а не callback_data: callback требует существующего апдейта в чате бота,
+    и человек, который просто листает публичный @guild_antysocial и никогда не
+    жал /start, с callback-кнопкой ничего сделать не может. URL-кнопка открывает
+    ЛС с ботом одним тапом и сама прокатывает онбординг — единственный вид кнопки,
+    который работает для постороннего, а не только для существующего игрока.
+    """
+    return {"inline_keyboard": [[
+        {"text": "🎮 Играть", "url": f"https://t.me/{BOT_USERNAME}?start=guild_chat"}
+    ]]}
+
+
+async def _send_http_message(ctx: AppContext, chat_id, text: str, reply_markup: dict = None) -> None:
+    """Прямой HTTP-вызов Telegram API, в обход PTB Application.
+
+    Раньше вызывалась в 4 местах и не была определена НИГДЕ в кодовой базе —
+    каждый вызов падал NameError, тихо проглоченным окружающим try/except.
+    Появилась 10 июля (c571e91), к 30 июля не работала 20 дней: за это время
+    молчали ВСЕ публичные трансляции — джекпоты, легендарные крафты, возвышения
+    ранга, рекорды Лабиринта, итоги войны гильдий, начало/конец Часа Удачи.
+    Ровно тот контент, что делает публичный чат витриной, а не пустой комнатой.
+    """
+    token = ctx.settings.bot_token
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.post(url, json=payload)
+        if resp.status_code != 200:
+            raise RuntimeError(f"Telegram API {resp.status_code}: {resp.text}")
+
+
+async def _safe_send_guild_message(ctx: AppContext, text: str, with_cta: bool = True):
+    """with_cta=True вешает кнопку «Играть» под анонсом — по умолчанию, потому что
+    каждый вызывающий здесь (джекпот/ранг/война/лабиринт) это ровно тот пиковый
+    момент, ради которого посторонний в канале захочет зайти и попробовать сам."""
+    kb = _guild_cta_keyboard() if with_cta else None
     for attempt in range(3):
         try:
-            await _send_http_message(ctx, "@guild_antysocial", text)
+            await _send_http_message(ctx, "@guild_antysocial", text, reply_markup=kb)
             return
         except Exception as e:
             logger.warning("Ошибка отправки в чат гильдии (попытка %d): %s", attempt+1, e)
@@ -7736,6 +11989,21 @@ async def keep_db_alive(ctx: AppContext):
         logger.debug("DB keep-alive executed")
     except Exception as e:
         logger.error(f"keep_db_alive failed: {e}")
+
+
+def _is_dead_chat_error(status_code: int, body: str) -> bool:
+    """Telegram по-разному сигналит «этому человеку больше нельзя написать»:
+    403 — заблокировал бота; 400 с «chat not found» — удалил аккаунт или чат
+    иначе перестал существовать. Оба случая — не наша ошибка и нечего чинить,
+    просто мёртвый адресат; раньше второй случай считался как «failed»
+    (реальный баг) наравне с настоящими сбоями — вводило в заблуждение при
+    диагностике по /growth (см. инцидент: 8 «ошибок» в winback оказались
+    все до одной именно этим, ни одной настоящей ошибкой не было)."""
+    if status_code == 403:
+        return True
+    if status_code == 400 and "chat not found" in (body or "").lower():
+        return True
+    return False
 
 
 def _reengagement_text(last_farm, login_streak, last_login_date, now, farm_cooldown,
@@ -7782,24 +12050,35 @@ async def reengagement_push(ctx: AppContext) -> None:
 
     Отбирает тех, кто недавно играл, но сейчас неактивен несколько часов, и у
     кого есть повод вернуться. АНТИ-СПАМ:
-      • без Redis — не шлём вообще (fail-closed, иначе риск спама);
-      • не чаще ~1 раза в 20 ч на игрока (guard в Redis);
-      • окно активности 2 ч … 3 дня (не трогаем активных и давно ушедших);
+      • guard и снимок ранга — в Postgres (players.last_reengagement_sent,
+        last_known_rank), не в Redis: Redis подтверждённо был недоступен в
+        проде несколько дней подряд, и джоба всё это время работала в режиме
+        fail-closed «не шлём вообще» — не деградация, а полное отключение
+        фичи молча. БД есть всегда, раз есть db_pool;
+      • не чаще ~1 раза в 20 ч на игрока (last_reengagement_sent в WHERE —
+        фильтруется в самом запросе, не построчной проверкой после выборки);
+      • окно активности 1 ч … 3 дня (не трогаем активных и давно ушедших);
       • 403 (заблокировал бота) — молча пропускаем.
+
+    Нижняя граница была 2ч — почти вчетверо дольше кулдауна фарма (30 мин):
+    грядка уже час с лишним стоит созревшей, а джоба её ещё не видит. Пик
+    желания вернуться («созрело — заберу») ближе к моменту, когда кулдаун
+    только закончился, а не спустя два часа, когда он уже остыл до фона.
     """
-    if not ctx or not ctx.db_pool or not ctx.redis:
+    if not ctx or not ctx.db_pool:
         return
 
     now = datetime.now()
     farm_cd = timedelta(hours=settings.farm_cooldown_hours)
-    drift_min = now - timedelta(hours=2)      # неактивен хотя бы 2 часа
+    drift_min = now - timedelta(hours=1)      # неактивен хотя бы 1 час
     active_window = now - timedelta(days=3)   # но не ушёл насовсем
 
     try:
         async with ctx.db_pool.acquire() as conn:
             rows = await conn.fetch(
                 "SELECT user_id, last_farm, login_streak, last_login_date, "
-                "passive_level, passive_collected "
+                "passive_level, passive_collected, last_known_rank, "
+                "last_reengagement_sent "
                 "FROM players "
                 "WHERE last_farm IS NOT NULL AND last_farm BETWEEN $1 AND $2",
                 active_window, drift_min,
@@ -7809,13 +12088,13 @@ async def reengagement_push(ctx: AppContext) -> None:
         return
 
     # Снимок рангов по балансу (один запрос, дешёв с индексом) для детекции
-    # обгона: сравниваем текущий ранг с сохранённым в Redis прошлым.
+    # обгона: сравниваем текущий ранг с сохранённым прошлым (last_known_rank).
     rank_map = {}
     try:
         async with ctx.db_pool.acquire() as conn:
             brows = await conn.fetch(
                 'SELECT user_id FROM players WHERE COALESCE("exists", TRUE) '
-                'ORDER BY balance DESC')
+                'ORDER BY total_earned DESC')
         for pos, br in enumerate(brows, 1):
             rank_map[br["user_id"]] = pos
     except Exception:
@@ -7824,29 +12103,36 @@ async def reengagement_push(ctx: AppContext) -> None:
     token = ctx.settings.bot_token
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     sent = 0
+    blocked = 0   # 403 — игрок заблокировал бота, ожидаемо, чинить нечего
+    failed = 0    # всё остальное — реальная причина «отправлено 0»
+    first_failure_logged = False
     async with httpx.AsyncClient(timeout=10) as client:
         for row in rows:
             uid = row["user_id"]
 
-            # Ранг: детекция обгона + всегда обновляем сохранённый ранг.
+            # Ранг: детекция обгона + всегда обновляем сохранённый ранг —
+            # ДЛЯ ВСЕХ кандидатов окна, даже тех, кто ниже сейчас пропустит
+            # отправку по guard'у (та же семантика, что была с Redis: ранг
+            # свежий к моменту, когда guard у игрока истечёт).
             rival_drop = None
             cur_rank = rank_map.get(uid)
             if cur_rank:
+                prev_rank = row["last_known_rank"]
+                if prev_rank and cur_rank > prev_rank and cur_rank <= 20:
+                    rival_drop = (prev_rank, cur_rank)
                 try:
-                    prev_v = await ctx.redis.get(f"rank:{uid}")
-                    prev_rank = int(prev_v) if prev_v else None
-                    if prev_rank and cur_rank > prev_rank and cur_rank <= 20:
-                        rival_drop = (prev_rank, cur_rank)
-                    await ctx.redis.setex(f"rank:{uid}", 7 * 24 * 3600, str(cur_rank))
+                    async with ctx.db_pool.acquire() as conn:
+                        await conn.execute(
+                            "UPDATE players SET last_known_rank=$1 WHERE user_id=$2",
+                            cur_rank, uid)
                 except Exception:
                     pass
 
-            guard_key = f"reengage:{uid}"
-            try:
-                if await ctx.redis.get(guard_key):
-                    continue
-            except Exception:
-                continue  # Redis-сбой → пропускаем (не рискуем спамом)
+            # Guard: не чаще раза в 20ч на игрока. TIMESTAMPTZ у asyncpg всегда
+            # приходит tz-aware (UTC) — сравнение с aware now() без доп. возни.
+            last_sent = row["last_reengagement_sent"]
+            if last_sent and (datetime.now(timezone.utc) - last_sent) < timedelta(hours=20):
+                continue
 
             text = _reengagement_text(
                 row["last_farm"], row["login_streak"],
@@ -7861,13 +12147,291 @@ async def reengagement_push(ctx: AppContext) -> None:
                 r = await client.post(url, json={"chat_id": uid, "text": text, "parse_mode": "HTML"})
                 if r.status_code == 200:
                     sent += 1
-                    await ctx.redis.setex(guard_key, 20 * 3600, "1")
-                # 403/прочее — молча пропускаем
-            except Exception:
-                pass
+                    async with ctx.db_pool.acquire() as conn:
+                        await conn.execute(
+                            "UPDATE players SET last_reengagement_sent=now() WHERE user_id=$1", uid)
+                elif _is_dead_chat_error(r.status_code, r.text):
+                    blocked += 1
+                else:
+                    failed += 1
+                    if not first_failure_logged:
+                        first_failure_logged = True
+                        logger.error("reengagement: sendMessage %d для uid=%s: %s",
+                                     r.status_code, uid, r.text[:300])
+            except Exception as e:
+                failed += 1
+                if not first_failure_logged:
+                    first_failure_logged = True
+                    logger.error("reengagement: исключение при отправке uid=%s: %s", uid, e)
             await asyncio.sleep(0.05)  # мягкий rate-limit к Telegram API
 
-    logger.info("reengagement: sent %d pushes to %d candidates", sent, len(rows))
+    logger.info("reengagement: sent %d pushes to %d candidates (blocked=%d, failed=%d)",
+                sent, len(rows), blocked, failed)
+    await _record_job_health(ctx, "reengagement", sent, len(rows), blocked, failed)
+
+
+async def _record_job_health(ctx: AppContext, job: str, sent: int, candidates: int,
+                              blocked: int = 0, failed: int = 0) -> None:
+    """Отметка «джоба реально дожила до конца» — читается в /growth.
+
+    Единственный способ, которым админ узнавал, работает ли пуш-возврат, —
+    рыться в логах Render вручную. Один живой лог "отменена" (задача убита при
+    рестарте процесса) неотличим на глаз от "джоба вообще никогда не
+    доживает до конца цикла" — оба выглядят одинаково тревожно, а разница
+    между "был один безобидный деплой" и "джоба в принципе не работает"
+    решает, чинить ли инфраструктуру или писать новый код.
+
+    Раньше жило в Redis-ключе с TTL — при отсутствующем Redis (а он
+    подтверждённо был недоступен в проде несколько дней подряд) /growth не
+    просто «не мог обновить метрику», а ВРАЛ «джоба не работает» про джобу,
+    которая на самом деле работала штатно. Один стол в Postgres: staleness
+    считает читающая сторона (/growth), а не TTL записи — своя граница
+    свежести для каждой джобы, без риска протухнуть между двумя честными
+    прогонами.
+    """
+    if not ctx or not ctx.db_pool:
+        return
+    try:
+        async with ctx.db_pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO job_health (job, last_run, sent, candidates, blocked, failed) "
+                "VALUES ($1, now(), $2, $3, $4, $5) "
+                "ON CONFLICT (job) DO UPDATE SET last_run=now(), sent=$2, candidates=$3, "
+                "blocked=$4, failed=$5",
+                job, sent, candidates, blocked, failed)
+    except Exception:
+        pass
+
+
+def _winback_text(days_gone: int, balance: int, item_name: str = None, item_rarity: str = None) -> str:
+    """Текст для игрока, пропавшего 3-30 дней назад — окно, куда
+    reengagement_push никогда не заглядывает (его верхняя граница — 3 дня).
+
+    Другой тон, не «грядка созрела»: для того, кто пропал так надолго, кулдаун
+    фарма и серия входов уже ничего не значат — это фальшивый повод. Работает
+    endowment («твоё никуда не делось») + честная новизна (реальные фичи этой
+    сессии — уникальные карточки, витрина, формы), а не выдуманное давление.
+
+    item_name/item_rarity — конкретный лучший предмет игрока (см. winback_push),
+    не родовое слово «блант»: endowment effect сильнее на конкретном, уникальном
+    объекте, чем на абстрактной категории — тот же принцип, что уже работает в
+    invite_friend_handler для карточки приглашения.
+    """
+    if item_name:
+        emoji = {"legendary": "🟡", "epic": "🟣", "rare": "🔵"}.get(item_rarity, "🟢")
+        thing_line = f"Твой {emoji} «{html.escape(item_name)}»"
+    else:
+        thing_line = "Твой блант"
+    return (
+        f"🕯️ <b>Давно не виделись</b> — с последнего фарма прошло {days_gone} дн.\n\n"
+        f"{thing_line}, <b>{balance} OAC</b> и место в Гильдии никуда не делись — "
+        f"всё ждёт тебя ровно там, где ты оставил.\n\n"
+        f"За это время в игре кое-что изменилось: у именных блантов теперь у "
+        f"КАЖДОГО свой уникальный облик, появилась витрина коллекции и наборы "
+        f"форм для сборки. Загляни — посмотри, что нового."
+    )
+
+
+async def winback_push(ctx: AppContext) -> None:
+    """Возврат для тех, кого reengagement_push структурно не видит.
+
+    reengagement_push целится в дрейф 2ч-3дня — сознательно узкое окно, чтобы
+    не спамить. Следствие: пропавший больше трёх дней назад не получает ВООБЩЕ
+    НИЧЕГО ни от одного механизма игры — окно [3д, 30д) закрыто целиком.
+    30 дней — верхняя граница намеренно: дальше шанс раздражить/схватить
+    блок растёт быстрее, чем шанс вернуть, и это уже другая, более осторожная
+    задача, не совместимая с еженедельной автоматической рассылкой.
+
+    Guard на 30 дней (не 20ч, как у reengagement): каждому — максимум одно
+    сообщение в месяц, не чаще. Это не частый пуш, это редкая, единственная
+    попытка напомнить о себе. Guard — players.last_winback_sent, отфильтрован
+    прямо в SQL: та же причина, что у reengagement_push (см. её докстринг) —
+    Redis подтверждённо был недоступен в проде, и «fail-closed без Redis»
+    означало «джоба ничего не делает молча», а не «делает чуть хуже».
+    """
+    if not ctx or not ctx.db_pool:
+        return
+
+    now = datetime.now()
+    window_start = now - timedelta(days=30)
+    window_end = now - timedelta(days=3)
+    guard_before = datetime.now(timezone.utc) - timedelta(days=30)
+
+    try:
+        async with ctx.db_pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT user_id, last_farm, balance, inventory FROM players "
+                "WHERE last_farm IS NOT NULL AND last_farm BETWEEN $1 AND $2 "
+                "AND (last_winback_sent IS NULL OR last_winback_sent < $3)",
+                window_start, window_end, guard_before,
+            )
+    except Exception as e:
+        logger.error(f"winback query error: {e}")
+        return
+
+    rarity_order = {"legendary": 0, "epic": 1, "rare": 2, "common": 3}
+
+    token = ctx.settings.bot_token
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    sent = 0
+    blocked = 0
+    failed = 0
+    first_failure_logged = False
+    async with httpx.AsyncClient(timeout=10) as client:
+        for row in rows:
+            uid = row["user_id"]
+            days_gone = (now - row["last_farm"]).days
+            named = [it for it in _json_safe_load(row["inventory"], [])
+                     if it.get("type") == "named"]
+            named.sort(key=lambda x: rarity_order.get(x.get("rarity"), 3))
+            best = named[0] if named else None
+            text = _winback_text(days_gone, row["balance"] or 0,
+                                  item_name=(best or {}).get("name"),
+                                  item_rarity=(best or {}).get("rarity"))
+
+            try:
+                r = await client.post(url, json={"chat_id": uid, "text": text, "parse_mode": "HTML"})
+                if r.status_code == 200:
+                    sent += 1
+                    async with ctx.db_pool.acquire() as conn:
+                        await conn.execute(
+                            "UPDATE players SET last_winback_sent=now() WHERE user_id=$1", uid)
+                elif _is_dead_chat_error(r.status_code, r.text):
+                    blocked += 1
+                else:
+                    failed += 1
+                    if not first_failure_logged:
+                        first_failure_logged = True
+                        logger.error("winback: sendMessage %d для uid=%s: %s",
+                                     r.status_code, uid, r.text[:300])
+            except Exception as e:
+                failed += 1
+                if not first_failure_logged:
+                    first_failure_logged = True
+                    logger.error("winback: исключение при отправке uid=%s: %s", uid, e)
+            await asyncio.sleep(0.05)
+
+    logger.info("winback: sent %d pushes to %d candidates (blocked=%d, failed=%d)",
+                sent, len(rows), blocked, failed)
+    await _record_job_health(ctx, "winback", sent, len(rows), blocked, failed)
+
+
+def _activation_text(balance: int) -> str:
+    """Тон принципиально другой, чем у reengagement/winback: тем НЕЧЕГО терять
+    (нет ни созревшей грядки, ни серии, ни рейтинга — они ни разу не
+    фармили), поэтому давление построено на endowment («уже твоё, просто
+    забери») и любопытстве, а не на угрозе потери прогресса, которого нет."""
+    return (
+        f"🍬 <b>Твой стартовый дар всё ещё ждёт тебя</b> — <b>{balance} OAC</b> "
+        f"и первый именной блант никуда не делись.\n\n"
+        f"Один тап — и грядка начнёт приносить урожай. Жми ниже, это займёт "
+        f"пару секунд:"
+    )
+
+
+async def activation_push(ctx: AppContext) -> None:
+    """Единственный пуш, нацеленный на тех, кто ни разу не фармил.
+
+    И reengagement_push (окно 2ч-3д), и winback_push (окно 3-30д) фильтруют
+    `last_farm IS NOT NULL` — оба структурно не видят игрока, у которого
+    last_farm вообще NULL. На проде это 53 из 157 аккаунтов (34% всей базы,
+    больше, чем кандидатов в обеих других джобах вместе) — люди, которые
+    прошли /start (получили стартовый баланс и блант), но НИ РАЗУ не нажали
+    «Фармить» — и до этой функции не получали от бота ни единого напоминания
+    никогда, потому что были невидимы для всего механизма пушей разом.
+
+    created_at < now()-1ч: не дёргаем того, кто буквально секунду назад
+    зарегистрировался и ещё не долистал приветственный экран.
+    activation_push_count < 4: не спамим бесконечно явно незаинтересованного
+    мёртвого аккаунта — 4 попытки и тишина.
+
+    Кулдаун между попытками СВОИМ ЖЕ раньше был плоский 3 дня на каждую —
+    и первый напоминание могло реально дойти только на следующий суточный
+    прогон джобы (job_activation спала 86400с), т.е. окно, где интерес к
+    только что открытой игре ещё жив, использовалось в лучшем случае на
+    четверть. Джоба (main.py) теперь просыпается раз в час — эта функция
+    подхватывает свежих кандидатов быстро; сам кулдаун между попытками —
+    убывающая лестница 1д → 3д → 5д (день выбора для догоняющих писем/пушей
+    в growth-практике — не флэт), а не растянутый плоский 3-дневный шаг:
+    2-я попытка ловит момент, пока регистрация ещё свежа в памяти, 3-я и
+    4-я расходятся шире для явно не откликнувшихся — не в наказание, а
+    чтобы не превращаться в надоедливый шум для тех, кто уже трижды
+    показал, что не вернётся.
+    last_activation_push_sent обновляется и на blocked/dead-chat, не только
+    на sent — иначе мёртвый чат ретраился бы каждый прогон вечно; на
+    настоящей ошибке (failed) не обновляется — это может быть временный сбой,
+    стоит попробовать раньше положенного кулдауна.
+    """
+    if not ctx or not ctx.db_pool:
+        return
+
+    created_before = datetime.now(timezone.utc) - timedelta(hours=1)
+    gate_2 = datetime.now(timezone.utc) - timedelta(days=1)
+    gate_3 = datetime.now(timezone.utc) - timedelta(days=3)
+    gate_4 = datetime.now(timezone.utc) - timedelta(days=5)
+
+    try:
+        async with ctx.db_pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT user_id, balance FROM players "
+                "WHERE last_farm IS NULL AND created_at < $1 "
+                "AND activation_push_count < 4 "
+                "AND ("
+                "  (activation_push_count = 0 AND last_activation_push_sent IS NULL)"
+                "  OR (activation_push_count = 1 AND last_activation_push_sent < $2)"
+                "  OR (activation_push_count = 2 AND last_activation_push_sent < $3)"
+                "  OR (activation_push_count = 3 AND last_activation_push_sent < $4)"
+                ")",
+                created_before, gate_2, gate_3, gate_4,
+            )
+    except Exception as e:
+        logger.error(f"activation query error: {e}")
+        return
+
+    token = ctx.settings.bot_token
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    sent = 0
+    blocked = 0
+    failed = 0
+    first_failure_logged = False
+    kb = {"inline_keyboard": [[{"text": "🍬 Фармить", "callback_data": "farm"}]]}
+    async with httpx.AsyncClient(timeout=10) as client:
+        for row in rows:
+            uid = row["user_id"]
+            text = _activation_text(row["balance"] or 0)
+
+            try:
+                r = await client.post(url, json={"chat_id": uid, "text": text,
+                                                   "parse_mode": "HTML", "reply_markup": kb})
+                if r.status_code == 200:
+                    sent += 1
+                    async with ctx.db_pool.acquire() as conn:
+                        await conn.execute(
+                            "UPDATE players SET last_activation_push_sent=now(), "
+                            "activation_push_count=activation_push_count+1 WHERE user_id=$1", uid)
+                elif _is_dead_chat_error(r.status_code, r.text):
+                    blocked += 1
+                    async with ctx.db_pool.acquire() as conn:
+                        await conn.execute(
+                            "UPDATE players SET last_activation_push_sent=now(), "
+                            "activation_push_count=activation_push_count+1 WHERE user_id=$1", uid)
+                else:
+                    failed += 1
+                    if not first_failure_logged:
+                        first_failure_logged = True
+                        logger.error("activation: sendMessage %d для uid=%s: %s",
+                                     r.status_code, uid, r.text[:300])
+            except Exception as e:
+                failed += 1
+                if not first_failure_logged:
+                    first_failure_logged = True
+                    logger.error("activation: исключение при отправке uid=%s: %s", uid, e)
+            await asyncio.sleep(0.05)
+
+    logger.info("activation: sent %d pushes to %d candidates (blocked=%d, failed=%d)",
+                sent, len(rows), blocked, failed)
+    await _record_job_health(ctx, "activation", sent, len(rows), blocked, failed)
+
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
@@ -7910,4 +12474,4 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handler(update, context)
     except Exception as e:
         logger.exception(f"Ошибка в текстовой команде '{command}' от {user_id}")
-        await msg.reply_text("⚠️ Внутренняя ошибка. Попробуйте позже.")
+        await msg.reply_text("⚠️ Внутренняя ошибка. Попробуй позже.")

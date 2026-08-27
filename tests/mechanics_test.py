@@ -11,6 +11,7 @@
 import os
 import sys
 import asyncio
+import types
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -24,18 +25,22 @@ import asyncpg
 import redis.asyncio as aioredis
 from cachetools import TTLCache
 
+import bot
 from bot import (
     calculate_smoke_reward, _calculate_reward, daily_config,
     _calc_multiplier, _generate_mines_field, get_medal_target,
     get_rank_progress, _get_craft_stats, FARM_MEDALS,
     _build_next_day_preview, _build_daily_message, _reengagement_text, reengagement_push,
+    winback_push, activation_push, _create_new_player,
     _farm_on_cooldown, _quest_progress_counts, _plural_steps, QUEST_TEMPLATES,
     _resolve_referrer, _reward_referrer,
     _plant_rate, _plant_upgrade_cost, _plant_pending,
     _days_left_in_week, _war_rally_line,
     create_tables, _run_migrations, PlayerRepository, Player,
     PetService, GuildWarService, WarConfig, WarSettings, PET_CONFIG,
+    GAME_CONFIG,
 )
+from game_content import ACHIEVEMENT_CONDITIONS
 from datetime import datetime, timedelta
 
 TEST_UID = 999002
@@ -54,23 +59,46 @@ def test_pure(passed):
         # число обязано соответствовать исходу — витрина честна
         if outcome == "jackpot":
             assert 80 <= val <= 160, f"джекпот вернул {val}"
+        elif outcome == "big":
+            assert 35 <= val <= 60, f"крупный вернул {val}"
         elif outcome == "win":
-            assert 15 <= val <= 40, f"выигрыш вернул {val}"
-        elif outcome == "loss":
-            assert val == -5, f"проигрыш вернул {val}"
+            assert 4 <= val <= 12, f"выигрыш вернул {val}"
         else:
             assert val == 0, f"пусто вернул {val}"
+        # ни один исход больше не отнимает OAC: игрок уже заплатил за блант,
+        # штраф сверху — наказание за главный глагол игры (см. calculate_smoke_reward)
+        assert val >= 0, f"исход {outcome} отнял OAC ({val}) — штраф вернулся"
         # флейвор не падает и рендерит знак корректно
         assert build_smoke_effect(outcome, val)
-    assert {"jackpot", "win", "loss", "neutral"} <= outcomes_seen, f"не все исходы: {outcomes_seen}"
+    assert {"jackpot", "big", "win", "neutral"} <= outcomes_seen, f"не все исходы: {outcomes_seen}"
+    assert "loss" not in outcomes_seen, "исход 'loss' должен быть убран целиком"
     # с happy hour положительный доход удваивается
     for _ in range(2000):
         val, outcome = calculate_smoke_reward(_P(), happy_hour=True)
         if outcome == "win":
-            assert 30 <= val <= 80, f"дунуть HH win вернул {val}"
+            assert 8 <= val <= 24, f"дунуть HH win вернул {val}"
+        elif outcome == "big":
+            assert 70 <= val <= 120, f"дунуть HH big вернул {val}"
         elif outcome == "jackpot":
             assert 160 <= val <= 320, f"дунуть HH jackpot вернул {val}"
     passed.append("calculate_smoke_reward: число всегда соответствует исходу (флейвор честен)")
+
+    # --- частота подкрепления: ~50% тяг дают хоть что-то ---
+    # Корневой дефект старого баланса: 73% тяг не давали НИЧЕГО. Дофаминовый
+    # ответ на неопределённость максимален около 50/50 и падает к краям
+    # (Fiorillo, Tobler, Schultz, Science, 2003) — 27% попаданий лежали
+    # глубоко в зоне «обычно ничего». Тест сторожит, чтобы правка не уползла.
+    _dry = 0
+    _hits = 0
+    _N = 200_000
+    for _ in range(_N):
+        v, o = calculate_smoke_reward(_P(), happy_hour=False, dry_count=_dry)
+        if v > 0:
+            _hits += 1
+        _dry = _dry + 1 if o == "neutral" else 0
+    _rate = _hits / _N
+    assert 0.45 <= _rate <= 0.56, f"частота попаданий уехала из зоны 50/50: {_rate:.1%}"
+    passed.append(f"Дунуть: частота подкрепления в зоне максимума дофамина ({_rate:.0%}, было 27%)")
 
     # --- стрик-награда: титулы детерминированы, доход не ниже базы×hot ---
     r5 = _calculate_reward(5, daily_config)
@@ -96,23 +124,40 @@ def test_pure(passed):
             assert _fld in _pf, f"стрик выдал несуществующее поле {_fld}"
     passed.append("Стрик: все предметные бонусы ложатся на реальные поля Player (не фантом)")
 
-    # --- множитель мин: 1.0 → 3.0, монотонно, границы точные ---
-    assert _calc_multiplier(0) == 1.0
-    assert _calc_multiplier(22) == 3.0
-    prev = -1.0
-    for step in range(0, 23):
-        m = _calc_multiplier(step)
-        assert 1.0 <= m <= 3.0 and m >= prev, f"множитель не монотонен на шаге {step}"
-        prev = m
-    passed.append("_calc_multiplier: 1.0→3.0, монотонно")
+    # --- честный множитель мин: rtp/P(дожить), монотонно, границы точные ---
+    # Раньше множитель рос линейно (1.0→3.0) НЕЗАВИСИМО от реальной
+    # вероятности — ожидаемая отдача (multiplier × P(дожить)) падала с
+    # каждым шагом. Теперь она обязана быть постоянной (тот же rtp) на
+    # любом шаге и для любого числа мин — это и есть «честная игра».
+    for mines_count in (1, 3, 5, 10):
+        assert _calc_multiplier(mines_count, 0) == 1.0
+        total_safe = 25 - mines_count
+        prev = -1.0
+        for step in range(0, total_safe + 1):
+            m = _calc_multiplier(mines_count, step)
+            assert m >= prev, f"множитель не монотонен на шаге {step} ({mines_count} мин)"
+            prev = m
+            p_survive = bot._mines_survival_prob(mines_count, step)
+            if step > 0:
+                expected_rtp = round(m * p_survive, 2)
+                assert abs(expected_rtp - 0.97) < 0.01, (
+                    f"ожидаемая отдача съехала с RTP на шаге {step} "
+                    f"({mines_count} мин): {expected_rtp}")
+    passed.append("_calc_multiplier: честная отдача (RTP постоянен) на любом шаге и числе мин")
 
-    # --- поле мин: 5x5, ровно 3 мины, координаты валидны ---
-    for _ in range(500):
-        field, mines = _generate_mines_field()
-        assert len(field) == 5 and all(len(row) == 5 for row in field)
-        assert len(mines) == 3
-        assert all(0 <= r <= 4 and 0 <= c <= 4 for r, c in mines)
-    passed.append("_generate_mines_field: 5x5, ровно 3 мины")
+    # --- шанс взрыва на следующем шаге: 3 мины / 25 клеток на старте = 12% ---
+    assert bot._mines_next_risk_pct(3, 0) == 12
+    assert bot._mines_next_risk_pct(3, 22) == 100  # последняя безопасная клетка гарантированно последняя
+    passed.append("_mines_next_risk_pct: честный процент риска на следующем шаге")
+
+    # --- поле мин: 5x5, ровно N мин (по выбранному пресету), координаты валидны ---
+    for mines_count in (1, 3, 5, 10):
+        for _ in range(200):
+            field, mines = _generate_mines_field(mines_count)
+            assert len(field) == 5 and all(len(row) == 5 for row in field)
+            assert len(mines) == mines_count
+            assert all(0 <= r <= 4 and 0 <= c <= 4 for r, c in mines)
+    passed.append("_generate_mines_field: 5x5, ровно N мин по пресету")
 
     # --- цель медали: следующий порог / максимум ---
     assert get_medal_target(0, FARM_MEDALS) == 1
@@ -197,9 +242,9 @@ def test_pure(passed):
     # --- подсчёт прогресса квеста (условия видимости заданий) ---
     ch1 = QUEST_TEMPLATES["chapter1"]
     prog = {"farm": True, "craft": True}
-    # BLACK: farm,craft,smoke,ritual видимы (repent/pet отфильтрованы) → 2/4
-    assert _quest_progress_counts(ch1, prog, "BLACK", False, False) == (2, 4)
-    assert _quest_progress_counts(ch1, prog, "WHITE", False, False) == (2, 4)
+    # BLACK: farm,craft,smoke,mines,ritual видимы (repent/pet отфильтрованы) → 2/5
+    assert _quest_progress_counts(ch1, prog, "BLACK", False, False) == (2, 5)
+    assert _quest_progress_counts(ch1, prog, "WHITE", False, False) == (2, 5)
     assert _quest_progress_counts(None, {}, "BLACK", False, False) == (0, 0)
     passed.append("_quest_progress_counts: фильтрация по условиям")
 
@@ -215,6 +260,16 @@ def test_pure(passed):
     assert _resolve_referrer(["blunt_garbage"], 999) is None         # мусор
     assert _resolve_referrer([], 999) is None
     passed.append("_resolve_referrer: парсинг создателя из ссылки")
+
+    # --- ref_<uid>: постоянная персональная ссылка (invite_friend_handler) ---
+    # До неё пригласить можно было ТОЛЬКО через одноразовую blunt-ссылку сразу
+    # после крафта (50 OAC) — ref_ не гейтится ничем и живёт в профиле постоянно.
+    assert _resolve_referrer(["ref_12345"], 999) == 12345
+    assert _resolve_referrer(["ref_999"], 999) is None                # сам себя
+    assert _resolve_referrer(["ref_"], 999) is None                   # пусто после префикса
+    assert _resolve_referrer(["ref_abc"], 999) is None                # не число
+    assert _resolve_referrer(["ref_-5"], 999) is None                 # минус не digit → None
+    passed.append("_resolve_referrer: постоянная ref_ ссылка (профиль)")
 
     # --- Плантация: ставка / стоимость апгрейда / накопление с лимитом ---
     assert (_plant_rate(1), _plant_rate(5)) == (25, 125)
@@ -272,6 +327,42 @@ def test_pure(passed):
     assert "ЧАС УДАЧИ" in _happy_hour_banner(_Ctx({"happy_hour": True}), n)  # без end не падает
     passed.append("Час Удачи: баннер FOMO с отсчётом, fail-closed")
 
+    # --- Час Удачи переживает TTL кэша (жил 10 мин вместо заявленных 30) ---
+    # Флаг лежал только в ctx.cache — TTLCache(ttl=600) из main.py. Через 10
+    # минут он испарялся, «×2» тихо выключалось, а баннер продолжал обещать
+    # «Осталось 25м». Источник правды теперь — дедлайн на самом ctx.
+    from bot import happy_hour_active
+    from cachetools import TTLCache as _TTL
+    class _CtxE:
+        def __init__(s, end, cache=None):
+            s.happy_hour_end = end
+            s.cache = cache if cache is not None else {}
+    _n = datetime.now()
+    assert happy_hour_active(_CtxE(_n + timedelta(minutes=25)))       # идёт
+    assert not happy_hour_active(_CtxE(_n - timedelta(minutes=1)))    # вышел
+    assert not happy_hour_active(None)                                # fail-closed
+    # ключевой сценарий: кэш пуст (истёк ttl), но Час ещё не кончился
+    assert happy_hour_active(_CtxE(_n + timedelta(minutes=18), _TTL(maxsize=4, ttl=600)))
+    # старый контракт (объект только с .cache) продолжает работать
+    class _CtxOld:
+        def __init__(s, cache): s.cache = cache
+    assert happy_hour_active(_CtxOld({"happy_hour": True}))
+    assert not happy_hour_active(_CtxOld({"happy_hour": False}))
+    passed.append("Час Удачи переживает TTL кэша (30 мин, а не 10)")
+
+    # --- alchemy_count должен расти: от него зависит высший приз игры ---
+    # Счётчик не инкрементировался нигде → ачивки alchemy_15/alchemy_50
+    # недостижимы → «🌀 Лунный лорд» (закрыть ВСЕ достижения) заперт навсегда.
+    _ach_fields = {c[0] for c in ACHIEVEMENT_CONDITIONS.values()}
+    _bot_src = open(os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "bot.py"), encoding="utf-8").read()
+    _never = sorted(f for f in _ach_fields
+                    if f"p.{f} = " not in _bot_src and f"p.{f} +=" not in _bot_src
+                    and f"player.{f} = " not in _bot_src and f"player.{f} +=" not in _bot_src)
+    assert not _never, ("Поля, от которых зависят достижения, нигде не растут "
+                        "(ачивки недостижимы, а с ними и «Лунный лорд»): " + ", ".join(_never))
+    passed.append("Все поля-счётчики достижений реально инкрементируются в коде")
+
     # --- Персистентность: каждое поле Player пишется в БД (ловит «поле живёт
     #     только в кэше» — так терялись onboarding_step/pet_hunger/repent_count) ---
     from repository import PLAYER_COLUMNS
@@ -325,6 +416,30 @@ def test_pure(passed):
     assert "Выбери гильдию" in _war_rally_line(None, 0, 0)   # без гильдии
     passed.append("Война гильдий: дни недели + рэлли-строка")
 
+    # --- Кошелёк ≠ статус: трата не имеет права отбирать ранг/скидку/цель ---
+    # Корневой баг: balance был одновременно кошельком, очками ранга и гейтом.
+    # Купил питомца за 3000 на пороге Ветерана (5000) — и мгновенно перестал
+    # быть Ветераном, потерял алхимию, скидку и место в топе. Игра наказывала
+    # за то, что в неё играют. Сторожим разделение осей.
+    from bot import has_rank, compute_rank_info, _shop_discount_pct, _north_star_line
+    veteran_th = GAME_CONFIG["veteran_threshold"]
+    assert has_rank(veteran_th, "Ветеран")            # дошёл — Ветеран
+    assert has_rank(veteran_th, "Ветеран") == has_rank(veteran_th + 10_000, "Ветеран")
+    # total_earned не убывает → ранг, посчитанный по нему, не может упасть
+    _, name_rich, *_ = compute_rank_info(veteran_th)
+    assert name_rich == "Ветеран", name_rich
+    # Скидка Прилавка — привилегия ранга, а не остатка кошелька
+    assert _shop_discount_pct(veteran_th) == 5
+    assert _shop_discount_pct(GAME_CONFIG["phantom_threshold"]) == 10
+    assert _shop_discount_pct(GAME_CONFIG["necromant_threshold"]) == 15
+    # «Полярная звезда» на пороге ведёт к СЛЕДУЮЩЕЙ цели, а не к уже взятой
+    assert "Призрак" in _north_star_line(veteran_th)
+    # Достижения «накопить N OAC» висят на заработанном, иначе трата делала бы
+    # их недостижимыми навсегда
+    for _ach in ("balance_1000", "balance_20000", "balance_50000", "rank_phantom"):
+        assert ACHIEVEMENT_CONDITIONS[_ach][0] == "total_earned", _ach
+    passed.append("Кошелёк ≠ статус: ранг/скидка/цель/ачивки живут на total_earned")
+
 
 async def test_services(passed):
     pool = await asyncpg.create_pool(os.environ["DATABASE_URL_AIVEN"], min_size=1, max_size=3)
@@ -353,6 +468,31 @@ async def test_services(passed):
     after = await repo.get_by_id(TEST_UID)
     assert after.balance == 5000 - PET_CONFIG["dog"]["price"] and after.pet
     passed.append("PetService.buy: no_money / ok / списание баланса")
+
+    # --- Покупка НЕ разжалует: ровно тот сценарий, что был сломан ---
+    # Питомец открывается на Ветеране (5000) и стоит 3000. Раньше покупка
+    # роняла balance до 2000 → игрок мгновенно переставал быть Ветераном,
+    # терял алхимию/скидку/место в топе, а «Полярная звезда» снова звала к
+    # уже взятому рангу. Теперь трата не трогает total_earned.
+    from bot import has_rank
+    assert after.total_earned == 5000, f"заработок съеден тратой: {after.total_earned}"
+    assert after.balance < GAME_CONFIG["veteran_threshold"]      # кошелёк просел
+    assert has_rank(after.total_earned, "Ветеран")               # ранг устоял
+    # и после ещё одной траты статус по-прежнему не падает
+    async def _spend(p, conn):
+        p.balance = max(0, p.balance - 1500)
+    await repo.atomic_update(TEST_UID, _spend)
+    broke = await repo.get_by_id(TEST_UID)
+    assert broke.total_earned == 5000, broke.total_earned
+    assert has_rank(broke.total_earned, "Ветеран")
+    # а новый заработок статус двигает вверх
+    async def _earn(p, conn):
+        p.balance += 700
+    await repo.atomic_update(TEST_UID, _earn)
+    richer = await repo.get_by_id(TEST_UID)
+    assert richer.total_earned == 5700, richer.total_earned
+    passed.append("Покупка не разжалует: трата не трогает ранг, заработок растит")
+
 
     # --- повторная покупка → already_have ---
     res = await pet_service.buy(TEST_UID, "dog")
@@ -391,6 +531,59 @@ async def test_services(passed):
     await reengagement_push(_NoRedisCtx())   # должно тихо вернуться
     passed.append("reengagement_push: fail-closed без Redis")
 
+    # --- activation_push: единственная джоба, видящая last_farm IS NULL ---
+    # reengagement_push и winback_push обе фильтруют last_farm IS NOT NULL —
+    # ни разу не фармивший игрок им структурно невидим. Проверяем на реальном
+    # Postgres: такой игрок ПОЛУЧАЕТ активацию (гвардия проставляется), но
+    # ни reengagement_push, ни winback_push его не трогают (гвардии остаются
+    # NULL) — именно тот разрыв, который activation_push закрывает.
+    class _FakeTgResp:
+        status_code = 200
+        text = "{}"
+
+    class _FakeAsyncClient:
+        def __init__(self, *a, **k): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, *a, **k): return _FakeTgResp()
+
+    class _PushCtx:
+        db_pool = pool
+        settings = types.SimpleNamespace(bot_token="123:DUMMY")
+
+    ACT_UID = 999006
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM players WHERE user_id=$1", ACT_UID)
+    await repo.save(Player(user_id=ACT_UID, username="NeverFarmed", balance=800, exists=True))
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE players SET last_farm=NULL, created_at=now() - interval '2 hours' "
+            "WHERE user_id=$1", ACT_UID)
+
+    orig_client = bot.httpx.AsyncClient
+    bot.httpx.AsyncClient = _FakeAsyncClient
+    try:
+        await reengagement_push(_PushCtx())
+        await winback_push(_PushCtx())
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT last_reengagement_sent, last_winback_sent FROM players WHERE user_id=$1",
+                ACT_UID)
+        assert row["last_reengagement_sent"] is None and row["last_winback_sent"] is None, (
+            "reengagement/winback не должны видеть ни разу не фармившего игрока")
+        passed.append("reengagement_push/winback_push: не видят last_farm IS NULL (структурный разрыв подтверждён)")
+
+        await activation_push(_PushCtx())
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT last_activation_push_sent, activation_push_count FROM players WHERE user_id=$1",
+                ACT_UID)
+        assert row["last_activation_push_sent"] is not None and row["activation_push_count"] == 1, (
+            f"activation_push должна была дойти до ни разу не фармившего игрока: {row}")
+        passed.append("activation_push: закрывает разрыв — доходит до ни разу не фармившего игрока")
+    finally:
+        bot.httpx.AsyncClient = orig_client
+
     # --- _reward_referrer: реферер получает +50 OAC, счётчик, метку 🩸 ---
     REF_UID = 999003
     async with pool.acquire() as conn:
@@ -412,6 +605,8 @@ async def test_services(passed):
     class _RefCtx:
         def __init__(self, repo):
             self.repo = repo
+            self.redis = None
+            self.db_pool = repo.db_pool
 
     before = await repo.get_by_id(REF_UID)
     await _reward_referrer(_RefCtx(repo), _RefContext(), REF_UID)
@@ -438,21 +633,135 @@ async def test_services(passed):
         await conn.execute("DELETE FROM players WHERE user_id=$1", PLANT_UID)
     passed.append("Плантация: round-trip полей + расчёт урожая на БД")
 
-    # --- Мины работают и без Redis (in-memory фолбэк) — «Рискнуть» не молчит ---
+    # --- Мины: состояние в Postgres (players.mines_state), не в Redis ---
+    # Redis подтверждённо был недоступен в проде несколько дней подряд — при
+    # старом «Redis, если есть, иначе ctx.cache» партия переживала рестарт
+    # процесса ТОЛЬКО пока Redis реально работал; без него (и без Redis
+    # вообще) ctx.cache тоже in-memory и стирается при любом деплое так же.
+    # БД переживает рестарт процесса всегда — тест сверяет именно это, а не
+    # «работает ли фолбэк», которого больше нет по конструкции.
     from bot import _mines_state_get, _mines_state_set
     from types import SimpleNamespace
+    MINES_UID = 999005
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM players WHERE user_id=$1", MINES_UID)
+    await repo.save(Player(user_id=MINES_UID, username="Miner", exists=True))
+    ctx_db = SimpleNamespace(db_pool=pool)
     st = {"field": [[0] * 5 for _ in range(5)], "mines": [[0, 1]], "bet": 50, "step": 0, "status": "playing"}
-    ctx_nr = SimpleNamespace(redis=None, cache=TTLCache(maxsize=20, ttl=600))
-    assert await _mines_state_get(ctx_nr, 777) is None            # пусто → None (а не крах)
-    await _mines_state_set(ctx_nr, 777, st)
-    assert await _mines_state_get(ctx_nr, 777) == st              # round-trip без Redis
-    ctx_r = SimpleNamespace(redis=redis_client, cache=TTLCache(maxsize=20, ttl=600))
-    await redis_client.delete("mines_game:778")
-    await _mines_state_set(ctx_r, 778, st)
-    assert await _mines_state_get(ctx_r, 778) == st              # round-trip с Redis
-    await redis_client.delete("mines_game:778")
-    passed.append("Мины: состояние round-trip с Redis и без (in-memory фолбэк)")
+    assert await _mines_state_get(ctx_db, MINES_UID) is None      # пусто → None (а не крах)
+    await _mines_state_set(ctx_db, MINES_UID, st)
+    assert await _mines_state_get(ctx_db, MINES_UID) == st        # round-trip через БД
+    # 1-часовой TTL сохранён поведенчески (был Redis SETEX 3600): партия
+    # старше часа читается как брошенная, а не восстанавливается.
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE players SET mines_state_updated_at = now() - interval '2 hours' "
+            "WHERE user_id=$1", MINES_UID)
+    assert await _mines_state_get(ctx_db, MINES_UID) is None, "партия старше часа должна читаться как брошенная"
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM players WHERE user_id=$1", MINES_UID)
+    passed.append("Мины: состояние в Postgres, round-trip + часовой TTL брошенной партии")
 
+    # --- Награда за ПЕРВЫЙ фарм не должна стираться онбордингом ---
+    # Был потерянный апдейт: хендлер держит снимок игрока, загруженный ДО
+    # atomic_update, а затем save(снимок) переписывал ВСЕ колонки — награда за
+    # первый фарм, farm_count, last_farm и daily_progress откатывались.
+    # Игрок видел «+81 OAC» на экране и 800 в базе.
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM players WHERE user_id=$1", TEST_UID)
+    await repo.save(Player(user_id=TEST_UID, username="newbie", balance=800,
+                           onboarding_step=1, exists=True))
+    _stale = await repo.get_by_id(TEST_UID)           # снимок «до транзакции»
+    async def _first_farm(p, conn):
+        p.balance += 81; p.farm_count = 1; p.daily_progress = {"farm": True}
+    await repo.atomic_update(TEST_UID, _first_farm)
+    async def _advance(p, conn):                       # так делает онбординг ТЕПЕРЬ
+        p.onboarding_step = 2
+    await repo.atomic_update(TEST_UID, _advance)
+    fresh = await repo.get_by_id(TEST_UID)
+    assert fresh.balance == 881, f"награда за первый фарм потеряна: {fresh.balance}"
+    assert fresh.farm_count == 1 and fresh.daily_progress == {"farm": True}
+    assert fresh.onboarding_step == 2
+    assert _stale.balance == 800                       # снимок и правда устаревший
+    passed.append("Онбординг не стирает награду за первый фарм (потерянный апдейт)")
+
+    # --- Инвентарь переживает частичную загрузку ---
+    # get_by_id(with_inventory=False) отдаёт inventory=[], а save() писал этот
+    # пустой список в БД → стартовый именной блант, обещанный в приветствии,
+    # уничтожался первым же тапом по кнопке фракции.
+    _inv = [{"type": "named", "name": "Крик Бездны", "rarity": "rare"}]
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM players WHERE user_id=$1", TEST_UID)
+    await repo.save(Player(user_id=TEST_UID, username="newbie", balance=800,
+                           exists=True, inventory=_inv))
+    # Холодный кэш = путь через БД. С тёплым Redis (TTL 10 с) get_by_id отдаёт
+    # полный объект и баг не виден — он бьёт ровно тех, кто читал приветствие
+    # дольше 10 секунд.
+    async def _chill():
+        repo.cache.clear()
+        await redis_client.delete(f"player:{TEST_UID}")
+    await _chill()
+    light = await repo.get_by_id(TEST_UID, with_inventory=False)
+    assert light.inventory == [] and light._inventory_loaded is False
+    light.guild = "BLACK"
+    await repo.save(light)
+    await _chill()
+    restored = await repo.get_by_id(TEST_UID)
+    assert restored.guild == "BLACK", "гильдия не записалась"
+    assert restored.inventory == _inv, f"инвентарь стёрт: {restored.inventory}"
+    passed.append("Частичная загрузка не стирает инвентарь (стартовый блант цел)")
+
+    # --- Первое сообщение новичку: сразу фарм, без стены лора и выбора фракции ---
+    # Раньше первое сообщение требовало выбрать фракцию (или явно отложить)
+    # ДО единой награды — 2 тапа и 2 экрана текста до первого дофамина.
+    # На холодном трафике это и есть точка потери большинства. Теперь первое
+    # сообщение сразу ведёт в фарм, а onboarding_step стартует с 1 (не с 0).
+    NEW_UID = 999007
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM players WHERE user_id=$1", NEW_UID)
+
+    class _NoNetBot2:
+        async def send_message(self, *a, **k):
+            raise RuntimeError("no network in test")
+
+    class _NewCtx:
+        def __init__(self, repo):
+            self.repo = repo
+            self.db_pool = repo.db_pool
+
+    class _NewMsg:
+        def __init__(self):
+            self.sent = []
+        async def reply_text(self, text, reply_markup=None, **kw):
+            self.sent.append((text, reply_markup))
+
+    class _NewUpdate:
+        def __init__(self):
+            self.effective_message = _NewMsg()
+
+    class _NewContext:
+        def __init__(self, ctx):
+            self.bot = _NoNetBot2()
+            self.bot_data = {"ctx": ctx}
+            self.user_data = {}
+
+    new_ctx = _NewCtx(repo)
+    upd = _NewUpdate()
+    await _create_new_player(upd, _NewContext(new_ctx), NEW_UID, "newbie2")
+
+    created = await repo.get_by_id(NEW_UID)
+    assert created.onboarding_step == 1, (
+        f"новый игрок должен стартовать сразу с шага 1 (фарм), а не 0: {created.onboarding_step}")
+    assert len(upd.effective_message.sent) == 1, "должно уйти ровно одно приветственное сообщение"
+    text, kb = upd.effective_message.sent[0]
+    assert "ФРАКЦИЮ" not in text and "1/3" not in text, (
+        "первое сообщение больше не требует выбора фракции до первого действия")
+    cb_data = [btn.callback_data for row in kb.inline_keyboard for btn in row]
+    assert cb_data == ["farm"], (
+        f"первая (и единственная) кнопка новичка — сразу фарм, без выбора фракции: {cb_data}")
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM players WHERE user_id=$1", NEW_UID)
+    passed.append("Приветствие новичка: сразу фарм (без стены лора и выбора фракции до первого действия)")
 
     async with pool.acquire() as conn:
         await conn.execute("DELETE FROM players WHERE user_id=$1", TEST_UID)

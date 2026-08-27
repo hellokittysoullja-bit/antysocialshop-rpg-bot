@@ -36,7 +36,13 @@ class Settings(BaseSettings):
 
     @property
     def webhook_url(self) -> str:
-        return f"{self.render_url}{self.webhook_path}"
+        # .rstrip("/"): RENDER_URL со слэшем на конце даёт //webhook —
+        # Telegram принимает такой URL синтаксически, а реальный aiohttp-роут
+        # зарегистрирован на "/webhook" и не совпадает → 404 на каждый
+        # апдейт молча, без единого исключения в логах. См. main.py, где
+        # webhook_url строится тем же способом (эта property сейчас нигде
+        # не используется, но обязана давать тот же честный результат).
+        return f"{self.render_url.rstrip('/')}{self.webhook_path}"
 
 
 settings = Settings()
@@ -61,5 +67,14 @@ GAME_CONFIG = {
     "necromant_threshold": settings.necromant_threshold,
 }
 PET_CONFIG = {
-    "dog": {"name": "🐕 Песик", "price": 3000, "max_name_len": 15},
+    # Data-driven питомец-компаньон. Эффект живёт в ДАННЫХ, а не в коде: новый
+    # питомец, другая цель бонуса или иные числа = правка здесь, без переписывания
+    # логики (структура аддитивна — будущие правки только докладывают, не заменяют).
+    #   bonus_target  — что бустит сытый питомец ("plantation" = пассивная ставка)
+    #   bonus_max_pct — максимум прибавки при полной сытости
+    #   hunger_floor  — пол масштаба бонуса: заброшенный питомец выглядит голодным
+    #                   (эмоц. крючок «покорми»), но баф не обрывается в 0 —
+    #                   вернувшийся игрок всегда сохраняет часть (нет наказания за паузу)
+    "dog": {"name": "🐕 Песик", "price": 3000, "max_name_len": 15,
+            "bonus_target": "plantation", "bonus_max_pct": 10, "hunger_floor": 25},
 }

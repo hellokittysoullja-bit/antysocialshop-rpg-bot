@@ -9,10 +9,10 @@ import redis.asyncio as aioredis
 from aiohttp import web
 from cachetools import TTLCache
 
-from telegram import Update
+from telegram import Update, BotCommand
 from telegram.ext import (
     Application, ApplicationBuilder,
-    MessageHandler, CallbackQueryHandler,
+    MessageHandler, CallbackQueryHandler, ChatMemberHandler,
     AIORateLimiter, filters
 )
 from telegram.request import HTTPXRequest
@@ -34,6 +34,7 @@ from bot import (
     button_handler,
     global_error_handler,
     welcome_new_member,
+    track_chat_member_update,
     create_tables,
     _run_migrations,
     keep_db_alive,
@@ -42,6 +43,8 @@ from bot import (
     happy_hour_trigger,
     weekly_guild_rating,
     reengagement_push,
+    winback_push,
+    activation_push,
     _safe_send_guild_message,
     BLUNT_IMAGES,
 )
@@ -66,6 +69,56 @@ def resilient_task(func):
                 logger.exception(f"Задача {func.__name__} упала, перезапуск через 5с")
                 await asyncio.sleep(5)
     return wrapper
+
+# ============================================================
+async def configure_bot_profile(app: Application):
+    """Имя/описание/список команд бота нигде в репозитории не задавались
+    программно — либо выставлены руками через BotFather когда-то давно (и
+    не под контролем версий), либо не выставлены вовсе. А ведь short_description
+    — это ЕДИНСТВЕННЫЙ текст, который человек видит ДО решения нажать Start:
+    экран профиля бота в Telegram, до всякого /start и до всякой активации.
+    Ни одна из механик онбординга (дефер фракции, мгновенный первый фарм и
+    т.д.) физически не может сработать раньше этого момента — он выше по
+    воронке, чем весь остальной код в этом репозитории.
+
+    Идемпотентно и дёшево — Telegram просто перезаписывает текущее значение,
+    безопасно звать на каждом старте процесса, отдельный try/except не даёт
+    сбою здесь уронить остальную инициализацию.
+    """
+    try:
+        await app.bot.set_my_short_description(
+            "🕯️ RPG Фабрики №9 — крафти легендарные бланты, воюй за Гильдию. "
+            "Первый именной блант — бесплатно, прямо сейчас 🎁"
+        )
+        await app.bot.set_my_description(
+            "Добро пожаловать на Фабрику №9 🕯️⚜️\n\n"
+            "RPG прямо в Telegram: фарми OAC, крафти именные бланты редкости от "
+            "обычной до легендарной, выбери Тёмную или Светлую Гильдию и сражайся "
+            "в еженедельной Войне Гильдий за общий приз.\n\n"
+            "Колесо, Мины и Алхимия — испытай удачу. Плантация — пассивный доход. "
+            "Лабиринт Искажения — для смелых.\n\n"
+            "Жми Start — первые 800 OAC и именной блант ждут тебя."
+        )
+        # Список нарочно короче полного набора команд (см. TEXT_COMMAND_HANDLERS)
+        # — это автодополнение по вводу "/", Hick's law: 9 пунктов читаются,
+        # 20 — игнорируются. Админ-команды (setbluntpic/give_oac/broadcast/growth/
+        # debugpet/checkbluntpics) сюда не идут: они и так работают по прямому
+        # вводу, светить их в автодополнении обычным игрокам незачем.
+        await app.bot.set_my_commands([
+            BotCommand("start", "🎮 Начать игру"),
+            BotCommand("farm", "🍬 Собрать урожай OAC"),
+            BotCommand("craft", "🌿 Скрутить блант"),
+            BotCommand("luck", "🍀 Колесо, Мины, Алхимия"),
+            BotCommand("profile", "⚜️ Профиль и коллекция"),
+            BotCommand("top", "🏆 Топ игроков"),
+            BotCommand("shop", "🏪 Лавка Фабрики"),
+            BotCommand("rules", "📜 Правила мира"),
+            BotCommand("help", "❓ Полная справка"),
+        ])
+        logger.info("✅ Профиль бота (описание/команды) настроен")
+    except Exception:
+        logger.exception("Не удалось настроить профиль бота (описание/команды)")
+
 
 # ============================================================
 async def load_blunt_images(ctx: AppContext):
@@ -156,8 +209,43 @@ async def background_jobs(ctx: AppContext):
                 logger.exception("reengagement_push error")
             await asyncio.sleep(1800)   # каждые 30 минут (guard в Redis ограничивает до ~1/сут)
 
+    @resilient_task
+    async def job_winback():
+        # reengagement_push видит только дрейф 2ч-3дня — окно [3д, 30д) не
+        # получает вообще ничего ни от одного механизма игры. Раз в неделю,
+        # не чаще: это редкая единственная попытка напомнить о себе, а не
+        # ещё один частый пуш поверх уже существующего.
+        await asyncio.sleep(600)   # старт позже reengagement, чтобы не толкаться при деплое
+        while True:
+            try:
+                await winback_push(ctx)
+            except Exception:
+                logger.exception("winback_push error")
+            await asyncio.sleep(7 * 86400)
+
+    @resilient_task
+    async def job_activation():
+        # И reengagement_push, и winback_push фильтруют last_farm IS NOT
+        # NULL — оба структурно не видят игрока, который вообще ни разу не
+        # фармил (на проде это 34% всей базы, больше, чем кандидатов в
+        # обеих других джобах вместе). Было раз в сутки: первый (и самый
+        # ценный — интерес к только что открытой игре ещё свеж) пуш реально
+        # мог уйти только на следующий суточный прогон, т.е. с задержкой до
+        # ~24ч сверх и так уже выставленной часовой грации. Раз в час: своя
+        # гвардия внутри activation_push (эскалирующий кулдаун 1д→3д→5д на
+        # игрока) всё равно не даст спамить чаще — учащение джобы просто не
+        # даёт СВЕЖИМ кандидатам застрять в очереди на сутки.
+        await asyncio.sleep(900)   # старт позже остальных, чтобы не толкаться при деплое
+        while True:
+            try:
+                await activation_push(ctx)
+            except Exception:
+                logger.exception("activation_push error")
+            await asyncio.sleep(3600)
+
     for coro in (job_keep_db_alive, job_update_pulse, job_echo_of_distortion,
-                 job_happy_hour, job_weekly_guild_rating, job_reengagement):
+                 job_happy_hour, job_weekly_guild_rating, job_reengagement, job_winback,
+                 job_activation):
         t = asyncio.create_task(coro())
         background_tasks.add(t)
         t.add_done_callback(background_tasks.discard)
@@ -183,6 +271,25 @@ async def on_startup(app: Application):
         async with pool.acquire() as conn:
             await create_tables(conn)
             await _run_migrations(conn)
+
+            # Метка живого старта процесса — единственный способ ответить на
+            # вопрос «процесс вообще стабильно работает или постоянно
+            # рестартует», не заглядывая в логи Render. Перезаписывается на
+            # КАЖДОМ старте: если /growth показывает «запущен 2 минуты назад»
+            # снова и снова при проверках с разницей в часы — это прямое
+            # доказательство цикла рестартов, а не единичного деплоя.
+            #
+            # В Postgres, не в Redis: раньше жила ТОЛЬКО при подключённом
+            # Redis — то есть ровно там, где диагностика нужнее всего (Redis
+            # недоступен), она сама была недоступна и говорила «неизвестно»
+            # вместо ответа. Таблица job_health есть всегда, раз есть db_pool.
+            try:
+                await conn.execute(
+                    "INSERT INTO job_health (job, last_run, sent, candidates) "
+                    "VALUES ('process_start', now(), 0, 0) "
+                    "ON CONFLICT (job) DO UPDATE SET last_run=now()")
+            except Exception:
+                logger.exception("Не удалось записать метку старта процесса")
 
         # ================== Redis ==================
         redis_client = None
@@ -239,6 +346,9 @@ async def on_startup(app: Application):
         # ================== Прогрев кэша ==================
         if redis_client:
             await load_blunt_images(ctx)
+
+        # ================== Профиль бота ==================
+        await configure_bot_profile(app)
 
     except Exception:
         logger.exception("Критическая ошибка инициализации")
@@ -297,6 +407,7 @@ async def main_async():
         tg_app.add_handler(MessageHandler(filters.TEXT, handle_text))
         tg_app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_member))
         tg_app.add_handler(CallbackQueryHandler(button_handler))
+        tg_app.add_handler(ChatMemberHandler(track_chat_member_update, ChatMemberHandler.MY_CHAT_MEMBER))
         tg_app.add_error_handler(global_error_handler)
 
         logger.info("🔄 Запуск tg_app.initialize()...")
@@ -368,12 +479,30 @@ async def main_async():
         app.router.add_post(settings.webhook_path, handle_webhook)
         app.router.add_get("/healthz", healthcheck)
 
-        webhook_url = f"{settings.render_url}{settings.webhook_path}"
+        # .rstrip("/") — не косметика. RENDER_URL со слэшем на конце (частая
+        # опечатка при ручном вводе в Render Dashboard) даёт //webhook: Telegram
+        # принимает такой URL (200 OK на setWebhook — валиден синтаксически) и
+        # шлёт апдейты именно на него, а aiohttp-роут зарегистрирован на ровно
+        # "/webhook" и не совпадает → каждый апдейт молча получает 404. Никакого
+        # исключения нигде не происходит — бот выглядит живым (деплой зелёный,
+        # /healthz отвечает 200), просто никогда не видит ни одного сообщения.
+        # Обнаружено на живом инциденте: RENDER_URL с "/" на конце → 100%
+        # игроков молчат, а логи выглядят полностью штатными.
+        if not settings.render_url or not settings.render_url.startswith("http"):
+            logger.critical(
+                "RENDER_URL не задан или не похож на URL (%r) — вебхук "
+                "не будет работать. Нужен полный адрес вида "
+                "https://<имя-сервиса>.onrender.com, без пути и без "
+                "слэша на конце.", settings.render_url)
+        webhook_url = f"{settings.render_url.rstrip('/')}{settings.webhook_path}"
         logger.info(f"🌐 Устанавливаю вебхук: {webhook_url}")
         await tg_app.bot.set_webhook(
             url=webhook_url,
             secret_token=settings.webhook_secret,
-            allowed_updates=["message", "callback_query"],
+            # my_chat_member — без него Telegram молча не шлёт апдейты о
+            # блокировке/разблокировке бота, даже если ChatMemberHandler
+            # зарегистрирован (см. track_chat_member_update в bot.py).
+            allowed_updates=["message", "callback_query", "my_chat_member"],
             drop_pending_updates=True
         )
 
