@@ -227,7 +227,7 @@ def game_handler(func):
                 if update.callback_query:
                     await update.callback_query.answer(user_text, show_alert=True)
                 elif update.effective_message:
-                    await update.effective_message.reply_text("⚠️ Что-то пошло не так. Попробуйте позже.")
+                    await update.effective_message.reply_text("⚠️ Что-то пошло не так. Попробуй позже.")
             except Exception:
                 pass
             # Алерт на callback_query — не гарантированная доставка: CallbackQuery
@@ -3310,7 +3310,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.effective_message.reply_text(text, reply_markup=kb, parse_mode='HTML')
     except Exception as e:
         logger.exception("start failed")
-        await update.effective_message.reply_text("⚠️ Произошла ошибка. Попробуйте позже.")
+        await update.effective_message.reply_text("⚠️ Произошла ошибка. Попробуй позже.")
 
 # Конфигурация (все правила в одном месте)
 @dataclass(frozen=True)
@@ -8902,7 +8902,7 @@ async def handle_gift_username(update: Update, context: ContextTypes.DEFAULT_TYP
 
     blunt_id = context.user_data.get('gifting_blunt_id')
     if not blunt_id:
-        await update.message.reply_text("❌ Не найден блант для дарения. Попробуйте заново.")
+        await update.message.reply_text("❌ Не найден блант для дарения. Попробуй заново.")
         return
 
     uid = update.effective_user.id
@@ -8963,7 +8963,7 @@ async def handle_gift_username(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text(
                 f"✅ Блант «{item.get('name')}» подарен игроку ID {target_id}!", reply_markup=kb)
         else:
-            await update.message.reply_text("❌ Не удалось передать блант. Попробуйте позже.", reply_markup=kb)
+            await update.message.reply_text("❌ Не удалось передать блант. Попробуй позже.", reply_markup=kb)
         context.user_data.pop('gifting_blunt_id', None)
         return
 
@@ -8975,7 +8975,7 @@ async def handle_gift_username(update: Update, context: ContextTypes.DEFAULT_TYP
     if not _USERNAME_RE.match(raw):
         await update.message.reply_text(
             "❌ Это не похоже на настоящий @username Telegram (5–32 символа, "
-            "буквы/цифры/подчёркивание, начинается с буквы). Проверьте и введите снова.")
+            "буквы/цифры/подчёркивание, начинается с буквы). Проверь и введи снова.")
         return
 
     async with ctx.db_pool.acquire() as conn:
@@ -8994,7 +8994,7 @@ async def handle_gift_username(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text(
                 f"✅ Блант «{item.get('name')}» подарен @{raw}!", reply_markup=kb)
         else:
-            await update.message.reply_text("❌ Не удалось передать блант. Попробуйте позже.", reply_markup=kb)
+            await update.message.reply_text("❌ Не удалось передать блант. Попробуй позже.", reply_markup=kb)
         context.user_data.pop('gifting_blunt_id', None)
         return
 
@@ -9102,7 +9102,7 @@ async def pet_buy_dog_handler(update, context, ctx):
     uid = query.from_user.id
     result = await ctx.pet_service.buy(uid, "dog")
     if result is None:
-        await query.answer("❌ Ошибка сервиса питомцев. Попробуйте позже.", show_alert=True)
+        await query.answer("❌ Ошибка сервиса питомцев. Попробуй позже.", show_alert=True)
         return
 
     status = result["status"]
@@ -9911,10 +9911,23 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
         else:
             # Есть незавершённые задания → прогресс-бар
             remaining = total - done
+            # 📋, а не ⚠️. ⚠️ — универсальный знак ОШИБКИ/ОПАСНОСТИ, а здесь он
+            # стоял на состоянии, которое наступает КАЖДЫЙ день у КАЖДОГО игрока
+            # (день всегда начинается с 0/N) — и на самой заметной кнопке игры.
+            # Сигнал, который горит всегда, не несёт информации и приучает себя
+            # игнорировать: ровно на это тратилась самая ценная позиция экрана.
+            # Плюс ⚠️ подаёт рутинный дневной прогресс как проблему, хотя это
+            # приглашение. Значок 📋 — тот же, которым эти задания названы и в
+            # своём заголовке («📋 ЗАДАНИЯ ДНЯ»), и в «📊 Прогрессе».
+            #
+            # 🔥 на последнем шаге сохранён: там всплеск уместен и работает
+            # именно потому, что редок — цель на расстоянии вытянутой руки
+            # (goal-gradient). Получается честная лестница: 📋 обычно →
+            # 🔥 на пороге → 🎁 когда награда готова.
             if remaining == 1:
                 bar_text = "🔥 Задания " + "▰" * done + "▱" * remaining + f" {done}/{total} · ещё 1! ›"
             else:
-                bar_text = "⚠️ Задания " + "▰" * done + "▱" * remaining + f" {done}/{total} ›"
+                bar_text = "📋 Задания " + "▰" * done + "▱" * remaining + f" {done}/{total} ›"
             keyboard.append([InlineKeyboardButton(bar_text, callback_data="daily_quest_hub")])
     else:
         # Награда уже получена или заданий нет → фарм в первой строке
@@ -10349,7 +10362,7 @@ async def progress_hub_handler(update, context, ctx):
             logger.exception("Ошибка в progress_hub_handler")
         try:
             await query.answer("⏳ Слишком много запросов — попробуй через пару секунд." if
-                               isinstance(e, RetryAfter) else "⚠️ Внутренняя ошибка. Попробуйте позже.",
+                               isinstance(e, RetryAfter) else "⚠️ Внутренняя ошибка. Попробуй позже.",
                                show_alert=True)
         except Exception:
             pass
@@ -10837,7 +10850,7 @@ async def claim_reward_handler(update, context, ctx):
             reply_markup=claim_kb
         )
     else:
-        await query.answer("Ошибка при начислении награды. Попробуйте позже.", show_alert=True)
+        await query.answer("Ошибка при начислении награды. Попробуй позже.", show_alert=True)
 
     # Обновляем главное меню (без ctx — его подставит @cb, см. handle_quest_action).
     # Раньше TypeError глушился, и после «Забрать награду» экран замирал с той же
@@ -12419,4 +12432,4 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handler(update, context)
     except Exception as e:
         logger.exception(f"Ошибка в текстовой команде '{command}' от {user_id}")
-        await msg.reply_text("⚠️ Внутренняя ошибка. Попробуйте позже.")
+        await msg.reply_text("⚠️ Внутренняя ошибка. Попробуй позже.")
