@@ -2479,32 +2479,50 @@ async def world_hub(update, context, ctx):
     # команда. Глагол «собрать» обещал бы сбор по тапу — этим занята отдельная
     # кнопка на главном экране (callback_data="plant_harvest"), и два разных
     # поведения под одним словом путали бы.
+    # ── РАСКЛАДКА: три пары вместо шести кнопок в столбик ──────────────
+    # Было: шесть локаций, каждая полноширинной кнопкой в своём ряду. Полная
+    # ширина в Telegram — сильнейший визуальный вес, и когда его получают ВСЕ
+    # шесть пунктов подряд, иерархии не остаётся: экран читается как ровный
+    # список, где глазу не за что зацепиться, и приходится перебирать все
+    # шесть вариантов. Именно этот случай и описывает закон Хика — время
+    # решения растёт с числом РАВНОЗНАЧНЫХ альтернатив; лечится он не
+    # выкидыванием пунктов, а разбиением на группы, внутри которых выбор
+    # мельче (Miller 1956 — чанкинг; Gestalt — близость и сходство).
+    #
+    # Пары не произвольные, у каждой свой смысл, поэтому ненужный ряд можно
+    # пропустить целиком, не читая обе подписи:
+    #   1) ХОЗЯЙСТВО — растёт и живёт само, требует захода (Плантация, Питомец)
+    #   2) РИСК      — ставка ради награды (Зал Удачи, Лабиринт)
+    #   3) ТРАТА OAC — куда деть накопленное (Лавка, Алтарь)
+    #
+    # Подписи ужаты под половину ширины: на половине ряда помещается ~20
+    # символов, длиннее — перенос на вторую строку, и ряд разъезжается.
+    # Ужимаются только служебные слова, число (goal-gradient) остаётся.
     if plant_lvl <= 0:
-        plant_label = "🪴 Плантация · посадить 🌱 ›"
+        plant_label = "🪴 Плантация · посадить ›"
     elif _pending > 0:
-        plant_label = f"🪴 Плантация · готово {_pending} 🌾 ›"
+        plant_label = f"🪴 Плантация · {_pending} 🌾 ›"
     else:
         plant_label = "🪴 Плантация ›"
-    kb_rows.append([InlineKeyboardButton(plant_label, callback_data="collect")])
 
-    # Питомец – виден всем
     if is_veteran and has_pet:
-        kb_rows.append([InlineKeyboardButton("🐾 Логово Питомца ›", callback_data="pet_preview")])
+        pet_btn = InlineKeyboardButton("🐾 Питомец ›", callback_data="pet_preview")
     elif is_veteran and not has_pet:
-        kb_rows.append([InlineKeyboardButton("🐾 Логово Питомца (купить) ›", callback_data="pet_preview")])
+        pet_btn = InlineKeyboardButton("🐾 Питомец · купить ›", callback_data="pet_preview")
     else:
-        kb_rows.append([InlineKeyboardButton("🌫️ Логово Питомца (в тумане) ›", callback_data="pet_locked")])
+        pet_btn = InlineKeyboardButton("🌫️ Питомец (в тумане) ›", callback_data="pet_locked")
 
-    kb_rows.append([InlineKeyboardButton("🎲 Зал Удачи ›", callback_data="luck")])
-    kb_rows.append([InlineKeyboardButton("🏛️ Лабиринт Искажения ›", callback_data="lab_start")])
-    kb_rows.append([InlineKeyboardButton("🛒 Лавка Фабрики ›", callback_data="shop")])
     # Алтарь Вечности — виден всем (интрига «что это»), но открыт только на
     # вершине вертикали (Некромант / макс-плантация) — ровно где по аудиту
     # начинается валютная пустота.
-    if _altar_gate_open(player):
-        kb_rows.append([InlineKeyboardButton("🕯️ Алтарь Вечности ›", callback_data="altar_hub")])
-    else:
-        kb_rows.append([InlineKeyboardButton("🌫️ Алтарь Вечности (в тумане) ›", callback_data="altar_hub")])
+    altar_btn = (InlineKeyboardButton("🕯️ Алтарь Вечности ›", callback_data="altar_hub")
+                 if _altar_gate_open(player)
+                 else InlineKeyboardButton("🌫️ Алтарь (в тумане) ›", callback_data="altar_hub"))
+
+    kb_rows.append([InlineKeyboardButton(plant_label, callback_data="collect"), pet_btn])
+    kb_rows.append([InlineKeyboardButton("🎲 Зал Удачи ›", callback_data="luck"),
+                    InlineKeyboardButton("🏛️ Лабиринт ›", callback_data="lab_start")])
+    kb_rows.append([InlineKeyboardButton("🛒 Лавка Фабрики ›", callback_data="shop"), altar_btn])
     kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="menu")])
 
     fogged = sum(1 for row in kb_rows for btn in row if "туман" in btn.text)
@@ -9924,23 +9942,10 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
         else:
             # Есть незавершённые задания → прогресс-бар
             remaining = total - done
-            # 📋, а не ⚠️. ⚠️ — универсальный знак ОШИБКИ/ОПАСНОСТИ, а здесь он
-            # стоял на состоянии, которое наступает КАЖДЫЙ день у КАЖДОГО игрока
-            # (день всегда начинается с 0/N) — и на самой заметной кнопке игры.
-            # Сигнал, который горит всегда, не несёт информации и приучает себя
-            # игнорировать: ровно на это тратилась самая ценная позиция экрана.
-            # Плюс ⚠️ подаёт рутинный дневной прогресс как проблему, хотя это
-            # приглашение. Значок 📋 — тот же, которым эти задания названы и в
-            # своём заголовке («📋 ЗАДАНИЯ ДНЯ»), и в «📊 Прогрессе».
-            #
-            # 🔥 на последнем шаге сохранён: там всплеск уместен и работает
-            # именно потому, что редок — цель на расстоянии вытянутой руки
-            # (goal-gradient). Получается честная лестница: 📋 обычно →
-            # 🔥 на пороге → 🎁 когда награда готова.
             if remaining == 1:
                 bar_text = "🔥 Задания " + "▰" * done + "▱" * remaining + f" {done}/{total} · ещё 1! ›"
             else:
-                bar_text = "📋 Задания " + "▰" * done + "▱" * remaining + f" {done}/{total} ›"
+                bar_text = "⚠️ Задания " + "▰" * done + "▱" * remaining + f" {done}/{total} ›"
             keyboard.append([InlineKeyboardButton(bar_text, callback_data="daily_quest_hub")])
     else:
         # Награда уже получена или заданий нет → фарм в первой строке
@@ -10041,17 +10046,26 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
             f"🕯️ Алтарь ур.{_lvl} · ещё {_cost_next} OAC ›",
             callback_data="altar_hub")])
 
-    # Навигация: 2 кнопки в ряд, чтобы длинные подписи не обрезались
-    # (3-в-ряд не помещались: «Прогресс…», «Гильди…»).
+    # Навигация: 2 кнопки в ряд (3-в-ряд не помещались: «Прогресс…», «Гильди…»).
+    #
+    # Пары СМЫСЛОВЫЕ, а не как легли. Раньше было [Гильдия | Прогресс] и
+    # [Лидеры | Мир]: два социальных пункта (Гильдия и Лидеры) оказывались в
+    # разных рядах, а личная статистика стояла в паре с гильдией. Ряд не имел
+    # своего лица, поэтому глазу приходилось прочитывать все четыре подписи —
+    # ровно та цена решения, которую описывает закон Хика.
+    #
+    # Теперь у каждого ряда одна тема, и ненужный можно пропустить целиком:
+    #   МЕСТА, куда идти      — 🌍 Мир, 🏰 Гильдия
+    #   ПОКАЗАТЕЛИ, где я     — 📊 Прогресс (свои), 🏅 Лидеры (в сравнении)
+    # Лидерборд остаётся на главном экране (сильнейший соц-крючок), просто
+    # встаёт рядом с той цифрой, с которой его и сравнивают.
     keyboard.append([
-        InlineKeyboardButton("🏰 Гильдия ›", callback_data="guild_info"),
-        InlineKeyboardButton("📊 Прогресс ›", callback_data="progress_hub"),
-    ])
-    # Лидерборд — из подвала на главный экран: сильнейший соц-крючок (топ-10 +
-    # твоя позиция + приз, который надо удержать). 2-в-ряд, без обрезки подписей.
-    keyboard.append([
-        InlineKeyboardButton("🏅 Лидеры ›", callback_data="top"),
         InlineKeyboardButton("🌍 Мир ›", callback_data="world_hub"),
+        InlineKeyboardButton("🏰 Гильдия ›", callback_data="guild_info"),
+    ])
+    keyboard.append([
+        InlineKeyboardButton("📊 Прогресс ›", callback_data="progress_hub"),
+        InlineKeyboardButton("🏅 Лидеры ›", callback_data="top"),
     ])
 
     return text, InlineKeyboardMarkup(keyboard)
@@ -10459,7 +10473,17 @@ async def daily_quest_hub(update, context, ctx):
     text += f"<b>[{bar}] {done}/{total} этапов</b>\n\n"
     
     # ===== СПИСОК ЗАДАНИЙ =====
+    # Кнопки невыполненных заданий собираем отдельно и раскладываем ПО ДВЕ В
+    # РЯД. Было по одной: шесть подписей длиной 7–19 символов («🎲 Мины»,
+    # «🌿 Крафт», «💨 Дунуть») занимали по целому ряду каждая — экран вытягивался
+    # вшестеро длиннее нужного, а полная ширина, сильнейший визуальный вес в
+    # Telegram, доставалась ВСЕМ пунктам сразу, то есть не выделяла ни одного.
+    # Разложенные парами, задания читаются как сетка: взгляд идёт по строкам,
+    # а не перебирает шесть равнозначных вариантов подряд (закон Хика — цена
+    # решения растёт с числом равнозначных альтернатив; чанкинг её снижает).
+    # Порядок сохранён — слева направо, сверху вниз, как в тексте выше.
     kb_rows = []
+    task_btns = []
     for task in tasks:
         label = task["label"]
         key = task["key"]
@@ -10474,7 +10498,12 @@ async def daily_quest_hub(update, context, ctx):
             text += f"✅ {label}\n"
         else:
             text += f"⬜️ {label}\n"
-            kb_rows.append([InlineKeyboardButton(label, callback_data=f"quest_{key}")])
+            task_btns.append(InlineKeyboardButton(label, callback_data=f"quest_{key}"))
+
+    # Пары; нечётный «хвост» остаётся один в последнем ряду — это нормально и
+    # заодно выделяет последнее оставшееся задание, когда оно одно.
+    for i in range(0, len(task_btns), 2):
+        kb_rows.append(task_btns[i:i + 2])
 
     # ===== ПРОЦЕНТ ПРОГРЕССА =====
     text += f"\n🎯 <b>Прогресс: {percent}%</b>"

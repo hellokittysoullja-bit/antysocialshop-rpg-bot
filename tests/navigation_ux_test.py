@@ -425,6 +425,90 @@ def check_no_dead_end_screens():
     asyncio.run(_run())
 
 
+def check_hub_layout_is_grouped_not_a_column():
+    """Хаб-экраны не выродились обратно в столбик полноширинных кнопок.
+
+    Полная ширина — сильнейший визуальный вес в клавиатуре Telegram (ширина
+    кнопки = ширина ряда / число кнопок в ряду). Когда его получают ВСЕ
+    пункты подряд, он не выделяет ни одного: экран читается ровным списком
+    равнозначных вариантов, а именно на равнозначных альтернативах и растёт
+    цена решения (закон Хика). Лечится группировкой, а не удалением пунктов.
+
+    Ловилось так: «🌍 Мир» и «Задания дня» были по шесть рядов, в каждом одна
+    кнопка, при подписях в 7–20 символов («🎲 Мины», «🌿 Крафт») — по целому
+    ряду на слово.
+
+    Кнопка-возврат «🔙» из счёта исключена: она обязана быть отдельной и
+    полноширинной, иначе её легко задеть вместо соседней (закон Фиттса).
+    """
+    LIMIT = 2   # больше двух полноширинных подряд в хабе — это уже столбик
+
+    async def _run():
+        for label, kw in _states():
+            for name, getter in (("хаб «Мир»", _world_hub_buttons),):
+                p = Player(user_id=1, **kw)
+                ctx = t.make_ctx(p)
+                u, c = t.FakeUpdate("world_hub", uid=1), t.FakeContext(ctx)
+                await bot.world_hub(u, c)
+                rows = u.callback_query.message.edit_calls[-1][1][
+                    "reply_markup"].inline_keyboard
+                body = [r for r in rows
+                        if not (len(r) == 1 and r[0].text.startswith("🔙"))]
+                full = [r[0].text for r in body if len(r) == 1]
+                assert len(full) <= LIMIT, (
+                    f"[{label}] {name}: {len(full)} полноширинных рядов из "
+                    f"{len(body)} — экран снова столбик: {full}")
+
+            # Задания дня: кнопки строятся из невыполненных задач, поэтому
+            # проверяем состояние, где их заведомо много.
+            p = Player(user_id=1, **kw)
+            ctx = t.make_ctx(p)
+            fn = bot.CALLBACKS.get("daily_quest_hub") or bot.EXACT_HANDLERS.get(
+                "daily_quest_hub")
+            u, c = t.FakeUpdate("daily_quest_hub", uid=1), t.FakeContext(ctx)
+            await fn(u, c)
+            calls = u.callback_query.message.edit_calls
+            if not calls or not calls[-1][1].get("reply_markup"):
+                continue
+            rows = calls[-1][1]["reply_markup"].inline_keyboard
+            body = [r for r in rows
+                    if not (len(r) == 1 and r[0].text.startswith("🔙"))]
+            full = [r[0].text for r in body if len(r) == 1]
+            # Один одинокий «хвост» нечётного числа заданий допустим.
+            assert len(full) <= 1, (
+                f"[{label}] задания дня: {len(full)} полноширинных рядов из "
+                f"{len(body)} — задания снова в столбик: {full}")
+    asyncio.run(_run())
+
+
+def check_nav_rows_are_semantic_pairs():
+    """Навигационные ряды главного меню — смысловые пары, а не «как легли».
+
+    Было [Гильдия | Прогресс] и [Лидеры | Мир]: два социальных пункта в
+    разных рядах, личная статистика в паре с гильдией. Ряд без своего лица
+    заставляет прочитывать все четыре подписи вместо того, чтобы пропустить
+    ненужный ряд целиком.
+    """
+    PLACES = {"world_hub", "guild_info"}     # места, куда идти
+    NUMBERS = {"progress_hub", "top"}        # показатели: свои и в сравнении
+
+    async def _run():
+        for label, kw in _states():
+            rows = []
+            p = Player(user_id=1, **kw)
+            ctx = t.make_ctx(p)
+            _text, kb = await bot.build_main_menu(p, ctx, t.FakeContext(ctx))
+            for row in kb.inline_keyboard:
+                cbs = {b.callback_data for b in row}
+                if cbs & (PLACES | NUMBERS):
+                    rows.append(cbs)
+            for cbs in rows:
+                assert cbs <= PLACES or cbs <= NUMBERS, (
+                    f"[{label}] ряд навигации смешивает места и показатели: "
+                    f"{sorted(cbs)}")
+    asyncio.run(_run())
+
+
 def check_rank_promises_match_real_gates():
     """Полярная звезда не обещает того, что уже доступно бесплатно.
 
@@ -476,6 +560,10 @@ def main():
     passed.append("у одной цели есть общее опорное слово в подписях")
     check_no_dead_end_screens()
     passed.append("ни одного тупика: с любого экрана есть путь назад")
+    check_hub_layout_is_grouped_not_a_column()
+    passed.append("хабы сгруппированы парами, а не вытянуты в столбик")
+    check_nav_rows_are_semantic_pairs()
+    passed.append("ряды навигации — смысловые пары (места / показатели)")
     check_rank_promises_match_real_gates()
     passed.append("обещания рангов совпадают с реальными гейтами")
     for name in passed:
