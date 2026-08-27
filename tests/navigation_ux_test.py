@@ -277,6 +277,99 @@ def check_player_addressed_informally_everywhere():
                       f"({len(hits)} шт.): {hits[:5]}")
 
 
+def check_one_destination_one_icon():
+    """У одной цели — один значок во всех подписях, что на неё ведут.
+
+    Значок кнопки — самый быстрый признак «куда это ведёт»: его видно раньше,
+    чем прочитан текст. Когда одно и то же место помечено 🍀 в одном месте и
+    🎲 в другом (или 💍 против 🌿 у крафта), признак перестаёт работать —
+    игрок вынужден каждый раз дочитывать подпись (Nielsen, consistency &
+    standards; узнавание вместо припоминания).
+
+    Сокращать слова можно («Лабиринт» вместо «Лабиринт Искажения»), а вот
+    заменять их другими — нет: «Магазин» и «Лавка Фабрики» читаются как два
+    разных места. Поэтому здесь проверяется значок, а общее опорное слово —
+    в check_one_destination_one_word ниже.
+    """
+    import re
+    import collections
+    src = open(os.path.join(ROOT, "bot.py"), encoding="utf-8").read()
+    pat = re.compile(r'(?:InlineKeyboardButton|_btn)\(\s*"([^"]*)"\s*,\s*'
+                     r'callback_data="([a-z_0-9]+)"')
+    icons = collections.defaultdict(set)
+    for m in pat.finditer(src):
+        label, cb = m.group(1), m.group(2)
+        if label.startswith("🔙") or cb in ("menu", "noop"):
+            continue          # кнопки-возврат живут по своей конвенции
+        lead = label.split(" ", 1)[0]
+        if lead and not lead.isascii():
+            icons[cb].add(lead)
+    # Осознанные исключения: значок несёт СОСТОЯНИЕ, а не место.
+    STATEFUL = {
+        "altar_hub",    # 🌫️ «в тумане» против 🕯️ открытого
+        "collect",      # 🌱 «посади» (пусто) против 🪴 существующей плантации
+        "do_smoke",     # 🔥 на пороге Забоя против обычного 💨
+        "farm",         # 🍬 всегда, но подписи контекстные — значок один, см. assert
+        "craft_normal",
+    }
+    bad = {cb: sorted(v) for cb, v in icons.items()
+           if len(v) > 1 and cb not in STATEFUL}
+    assert not bad, f"одна цель помечена разными значками: {bad}"
+
+
+def check_one_destination_one_word():
+    """У одной цели во всех подписях есть общее опорное слово.
+
+    Регресс, который это ловит: обучение звало «🍬 Собрать первый урожай», а
+    та же механика во всей игре называется «фарм» — причём «собрать урожай»
+    занято ДРУГОЙ механикой (Плантацией). Первая кнопка игры выдавала игроку
+    словарь, который дальше означал не то, чему его научили.
+    """
+    import re
+    import collections
+    src = open(os.path.join(ROOT, "bot.py"), encoding="utf-8").read()
+    pat = re.compile(r'(?:InlineKeyboardButton|_btn)\(\s*"([^"]*)"\s*,\s*'
+                     r'callback_data="([a-z_0-9]+)"')
+    words = collections.defaultdict(list)
+    for m in pat.finditer(src):
+        label, cb = m.group(1), m.group(2)
+        if label.startswith("🔙") or cb in ("menu", "noop"):
+            continue
+        # оставляем только буквенные корни, без значков/цифр/суффиксов состояния
+        base = label.split("(")[0].split("·")[0]
+        # Основа в 4 буквы, а не всё слово: русский склоняется, и «Удача»
+        # против «Зал Удачи» — это одно слово в разных падежах, а не два
+        # разных имени. С 5 буквами тест падал именно на этом («удача» против
+        # «удачи») — то есть ловил грамматику вместо расхождения смысла.
+        toks = {w.lower()[:4] for w in re.findall(r"[А-Яа-яЁё]{4,}", base)}
+        if toks:
+            words[cb].append((label, toks))
+    # Исключения — только там, где расхождение ОСМЫСЛЕННО, и каждое названо
+    # поимённо: широкое исключение молча гасит настоящие находки (именно так
+    # первая версия этого теста пропустила обучение, звавшее «Собрать первый
+    # урожай» вместо «Фармить»).
+    CTA = {
+        # Пик Забоя намеренно кричит другим текстом: «🔥 ЕЩЁ ОДНА — И ЗАБОЙ!».
+        "do_smoke",
+        # На экране крафта подпись противопоставляет варианты («Обычный блант»
+        # против «Именной блант»), а не называет действие.
+        "craft_normal",
+        # Реферальная кнопка — призыв («Позвать друга» / «Подари другу лучший
+        # старт»), формулировка зависит от места.
+        "invite_friend",
+        # «Пропустить шаг» против «Пропустить обучение» — разный охват.
+        "skip_onboarding",
+    }
+    bad = {}
+    for cb, entries in words.items():
+        if cb in CTA or len(entries) < 2:
+            continue
+        common = set.intersection(*[t for _l, t in entries])
+        if not common:
+            bad[cb] = sorted({l for l, _t in entries})
+    assert not bad, f"у одной цели нет ни одного общего слова в подписях: {bad}"
+
+
 def check_rank_promises_match_real_gates():
     """Полярная звезда не обещает того, что уже доступно бесплатно.
 
@@ -322,6 +415,10 @@ def main():
     passed.append("одна кнопка называется одинаково на всех экранах")
     check_player_addressed_informally_everywhere()
     passed.append("обращение к игроку везде на «ты», без срывов в «Вы»")
+    check_one_destination_one_icon()
+    passed.append("одна цель — один значок во всех ведущих на неё кнопках")
+    check_one_destination_one_word()
+    passed.append("у одной цели есть общее опорное слово в подписях")
     check_rank_promises_match_real_gates()
     passed.append("обещания рангов совпадают с реальными гейтами")
     for name in passed:

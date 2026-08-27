@@ -1544,7 +1544,12 @@ async def test_welcome_text_has_framing_without_extra_tap():
     body = src[src.index("async def _create_new_player"):src.index("async def defer_faction_handler")]
     check("Фабрика №9 давно ждала" in body,
           "атмосферная строка добавлена в welcome_text")
-    check('InlineKeyboardButton("🍬 Собрать первый урожай", callback_data="farm")' in body,
+    # Проверяем НАЗНАЧЕНИЕ кнопки, а не конкретную подпись: смысл теста — «один
+    # тап прямо в фарм, без экрана-прокладки». Подпись с тех пор приведена к
+    # общему словарю игры («Фармить» вместо «Собрать первый урожай», который
+    # занят Плантацией, см. tests/navigation_ux_test.py), и завязка на неё
+    # ломала тест на правке, ничего не менявшей по сути.
+    check('callback_data="farm")' in body,
           "кнопка по-прежнему одна и ведёт прямиком в фарм — ни одного лишнего тапа/экрана")
     check(body.count("InlineKeyboardMarkup(") == 1,
           "ровно одна клавиатура в welcome-сообщении — атмосфера не породила отдельный экран-прокладку")
@@ -1560,8 +1565,16 @@ async def test_luck_result_buttons_dont_claim_menu():
                             "bot.py"), encoding="utf-8").read()
     check('InlineKeyboardButton("🏰 В меню", callback_data="luck")' not in src,
           "кнопка результата Колеса/Алхимии больше не выдаёт себя за «В меню»")
-    check(src.count('InlineKeyboardButton("🍀 К удаче", callback_data="luck")') == 2,
-          "оба экрана (Колесо, Алхимия) честно ведут «К удаче», не «В меню»")
+    # Суть проверки — что обе кнопки честно НАЗЫВАЮТ хаб Удачи, куда ведут.
+    # Точная подпись приведена к канону («🎲 Зал Удачи» — тот же значок и то же
+    # имя, что у этого хаба везде в игре, см. tests/navigation_ux_test.py).
+    # >= 2, а не == 2: канон «🎲 Зал Удачи» теперь носят ВСЕ кнопки, ведущие в
+    # этот хаб (включая «Прогресс»), поэтому точный счёт ловил бы появление
+    # честной кнопки в новом месте как поломку. Инвариант здесь другой и он
+    # сохранён: Колесо и Алхимия называют хаб своим именем, а проверка выше
+    # отдельно запрещает подделку под «В меню».
+    check(src.count('InlineKeyboardButton("🎲 Зал Удачи", callback_data="luck")') >= 2,
+          "оба экрана (Колесо, Алхимия) честно ведут в Зал Удачи, не «В меню»")
 
 
 # ── 33. Колесо/Алхимия: подвеска ожидания перед раскрытием результата ──
@@ -1584,7 +1597,7 @@ async def test_wheel_and_alchemy_have_suspense_before_reveal():
           "первый кадр Колеса — визуальная подвеска, не готовый результат")
     final_kb = calls[-1][1].get("reply_markup")
     check(final_kb and final_kb.inline_keyboard[0][0].callback_data == "luck"
-          and final_kb.inline_keyboard[0][0].text == "🍀 К удаче",
+          and "Удачи" in final_kb.inline_keyboard[0][0].text,
           "финальный кадр Колеса несёт настоящую кнопку результата, не подвеску")
 
     p2 = Player(user_id=2, exists=True, balance=1000, total_earned=1000,

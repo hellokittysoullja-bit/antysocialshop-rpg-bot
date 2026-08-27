@@ -2572,8 +2572,8 @@ async def destiny_hub(update, context, ctx):
         "<i>Каждый фарм, каждый блант, каждая победа гильдии — шаг к власти.</i>"
     )
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🪴 Растить империю", callback_data="collect"),
-         InlineKeyboardButton("💍 Крафт", callback_data="craft")],
+        [InlineKeyboardButton("🪴 Плантация ›", callback_data="collect"),
+         InlineKeyboardButton("🌿 Крафт ›", callback_data="craft")],
         [InlineKeyboardButton("🔙 В меню", callback_data="menu")],
     ])
     await edit_or_reply(update, context, text, reply_markup=kb, parse_mode='HTML')
@@ -2993,11 +2993,16 @@ async def _create_new_player(update, context, uid, username, invited_by=None,
         "<b>🎉 Добро пожаловать в Antysocialshop!</b>\n\n"
         f"{ref_bonus_line}"
         f"🎁 Тебе подарили <code>{start_balance}</code> 🍬 OAC и первый именной блант.\n\n"
-        "👉 <b>Жми — собери первый урожай прямо сейчас:</b>"
+        "👉 <b>Жми — сделай свой первый фарм прямо сейчас:</b>"
     )
 
+    # «Фармить», а не «Собрать первый урожай»: это САМАЯ ПЕРВАЯ кнопка в игре,
+    # и она задаёт игроку словарь. Механика называется «фарм» во всех остальных
+    # местах (главное меню, задания, прогресс), а «собрать урожай» — это глагол
+    # ДРУГОЙ механики, Плантации. Обучение выдавало игроку слово, которое потом
+    # означает не то, чему его учили.
     farm_kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🍬 Собрать первый урожай", callback_data="farm")],
+        [InlineKeyboardButton("🍬 Фармить", callback_data="farm")],
     ])
 
     await update.effective_message.reply_text(
@@ -3933,7 +3938,13 @@ async def farm_callback_v2(update, context, ctx, player):
             "<i>💡 Бланты нужны, чтобы активировать случайный эффект.</i>\n"
             "<b>🎁 Сразу после — бонус за обучение!</b>",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🌿 Крафт", callback_data="craft_normal")],
+                # «Скрутить блант», а не «Крафт»: под подписью «🌿 Крафт» во всей
+                # остальной игре живёт ЭКРАН крафта (callback "craft"), а здесь
+                # тап немедленно создаёт блант ("craft_normal"). Обучение учило,
+                # что «Крафт» = мгновенно сделать блант, после чего та же надпись
+                # в меню открывала меню — ровно то соответствие, которое игрок
+                # только что выучил, тут же и ломалось.
+                [InlineKeyboardButton("🌿 Скрутить блант", callback_data="craft_normal")],
                 [InlineKeyboardButton("⏭️ Пропустить шаг", callback_data="skip_onboarding")]
             ]),
             parse_mode='HTML'
@@ -3963,7 +3974,7 @@ def _format_craft_menu_text(balance: int, blunts: int, craft_count: int,
                             medal_name: str, target: int, m_essence: int) -> str:
     """HTML‑текст меню крафта."""
     text = (
-        f"<b>🌱 КРАФТ БЛАНТОВ</b>\n\n"
+        f"<b>🌿 КРАФТ БЛАНТОВ</b>\n\n"
         f"<b>💎 У тебя: {balance} OAC 🍬</b>\n\n"
         f"<b>🗞️ Блантов в свёртке: {blunts}</b>\n"
         f"<b>🎯 Крафтинг: {craft_count}/{target} | {medal_name}</b>\n"
@@ -4100,7 +4111,7 @@ async def handle_craft_normal_v2(update, context, ctx, player):
         text += f"\n💡 {_next_step[2]}"
 
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🌿 Скрафтить ещё", callback_data="craft_normal"),
+        [InlineKeyboardButton("🌿 Скрутить ещё", callback_data="craft_normal"),
          # Баг, который поймал сам игрок: "smoke" вёл на старый экран-прокладку
          # smoke_callback («Блантов в свёртке: N» + ещё один тап «Дунуть»)
          # вместо прямого броска — ровно то, что build_main_menu уже избегает
@@ -4617,7 +4628,7 @@ async def onboarding_reward(update, context, ctx, player):
         kb_rows = [[InlineKeyboardButton(cta, callback_data="daily_quest_hub")]]
         if not (player.referral_count or 0):
             kb_rows.append([InlineKeyboardButton(
-                "🎁 Подари другу лучший старт", callback_data="invite_friend")])
+                "🔗 Подари другу лучший старт", callback_data="invite_friend")])
 
         await query.message.edit_text(
             f"🎓 <b>Отныне Фабрика №9 признаёт тебя Странником.</b>\n\n"
@@ -5925,7 +5936,7 @@ async def profile_callback(update, context, ctx, player):
 
     kb_rows = []
     if not guild:
-        kb_rows.append([InlineKeyboardButton("🕋 Вступить в Гильдию", callback_data="guild_info")])
+        kb_rows.append([InlineKeyboardButton("🏰 Вступить в Гильдию", callback_data="guild_info")])
     # Кодекс блантов — приоритетная, полноширинная (это про статус/коллекцию).
     if len(named) > 2:
         kb_rows.append([InlineKeyboardButton(f"💍 Все именные бланты ({len(named)})", callback_data="my_blunts")])
@@ -6935,7 +6946,7 @@ async def catalog_callback(update, context):
     # писать /menu). Добавлена навигация; экран редактируется на месте.
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔗 Открыть Каталог", url="https://t.me/antysocialshop")],
-        [InlineKeyboardButton("🛒 Магазин", callback_data="shop"),
+        [InlineKeyboardButton("🛒 Лавка Фабрики", callback_data="shop"),
          InlineKeyboardButton("🔙 В меню", callback_data="menu")],
     ])
     await edit_or_reply(update, context,
@@ -7070,7 +7081,7 @@ async def luck_callback(update, context, action=None):
 
     # Главное меню удачи
     text = (
-        "<b>🍀 УДАЧА</b>\n\n"
+        "<b>🎲 ЗАЛ УДАЧИ</b>\n\n"
         "<i>🌀 «Испытай свою удачу и выиграй OAC 🍬 и редкие эксклюзивные вещи!» 🪽</i>\n\n"
         "🎡 <b>Крутить Колесо</b> — ежедневный выигрыш 🎉\n"
         "🎰 <b>Мины</b> — рискни ставкой ради множителя 💣\n"
@@ -7184,7 +7195,7 @@ async def _process_wheel(update, context, uid, player, cfg, ctx):
         msg_text += "\n\n😤 <i>Стрелка замерла у самого ДЖЕКПОТА (1000 OAC)! Ещё чуть-чуть — крутани снова завтра.</i>"
 
     await edit_or_reply(update, context, msg_text,
-                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🍀 К удаче", callback_data="luck")]]))
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🎲 Зал Удачи", callback_data="luck")]]))
 
 # МИНЫ
 import json
@@ -7957,7 +7968,7 @@ async def _process_alchemy_confirm(update, context, uid, player, cfg, ctx):
     )
 
     await edit_or_reply(update, context, data[0],
-                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🍀 К удаче", callback_data="luck")]]))
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🎲 Зал Удачи", callback_data="luck")]]))
     # alchemy_count растёт именно тут — «alchemy_15»/«alchemy_50» (и через них
     # «Лунный лорд») раньше ждали случайного следующего фарма/крафта вместо
     # срабатывания в момент самой алхимии — самого дорогого веторан-ритуала.
@@ -9204,7 +9215,7 @@ def _build_shop_view(balance, now, earned=None):
     disc = _shop_discount_pct(balance if earned is None else earned)
     today = _shop_today(now.toordinal())
     h, m = _shop_time_left(now)
-    lines = ["<b>🏪 ЛАВКА ФАБРИКИ №9</b>", ""]
+    lines = ["<b>🛒 ЛАВКА ФАБРИКИ №9</b>", ""]
     if disc:
         lines.append(f"🪪 <b>Скидка ранга: −{disc}%</b> на всё сегодня")
     else:
@@ -10863,9 +10874,9 @@ async def all_features_handler(update, context, ctx):
          InlineKeyboardButton("🌿 Крафт", callback_data="craft"),
          InlineKeyboardButton("💨 Дунуть", callback_data="do_smoke")],
         [InlineKeyboardButton("🪴 Плантация", callback_data="collect"),
-         InlineKeyboardButton("🎲 Удача", callback_data="luck")],
+         InlineKeyboardButton("🎲 Зал Удачи", callback_data="luck")],
         [InlineKeyboardButton("🏛️ Лабиринт", callback_data="lab_start"),
-         InlineKeyboardButton("🛒 Магазин", callback_data="shop")],
+         InlineKeyboardButton("🛒 Лавка Фабрики", callback_data="shop")],
         [InlineKeyboardButton("🏰 Гильдия — ритуалы, война", callback_data="guild_info")],
     ]
     if is_veteran:
@@ -11021,7 +11032,7 @@ async def blunt_details_handler(update, context, ctx, player):
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔗 Поделиться", callback_data=f"share_blunt_{blunt_id}"),
          InlineKeyboardButton("🎁 Подарить", callback_data=f"gift_blunt_{blunt_id}")],
-        [InlineKeyboardButton("🏆 К списку", callback_data="my_blunts")]
+        [InlineKeyboardButton("💍 Мои бланты", callback_data="my_blunts")]
     ])
     # Уникальная карточка бланта (кэш file_id на предмете; старым блантам
     # дорисуется при первом просмотре). Откат: per-rarity картинка, затем текст.
