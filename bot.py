@@ -41,7 +41,7 @@ import httpx
 # Статический игровой контент/константы вынесены в отдельный модуль (слой данных)
 from game_content import (
     FARM_MEDALS, CRAFT_MEDALS, SMOKE_MEDALS, RITUAL_MEDALS, REPENT_MEDALS,
-    WHISPERS, NEURO_STATUSES, FUNNY_REACTIONS, RANKS,
+    WHISPERS, WHISPERS_GUILD, NEURO_STATUSES, FUNNY_REACTIONS, RANKS,
     ACHIEVEMENTS, ACHIEVEMENTS_DICT, ACHIEVEMENT_CONDITIONS, SMOKE_FLAVORS,
     QUEST_TEMPLATES, BLUNTS_PER_PAGE, BLUNT_IMAGES, LUCK_CONFIG, LABYRINTH_ROOMS,
     SHOP_ITEMS, RANK_LORE, ALTAR_BASE_COST, ALTAR_TIERS,
@@ -2474,21 +2474,26 @@ async def world_hub(update, context, ctx):
     # созревший урожай (goal-gradient тянет вернуться) или зовёт посадить.
     plant_lvl = player.passive_level or 0
     _pending, _h, _c = _plant_pending_player(player, datetime.now())
+    # «готово N», а не «собрать N»: «Мир» — хаб МЕСТ, каждая его кнопка ведёт на
+    # экран, поэтому подпись здесь читается как показание статуса, а не как
+    # команда. Глагол «собрать» обещал бы сбор по тапу — этим занята отдельная
+    # кнопка на главном экране (callback_data="plant_harvest"), и два разных
+    # поведения под одним словом путали бы.
     if plant_lvl <= 0:
-        plant_label = "🪴 Плантация · посадить 🌱"
+        plant_label = "🪴 Плантация · посадить 🌱 ›"
     elif _pending > 0:
-        plant_label = f"🪴 Плантация · собрать {_pending} 🌾"
+        plant_label = f"🪴 Плантация · готово {_pending} 🌾 ›"
     else:
-        plant_label = "🪴 Плантация"
+        plant_label = "🪴 Плантация ›"
     kb_rows.append([InlineKeyboardButton(plant_label, callback_data="collect")])
 
     # Питомец – виден всем
     if is_veteran and has_pet:
-        kb_rows.append([InlineKeyboardButton("🐾 Логово Питомца", callback_data="pet_preview")])
+        kb_rows.append([InlineKeyboardButton("🐾 Логово Питомца ›", callback_data="pet_preview")])
     elif is_veteran and not has_pet:
-        kb_rows.append([InlineKeyboardButton("🐾 Логово Питомца (купить)", callback_data="pet_preview")])
+        kb_rows.append([InlineKeyboardButton("🐾 Логово Питомца (купить) ›", callback_data="pet_preview")])
     else:
-        kb_rows.append([InlineKeyboardButton("🌫️ Логово Питомца (в тумане)", callback_data="pet_locked")])
+        kb_rows.append([InlineKeyboardButton("🌫️ Логово Питомца (в тумане) ›", callback_data="pet_locked")])
 
     kb_rows.append([InlineKeyboardButton("🎲 Зал Удачи ›", callback_data="luck")])
     kb_rows.append([InlineKeyboardButton("🏛️ Лабиринт Искажения ›", callback_data="lab_start")])
@@ -2499,7 +2504,7 @@ async def world_hub(update, context, ctx):
     if _altar_gate_open(player):
         kb_rows.append([InlineKeyboardButton("🕯️ Алтарь Вечности ›", callback_data="altar_hub")])
     else:
-        kb_rows.append([InlineKeyboardButton("🌫️ Алтарь Вечности (в тумане)", callback_data="altar_hub")])
+        kb_rows.append([InlineKeyboardButton("🌫️ Алтарь Вечности (в тумане) ›", callback_data="altar_hub")])
     kb_rows.append([InlineKeyboardButton("🔙 Назад", callback_data="menu")])
 
     fogged = sum(1 for row in kb_rows for btn in row if "туман" in btn.text)
@@ -9726,7 +9731,19 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
     reward_claimed = progress.get("reward_claimed", False)
 
     # ── ТЕКСТ ──
-    whisper = random.choice(WHISPERS)
+    # Пул зовёт только туда, куда игрок реально может пойти (см. WHISPERS_GUILD).
+    # Анти-повтор держим в context.user_data, а НЕ в daily_progress: главное меню
+    # открывается чаще любого другого экрана, и запись в БД ради декоративной
+    # строки была бы лишним походом в базу на самом горячем пути. Память процесса
+    # здесь достаточна — задача скромная: не показать ту же строку дважды подряд
+    # в рамках одной сессии (точный повтор стимула слабее активирует
+    # чувствительные к новизне зоны — repetition suppression, Grill-Spector,
+    # Henson & Martin, 2006); переживать рестарт ей незачем.
+    _wpool = WHISPERS + (WHISPERS_GUILD if guild else [])
+    _wlast = context.user_data.get("last_whisper") if context else None
+    whisper = random.choice([w for w in _wpool if w != _wlast] or _wpool)
+    if context:
+        context.user_data["last_whisper"] = whisper
     display_name = html.escape(player.username or "Странник")
 
     if full_mode:
@@ -9891,15 +9908,19 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
     # ===== АДАПТИВНАЯ КНОПКА ГИЛЬДИИ =====
     if guild:
         now = datetime.now()
+        # «›» обязательна: после перехода Ритуала/Исповеди на выбор профиля
+        # риска тап ведёт на ЭКРАН ВЫБОРА, а не совершает действие сразу —
+        # подпись без «›» обещала бы мгновенный результат (как «🍬 Фармить»
+        # или «💨 Дунуть») и обманывала бы ожидание.
         if guild == "BLACK":
             last_time = player.last_ritual
             cooldown = GAME_CONFIG["ritual_cooldown_hours"]
-            label = "🕯️ Ритуал"
+            label = "🕯️ Ритуал ›"
             callback = "ritual"
         else:  # WHITE
             last_time = player.last_repent
             cooldown = GAME_CONFIG["repent_cooldown_hours"]
-            label = "⚜️ Исповедь"
+            label = "⚜️ Исповедь ›"
             callback = "repent"
         
         # Показываем кнопку ТОЛЬКО если доступно
@@ -9915,7 +9936,15 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
     if _plant_earned > 0:
         _harvest_label = (f"⚠️ Урожай переполнен · собрать {_plant_earned} 🌾"
                           if _pcapped else f"🌾 Собрать урожай · {_plant_earned} OAC")
-        keyboard.append([InlineKeyboardButton(_harvest_label, callback_data="collect")])
+        # callback_data="plant_harvest", НЕ "collect": подпись называет точную
+        # сумму и глагол «собрать», а "collect" — навигация, она открывала экран
+        # Плантации, где урожай нужно было собирать ВТОРЫМ тапом. Кнопка обещала
+        # действие и не выполняла его — прямое нарушение соответствия подписи
+        # результату (Nielsen, «match between system and the real world»), да ещё
+        # на самом сильном крючке возврата в игру. plant_harvest_handler
+        # самодостаточен (атомарный сбор + показ Плантации), поэтому работает
+        # с любого входа, включая главное меню.
+        keyboard.append([InlineKeyboardButton(_harvest_label, callback_data="plant_harvest")])
     elif (player.passive_level or 0) == 0 and player.onboarding_step == -1:
         # D1→D2 мост: посадка «растёт пока тебя нет» доступна с первого дня, но
         # живёт только внутри «Мир» → новичок уходит, НЕ активировав самый
@@ -9924,7 +9953,7 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
         # не посажено (после посадки слот займёт кнопка урожая). Бесплатно →
         # чистый плюс: endowment («уже моё, растёт») + overnight-крючок возврата.
         keyboard.append([InlineKeyboardButton(
-            "🌱 Посади Плантацию · растёт, пока тебя нет", callback_data="collect")])
+            "🌱 Посади Плантацию · растёт, пока тебя нет ›", callback_data="collect")])
     elif 1 <= (player.passive_level or 0) < PLANT_MAX_LEVEL:
         # Компаунд-движок наверх: у владельца плантации без готового урожая (сразу
         # после сбора) слот висел ПУСТЫМ — единственный в игре растущий движок
@@ -9937,7 +9966,7 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
         _lvl = player.passive_level or 0
         keyboard.append([InlineKeyboardButton(
             f"🪴 Империя {_plant_rate(_lvl)}→{_plant_rate(_lvl + 1)}/ч · "
-            f"{_plant_upgrade_cost(_lvl)} OAC",
+            f"{_plant_upgrade_cost(_lvl)} OAC ›",
             callback_data="collect")])
     elif (player.passive_level or 0) >= PLANT_MAX_LEVEL and _altar_gate_open(player):
         # Плантация максимальна → её слот на главном экране освободился (ветка
@@ -9945,9 +9974,18 @@ async def build_main_menu(player, ctx, context=None, full_mode=False):
         # аудиту, вертикаль роста исчерпана и OAC копится впустую — Алтарь
         # Вечности занимает этот же освободившийся слот следующей вечной целью.
         _lvl, _cost_next, _into = _altar_level(player.prestige or 0)
-        _title, _ = _altar_tier(_lvl)
+        # Титул тира (_altar_tier) намеренно НЕ выводим в подпись: он уже несёт
+        # собственный эмодзи (ALTAR_TIERS: «🕯️ Послушник Алтаря», «🔥 Хранитель
+        # Пламени», …), и с ведущим 🕯️ получалось «🕯️ Алтарь: 🕯️ Послушник
+        # Алтаря» — тот же двойной эмодзи, что уже чинили в строке приветствия
+        # («⚔️⚔️ Ветеран», см. выше). Убрать вместо этого ведущий 🕯️ нельзя: с
+        # тира 5 титул перестаёт содержать слово «Алтарь» («🔥 Хранитель
+        # Пламени · ещё 1200 OAC»), и по подписи уже не предсказать, куда ведёт
+        # тап. Имя пункта важнее украшения, поэтому в подписи — то же «Алтарь»,
+        # что и в хабе «🌍 Мир» (одна вещь называется одинаково везде — Nielsen,
+        # consistency & standards), а титул тира ждёт на самом экране Алтаря.
         keyboard.append([InlineKeyboardButton(
-            f"🕯️ Алтарь: {_title} ур.{_lvl} · ещё {_cost_next} OAC",
+            f"🕯️ Алтарь ур.{_lvl} · ещё {_cost_next} OAC ›",
             callback_data="altar_hub")])
 
     # Навигация: 2 кнопки в ряд, чтобы длинные подписи не обрезались
